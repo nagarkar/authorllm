@@ -3381,6 +3381,9 @@ def scenario_doc_comments(root: Path) -> None:
     check("ambiguous quote stays unattributed", rel is None, f"{rel}")
     rel, heading = locate_quote(files, "no such text anywhere")
     check("missing quote stays unattributed", rel is None, f"{rel}")
+    rel, _h = locate_quote({"r.md": "# **R**\n\nIt comes from *religare*. To tie back.\n"},
+                           "It comes from religare. To tie back.")
+    check("a quote of rendered italics finds its markdown", rel == "r.md", f"{rel}")
 
     long_comment = "Please rework this — " + "with care, " * 30
     comments = [
@@ -3412,6 +3415,72 @@ def scenario_doc_comments(root: Path) -> None:
     ingest_comments(db, manuscript, comments, files)
     check("re-ingestion dedupes on comment id",
           db.one("SELECT COUNT(*) AS n FROM doc_comments")["n"] == 2, "")
+    files["two.md"] = "# **Essay Two**\n\nGamma paragraph, now on its own.\n"
+    ingest_comments(db, manuscript, comments, files)
+    check("an unattributed comment is placed by a later pull, not duplicated",
+          db.one("SELECT file FROM doc_comments WHERE comment_id='c2'")["file"] == "one.md"
+          and db.one("SELECT COUNT(*) AS n FROM doc_comments")["n"] == 2, "")
+
+    # Google's export without tab titles (2026-10-26): split by each
+    # tab's first paragraph, in tab order.
+    import authorlm.gdocs as gd0
+    export = ("# **Part One**\n\nAlpha text.\n\n# **Part Two**\n\nBeta, with *italic*.\n\n"
+              "# **Part One**\n\nA later heading that repeats tab one's.\n")
+    doc = {"tabs": [
+        {"tabProperties": {"title": "one.md"}, "documentTab": {"body": {"content": [
+            {"paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+            {"paragraph": {"elements": [{"textRun": {"content": "Part One\n"}}]}}]}}},
+        {"tabProperties": {"title": "two.md"}, "documentTab": {"body": {"content": [
+            {"paragraph": {"elements": [{"textRun": {"content": "Part Two\n"}}]}}]}}},
+        {"tabProperties": {"title": "empty.md"}, "documentTab": {"body": {"content": []}}}]}
+    secs = gd0.split_tabbed_export(export, {"one.md", "two.md", "empty.md"},
+                                   order=["one.md", "two.md", "empty.md"],
+                                   anchors=gd0.tab_anchors(doc))
+    check("an export without tab titles splits by each tab's first paragraph",
+          secs.get("one.md") == "# **Part One**\n\nAlpha text.\n"
+          and secs.get("two.md", "").startswith("# **Part Two**")
+          and "A later heading" in secs.get("two.md", "")
+          and secs.get("empty.md") == "\n", str(secs))
+    old_style = "# **one.md**\n\nAlpha.\n\n# **two.md**\n\nBeta.\n"
+    secs = gd0.split_tabbed_export(old_style, {"one.md", "two.md"},
+                                   order=["one.md", "two.md"],
+                                   anchors=gd0.tab_anchors(doc))
+    check("an export with tab titles still splits on them",
+          secs == {"one.md": "Alpha.\n", "two.md": "Beta.\n"}, str(secs))
+
+    # Comment-loss causes (2026-10-26).
+    import authorlm.gdocs as gd
+    still = gd.still_open_comments(db, manuscript, [
+        {"id": "c1", "content": "x", "quotedFileContent": {"value": "Beta paragraph, quite distinctive text here."}},
+        {"id": "c9", "content": "gone", "quotedFileContent": {"value": "words no file has"}},
+        {"id": "c10", "content": "new", "quotedFileContent": {"value": "Gamma"}}],
+        [{"id": "c10"}], files)
+    check("a pull re-lists earlier open comments, marking a lost anchor",
+          [(c["comment_id"], c["location"]) for c in still]
+          == [("c1", "one.md#**The Middle**"), ("c9", "(anchor text gone)")], str(still))
+    marks = gd._anchored_paragraphs(
+        ["Plain one.", "It comes from *religare*. To tie back."],
+        [{"quoted": "It comes from religare. To tie back."}])
+    check("a commented paragraph with italics is held", list(marks) == [1], str(marks))
+    real = (gd._mapping, gd.fetch_tab_markdown, gd._open_comment_anchors)
+    gd._mapping = lambda *a, **k: {"gdocs": {"_master_id": "m", "one.md": {"tab_id": "t"}}}
+    gd.fetch_tab_markdown = lambda *a, **k: "Beta paragraph, *quite* distinctive text here."
+    gd._open_comment_anchors = lambda *a, **k: [
+        {"comment_id": "c1", "quoted": "Beta paragraph, quite distinctive", "content": "fix"}]
+    bridge = type("B", (), {"meta_key": "gdocs"})()
+    try:
+        try:
+            gd._refuse_rebuild_over_comments(db, manuscript, bridge, "one.md", None, None)
+            check("a rebuild over an anchored comment is refused", False)
+        except LookupError as err:
+            check("a rebuild over an anchored comment is refused by name",
+                  "rebuild refused" in str(err) and "c1" in str(err), str(err))
+        gd._open_comment_anchors = lambda *a, **k: [
+            {"comment_id": "c9", "quoted": "words no tab has", "content": "x"}]
+        gd._refuse_rebuild_over_comments(db, manuscript, bridge, "one.md", None, None)
+        check("a rebuild with no comment in the tab goes ahead", True)
+    finally:
+        gd._mapping, gd.fetch_tab_markdown, gd._open_comment_anchors = real
 
     # --- tab reconciliation: adopt / re-adopt / rename / ambiguity --------
     from authorlm.gdocs import MANIFEST_TITLE, classify_tabs
@@ -3529,8 +3598,9 @@ def scenario_doc_comments(root: Path) -> None:
           and "part1.md — introduces 3 · debt 0" in m3, m3)
     check("reader-load lists each essay's debts",
           "intro.md (!! stale) — Dharma, karma" in m3, m3)
-    check("reader-load names the summaries that are not fresh",
-          "1 of 2 summaries are not fresh" in m3, m3)
+    check("reader-load names the essays whose paragraph records are "
+          "missing or stale",
+          "1 of 2 essays have missing or stale paragraph records" in m3, m3)
     check("reader-load is plain text, not a markdown table",
           "|---" not in m3 and "# Reader load" not in m3, m3)
     check("an empty reader load says how to build summaries",

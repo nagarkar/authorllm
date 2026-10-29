@@ -1515,6 +1515,18 @@ while one plays, and a change of `[preview]` voice or rate clears every
 preview (`_audio/preview/.voice` records what they were made with). Bulk
 `audio preview` is only for listening offline.
 
+**The free stand-in narration** (owner, 2026-10-26, for podlm monologue
+prototypes). `authorlm audio stitch <stem> --preview [--json] -m <ms>`
+renders the chapter's missing previews (the rule above; macOS `say`
+only, never ElevenLabs, so it spends nothing), then joins them in
+manifest order with each silence section's duration into
+`_audio/preview/chapters/<stem>.mp3` (44.1 kHz mono, 128 kbps,
+single-pass loudnorm). Beside it, `<stem>.sections.json` gives each
+speech section's `id`, source `line`, `text`, `start_s` and `end_s` in
+the stitched file, counted in samples. Prints the path; `--json` prints
+`{path, duration_s, sections, rendered}`. Run `audio export` first so
+the manifest matches the text.
+
 **The page — the author's surface, on the Mac and the phone.** Run
 `authorlm audio serve -m <ms> --no-open` in the background from Bash
 (fixed port 8792 by default; verify `curl -s http://127.0.0.1:8792/health`)
@@ -1573,6 +1585,12 @@ do it only on the author's word in chat (given 2026-09-25 for these).
 
 **Set up and cast the manuscript before exporting:**
 
+For Mac `say` previews, leave ElevenLabs Voice IDs blank if the author has
+not selected paid voices. Explicit cast roles are still required. Export
+with `--offline`; `[preview].voice` selects the installed Mac voice.
+Only paid synthesis requires an ElevenLabs Voice ID. Do not ask the author
+to choose an ElevenLabs voice just to listen with Mac `say`.
+
 1. If either `_audio/audiobook.toml` or `_audio/cast.md` is missing,
    run `authorlm audio init -m <ms>` (CLI only), then inspect both files.
    To change existing settings, edit the per-manuscript files directly.
@@ -1606,6 +1624,24 @@ do it only on the author's word in chat (given 2026-09-25 for these).
    actually be generated) or `text`. Without `confirm=True` it returns
    the character cost — read it to the author and wait for a yes. Never
    audition on paid clips before a free pass has narrowed the field.
+   **This verb is for short samples only** (a paragraph or two per
+   voice). It renders one cheap request per voice at audition quality
+   with default settings, and nothing it makes can become a chapter take.
+2b. **A chapter-length audition IS a chapter render** (author's ruling
+   2026-10-18: "when I ask you to render a chapter, render it exactly as
+   chapter render would; there is no reason to reinvent the wheel"). When
+   the author wants to hear a whole chapter, or more than a couple of
+   paragraphs, in a candidate voice, go through the ordinary verbs, per
+   candidate: `audio cast set <role> --voice-id <id> --voice "<name>"`,
+   `audio export`, `audio generate <stem> --remaining` (dry run shown
+   first), `audio stitch <stem>`, then copy or note the stitched file
+   before the next candidate overwrites `audio/<stem>.<quality>.mp3`.
+   Takes are keyed by text + voice + settings (§6 of the design), so every
+   candidate's takes stay in `state/` and `audio/`: casting the winner
+   back costs nothing, the losers cost nothing to keep, and a later Doc
+   edit re-renders only the moved paragraphs in whichever voice is cast.
+   Outside AuthorLM (another repo, another agent) the same rule holds:
+   call these verbs, never a hand-rolled ElevenLabs request.
 3. **One parameter per round.** Vary stability or speed, not both.
    Industry practice is one setting per voice for the whole book;
    drama comes from the prose.
@@ -1622,7 +1658,12 @@ changed, and rules to remove — and applies only with `confirm=True`.
 append-only rule of 2026-09-03 is reversed): a rule on ElevenLabs that
 `pronunciations.md` does not carry is removed on the next push, and a
 row without a reading carries nothing. Deleting a row is how a rule is
-dropped; nothing lives only on the server. The dictionary is named in `audiobook.toml`; the model
+dropped; nothing lives only on the server. **Every book has a dictionary
+and nobody makes one by hand** (ruling 2026-10-18): `audio init` seeds
+`[tts].dictionary` with the manuscript's name, an empty key means the
+same, and `audio export` creates the dictionary on ElevenLabs from the
+table when the account lacks it — so the Pronunciations tab works from
+the first row and a first render never needs a push. The model
 there decides alias (multilingual v2 and most others) versus phoneme
 (`eleven_flash_v2`, `eleven_v3`) rules. After a push, `export_audio`
 writes the new version into `audiobook.json`.
@@ -1725,13 +1766,36 @@ the Collage title up to its first comma. A file with no `voice: author`
 clip stops with an error that says where to add `| voice: author`; add
 it to the intro/outro `[Clip:]` only with the author's go-ahead.
 
+`--whole` (2026-10-20) is the whole file read on camera: every word of
+prose the md export keeps, as `Body` — an `[Omit: audio]` intro or outro
+included, since the author speaks it — with any `voice: author` clip in
+its place. The SpiritualHindu monologues keep the intro and outro as
+`[Omit: audio]` prose, not Collage clips (ruled 2026-10-20: one text, the
+author's, edited in the Doc; no clip note to keep in step).
+Use it when the author records the whole monologue himself ("I want the
+whole thing"). Body prose takes no `voice:` field; the field is a Collage
+clip's alone.
+
+**Reconcile with the Doc first, every time.** The author edits in Google
+Docs; a local file checked out to Docs (`doc list` says `[checked out to
+Google Docs]`) is stale until pulled. Before any teleprompter export:
+
+1. `authorlm doc pull <file> -m <manuscript>`.
+2. Check the tag lines (the round trip joins them): split any `] [` into
+   separate lines with a blank line between, strip `⇢ [name](http…)` back
+   to `⇢ name`, and confirm `[/Collage]` / `[/Omit]` closes survived;
+   `authorlm media list <file>` must show the author's clips `ready`.
+3. Then export and upload. Never export from a file you did not just
+   reconcile with its Doc.
+
 Uploading the teleprompter copy ("upload the teleprompter copy", "put the
 teleprompter on Drive", "send it to my phone"): rerun the export with
 `--upload`; there is no separate upload verb and no MCP tool, so it is the
 CLI from Bash:
 
 ```bash
-authorlm export teleprompter --file <file> -m <manuscript> --upload
+authorlm doc pull <file> -m <manuscript>        # reconcile first (above)
+authorlm export teleprompter --file <file> -m <manuscript> [--whole] --upload
 ```
 
 - Default is the plain `.docx`: teleprompter apps import it from Drive as
@@ -1794,7 +1858,8 @@ run the CLI via Bash:
   `<<old>>{{new}}` forms.
 - push: `authorlm doc push <file> -m <manuscript>` → prints the Doc URL;
   the file is now *checked out* (warn the author against local edits).
-  `doc push <file> --rebuild` rebuilds a comment-bearing tab, orphaning its comments — only on the author's explicit word, never to clear a held paragraph.
+  `doc push <file> --rebuild` rebuilds the whole tab. It is refused while any open comment anchors in the tab (2026-10-26: a rebuild after a "tab structure and export disagree" error orphaned four comments); settle or `doc resolve-comments` them first, and never reach for a rebuild to get past that error or a held paragraph.
+  `doc push` also refuses when the tab's text changed since the last push ("did not push; doc has changed. pull first"): pull, or `doc merge` when both sides moved. Every pull lists the open comments again under "Still open from earlier pulls", marking one whose anchor text is gone; resolve it once addressed.
   **Held paragraphs** (it-e26a44f924be): a push holds back every changed paragraph (or table) an open comment is anchored in, pushes the rest, and prints "Held N paragraph(s)" with each comment's id, quote and content (`held` in the result). The local file keeps its new text and stays local ahead; a pull does not overwrite it. Address each held comment, then push again:
   1. A change request: register the edit beside the comment with `doc propose <comment-id>` ({"old","new","note"}; the anchor stays). A question: answer in chat.
   2. The author reviews in the margin; the next pull applies the verdict and closes the thread.
@@ -2181,6 +2246,21 @@ drops the tag lines and keeps every word of prose.
     (fetch the transcript and copy the full sentence; a fragment is a
     draft), and the `start:`/`end:` you propose cover exactly those
     sentences: begin at the first word, end before the next sentence.
+    **The brief carries everything the clip says (author ruling
+    2026-10-26: "add the full description/lines from the clips inline in
+    the doc, so you can see those and figure out what gaps should be
+    filled"; true for every YouTube clip).** Once a clip has its
+    `youtube:` and times, `quote:` holds EVERY line spoken inside the
+    span, in order, speakers marked, and `moment:` says what happens in
+    it. The lines come from ytlm, read by a subagent and never into the
+    chat (ytlm skill, "Never in the window"): `ytlm quote <id> "the"`
+    caches the free captions in `<ytlm workspace>/clips/<id>/captions.json`,
+    and the subagent copies the span's lines into the brief. Land them
+    with `clip spec --batch`; on a checked-out chapter they show in its
+    tab as pending forms, which is how the author reads them inline.
+    Drafting narration around a clip starts from its brief: supply only
+    what the clips leave out, never retell a line the brief holds. A
+    script whose YouTube clips lack their lines is not ready for review.
   - a clip to be generated takes a **generation spec** (`_clips/specs/`):
     `subject:`, `setting:`, `look:`, `camera:`, `light:`, `motion:`,
     `sound:`, `continuity:`, `on-screen text:` ('none' is an answer),
@@ -2306,6 +2386,11 @@ do all three in the same turn:
   paraphrase away their reasoning.
 - All tools take an optional `manuscript` parameter — resolve ambiguity via
   `list_manuscripts` once, then pass it explicitly.
+
+## Rulings
+
+- Every mention of a ruling in a message links inline to the document that records it: a markdown link whose target is the absolute path of the rulings file, or the full URL of its Doc tab, on the ruling's id, for example `[R2](/Users/nagarkar/workspace/repos/<repo>/<path>/rulings.md)`. A ruling named without its link is a claim the owner cannot check. Standard for every repo skill: metalm `guidelines/requirements.md`, "Capturing owner input" (owner).
+- In AuthorLM a project's rulings live in `<manuscript>/_drafts/<project>-rulings.md` (for example `recap-five-rulings.md`, `recap-one-rulings.md`, `papers-conflicts.md`) or in the Doc's `<project>_rulings.md` tab; link whichever holds the ruling.
 
 ## Merging
 

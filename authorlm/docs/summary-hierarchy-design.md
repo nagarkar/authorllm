@@ -471,6 +471,25 @@ feed section N+1), but different essays' lower levels are independent and may
 run in parallel before the essay pass; a full build at four workers is on the
 order of today's.
 
+### 5.1 The first live rebuild, and the JSON call (2026-10-25/26)
+
+The step 4 session's full rebuild cost $1.34 (paragraph $0.72, section
+$0.49, essay $0.13) against the $0.45 estimate above: paragraph-record
+output ran 4.5× the estimate and section input 3×. One essay, mixing.md,
+stayed stale because its display-math section made the paragraph model's
+reply unparseable on every attempt. The owner's ruling on that: a model
+not returning JSON is not a reason for a model fallback; the call must ask
+for JSON properly. The finding behind it: `LLMClient.complete_json` only
+appends "Reply with JSON only" to the prompt; llmlm sends
+`response_format json_object` for the paragraph model
+(gemini-3.1-flash-lite) because authorlm declares no `output_schema` and no
+`schema_loader`, although that model's profile supports `json_schema`
+(verified live 2026-10-17); and the prompt asks for a top-level JSON array,
+which `json_object` mode cannot return, so every reply survived only
+through the parser's tolerance of an object wrapping one list. The fix is
+a declared record schema sent as `json_schema`, reply shaped
+`{"records": […]}`; it is its own PR.
+
 ## 6. Inputs: which consumer gets which level
 
 ### 6.0 The processes: what each is for, when to use which, what it needs, what it lacks
@@ -774,6 +793,38 @@ A front-matter key on a lens or filter uses the enum's string value, so
 `inputs = ["concepts", "referenced-sections"]` is checked against the enum
 and an unknown name is rejected by name at parse time, as the current
 front-matter vocabularies already are.
+
+Built (step 5, first slice, 2026-10-26): `context.py` holds the enum,
+`Input.parse`, and `supply`, which renders STYLE_LAW, VALIDATED_BELIEFS,
+INTENTS, CONCEPT_SLICE, ESSAY_SUMMARIES, SECTION_OUTLINE, PARAGRAPH_RECORDS,
+REFERENCED_SECTIONS, READING_ORDER and ESSAY_TEXT; the six inputs whose
+renderer needs an argument only its pass has (PROTECTED_TERMS, DICTIONARY,
+CAST, PROFILES, PRIOR_RUNS, TARGET_CHAPTERS) are declared and say by name
+which module still renders them. `passes.INPUTS` is the critique pass's
+declaration; `build_context(llm=…)` runs `context.ensure_for` over it
+before the gate (rulings 3 and 9, the CLI passes `summaries.clients`), and
+`render_user_message` adds OUTLINE and REFERENCED SECTIONS between BOOK
+CONTEXT and THE ESSAY. `manifest.INPUTS` declares PARAGRAPH_RECORDS and
+`manifest.compute` reads `derived_lists` instead of parsing prose. One
+snapshot per invocation holds: `supply` hands the caller's capture to every
+renderer, and `for_unit`, `mentions` and `derived_lists` take the caller's
+`texts`, so a pass never reads the manuscript from disk twice (test_e2e
+E2/P3 counts the reads). Not yet moved onto `supply`: the critique pass's seven original blocks (their
+shape is what the editor prompt and the HTTP-stub tests describe), the
+beat loop, filters and lenses.
+
+### 6.8 REFERENCED_SECTIONS: how a backward reference finds its text
+
+`context.referenced_sections(db, manuscript, file, texts)`: for every
+record of `file` with a reference of direction `back`, the term's first
+`introduces | defines` mention in reading order (`summaries.mentions`),
+when it lies in another file, names a section; that section's text enters
+the block under its file, ordinal, heading and `section_hash`, with the
+terms that led there. Deduplicated, reading order, capped at
+`REFERENCED_CAP` = 12 sections. The record's own `target` field is not
+yet used for resolution (a chapter named in the text could override the
+mention lookup); that is a follow-up once the live records show how often
+the model fills it.
 
 ## 7. The summary side of the extraction interface
 

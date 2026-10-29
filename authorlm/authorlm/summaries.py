@@ -1158,8 +1158,8 @@ def derived_lists(db: Database, manuscript: dict, file: str,
             "promises": promises, "debts": debts}
 
 
-def for_unit(db: Database, manuscript: dict, file: str, text: str | None = None
-             ) -> dict:
+def for_unit(db: Database, manuscript: dict, file: str, text: str | None = None,
+             texts: dict[str, str] | None = None) -> dict:
     """The three levels for one essay, projected for a consumer (§7's
     table; extraction-redesign.md §4.3). Read-only over `current` rows.
 
@@ -1167,12 +1167,18 @@ def for_unit(db: Database, manuscript: dict, file: str, text: str | None = None
     with its hash per row and `stale: True` when some unit of the text
     has no row — a paragraph or section without one carries `gist` /
     `summary` `None` so the consumer can print STALE against it. The
-    essay carries `_state`'s verdict as `state`."""
-    if text is None:
-        texts, _unlisted, _flight = _context_units(db, manuscript)
-        if file not in texts:
-            raise LookupError(f"'{file}' is not a unit of the manuscript")
-        text = texts[file]
+    essay carries `_state`'s verdict as `state`.
+
+    `texts` is the caller's snapshot of the whole book (the derived lists
+    read every unit's records); omitted, one is taken here. `text` is this
+    unit's own text, which defaults to `texts[file]`."""
+    if text is None or texts is None:
+        if texts is None:
+            texts, _unlisted, _flight = _context_units(db, manuscript)
+        if text is None:
+            if file not in texts:
+                raise LookupError(f"'{file}' is not a unit of the manuscript")
+            text = texts[file]
     verse_file = file in verse_files_of(manuscript)
     secs = sections_of(text, verse_file=verse_file)
     have_p = _current_paragraph_rows(db, manuscript["id"], file)
@@ -1217,7 +1223,8 @@ def for_unit(db: Database, manuscript: dict, file: str, text: str | None = None
                  "stale": state not in ("fresh", "upstream_stale")}
         essay.update(derived_lists(
             db, manuscript, file,
-            paragraph_records(db, manuscript, files=[file], texts={file: text})))
+            paragraph_records(db, manuscript, files=[file], texts={file: text}),
+            texts=texts))
     return {"file": file, "essay": essay, "sections": sections,
             "paragraphs": paragraphs,
             "paragraph_level_stale": bool(paragraphs) and any(
@@ -1260,15 +1267,16 @@ def paragraph_records(db: Database, manuscript: dict,
     return out
 
 
-def mentions(db: Database, manuscript: dict, term: str | None = None
-             ) -> list[dict]:
+def mentions(db: Database, manuscript: dict, term: str | None = None,
+             texts: dict[str, str] | None = None) -> list[dict]:
     """Every mention across the book in reading order, flattened for the
     recurrence query (ruling 7): {term, role, span, file, para_hash,
     ordinal, section_ordinal}. `term` filters case-insensitively on the
-    author's spelling."""
+    author's spelling. `texts` is the caller's snapshot; omitted, one is
+    taken here."""
     want = term.lower() if term else None
     out = []
-    for rec in paragraph_records(db, manuscript):
+    for rec in paragraph_records(db, manuscript, texts=texts):
         for m in rec["mentions"]:
             if want is not None and m["term"].lower() != want:
                 continue
@@ -1290,7 +1298,8 @@ def mentions(db: Database, manuscript: dict, term: str | None = None
 PARAGRAPH_PROMPT_PATH = Path(__file__).parent / "prompts" / "paragraph-records.md"
 # The flash tier (ruling 5). config.toml names it under `[summaries]`;
 # without that key the pass falls through to `[critique]
-# summarizer_model` (Luna, the ruling's fallback), and only then to this.
+# summarizer_model`, and only then to this. The call sends
+# `paragraph_schema()`, so flash replies in that shape.
 DEFAULT_PARAGRAPH_MODEL = "gemini/gemini-3.1-flash-lite"
 # Extraction's cap (§3.5): a longer section splits at paragraph
 # boundaries into several calls.
@@ -1326,6 +1335,44 @@ def paragraph_prompt() -> str:
     return (PARAGRAPH_PROMPT_PATH.read_text(encoding="utf-8")
             .replace("<<MOVES>>", ", ".join(MOVES))
             .replace("<<RELATIONS>>", ", ".join(sorted(VALID_RELATIONS))))
+
+
+def _list(item: dict) -> dict:
+    return {"type": "array", "items": item}
+
+
+def _obj(**props) -> dict:
+    return {"type": "object", "properties": props,
+            "required": list(props), "additionalProperties": False}
+
+
+_STR = {"type": "string"}
+_STR_OR_NULL = {"type": ["string", "null"]}
+
+
+def paragraph_schema() -> tuple[str, dict]:
+    """The reply's shape as a JSON schema (§3.2), sent with the call so a
+    model that honours `json_schema` (the flash tier does) is held to it.
+    The root is an object holding `records`, since strict schemas want an
+    object root; `_reply_records` unwraps it. Enum checks stay in
+    `store_paragraph_record` too: a model without schema support still
+    gets only the prose."""
+    from .extraction import VALID_RELATIONS
+
+    record = _obj(
+        n={"type": "integer"}, gist=_STR, claim=_STR_OR_NULL,
+        move={"type": "string", "enum": list(MOVES)},
+        mentions=_list(_obj(term=_STR, span=_STR, role={
+            "type": "string", "enum": list(MENTION_ROLES)})),
+        definitions=_list(_obj(term=_STR, sentence=_STR)),
+        relations=_list(_obj(**{"from": _STR, "relation": {
+            "type": "string", "enum": sorted(VALID_RELATIONS)},
+            "to": _STR, "span": _STR})),
+        references=_list(_obj(term=_STR, direction={
+            "type": "string", "enum": list(REFERENCE_DIRECTIONS)},
+            target=_STR_OR_NULL, span=_STR)),
+        depends_on=_list({"type": "integer"}))
+    return "paragraph_records", _obj(records=_list(record))
 
 
 def paragraph_llm(config: dict) -> LLMClient:
@@ -1445,7 +1492,7 @@ def _build_file(db: Database, manuscript: dict, file: str, text: str,
                 paragraph_prompt(),
                 _records_user(file, sec["heading"], chunk,
                               [p["ordinal"] for p in wanted]),
-                thinking_budget=0)
+                thinking_budget=0, schema=paragraph_schema())
             report["calls"] += 1
             got = _reply_records(reply)
             for p in chunk:

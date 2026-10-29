@@ -15,8 +15,8 @@ You receive:
 - RECORD THESE: the numbers of the paragraphs you must write a record for.
   The other paragraphs are context only (you may name them in depends_on).
 
-Return a JSON array with exactly one object per number in RECORD THESE, in
-that order:
+Return a JSON object {"records": [...]} whose list holds exactly one object
+per number in RECORD THESE, in that order:
 
 {"n": int, "gist": str, "claim": str or null, "move": str,
  "mentions": [{"term": str, "span": str, "role": str}],

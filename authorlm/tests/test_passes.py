@@ -56,6 +56,7 @@ import contextlib
 import http.server
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -1665,6 +1666,56 @@ def _the_doc_transport_push(root: Path) -> None:
           "formed at all", not fake3.bodies, str(fake3.bodies[:1]))
 
 
+def _critique_write_refuses_checked_out(root: Path) -> None:
+    """RISK-4 — `critique write` opened with a levelling push that wiped
+    Doc-ahead prose when the essay was checked out. Same gate as
+    `filter push`: refuse, name `doc pull`, touch nothing on the wire."""
+    import authorlm.gdocs as _gd
+
+    print("RISK-4: critique write refuses a checked-out file:")
+
+    ws_name = "critique-gate-ws"
+    db, manuscript, ms, fake = _twin_fixture(root, ws_name)
+    mid = manuscript["id"]
+    _twin_threads(db, mid, [(2, "The wall stands, in my voice.")])
+    # Doc holds ahead prose the local file does not — the wipe case if
+    # write_pending_forms' levelling push ran.
+    ahead = TWIN_ESSAY.replace(
+        "Alpha opens the essay and says a thing.",
+        "Alpha opens the essay, edited only in the Doc.", 1)
+    for tab in fake.tabs:
+        if tab["title"] == "solo.md":
+            tab["body"] = fake._as_body(ahead, tab["id"])
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, meta)
+
+    saved = (_gd.get_service, _gd.get_docs_service)
+    _gd.get_service = lambda *a, **k: fake
+    _gd.get_docs_service = lambda *a, **k: fake
+    raised = None
+    try:
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli_main(["--workspace", str(root / ws_name),
+                          "critique", "write", "solo.md"])
+        except SystemExit as err:
+            raised = str(err)
+    finally:
+        _gd.get_service, _gd.get_docs_service = saved
+
+    check("RISK-4 `critique write` refuses a CHECKED-OUT file, naming "
+          "`doc pull` — staging read `old` from local; a levelling push "
+          "would overwrite Doc-side prose",
+          raised is not None and "checked out to Google Docs" in raised
+          and "doc pull solo.md" in raised, raised)
+    check("RISK-4 ...and nothing reached the wire",
+          not fake.bodies, str(fake.bodies[:1]))
+    check("RISK-4 ...and the Doc-ahead prose is still in the tab",
+          "edited only in the Doc" in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md")[:200])
+
+
 NON_CANONICAL_ESSAY = (
     "# The Wall\n\n"
     "* one thing the wall does   \n"
@@ -2453,8 +2504,9 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
 
     # 4. A comment INSIDE the table: the changed table is held at its
     #    old text and reported (it-e26a44f924be holds any changed unit
-    #    an open comment is anchored in); --rebuild is the knowing
-    #    opt-in.
+    #    an open comment is anchored in); --rebuild over it is refused
+    #    (2026-10-26, the author: "make --rebuild refuse while open
+    #    comments anchor in the tab").
     _, db2, man2, ms2, fake2 = _table_fixture(
         root, "tbl-cell-ws", commented("Choice scores"))
     before = fake2.tab_text("agency.md")
@@ -2468,12 +2520,16 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
           == "Choice scores", str(push))
     check("and leaves the tab and the comment untouched",
           fake2.tab_text("agency.md") == before and not fake2.orphaned)
-    push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
-                          docs_service=fake2, rebuild=True)
-    check("rebuild=True rebuilds the tab, accepting the orphan",
-          push.get("mode") is None and fake2.orphaned
-          and _tab_md(fake2) == gdocs.normalize_markdown(changed),
-          f"{push}\n{_tab_md(fake2)}")
+    try:
+        gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                       docs_service=fake2, rebuild=True)
+        check("rebuild=True over an anchored comment is refused", False)
+    except LookupError as err:
+        check("rebuild=True over an anchored comment is refused by name, "
+              "the tab and the comment untouched",
+              "rebuild refused" in str(err) and "Choice scores" in str(err)
+              and fake2.tab_text("agency.md") == before and not fake2.orphaned,
+              str(err))
 
     # 5. A table tab with no comments still pushes, by rebuild as before.
     _, db3, man3, ms3, fake3 = _table_fixture(
@@ -2607,16 +2663,21 @@ def _a_commented_paragraph_is_held(root: Path) -> None:
           and _tab_md(fake2) == gdocs.normalize_markdown(_HOLD_LOCAL),
           f"{push}\n{_tab_md(fake2)}")
 
-    # 6. --rebuild still overrides, as the author's explicit opt-in.
+    # 6. --rebuild no longer overrides the hold: it is refused while the
+    #    comment anchors in the tab (2026-10-26).
     _, db3, man3, ms3, fake3 = _table_fixture(
         root, "hold-rebuild-ws", commented("escape"), text=_HOLD_DOC)
     (ms3 / "agency.md").write_text(_HOLD_LOCAL)
-    push = gdocs.push_doc(db3, man3, "agency.md", service=fake3,
-                          docs_service=fake3, rebuild=True)
-    check("rebuild=True overrides the hold",
-          push.get("mode") is None and not push.get("held")
-          and _tab_md(fake3) == gdocs.normalize_markdown(_HOLD_LOCAL),
-          f"{push}\n{_tab_md(fake3)}")
+    before3 = fake3.tab_text("agency.md")
+    try:
+        gdocs.push_doc(db3, man3, "agency.md", service=fake3,
+                       docs_service=fake3, rebuild=True)
+        check("rebuild=True does not override the hold", False)
+    except LookupError as err:
+        check("rebuild=True does not override the hold: refused, tab untouched",
+              "rebuild refused" in str(err)
+              and fake3.tab_text("agency.md") == before3 and not fake3.orphaned,
+              str(err))
 
     # 7. The CLI names each held paragraph and its comment.
     ws4, db4, man4, ms4, fake4 = _table_fixture(
@@ -4652,6 +4713,52 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
           f"temps={len(fake3.temps)} orphaned={fake3.orphaned} "
           f"anchored={fake3.anchored_text()!r}")
 
+    # Atomic rollback must not re-record the local file as the pushed
+    # base: a levelling push that HELD a commented paragraph left the tab
+    # on old text while local kept the author's edit. Hashing local as
+    # the base would make the next pull read doc-ahead and wipe that edit.
+    hold_doc = ("# Sky\n\nAlpha stays.\n\n"
+                "Beta holds.[Footnote: cite Job]\n\nOmega closes.\n")
+    hold_local = hold_doc.replace("Beta holds.", "Beta holds firmly.")
+    db4, ms4, msdir4, _ = _outside_fixture(root, "sky-ws-4", essay=hold_doc)
+    (msdir4 / "solo.md").write_text(hold_local)
+    meta = gdocs._mapping(db4, ms4)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db4, ms4, meta)
+    fake4 = _CommentedDocFake([("book", ""), ("solo.md", hold_doc)],
+                              "Beta holds.", "solo.md", render=True)
+    real_insertion = gdocs.threads_mod.render_insertion
+
+    def never_reads_back(new):
+        return "never in the tab"
+
+    gdocs.threads_mod.render_insertion = never_reads_back
+    try:
+        rep = dv.apply(db4, ms4, {}, "footnote", "solo.md",
+                       [(1, "Job 38.")],
+                       services=lambda: (fake4, fake4))
+    finally:
+        gdocs.threads_mod.render_insertion = real_insertion
+    links = gdocs._mapping(db4, ms4).get("gdocs", {})
+    local = gdocs.strip_embed_lines(gdocs.normalize_markdown(
+        (msdir4 / "solo.md").read_text(encoding="utf-8")))
+    # pushed_hash is the export's markdown (fetch_tab_markdown), not the
+    # Docs body runs — same side pull/three_way read.
+    tab = gdocs.threads_mod.strip_pending(gdocs.fetch_tab_markdown(
+        fake4, fake4, links["_master_id"], links,
+        gdocs.manuscript_bridge(ms4), "solo.md"))[0]
+    base_hash = (links.get("solo.md") or {}).get("pushed_hash")
+    state = gdocs.three_way(tab, local, base_hash)
+    check("atomic rollback after a held push keeps the tab's base: pull "
+          "still sees local ahead, and the author's held edit stays",
+          rep["landed"] == [] and rep["failed"]
+          and "Beta holds firmly." in local and "Beta holds." in tab
+          and "firmly" not in tab
+          and state == "local_ahead"
+          and (msdir4 / "solo.md").read_text() == hold_local,
+          f"state={state} hash={base_hash}\nlocal={local!r}\ntab={tab!r}\n"
+          f"{rep}")
+
 
 OUTSIDE_ESSAY = (
     "# Topic\n\n"
@@ -4662,7 +4769,8 @@ OUTSIDE_ESSAY = (
     "Omega closes.\n")
 
 
-def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY):
+def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY,
+                     fake_class=None):
     """`_twin_fixture` with a RENDERING fake: its export gives each tab
     paragraph back as its own markdown paragraph, which a resolve that
     writes the tab's text to disk needs."""
@@ -4677,7 +4785,8 @@ def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY):
     manuscript = api.get_manuscript(db)
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, {})
-    fake = _SurgicalDocFake([("book", ""), ("solo.md", essay)], render=True)
+    fake = (fake_class or _SurgicalDocFake)(
+        [("book", ""), ("solo.md", essay)], render=True)
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
@@ -5047,12 +5156,165 @@ def _an_outside_caller_keeps_its_settings_and_withdraws(root: Path) -> None:
               db, manuscript, "no-such.md", "ytlm"), "no document matching"))
 
 
+EXTENDS_ESSAY = (
+    "# Topic\n\n"
+    "The answer is not a place; it is the pursuit.\n\n"
+    "To give a thing a figure is to mark where it is not.\n\n"
+    "Böhme’s account of Nothing, abyss, will.\n\n"
+    "Its consequences may change, but the act remains.\n\n"
+    "Omega closes.\n")
+
+
+def _a_new_half_that_extends_its_old(root: Path) -> None:
+    """A revision whose new text CONTAINS its old (a sentence appended
+    or prepended) leaves the old text standing inside the new once it
+    lands. When the forms come back without their markers (resolved by
+    hand, or anything else that leaves the form unmatched), the verdict
+    is inferred from the prose — and the old text found inside the
+    landed new is no decline (SMSTTD recapitulation.md, 2026-10-18:
+    7 accepted forms recorded `declined`)."""
+    print("outside callers: a new half that extends its old:")
+    db, manuscript, ms, fake = _outside_fixture(root, "extends-ws",
+                                                EXTENDS_ESSAY)
+    revisions = [
+        ("it is the pursuit.",
+         "it is the pursuit. The verdict is given from within."),
+        ("To give a thing a figure is to mark where it is not.",
+         "To give a thing a figure is to mark where it is not. Spinoza "
+         "drew the opposite conclusion."),
+        ("Böhme’s account of Nothing, abyss, will.",
+         "Trans. Ellistone (1651). Böhme’s account of Nothing, abyss, "
+         "will."),
+        ("Its consequences may change, but the act remains.",
+         "Its consequences may change, but the act remains. The balance "
+         "is conserved."),
+    ]
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": old, "new": new, "note": f"x-{n}"}
+        for n, (old, new) in enumerate(revisions)], "ytlm", fake, fake)
+    check("the fixture: four replacements out",
+          len(staged["written"]) == 4 and not staged["failed"],
+          str(staged))
+    # The author takes the markers off by hand: the first three keep the
+    # new text (acceptances), the last is put back to its old (a decline).
+    for old, new in revisions[:3]:
+        fake.edit("tab-2", f"<<{old}>>{{{{{new}}}}}", new)
+    old, new = revisions[3]
+    fake.edit("tab-2", f"<<{old}>>{{{{{new}}}}}", old)
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    by_note = {r["note"]: r["verdict"] for r in res["revisions"]}
+    check("a landed new that contains its old is accepted — appended "
+          "or prepended",
+          [by_note[f"x-{n}"] for n in range(3)] == ["accepted"] * 3,
+          str(res["revisions"]))
+    check("...and the old text put back is still a decline",
+          by_note["x-3"] == "declined"
+          and (res["accepted"], res["modified"], res["declined"])
+          == (3, 0, 1), str(res))
+    text = (ms / "solo.md").read_text()
+    check("the file carries what was ruled",
+          all(new in text for _, new in revisions[:3])
+          and "The balance is conserved." not in text, text)
+    rows = {r["note"]: r["state"] for r in db.all(
+        "SELECT note, state FROM doc_threads WHERE manuscript_id = ?",
+        (manuscript["id"],))}
+    signals = sorted(r["signal"] for r in db.all(
+        "SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+        "evidence_type = ?", (manuscript["id"], api.EXTERNAL_EVIDENCE)))
+    check("the evidence agrees: three resolved, one declined",
+          [rows[f"x-{n}"] for n in range(4)] == ["cleaned"] * 3
+          + ["declined"]
+          and signals == ["declined"] + ["resolved"] * 3,
+          str((rows, signals)))
+
+
 def _refuses(fn, fragment: str) -> bool:
     try:
         fn()
     except Exception as err:  # noqa: BLE001
         return fragment in str(err)
     return False
+
+
+class _EscapingDocFake(_SurgicalDocFake):
+    """`_SurgicalDocFake` with Google's backslash escapes on both ends:
+    the importer consumes one backslash before any ASCII punctuation
+    (`\{` imports as `{`, which is why push runs escape_math), and the
+    markdown export escapes the characters it was measured escaping
+    around math — `\`, `$`, `_`, `=`, `<`, `>` (#152,
+    margin-threads-design.md "Export encodings")."""
+
+    _IMPORT_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+    def _paras(self, markdown):
+        return [self._IMPORT_ESCAPE.sub(r"\1", p)
+                for p in super()._paras(markdown)]
+
+    def _markdown_of_tab(self, tab):
+        saved = tab["body"]
+        tab["body"] = "".join("\\" + c if c in "\\$_=<>" else c
+                              for c in saved)
+        # One character for one: the style map's indices still hold.
+        assert len(tab["body"]) == len(saved) or not self.styled, \
+            "escaping fake: emphasis and escapes in one tab"
+        try:
+            return super()._markdown_of_tab(tab)
+        finally:
+            tab["body"] = saved
+
+
+MATH_ESSAY = (
+    "# Topic\n\n"
+    "Formally, let $N=\\bigcup\\limits_{A}\\{A,\\neg A\\}$, where $A$ "
+    "ranges over all things. Define negation of the whole element by "
+    "element:$\\neg N:=\\{\\neg x:x\\in N\\}$. Assuming "
+    "$\\neg \\neg A=A$, negation leaves the whole unchanged: "
+    "$\\neg N=N$.\n\n"
+    "Omega closes.\n")
+
+
+def _a_resolve_keeps_math_a_form_cuts_through(root: Path) -> None:
+    r"""2026-10-18, SMSTTD recapitulation.md R10: a revision that moved a
+    math span's opening `$` (`element:$\neg` → `element: $\neg`) put a
+    `$` in each half of its form. Pairing the export's delimiters on the
+    marked text left the new half's `\$` escaped; the resolve landed
+    `\$\neg N:=\{…\}$`, the push took the span for prose so the importer
+    ate `\{` `\}`, and normalize stripped them from the local file too."""
+    print("math a form cuts through survives resolve, push and pull:")
+    # The tab as a push leaves it: the essay through escape_math.
+    db, manuscript, ms, fake = _outside_fixture(
+        root, "math-form-ws", gdocs.escape_math(MATH_ESSAY),
+        fake_class=_EscapingDocFake)
+    (ms / "solo.md").write_text(MATH_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    tab = next(t for t in fake.tabs if t["title"] == "solo.md")
+    check("the fixture: the tab holds the TeX the file does",
+          "element:$\\neg N:=\\{\\neg x:x\\in N\\}$" in tab["body"],
+          tab["body"])
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "element:$\\neg", "new": "element: $\\neg", "note": "c-1"},
+    ], "ytlm", fake, fake)
+    check("the form is out, a `$` in each half",
+          len(staged["written"]) == 1 and not staged["failed"]
+          and "<<element:$\\neg>>{{element: $\\neg}}" in tab["body"],
+          tab["body"])
+
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    want = MATH_ESSAY.replace("element:$", "element: $")
+    local = (ms / "solo.md").read_text()
+    check("the resolve lands the TeX byte for byte",
+          res["accepted"] == 1 and local == want, repr(local))
+    check("the tab holds the escaped braces after the resolve's push",
+          not res["tab_still_marked"]
+          and "element: $\\neg N:=\\{\\neg x:x\\in N\\}$" in tab["body"],
+          tab["body"])
+    gdocs.pull_doc(db, manuscript, "solo.md", service=fake,
+                   docs_service=fake, with_comments=False)
+    local = (ms / "solo.md").read_text()
+    check("a pull gives the same bytes back", local == want, repr(local))
 
 
 def main_test() -> None:
@@ -6052,6 +6314,31 @@ def main_test() -> None:
         check("doc pull snapshots the uncollected local edit into history "
               "before the Doc overwrites it (BUG-1 / A2)", recovered)
 
+        # A tab the export does not carry: the pull says so and EXITS
+        # NON-ZERO (2026-10-26: every pull exited 0 while nothing came down).
+        def _missing_pull_doc(db, manuscript, query=None, service=None,
+                              force=False, with_comments=True,
+                              docs_service=None, bridge=None):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [], "missing": ["solo.md"], "doc_id": "doc-1"}
+        _gdocs_mod.get_service = _fake_service2
+        _gdocs_mod.get_docs_service = _fake_service2
+        _gdocs_mod.pull_doc = _missing_pull_doc
+        out_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out_buf):
+                cli_main(["--workspace", str(dp_ws), "doc", "pull", "solo.md"])
+            exit_msg = None
+        except SystemExit as err:
+            exit_msg = str(err.code)
+        finally:
+            (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
+             _gdocs_mod.pull_doc) = _orig2
+        check("a pull whose tab is missing exits with an error naming it",
+              exit_msg is not None and "nothing pulled for solo.md" in exit_msg
+              and "clean round trip" not in out_buf.getvalue(),
+              f"{exit_msg!r} / {out_buf.getvalue()[-200:]!r}")
+
         _local_transport_guards(root)
         _identical_old_halves(root)
         _inline_markup_forms(root)
@@ -6062,6 +6349,7 @@ def main_test() -> None:
         _mixed_push_set_membership(root)
         _failed_writes_keep_their_own_state(root)
         _the_doc_transport_push(root)
+        _critique_write_refuses_checked_out(root)
         _the_push_says_what_it_did_to_the_file(root)
         _the_push_is_partial_or_nothing(root)
         _twins_go_to_the_doc(root)
@@ -6089,6 +6377,8 @@ def main_test() -> None:
         _suggestions_on_the_doc_road(root)
         _footnotes_after_a_closing_illustration(root)
         _an_outside_caller_resolves_one_tab(root)
+        _a_resolve_keeps_math_a_form_cuts_through(root)
+        _a_new_half_that_extends_its_old(root)
         _an_outside_caller_keeps_its_settings_and_withdraws(root)
     finally:
         server.shutdown()

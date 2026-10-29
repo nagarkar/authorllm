@@ -223,6 +223,32 @@ class ExportTests(unittest.TestCase):
         self.assertIn('w:sz w:val="64"', styles)   # 32pt body
         self.assertIn('w:line="360"', styles)       # 1.5 line spacing
 
+    def test_teleprompter_whole_puts_the_body_between_the_clips(self):
+        db = api.open_db(str(self.ws))
+        passages = export.teleprompter_passages(
+            api.get_manuscript(db), "picture-story.md", whole=True)
+        labels = [p["label"] for p in passages]
+        self.assertEqual(labels[0], "Intro")
+        self.assertEqual(labels[-1], "Outro")
+        self.assertIn("Body", labels)
+        body = " ".join(" ".join(p["paragraphs"]) for p in passages
+                        if p["label"] == "Body")
+        self.assertIn("casual conversation", body)
+        self.assertNotIn("[", body)
+        code, out, err = self.cli("export", "teleprompter", "--file",
+                                  "picture-story.md", "--whole")
+        self.assertEqual(code, 0, err)
+
+    def test_teleprompter_whole_reads_an_omit_audio_intro(self):
+        (self.ms / "plain.md").write_text(
+            "# P\n\n[Omit: audio]\n\nNamaste, said on camera.\n\n"
+            "[/Omit]\n\nJust prose.\n", encoding="utf-8")
+        db = api.open_db(str(self.ws))
+        passages = export.teleprompter_passages(
+            api.get_manuscript(db), "plain.md", whole=True)
+        self.assertEqual(passages[0]["paragraphs"],
+                         ["Namaste, said on camera.", "Just prose."])
+
     def test_teleprompter_needs_a_file_and_an_author_passage(self):
         code, _out, err = self.cli("export", "teleprompter")
         self.assertEqual(code, 1)

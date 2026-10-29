@@ -140,6 +140,12 @@ Session-start backups of the SQLite store (OPS-4).
 
 Learning Engine (RFC AuthorLM §17.8, Chapter 8).
 
+## `authorlm.branding`
+
+`authorlm/authorlm/branding.py`
+
+The AuthorLM brand files every served page links, and the routes that serve them.
+
 ## `authorlm.briefing`
 
 `authorlm/authorlm/briefing.py`
@@ -175,6 +181,12 @@ Bash tab-completion, generated from the live argument parser.
 `authorlm/authorlm/concepts.py`
 
 The Concept Graph (RFC AuthorLM Chapter 21) — AuthorLM's enduring asset.
+
+## `authorlm.context`
+
+`authorlm/authorlm/context.py`
+
+Declared inputs — what a pass asks for, and the one place that supplies it (summary-hierarchy-design.md ruling 10, §6.7).
 
 ## `authorlm.critic`
 
@@ -566,11 +578,29 @@ API-layer tests + CLI/MCP parity checklist (P11).
 
 The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
+## `tests.test_audio_preview_without_paid_voice`
+
+`authorlm/tests/test_audio_preview_without_paid_voice.py`
+
+Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
+
 ## `tests.test_audio_voice_config`
 
 `authorlm/tests/test_audio_voice_config.py`
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
+
+## `tests.test_branding`
+
+`authorlm/tests/test_branding.py`
+
+Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
+
+## `tests.test_context`
+
+`authorlm/tests/test_context.py`
+
+Declared inputs (summary-hierarchy-design.md ruling 10, §6.7, step 5): the `Input` enum, `context.supply`, the critique pass's OUTLINE and REFERENCED SECTIONS blocks, and the reader load derived from paragraph records. No model call anywhere in this suite: records and section summaries are stored directly.
 
 ## `tests.test_continuation`
 
@@ -667,6 +697,12 @@ The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, �
 `authorlm/tests/test_findings_edit_entry.py`
 
 `findings.edit_entry` is the one gate every producer's `replacement` passes through before it is staged as a `<<old>>{{new}}` edit in the author's Doc tab.
+
+## `tests.test_footnote_prefixes_nested`
+
+`authorlm/tests/test_footnote_prefixes_nested.py`
+
+footnote_prefixes must stay injective when nested paths share a stem.
 
 ## `tests.test_gallery`
 
@@ -793,6 +829,12 @@ toc.toml `outside`: Doc tabs that are not part of the book.
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_write_accept_idempotent`
+
+`authorlm/tests/test_write_accept_idempotent.py`
+
+write_accept must not duplicate a beat after a crash mid-accept.
 
 ## `tools.bootstrap_beliefs`
 
