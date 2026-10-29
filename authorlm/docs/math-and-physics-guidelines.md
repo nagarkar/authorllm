@@ -217,6 +217,13 @@ Done 2026-09-02:
   way into Google's importer; `gdocs.unescape_export_math` strips the
   exporter's escapes inside math on every pull. A hermetic test models
   the measured importer and exporter and asserts a byte-clean round trip.
+- Math is found per READING of every pending form (`gdocs._FORM`): the
+  text with each `<<old>>{{new}}` collapsed to its old half, then its new.
+  A revision that moves a span's opening `$` puts a `$` in each half, and
+  pairing delimiters on the marked text left the new half's `\$` escaped;
+  the resolve landed it and the next push lost the span's `\{` `\}`
+  (2026-10-18, SMSTTD recapitulation.md R10). A TeX `\$` inside math now
+  round-trips too.
 - `export.export_manuscript` builds the export Doc from the pandoc DOCX
   (`export.build_docx`), so the Doc carries native equations, footnotes,
   and illustrations.

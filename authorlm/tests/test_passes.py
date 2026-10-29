@@ -56,6 +56,7 @@ import contextlib
 import http.server
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -4672,7 +4673,8 @@ OUTSIDE_ESSAY = (
     "Omega closes.\n")
 
 
-def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY):
+def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY,
+                     fake_class=None):
     """`_twin_fixture` with a RENDERING fake: its export gives each tab
     paragraph back as its own markdown paragraph, which a resolve that
     writes the tab's text to disk needs."""
@@ -4687,7 +4689,8 @@ def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY):
     manuscript = api.get_manuscript(db)
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, {})
-    fake = _SurgicalDocFake([("book", ""), ("solo.md", essay)], render=True)
+    fake = (fake_class or _SurgicalDocFake)(
+        [("book", ""), ("solo.md", essay)], render=True)
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
@@ -5136,6 +5139,86 @@ def _refuses(fn, fragment: str) -> bool:
     except Exception as err:  # noqa: BLE001
         return fragment in str(err)
     return False
+
+
+class _EscapingDocFake(_SurgicalDocFake):
+    """`_SurgicalDocFake` with Google's backslash escapes on both ends:
+    the importer consumes one backslash before any ASCII punctuation
+    (`\{` imports as `{`, which is why push runs escape_math), and the
+    markdown export escapes the characters it was measured escaping
+    around math — `\`, `$`, `_`, `=`, `<`, `>` (#152,
+    margin-threads-design.md "Export encodings")."""
+
+    _IMPORT_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+    def _paras(self, markdown):
+        return [self._IMPORT_ESCAPE.sub(r"\1", p)
+                for p in super()._paras(markdown)]
+
+    def _markdown_of_tab(self, tab):
+        saved = tab["body"]
+        tab["body"] = "".join("\\" + c if c in "\\$_=<>" else c
+                              for c in saved)
+        # One character for one: the style map's indices still hold.
+        assert len(tab["body"]) == len(saved) or not self.styled, \
+            "escaping fake: emphasis and escapes in one tab"
+        try:
+            return super()._markdown_of_tab(tab)
+        finally:
+            tab["body"] = saved
+
+
+MATH_ESSAY = (
+    "# Topic\n\n"
+    "Formally, let $N=\\bigcup\\limits_{A}\\{A,\\neg A\\}$, where $A$ "
+    "ranges over all things. Define negation of the whole element by "
+    "element:$\\neg N:=\\{\\neg x:x\\in N\\}$. Assuming "
+    "$\\neg \\neg A=A$, negation leaves the whole unchanged: "
+    "$\\neg N=N$.\n\n"
+    "Omega closes.\n")
+
+
+def _a_resolve_keeps_math_a_form_cuts_through(root: Path) -> None:
+    r"""2026-10-18, SMSTTD recapitulation.md R10: a revision that moved a
+    math span's opening `$` (`element:$\neg` → `element: $\neg`) put a
+    `$` in each half of its form. Pairing the export's delimiters on the
+    marked text left the new half's `\$` escaped; the resolve landed
+    `\$\neg N:=\{…\}$`, the push took the span for prose so the importer
+    ate `\{` `\}`, and normalize stripped them from the local file too."""
+    print("math a form cuts through survives resolve, push and pull:")
+    # The tab as a push leaves it: the essay through escape_math.
+    db, manuscript, ms, fake = _outside_fixture(
+        root, "math-form-ws", gdocs.escape_math(MATH_ESSAY),
+        fake_class=_EscapingDocFake)
+    (ms / "solo.md").write_text(MATH_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    tab = next(t for t in fake.tabs if t["title"] == "solo.md")
+    check("the fixture: the tab holds the TeX the file does",
+          "element:$\\neg N:=\\{\\neg x:x\\in N\\}$" in tab["body"],
+          tab["body"])
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "element:$\\neg", "new": "element: $\\neg", "note": "c-1"},
+    ], "ytlm", fake, fake)
+    check("the form is out, a `$` in each half",
+          len(staged["written"]) == 1 and not staged["failed"]
+          and "<<element:$\\neg>>{{element: $\\neg}}" in tab["body"],
+          tab["body"])
+
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    want = MATH_ESSAY.replace("element:$", "element: $")
+    local = (ms / "solo.md").read_text()
+    check("the resolve lands the TeX byte for byte",
+          res["accepted"] == 1 and local == want, repr(local))
+    check("the tab holds the escaped braces after the resolve's push",
+          not res["tab_still_marked"]
+          and "element: $\\neg N:=\\{\\neg x:x\\in N\\}$" in tab["body"],
+          tab["body"])
+    gdocs.pull_doc(db, manuscript, "solo.md", service=fake,
+                   docs_service=fake, with_comments=False)
+    local = (ms / "solo.md").read_text()
+    check("a pull gives the same bytes back", local == want, repr(local))
 
 
 def main_test() -> None:
@@ -6197,6 +6280,7 @@ def main_test() -> None:
         _suggestions_on_the_doc_road(root)
         _footnotes_after_a_closing_illustration(root)
         _an_outside_caller_resolves_one_tab(root)
+        _a_resolve_keeps_math_a_form_cuts_through(root)
         _a_new_half_that_extends_its_old(root)
         _an_outside_caller_keeps_its_settings_and_withdraws(root)
     finally:
