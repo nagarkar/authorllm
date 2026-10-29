@@ -19,7 +19,9 @@ function Div(div)
     return nil
   end
 
-  if seen_file then
+  -- A continuation file (export setting continuation_level) runs on
+  -- from the essay before it: no page break.
+  if seen_file and not has_class(div, "authorlm-continuation") then
     table.insert(div.content, 1,
       pandoc.RawBlock("latex", "\\AuthorLMEssayBreak{}"))
   end

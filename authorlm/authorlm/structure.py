@@ -50,7 +50,29 @@ MATTER_VALUES = ("front", "main", "back")
 # with a kind marker, applied to a file. `toc.toml` uses a filename for
 # the same reason. A configurable name is not supported and not wanted:
 # one manuscript, one dictionary.
-SIDECAR_FILES = ("pronunciations.md", "manifest.md")
+SIDECAR_FILES = ("pronunciations.md",)
+
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s", re.M)
+
+
+def first_heading_level(text: str) -> int | None:
+    """Level of the first markdown heading in a file (1 for '#'), or None
+    when the file has no heading."""
+    match = _HEADING_RE.search(text)
+    return len(match.group(1)) if match else None
+
+
+def is_continuation(name: str, text: str, level: int | None) -> bool:
+    """A continuation file carries on the essay before it instead of
+    starting a new one: its first heading is at `level` or deeper (the
+    manuscript's export setting `continuation_level`; None = no file is a
+    continuation). The title page never is. Exports run it on without a
+    page break and the audiobook folds it into the previous chapter."""
+    if not level or name == "title.md":
+        return False
+    found = first_heading_level(text)
+    return found is not None and found >= level
 
 
 def is_sidecar(name: str) -> bool:
@@ -90,6 +112,24 @@ def refuse_sidecar(name: str) -> None:
 def content_files(files: dict[str, str]) -> dict[str, str]:
     """Manuscript files that count as prose (structural files removed)."""
     return {k: v for k, v in files.items() if not is_structural(k)}
+
+
+def toc_outside(toc_text: str) -> list[str]:
+    """The `outside` list of toc.toml: files mirrored to the Doc that are
+    not part of the book (papers, side pieces). An entry ending in '/'
+    names a folder. [] when absent or unparseable."""
+    try:
+        data = tomllib.loads(toc_text or "")
+    except (tomllib.TOMLDecodeError, TypeError):
+        return []
+    entries = data.get("outside", [])
+    return [e for e in entries if isinstance(e, str) and e]
+
+
+def is_outside(name: str, outside: list[str]) -> bool:
+    """True when `name` is declared outside the book by `outside`."""
+    return any(name == e or (e.endswith("/") and name.startswith(e))
+               for e in outside)
 
 
 def _toc_chapters(toc_text: str) -> list[dict]:
@@ -135,12 +175,18 @@ def matter_map(files: dict[str, str]) -> dict[str, str]:
 
 
 def serialize_toc_tree(entries: list[tuple[str, int]],
-                       attrs: dict[str, dict] | None = None) -> str:
+                       attrs: dict[str, dict] | None = None,
+                       outside: list[str] | None = None) -> str:
     """toc.toml text for ordered (filename, depth) entries, carrying the
-    given per-file attributes through (Doc-side reorders must not strip
-    matter assignments)."""
+    given per-file attributes and the `outside` list through (Doc-side
+    reorders must not strip matter assignments or out-of-book files)."""
     lines = ["# Table of contents — structural: order is reading order.",
              "# matter = \"front\" | \"main\" (default) | \"back\""]
+    if outside:
+        lines += ["# outside: Doc tabs that are not part of the book "
+                  "(a trailing / names a folder).",
+                  "outside = [" + ", ".join(f'"{e}"' for e in outside)
+                  + "]"]
     parents = tree_to_parents(entries)
     for name, parent in parents:
         lines += ["", "[[chapter]]", f'file = "{name}"']
@@ -164,6 +210,17 @@ def _file_line_re(name: str) -> re.Pattern:
     return re.compile(rf'^\s*file\s*=\s*["\']{re.escape(name)}["\']\s*$')
 
 
+def _descendants_of(chapters: list[dict], ancestor: str) -> set[str]:
+    """Files whose parent chain reaches `ancestor`, in document order so
+    a child of a descendant counts too."""
+    found: set[str] = set()
+    for c in chapters:
+        parent = c.get("parent")
+        if parent == ancestor or parent in found:
+            found.add(c["file"])
+    return found
+
+
 def insert_toc_entry(toc_text: str, file: str,
                      after: str | None) -> tuple[str, str] | None:
     """Register `file` in toc.toml immediately after `after` (or, for the
@@ -179,6 +236,13 @@ def insert_toc_entry(toc_text: str, file: str,
     The stanza carries the anchor's `parent` — structural depth, which is
     deterministic — and nothing else. `matter` and the rest are semantic;
     the author sets them.
+
+    When `after` has descendants in the toc, the new stanza goes after
+    that whole subtree — not between the anchor and its first child. A
+    wedged sibling would keep the children's written `parent =` lines
+    but `tree_to_parents(parse_toc_tree(...))` (depth + document order)
+    would reparent them under the new file, so the next Doc tab sync
+    and any serialize round trip would steal the chapter's children.
     """
     # Split and re-join on the file's OWN dominant line ending. `splitlines`
     # + `"\n".join` silently relaid a CRLF toc in LF, rewriting every line
@@ -206,19 +270,25 @@ def insert_toc_entry(toc_text: str, file: str,
                           if anchor.match(line)), None)
         if anchor_at is None:
             return None
-        parent = next((c.get("parent") for c in _toc_chapters(toc_text)
+        chapters = _toc_chapters(toc_text)
+        parent = next((c.get("parent") for c in chapters
                        if c.get("file") == after), None)
         if parent:
             stanza_lines.append(f'parent = "{parent}"')
-        # Forward to the start of the next chapter table (or EOF), then
-        # back over everything that belongs to THAT table rather than to
-        # the anchor's: the blank lines that separate them, and any
-        # comment lines, which annotate the table below them. Stopping at
-        # a comment would drop the new stanza between the comment and the
-        # table it describes — silently re-attributing the comment to the
-        # new essay, and gluing the new stanza to its neighbour with no
-        # separator.
-        insert_at = next((i for i in chapter_at if i > anchor_at), len(lines))
+        # After the anchor's whole subtree (anchor + descendants), not
+        # merely the anchor stanza: see the docstring. Then back over
+        # blanks and comments that belong to the NEXT table rather than
+        # to the subtree we just left — stopping at a comment would drop
+        # the new stanza between the comment and the table it describes.
+        descendants = _descendants_of(chapters, after)
+        last_file = after
+        for c in chapters:
+            if c["file"] in descendants:
+                last_file = c["file"]
+        last_at = next((i for i, line in enumerate(lines)
+                        if _file_line_re(last_file).match(line)),
+                       anchor_at)
+        insert_at = next((i for i in chapter_at if i > last_at), len(lines))
         while insert_at > 0 and (not lines[insert_at - 1].strip()
                                  or lines[insert_at - 1].lstrip()
                                  .startswith("#")):
@@ -260,8 +330,10 @@ def reading_order(files: dict[str, str]) -> tuple[list[str], list[str]]:
     TOC order when toc.toml parses (depth-first flatten of the tree);
     alphabetical otherwise. Unlisted files are appended alphabetically
     and reported so the author can complete the TOC."""
-    names = sorted(content_files(files))
     toc_text = files.get(TOC_FILENAME)
+    outside = toc_outside(toc_text or "")
+    names = sorted(n for n in content_files(files)
+                   if not is_outside(n, outside))
     if not toc_text:
         return names, []
     ordered = [n for n, _ in parse_toc_tree(toc_text) if n in names]
@@ -293,6 +365,11 @@ def select_chapters(files: dict[str, str],
         name = raw.strip()
         if name not in positions and f"{name}.md" in positions:
             name = f"{name}.md"
+        if name not in positions and name in files:
+            # A file declared outside the book is not in the reading
+            # order, but naming it alone still builds it (--file).
+            positions[name] = len(positions)
+            order = order + [name]
         if name not in positions:
             raise LookupError(
                 f"no such chapter '{raw}' (one of: {', '.join(order)})")

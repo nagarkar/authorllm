@@ -59,10 +59,15 @@ const tutorialDoc = fileURLToPath(
 
 export default defineConfig({
   base: "./",
+  // The brand icons (authorlm/brand/, copied from metalm) are served by the
+  // Python server at the site root; the dev server serves them from here too,
+  // and the build leaves them out of the dist (the page links them by url).
+  publicDir: "../../authorlm/brand",
   plugins: [react(), viteSingleFile(), tutorialChecksumPlugin(tutorialDoc)],
   build: {
     outDir: "../../authorlm/triage_dist",
     emptyOutDir: true,
     cssCodeSplit: false,
+    copyPublicDir: false,
   },
 });
