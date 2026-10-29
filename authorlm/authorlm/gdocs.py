@@ -2053,22 +2053,24 @@ def _refuse_doc_changed(db: Database, manuscript: dict, bridge: DocBridge,
 
 def _holds_doc_edits(local: str, base: str, doc: str) -> bool:
     """True when every edit the Doc made since the base is already in
-    the local file: each line the Doc added is in the file, and each
-    line the Doc removed is gone from it. Blank lines are not counted.
-    A push of such a file loses nothing of the Doc's."""
-    import difflib
+    the local file: each non-blank line the Doc added appears at least
+    as often locally as in the Doc, and each non-blank line the Doc
+    removed does not still appear more often locally than in the Doc.
+    Blank lines are not counted. Counts matter — a repeated line the
+    Doc added (or deleted) once is not "held" just because another copy
+    remains elsewhere (2026-10-27). A push of such a file loses nothing
+    of the Doc's."""
+    from collections import Counter
 
-    base_l, doc_l, local_l = (t.splitlines() for t in (base, doc, local))
-    local_set, doc_set = set(local_l), set(doc_l)
-    ops = difflib.SequenceMatcher(None, base_l, doc_l, autojunk=False)
-    for tag, i1, i2, j1, j2 in ops.get_opcodes():
-        if tag == "equal":
-            continue
-        if any(line.strip() and line not in local_set
-               for line in doc_l[j1:j2]):
+    def counts(text: str) -> Counter:
+        return Counter(line for line in text.splitlines() if line.strip())
+
+    base_c, doc_c, local_c = counts(base), counts(doc), counts(local)
+    for line in set(base_c) | set(doc_c):
+        b, d, loc = base_c[line], doc_c[line], local_c[line]
+        if d > b and loc < d:
             return False
-        if any(line.strip() and line not in doc_set and line in local_set
-               for line in base_l[i1:i2]):
+        if d < b and loc > d:
             return False
     return True
 
