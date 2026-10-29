@@ -326,7 +326,7 @@ export function Workbench({transport, manuscript}: {transport: Transport; manusc
 
   return (
     <div className="wb">
-      <h1>Pronunciation workbench — {state?.manuscript ?? "…"}</h1>
+      <h1><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />Pronunciation workbench — {state?.manuscript ?? "…"}</h1>
       <div className="bar">
         <select value={term} onChange={(e) => void selectTerm(e.target.value)} title="Every row of pronunciations.md">
           <option value="">— pick a word —</option>

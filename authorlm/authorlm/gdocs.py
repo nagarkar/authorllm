@@ -131,12 +131,59 @@ _EXPORT_INLINE_MATH = re.compile(
     r"(?<![\\$])\\\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<!\s)\\\$(?![\d$])")
 _MATH_SENTINEL = "\x00M%d\x00"
 _SENTINEL_RE = re.compile(r"\x00M(\d+)\x00")
+_ANY_MATH = re.compile(
+    f"(?s:{_DISPLAY_MATH.pattern})|{_INLINE_MATH.pattern}")
+_ANY_EXPORT_MATH = re.compile(
+    f"(?s:{_EXPORT_DISPLAY_MATH.pattern})|(?s:{_DISPLAY_MATH.pattern})"
+    f"|{_EXPORT_INLINE_MATH.pattern}|{_INLINE_MATH.pattern}")
+# Inside math the exporter's escapes are all undone — _ESCAPE's set and
+# the `$` of an escaped delimiter or a TeX `\$`.
+_EXPORT_ESCAPE_IN_MATH = re.compile(r"\\(.)", re.DOTALL)
+_MATH_ESCAPED = set("\\`*_{}[]()#+-.!<>~|=:$")
 
 
 def map_math(text: str, fn) -> str:
     """fn over the inside of every math span, delimiters excluded."""
     text = _DISPLAY_MATH.sub(lambda m: "$$" + fn(m.group(1)) + "$$", text)
     return _INLINE_MATH.sub(lambda m: "$" + fn(m.group(1)) + "$", text)
+
+
+# A pending form, as the tab and its export hold it: `<<old>>{{new}}`,
+# the old half struck (`~~`) and its markers escaped (`\<\<`) by the
+# exporter. A form whose halves each carry a `$` — a revision that moves
+# a span's opening delimiter, `<<by element:$\neg>>{{by element: $\neg}}`
+# — leaves the marked text with three delimiters where each reading has
+# two, and pairing them on the marked text pairs the wrong ones: the new
+# half kept its `\$` on pull, the resolve landed it, and the next push
+# and normalize took the span for prose and stripped its `\{` `\}`
+# (2026-10-18, SMSTTD recapitulation.md R10). So math is found on each
+# READING — every form collapsed to its old half, then to its new — and
+# mapped back to the marked text.
+_FORM = re.compile(
+    r"(?:~~)?\\?<\\?<(?P<old>.*?)\\?>\\?>(?:~~)?\{\{(?P<new>.*?)\}\}",
+    re.DOTALL)
+
+
+def _math_positions(text: str, pattern: re.Pattern) -> list[list[int]]:
+    """Each math span `pattern` finds, as the positions in `text` it
+    covers. Without forms that is the match itself; with forms, every
+    span of either reading, each mapped back through its reading."""
+    forms = list(_FORM.finditer(text))
+    if not forms:
+        return [list(range(*m.span())) for m in pattern.finditer(text)]
+    spans: list[list[int]] = []
+    for keep in ("old", "new"):
+        idx: list[int] = []
+        pos = 0
+        for f in forms:
+            idx += range(pos, f.start())
+            idx += range(f.start(keep), f.end(keep))
+            pos = f.end()
+        idx += range(pos, len(text))
+        reading = "".join(text[i] for i in idx)
+        spans += [idx[m.start():m.end()] for m in pattern.finditer(reading)
+                  if m.end() > m.start()]
+    return spans
 
 
 def _lift_math(text: str) -> tuple[str, list[str]]:
@@ -150,7 +197,10 @@ def _lift_math(text: str) -> tuple[str, list[str]]:
         spans.append(m.group(0))
         return _MATH_SENTINEL % (len(spans) - 1)
 
-    text = _DISPLAY_MATH.sub(display, text)
+    if _FORM.search(text):
+        text = _lift_marked_math(text, spans)
+    else:
+        text = _DISPLAY_MATH.sub(display, text)
     # An unclosed $$ leaves TeX in the prose stream. _ESCAPE would then
     # gut row breaks (\\ → \) and \{ \| \= — and push_doc writes the
     # normalized bytes back to disk, so the damage is permanent. Keep
@@ -163,6 +213,38 @@ def _lift_math(text: str) -> tuple[str, list[str]]:
         spans.append(tail.rstrip("\n"))
         return head + (_MATH_SENTINEL % (len(spans) - 1)), spans
     return _INLINE_MATH.sub(inline, text), spans
+
+
+def _lift_marked_math(text: str, spans: list[str]) -> str:
+    r"""_lift_math for text carrying pending forms: every stretch that is
+    math in either reading goes opaque, so no prose rule reaches a `\{`
+    inside it. A span a form cuts through is lifted piece by piece —
+    the form markers between the pieces stay prose, for the rules that
+    unescape them. Display layout is canonicalized only for a piece
+    that is one whole display span."""
+    runs: list[list[int]] = []
+    for span in _math_positions(text, _ANY_MATH):
+        start = span[0]
+        for prev, at in zip(span, span[1:] + [None]):
+            if at != prev + 1:
+                runs.append([start, prev + 1])
+                start = at
+    ranges: list[list[int]] = []
+    for a, b in sorted(runs):
+        if ranges and a < ranges[-1][1]:
+            ranges[-1][1] = max(ranges[-1][1], b)
+        else:
+            ranges.append([a, b])
+    out, pos = [], 0
+    for a, b in ranges:
+        chunk = text[a:b]
+        m = _DISPLAY_MATH.fullmatch(chunk)
+        if m:
+            chunk = "$$ " + " ".join(m.group(1).split()) + " $$"
+        spans.append(chunk)
+        out.append(text[pos:a] + _MATH_SENTINEL % (len(spans) - 1))
+        pos = b
+    return "".join(out) + text[pos:]
 
 
 def _restore_math(text: str, spans: list[str]) -> str:
@@ -295,12 +377,19 @@ def unescape_export_math(markdown: str) -> str:
     corrupt every equation with an equals sign). Pull-side only:
     normalize_markdown leaves math alone because on a local file every
     backslash is TeX. Escaped delimiters (`\$…\$`, `\$\$…\$\$`) are
-    unescaped first so the spans are found at all (#152)."""
-    markdown = _EXPORT_DISPLAY_MATH.sub(
-        lambda m: "$$" + m.group(1) + "$$", markdown)
-    markdown = _EXPORT_INLINE_MATH.sub(
-        lambda m: "$" + m.group(1) + "$", markdown)
-    return map_math(markdown, lambda body: _ESCAPE.sub(r"\1", body))
+    unescaped with the rest so the spans are found at all (#152), and
+    spans are found per reading of any pending form (see _FORM)."""
+    inside: set[int] = set()
+    for span in _math_positions(markdown, _ANY_EXPORT_MATH):
+        inside.update(span)
+
+    def one(m: re.Match) -> str:
+        at = m.start()
+        if (at in inside and at + 1 in inside
+                and m.group(1) in _MATH_ESCAPED):
+            return m.group(1)
+        return m.group(0)
+    return _EXPORT_ESCAPE_IN_MATH.sub(one, markdown)
 
 
 def separate_tag_lines(markdown: str) -> str:
@@ -2043,7 +2132,7 @@ def classify_tabs(tabs: list[tuple[str, str]], links: dict,
       content drift is the author's call — no push-base survives a relink)
     - unknown id, title duplicating a LIVE mapped tab → ambiguous (a hand-made
       duplicate; relinking would hijack the real tab's mapping)
-    - manifest / non-.md titles    → ignored
+    - manifest / obsolete Reader-load (`manifest.md`) / non-.md titles → ignored
     """
     from collections import Counter
 
@@ -2059,7 +2148,11 @@ def classify_tabs(tabs: list[tuple[str, str]], links: dict,
             if title != known_ids[tid]:
                 out["renamed"].append((known_ids[tid], title))
             continue
-        if title == MANIFEST_TITLE or not title.endswith(".md"):
+        # Inventory tab, and the pre-2026-10-19 Reader-load tab title
+        # (`manifest.md`): never an essay. Without this, a leftover Doc
+        # tab is adopted and rewrite_toc_from_doc writes it into toc.toml.
+        if (title == MANIFEST_TITLE or title == OLD_READER_LOAD_TITLE
+                or not title.endswith(".md")):
             out["ignored"].append(title)
             continue
         entry = links.get(title)
@@ -2137,8 +2230,12 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
     toc_text = (toc_path.read_text(encoding="utf-8")
                 if toc_path.exists() else "")
     outside = toc_outside(toc_text)
+    # Sidecars, and the retired Reader-load filename, must never become
+    # chapters — a leftover Doc `manifest.md` tab would otherwise ship
+    # inside the book after a doc_moved pull.
     doc_pairs = [(n, p) for n, p in doc_pairs
-                 if not is_sidecar(n) and not is_outside(n, outside)]
+                 if not is_sidecar(n) and n != OLD_READER_LOAD_TITLE
+                 and not is_outside(n, outside)]
     tabbed = {n for n, _ in doc_pairs}
     new_tree = parents_to_tree(doc_pairs)
     old_names = [n for n, _ in local_tree]
@@ -2220,11 +2317,13 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     outside = toc_outside(toc_path.read_text(encoding="utf-8"))
     doc_pairs = [(n, p if p in linked else None)
                  for n, p in doc_pairs if n in linked and not is_sidecar(n)
+                 and n != OLD_READER_LOAD_TITLE
                  and not is_outside(n, outside)]
     desired = [(n, p if p in linked else None)
                for n, p in tree_to_parents(parse_toc_tree(
                    toc_path.read_text(encoding="utf-8")))
-               if n in linked and not is_sidecar(n)]
+               if n in linked and not is_sidecar(n)
+               and n != OLD_READER_LOAD_TITLE]
     base = ([tuple(x) for x in links["_tab_structure"]]
             if links.get("_tab_structure") else None)
     doc_pairs, base = _toc_listed_view(doc_pairs, desired, base)
@@ -2744,6 +2843,13 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     report: dict = {"changed": [], "unchanged": [], "conflicts": [],
                     "local_ahead": [], "missing": [], "doc_id": master_id}
 
+    # Drop a stale mapping for the retired Reader-load tab (`manifest.md`
+    # before 2026-10-19). If left linked, a full pull treats it as an
+    # essay: content can land on disk and a doc_moved toc sync writes it
+    # into toc.toml. Local-ghost cleanup on push is separate (#252).
+    if OLD_READER_LOAD_TITLE in links:
+        links.pop(OLD_READER_LOAD_TITLE, None)
+
     # Tab reconciliation (best-effort — a pull must survive without it):
     # the Docs API is the authority on what tabs exist. Unknown *.md tabs
     # the author created by hand are adopted (new essays materialize on
@@ -3024,6 +3130,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         doc_struct = [(n, p if p in linked else None)
                       for n, p in doc_pairs
                       if n in linked and not is_sidecar(n)
+                      and n != OLD_READER_LOAD_TITLE
                       and not is_outside(n, outside)]
         local_tree = (parse_toc_tree(toc_path.read_text(encoding="utf-8"))
                       if toc_path.exists() else [])
@@ -4206,11 +4313,18 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
         # the tab is lost or orphaned. Document order (ascending anchor),
         # as `settle_forms_in_tab` wants; a form not in the tab (never
         # written, or already taken out) is simply not found.
+        # record_base=False: the levelling push at the top of this call
+        # already recorded what the tab holds (including any paragraph
+        # held for an open comment). Re-hashing the local file here would
+        # claim local IS the base while the tab still carries held old
+        # text — the next pull would read that as doc-ahead and wipe the
+        # author's local edit.
         outcomes = [{"old": tab_old_of.get(t["id"], t["proposed_old"]),
                      "new": t["proposed_new"], "keep": "old"}
                     for t in reversed(ordered)]
         faults = settle_forms_in_tab(db, manuscript, file, outcomes,
-                                     docs_service, bridge=bridge)
+                                     docs_service, bridge=bridge,
+                                     record_base=False)
         failed += [(t, "taken back out: another form of this file failed, "
                        "and a file's forms land together or not at all")
                    for t in written]
