@@ -4026,6 +4026,118 @@ def _braces_are_the_authors(root: Path) -> None:
     check("staging.is_marked says NO — the file is not mid-settle",
           not _staging.is_marked(TEMPLATE_ESSAY))
 
+    # Doc-road twin: pending_forms + final_text_from_marked must not treat
+    # inline author braces as insert forms (closed #65 / FIFO steal).
+    # Own-line plants (critique insert, stacked footnote defs) still match.
+    # Pure text — no Drive — so it stays hermetic without googleapiclient.
+    print("AQ/FU-A Doc-road: critique resolve keeps author braces:")
+    marked_doc = (
+        TEMPLATE_ESSAY.replace(
+            "The point is that a brace is only a brace.",
+            _th.render_pending("The point is that a brace is only a brace.",
+                               "A brace is only a brace."))
+        + "\n{{A bridging paragraph, new.}}\n")
+    written = [
+        {"id": "t-rep", "proposed_old":
+         "The point is that a brace is only a brace.",
+         "proposed_new": "A brace is only a brace.", "metadata": "{}"},
+        {"id": "t-ins", "proposed_old": "",
+         "proposed_new": "A bridging paragraph, new.", "metadata":
+         json.dumps({"kind": "insert"})},
+    ]
+    pf = _th.pending_forms(marked_doc)
+    check("pending_forms lists the replace + own-line insert only — not "
+          "inline {{title}} / {{a, b}} / {{author.name}}",
+          [(f["kind"], f["new"][:40]) for f in pf]
+          == [("replace", "A brace is only a brace."),
+              ("insert", "A bridging paragraph, new.")],
+          str([(f["kind"], f["new"][:40]) for f in pf]))
+    final, matched = passes.final_text_from_marked(marked_doc,
+                                                   written=written)
+    check("critique resolve keeps author {{title}} / {{a, b}} on the Doc "
+          "road — they are prose, not unmatched insertions",
+          "{{title}}" in final and "{{author.name}}" in final
+          and "{{a, b}}" in final
+          and "A brace is only a brace." in final
+          and "A bridging paragraph, new." in final
+          and "<<" not in final, repr(final))
+    edited = marked_doc.replace("{{A bridging paragraph, new.}}",
+                                "{{A bridging paragraph, in my voice.}}")
+    final2, matched2 = passes.final_text_from_marked(edited,
+                                                     written=written)
+    check("a post-edited paragraph insertion still resolves, and inline "
+          "author braces still survive (no FIFO steal)",
+          "{{title}}" in final2 and "{{a, b}}" in final2
+          and "A bridging paragraph, in my voice." in final2
+          and "A bridging paragraph, new." not in final2
+          and any(f["kind"] == "insert"
+                  and f["new"] == "A bridging paragraph, in my voice."
+                  for f in matched2),
+          repr(final2))
+    # Footnote defs stacked with single newlines (Docs export / #65 reject
+    # shape): own-line must still see each insert; paragraph-isolation
+    # would not.
+    footnote_stack = (
+        "Body cites[^1] and[^2] and mentions {{a, b}}.\n"
+        "[^old]: earlier.\n"
+        "{{[^1]: First definition.}}\n"
+        "{{[^2]: Second definition.}}\n")
+    fn_forms = [f for f in _th.pending_forms(footnote_stack)
+                if f["kind"] == "insert"]
+    check("stacked footnote-definition inserts (single newlines) are "
+          "still pending_forms inserts — the #65 false-negative shape",
+          [f["new"] for f in fn_forms]
+          == ["[^1]: First definition.", "[^2]: Second definition."],
+          str([f["new"] for f in fn_forms]))
+    fn_written = [
+        {"id": "f1", "proposed_old": "",
+         "proposed_new": "[^1]: First definition."},
+        {"id": "f2", "proposed_old": "",
+         "proposed_new": "[^2]: Second definition."},
+    ]
+    fn_final, fn_matched = passes.final_text_from_marked(
+        footnote_stack, written=fn_written)
+    check("footnote resolve unwraps both defs and leaves inline {{a, b}}",
+          "[^1]: First definition." in fn_final
+          and "[^2]: Second definition." in fn_final
+          and "{{a, b}}" in fn_final
+          and "{{[^" not in fn_final
+          and len(fn_matched) == 2, repr(fn_final))
+    # Set notation inside TeX math is never a form, own line or not: an
+    # inline `${{a,b},{c}}$` shares a line with prose anyway, but a
+    # display `$$…$$` block puts its braces on their own line, and the
+    # own-line rule alone would read that as a planted insertion.
+    math_text = (
+        "The charge pairs are ${{a,b},{c}}$ in the plane.\n\n"
+        "$$\n{{a,b},{c}}\n$$\n\n"
+        "Then the prose resumes.\n\n"
+        "{{A real insertion, planted.}}\n")
+    math_forms = _th.pending_forms(math_text)
+    check("pending_forms skips braces inside $…$ and $$…$$ — only the "
+          "real own-line insertion is a form",
+          [(f["kind"], f["new"]) for f in math_forms]
+          == [("insert", "A real insertion, planted.")],
+          str([(f["kind"], f["new"]) for f in math_forms]))
+    math_written = [{"id": "m1", "proposed_old": "",
+                     "proposed_new": "A real insertion, planted.",
+                     "metadata": json.dumps({"kind": "insert"})}]
+    math_final, math_matched = passes.final_text_from_marked(
+        math_text, written=math_written)
+    check("resolve leaves both math spans byte-intact and unwraps the "
+          "real form",
+          "${{a,b},{c}}$" in math_final
+          and "$$\n{{a,b},{c}}\n$$" in math_final
+          and "A real insertion, planted." in math_final
+          and "{{A real" not in math_final
+          and len(math_matched) == 1, repr(math_final))
+    math_stripped, math_warns = _th.strip_pending(math_text)
+    check("strip_pending (Doc pull) drops the insertion and keeps both "
+          "math spans, no warnings",
+          "${{a,b},{c}}$" in math_stripped
+          and "$$\n{{a,b},{c}}\n$$" in math_stripped
+          and "A real insertion" not in math_stripped
+          and math_warns == [], repr((math_stripped, math_warns)))
+
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
