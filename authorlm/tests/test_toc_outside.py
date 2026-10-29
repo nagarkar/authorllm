@@ -2,6 +2,8 @@
 
 Papers and side pieces are mirrored to the Doc but never enter the
 reading order, the full-book export, or the TOC <-> tab-order sync.
+Also: a leftover pre-2026-10-19 Doc `manifest.md` tab must not be
+adopted into toc.toml on pull (local-ghost push cleanup is separate).
 Run: python3 tests/test_toc_outside.py
 """
 from __future__ import annotations
@@ -11,12 +13,17 @@ os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-outside/config.toml"
 os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-outside/.env"
 os.environ["AUTHORLM_CLIENT"] = "none"
 
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from authorlm import gdocs, structure
+from test_passes import _SurgicalDocFake  # noqa: E402
+from authorlm import api, gdocs, structure  # noqa: E402
+from authorlm.cli import main as cli_main  # noqa: E402
 
 TOC = '''# Table of contents
 outside = ["papers/", "side.md"]
@@ -29,6 +36,76 @@ file = "b.md"
 parent = "a.md"
 matter = "back"
 '''
+
+
+class LeftoverManifestTabTests(unittest.TestCase):
+    """Pre-2026-10-19 Doc `manifest.md` tab must not enter the book."""
+
+    def test_classify_ignores_retired_reader_load_tab(self) -> None:
+        tabs = [("t0", "book"), ("t1", "a.md"),
+                ("t2", "manifest.md"), ("t3", "manifest")]
+        cls = gdocs.classify_tabs(tabs, {"a.md": {"tab_id": "t1"}}, {"a.md"})
+        self.assertIn("manifest.md", cls["ignored"])
+        self.assertNotIn(("manifest.md", "t2"), cls["adopted"])
+        self.assertNotIn(("manifest.md", "t2"), cls["readopted"])
+
+    def test_rewrite_toc_drops_retired_reader_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "toc.toml").write_text(
+                '[[chapter]]\nfile = "a.md"\n', encoding="utf-8")
+            gdocs.rewrite_toc_from_doc(
+                {"path": tmp},
+                [("a.md", None), ("manifest.md", None)],
+                [("a.md", 0)])
+            text = (Path(tmp) / "toc.toml").read_text(encoding="utf-8")
+        self.assertNotIn("manifest.md", text)
+        self.assertEqual([n for n, _ in structure.parse_toc_tree(text)],
+                         ["a.md"])
+
+    def test_pull_drops_stale_mapping_without_toc_chapter(self) -> None:
+        """Upgrade path: mapping still names the old tab, Doc still has
+        it. A full pull must not add it to toc.toml."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            ws, ms = root / "ws", root / "ws" / "book"
+            ms.mkdir(parents=True)
+            (ms / "a.md").write_text("# A\n\nProse.\n", encoding="utf-8")
+            (ms / "toc.toml").write_text(
+                '[[chapter]]\nfile = "a.md"\n', encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli_main(["--workspace", str(ws), "init", "--name", "book",
+                          "--path", str(ms), "--extraction", "off"])
+            db = api.open_db(str(ws))
+            manuscript = api.get_manuscript(db)
+            fake = _SurgicalDocFake([
+                ("book", ""), ("a.md", "# A\n\nProse.\n"),
+                ("manifest.md", "# Reader load\nDEBT\n"),
+                ("manifest", "Manuscript: book\n")])
+            meta = gdocs._mapping(db, manuscript)
+            entry = meta.setdefault("gdocs", {})
+            entry["_master_id"] = fake.master_id
+            entry["_container_tab"] = next(
+                t["id"] for t in fake.tabs if t["title"] == "book")
+            entry["a.md"] = {
+                "tab_id": next(t["id"] for t in fake.tabs
+                               if t["title"] == "a.md"),
+                "pushed_hash": "x", "checked_out": False}
+            entry["manifest.md"] = {
+                "tab_id": next(t["id"] for t in fake.tabs
+                               if t["title"] == "manifest.md"),
+                "pushed_hash": "y", "checked_out": False}
+            gdocs._save_mapping(db, manuscript, meta)
+            report = gdocs.pull_doc(
+                db, api.get_manuscript(db), None,
+                service=fake, docs_service=fake, with_comments=False)
+            self.assertFalse((ms / "manifest.md").exists())
+            self.assertNotIn("manifest.md",
+                             (ms / "toc.toml").read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "manifest.md",
+                gdocs._mapping(db, api.get_manuscript(db)).get("gdocs", {}))
+            self.assertFalse(report.get("toc_updated"))
+            self.assertNotIn("manifest.md", report.get("adopted") or [])
 
 
 class OutsideTests(unittest.TestCase):

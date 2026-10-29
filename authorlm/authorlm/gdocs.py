@@ -2128,7 +2128,7 @@ def classify_tabs(tabs: list[tuple[str, str]], links: dict,
       content drift is the author's call — no push-base survives a relink)
     - unknown id, title duplicating a LIVE mapped tab → ambiguous (a hand-made
       duplicate; relinking would hijack the real tab's mapping)
-    - manifest / non-.md titles    → ignored
+    - manifest / obsolete Reader-load (`manifest.md`) / non-.md titles → ignored
     """
     from collections import Counter
 
@@ -2144,7 +2144,11 @@ def classify_tabs(tabs: list[tuple[str, str]], links: dict,
             if title != known_ids[tid]:
                 out["renamed"].append((known_ids[tid], title))
             continue
-        if title == MANIFEST_TITLE or not title.endswith(".md"):
+        # Inventory tab, and the pre-2026-10-19 Reader-load tab title
+        # (`manifest.md`): never an essay. Without this, a leftover Doc
+        # tab is adopted and rewrite_toc_from_doc writes it into toc.toml.
+        if (title == MANIFEST_TITLE or title == OLD_READER_LOAD_TITLE
+                or not title.endswith(".md")):
             out["ignored"].append(title)
             continue
         entry = links.get(title)
@@ -2222,8 +2226,12 @@ def rewrite_toc_from_doc(manuscript: dict, doc_pairs: list,
     toc_text = (toc_path.read_text(encoding="utf-8")
                 if toc_path.exists() else "")
     outside = toc_outside(toc_text)
+    # Sidecars, and the retired Reader-load filename, must never become
+    # chapters — a leftover Doc `manifest.md` tab would otherwise ship
+    # inside the book after a doc_moved pull.
     doc_pairs = [(n, p) for n, p in doc_pairs
-                 if not is_sidecar(n) and not is_outside(n, outside)]
+                 if not is_sidecar(n) and n != OLD_READER_LOAD_TITLE
+                 and not is_outside(n, outside)]
     tabbed = {n for n, _ in doc_pairs}
     new_tree = parents_to_tree(doc_pairs)
     old_names = [n for n, _ in local_tree]
@@ -2305,11 +2313,13 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
     outside = toc_outside(toc_path.read_text(encoding="utf-8"))
     doc_pairs = [(n, p if p in linked else None)
                  for n, p in doc_pairs if n in linked and not is_sidecar(n)
+                 and n != OLD_READER_LOAD_TITLE
                  and not is_outside(n, outside)]
     desired = [(n, p if p in linked else None)
                for n, p in tree_to_parents(parse_toc_tree(
                    toc_path.read_text(encoding="utf-8")))
-               if n in linked and not is_sidecar(n)]
+               if n in linked and not is_sidecar(n)
+               and n != OLD_READER_LOAD_TITLE]
     base = ([tuple(x) for x in links["_tab_structure"]]
             if links.get("_tab_structure") else None)
     doc_pairs, base = _toc_listed_view(doc_pairs, desired, base)
@@ -2829,6 +2839,13 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     report: dict = {"changed": [], "unchanged": [], "conflicts": [],
                     "local_ahead": [], "missing": [], "doc_id": master_id}
 
+    # Drop a stale mapping for the retired Reader-load tab (`manifest.md`
+    # before 2026-10-19). If left linked, a full pull treats it as an
+    # essay: content can land on disk and a doc_moved toc sync writes it
+    # into toc.toml. Local-ghost cleanup on push is separate (#252).
+    if OLD_READER_LOAD_TITLE in links:
+        links.pop(OLD_READER_LOAD_TITLE, None)
+
     # Tab reconciliation (best-effort — a pull must survive without it):
     # the Docs API is the authority on what tabs exist. Unknown *.md tabs
     # the author created by hand are adopted (new essays materialize on
@@ -3109,6 +3126,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         doc_struct = [(n, p if p in linked else None)
                       for n, p in doc_pairs
                       if n in linked and not is_sidecar(n)
+                      and n != OLD_READER_LOAD_TITLE
                       and not is_outside(n, outside)]
         local_tree = (parse_toc_tree(toc_path.read_text(encoding="utf-8"))
                       if toc_path.exists() else [])
