@@ -11,8 +11,21 @@ every later run, so:
 
 The sample manuscript is generated fresh in a temp workspace on every run —
 tests never touch user manuscripts and always start from the same default
-state. Without GEMINI_API_KEY, the suite runs purely from the replay cache
-and skips (exit 0, loudly) if the cache is incomplete.
+state.
+
+KEYS AND RECORDING. The suite reads GEMINI_API_KEY from authorlm/.env (an
+exported variable still wins), the same place every other verb reads it.
+Any request whose hash has no recording — a changed prompt, sample text,
+model, max_tokens, effort or thinking budget — is sent live once and
+recorded. Commit the new tests/llm_cache/*.json with the change that caused
+them: a prompt change ships with its recordings, so a clean checkout makes
+zero billed calls. With no key anywhere, a section that needs a missing
+recording is reported once as SKIP (llm.ReplayMiss), never as a failure
+and never by quietly running the no-LLM path.
+
+PRUNING. A full run (no --section) that passes every section deletes the
+recordings it never asked for; they belong to prompts that no longer
+exist.
 
 SECTIONS (AL/live-suite-sections). The suite is one continuous narrative
 against a single workspace — 'bridge' declares the intent that 'episode'
@@ -46,19 +59,15 @@ from __future__ import annotations
 
 import os
 
-# Pin the project-config and .env lookups away from the real ones by
-# default, matching every other suite (test_api.py:14-18) — a bare import
-# of this module must not accidentally read the repo's config.toml or
-# .env before main_test() re-points AUTHORLM_CONFIG at this run's own
-# workspace config below. AUTHORLM_ENV stays pinned here for the whole
-# run: the suite's only documented way to supply a live key is an
-# exported GEMINI_API_KEY (see the module docstring), never an ambient
-# authorlm/.env. Without this pin, `cli.main` silently loaded a real key
-# from .env on the very first `run()` call below — after `key_available`
-# had already been computed and printed as absent — so the suite made
-# live billed calls while its own banner denied it.
+# Pin the project-config lookup away from the real one (test_api.py:14-18)
+# until main_test() re-points it at this run's own workspace config. The
+# .env lookup is pinned to authorlm/.env explicitly — that is where the key
+# lives — and main_test() loads it BEFORE printing the banner, so the
+# banner and the calls always agree about whether a key is present (the
+# old bug: .env loaded after the banner said "absent").
 os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
-os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+os.environ["AUTHORLM_ENV"] = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 
 import contextlib
 import io
@@ -72,6 +81,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from authorlm.cli import main  # noqa: E402
+from authorlm import llm as _llm  # noqa: E402
 from authorlm import paths as _paths  # noqa: E402
 
 CACHE_DIR = REPO / "tests" / "llm_cache"
@@ -97,6 +107,8 @@ SAMPLE_CH2 = """# Chapter 2 — Fields
 A single distinction is inert, but distinctions do not come alone: each
 distinction creates a space of further possible distinctions. We call this
 space a field.
+
+## The field as generator
 
 Think of a chessboard before the first move. The rules do not dictate a
 game; they open a field of possible games. A field is generative rather
@@ -178,13 +190,7 @@ def section_extraction(ctx: dict) -> None:
     ws, ms = ctx["ws"], ctx["ms"]
     out = run(ws, "init", "--name", "sample", "--path", str(ms))
     if "Extraction produced nothing" in out:
-        if not ctx["key_available"]:
-            print(
-                "SKIP: replay cache is incomplete for the current prompts "
-                "and GEMINI_API_KEY is not set. Export the key once to "
-                "record.")
-            return
-        raise AssertionError(f"extraction failed despite key being set:\n{out}")
+        raise AssertionError(f"extraction produced nothing:\n{out}")
     extracted = int(out.split("Extracted ")[1].split(" new concept")[0])
     check("extraction finds a philosophical vocabulary (≥3 concepts)",
           extracted >= 3, out)
@@ -210,9 +216,12 @@ def section_belief(ctx: dict) -> None:
     'bridge's guide batch in this session — it will not find one to review
     if 'bridge' didn't run first (or failed before its 'guide' call)."""
     ws = ctx["ws"]
+    # belief-distill.md replies NONE unless the explanation carries a
+    # concrete case, so this one names it (the bridge draft for History).
     out = run(ws, "review", "1", "--reject", "--explain",
-              "Always ground an abstract definition in a lived example "
-              "before formalizing it")
+              "This draft opens History with its formal definition. "
+              "Always ground an abstract definition in a lived example, "
+              "like a chess game twenty moves deep, before formalizing it")
     check("explanation distilled into a candidate belief",
           "seeded a candidate belief" in out, out)
     distilled = out.split('seeded a candidate belief: "')[1].split('"')[0]
@@ -267,7 +276,6 @@ def section_beat_draft(ctx: dict) -> None:
     the only cross-section need is manuscript registration + an active
     session, which bootstrap provides for every section (main_test)."""
     ws, ms = ctx["ws"], ctx["ms"]
-    key_available = ctx["key_available"]
     run(ws, "style", "guide", "House")
     run(ws, "style", "add", "register",
         "Plain declarative English; no rhetorical questions.",
@@ -284,25 +292,198 @@ def section_beat_draft(ctx: dict) -> None:
         {"role": "close", "concepts": ["Choice"], "budget": 60,
          "notes": "claims the field is generative, not a container"},
     ]), "write", "plan")
-    try:
-        out = run(ws, "write", "draft")
-    except AssertionError:
-        if key_available:
-            raise
-        print("SKIP: no beat-draft response in the replay cache and "
-              "GEMINI_API_KEY is not set. Export the key once to record.")
-    else:
-        check("write draft parses the model's reply and registers the "
-              "beat through the ordinary propose path",
-              "WHY" in out and "SELF-CHECK" in out
-              and "Draft registered" in out
-              and "authorlm/prompts/beat-draft.md" in out, out)
-        out = run_stdin(ws, "", "write", "accept")
-        check("the drafted beat accepts and appends exactly as a "
-              "hand-written one does",
-              "accepted" in out
-              and (ms / "02-fields.md").read_text().strip(), out)
-        run_stdin(ws, "", "write", "abandon")
+    out = run(ws, "write", "draft")
+    check("write draft parses the model's reply and registers the "
+          "beat through the ordinary propose path",
+          "WHY" in out and "SELF-CHECK" in out
+          and "Draft registered" in out
+          and "authorlm/prompts/beat-draft.md" in out, out)
+    out = run_stdin(ws, "", "write", "accept")
+    check("the drafted beat accepts and appends exactly as a "
+          "hand-written one does",
+          "accepted" in out
+          and (ms / "02-fields.md").read_text().strip(), out)
+    run_stdin(ws, "", "write", "abandon")
+
+
+PARAGRAPH_MODEL = "gemini/gemini-3.1-flash-lite"
+
+# One short heading section in the house style (one line per paragraph):
+# a definition, an asserted relation, a backward and a forward reference.
+SAMPLE_RECORDS = """# Distinction
+
+## The Field
+
+We call the space a distinction opens the Field. The Field is not a container; it is the set of further distinctions a first one makes possible.
+
+As the first chapter showed, every Choice draws a distinction. A Choice therefore creates a Field, and each position within that Field is itself a Choice.
+
+A later chapter will show how fields nest; for now it is enough that no Field exists before a Choice.
+"""
+
+
+def section_paragraph_records(ctx: dict) -> None:
+    """summaries.ensure(level="paragraph") on the flash tier (summary-
+    hierarchy design §11.2): one call for one short section, every body
+    paragraph gets a record, the span check passes real spans. Its own
+    workspace, so the extra file never reaches the other sections'
+    recorded payloads."""
+    from authorlm import api, summaries as sums
+
+    ws = ctx["ws"].parent / "records-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "distinction.md").write_text(SAMPLE_RECORDS)
+    db = api.open_db(str(ws), create=True)
+    manuscript = api.register_manuscript(db, "records", str(ms))
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {}, source="test")
+    llm = sums.paragraph_llm({
+        "llm": {"enabled": True, "model": MODEL, "cache_dir": str(CACHE_DIR)},
+        "summaries": {"paragraph_model": PARAGRAPH_MODEL}})
+    lines: list[str] = []
+    report = sums.ensure(db, manuscript, llm, echo=lines.append)
+    print(f"   {report['line']}")
+    print(f"   dropped: {report['dropped']}")
+    check("one call for the one section, a record per body paragraph",
+          report["calls"] == 1 and report["records"] == 3
+          and not report["missing"], str(report))
+    recs = [r for r in sums.paragraph_records(db, manuscript)
+            if r["kind"] != "heading"]
+    check("every gist is one dense sentence (at most ~30 words)",
+          all(r["gist"] and len(r["gist"].split()) <= 35 for r in recs),
+          json.dumps([r["gist"] for r in recs]))
+    check("the Field's definition survives the byte check",
+          any(d["term"].lower().endswith("field") for d in recs[0]["definitions"]),
+          json.dumps(recs[0]))
+    check("mentions survive with verbatim spans in every paragraph",
+          all(r["mentions"] for r in recs), json.dumps(recs))
+    check("the backward and forward references are recorded",
+          {ref["direction"] for r in recs for ref in r["references"]}
+          == {"back", "forward"}, json.dumps([r["references"] for r in recs]))
+    check("the cost line names the live or replayed call",
+          len(lines) == 1 and "LLM:" in lines[0], str(lines))
+
+
+SECTION_MODEL = "openai/gpt-5.6-luna"
+
+
+def section_section_summary(ctx: dict) -> None:
+    """summaries.ensure(level="section") on Luna (summary-hierarchy
+    design §11.3): the paragraph level replays its recording, then one
+    section call writes the four labels and places every body paragraph
+    in exactly one move. Same fixture and workspace layout as the
+    paragraph section, so that level's payload hashes the same."""
+    from authorlm import api, summaries as sums
+
+    ws = ctx["ws"].parent / "sections-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "distinction.md").write_text(SAMPLE_RECORDS)
+    db = api.open_db(str(ws), create=True)
+    manuscript = api.register_manuscript(db, "records", str(ms))
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {}, source="test")
+    config = {"llm": {"enabled": True, "model": MODEL, "cache_dir": str(CACHE_DIR)},
+              "summaries": {"paragraph_model": PARAGRAPH_MODEL},
+              "critique": {"summarizer_model": SECTION_MODEL}}
+    llms = sums.clients(config)
+    check("the section client is Luna, purpose summaries.section",
+          llms["section"].model == SECTION_MODEL
+          and llms["section"].purpose == "summaries.section")
+    lines: list[str] = []
+    report = sums.ensure(db, manuscript, llms, level="section",
+                         echo=lines.append)
+    for line in lines:
+        print(f"   {line}")
+    check("one paragraph call (replayed) and one section call",
+          report["paragraph"]["calls"] == 1 and report["calls"] == 1
+          and report["sections"] == 1 and not report["skipped"], str(report))
+    unit = sums.for_unit(db, manuscript, "distinction.md")
+    body = [s for s in unit["sections"] if s["heading"] == "## The Field"][0]
+    summary = body["summary"]
+    print(f"   {summary}")
+    check("the four labels, in order",
+          [summary.index(lb + ":") for lb in sums.SECTION_LABELS]
+          == sorted(summary.index(lb + ":") for lb in sums.SECTION_LABELS),
+          summary)
+    check("MOVES places every body paragraph exactly once (no miss reported)",
+          not report["misses"], str(report["misses"]))
+    low, high = sums.section_target_length(
+        "\n\n".join(p["text"] for p in sums.sections_of(SAMPLE_RECORDS)[1]
+                    ["paragraphs"]))
+    # On a ~100-word section the four labels and one line per move are a
+    # fixed cost the n/7.5 formula does not see; the check is that the
+    # model did not balloon, not that it hit a 30-40 window.
+    n = len(summary.split())
+    check(f"length within twice the {low}-{high} target", n <= 2 * high,
+          f"{n} words")
+    check("POINT is in the author's terms",
+          "Field" in sums.point_of(summary), sums.point_of(summary))
+    check("two cost lines, one per level", len(lines) == 2
+          and "paragraph level" in lines[0] and "section level" in lines[1],
+          str(lines))
+
+
+def section_essay_summary(ctx: dict) -> None:
+    """summaries.ensure(level="essay") on Luna (summary-hierarchy design
+    §3.4, §11.4): the paragraph and section levels replay their
+    recordings, then one essay call composes FLOW, MOVES, MOTIFS, DOES NOT
+    from the section summary alone, and code renders the derived four
+    labels from the records. Same fixture and workspace layout as the two
+    sections before it, so their payloads hash the same."""
+    from authorlm import api, summaries as sums
+
+    ws = ctx["ws"].parent / "essays-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "distinction.md").write_text(SAMPLE_RECORDS)
+    db = api.open_db(str(ws), create=True)
+    manuscript = api.register_manuscript(db, "records", str(ms))
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {}, source="test")
+    config = {"llm": {"enabled": True, "model": MODEL, "cache_dir": str(CACHE_DIR)},
+              "summaries": {"paragraph_model": PARAGRAPH_MODEL},
+              "critique": {"summarizer_model": SECTION_MODEL}}
+    llms = sums.clients(config)
+    check("the essay client is Luna, purpose critique.summarizer",
+          llms["essay"].model == SECTION_MODEL
+          and llms["essay"].purpose == "critique.summarizer")
+    lines: list[str] = []
+    report = sums.ensure(db, manuscript, llms, level="essay",
+                         echo=lines.append)
+    for line in lines:
+        print(f"   {line}")
+    check("one call per level, the essay built, nothing skipped",
+          report["section"]["paragraph"]["calls"] == 1
+          and report["section"]["calls"] == 1 and report["calls"] == 1
+          and report["built"] == ["distinction.md"] and not report["skipped"],
+          str(report))
+    row = sums.all_summaries(db, manuscript["id"])["distinction.md"]
+    summary = row["summary"]
+    print(f"   {summary}")
+    check("the eight labels, in stored order",
+          [summary.index(lb + ":") for lb in sums.ESSAY_LABELS]
+          == sorted(summary.index(lb + ":") for lb in sums.ESSAY_LABELS),
+          summary)
+    check("the model wrote every one of its four labels",
+          not report["labels_missing"], str(report["labels_missing"]))
+    check("FLOW names both headings and MOVES cites the body section: no "
+          "coverage miss", not report["misses"], str(report["misses"]))
+    check("INTRODUCES is derived from the records: the Field is defined here",
+          any(t.lower().endswith("field") for t in
+              sums._label_block(summary, "INTRODUCES", sums.ESSAY_LABELS)
+              .split(", ")), summary)
+    check("PROMISES and DEBTS come from the references",
+          sums._label_block(summary, "PROMISES", sums.ESSAY_LABELS) != "none"
+          and sums._label_block(summary, "DEBTS", sums.ESSAY_LABELS) != "none",
+          summary)
+    low, high = sums.target_length(SAMPLE_RECORDS)
+    n = len(summary.split())
+    check(f"length within twice the {low}-{high} target (eight labels are "
+          "a fixed cost on a 100-word essay)", n <= 2 * high + 20, f"{n} words")
+    check("three cost lines, one per level", len(lines) == 3
+          and "essay level" in lines[2], str(lines))
 
 
 # Order matters (the narrative), but 'extraction' is handled separately in
@@ -314,6 +495,9 @@ SECTIONS: list[tuple[str, "object"]] = [
     ("none-path", section_none_path),
     ("episode", section_episode),
     ("beat-draft", section_beat_draft),
+    ("paragraph-records", section_paragraph_records),
+    ("section-summary", section_section_summary),
+    ("essay-summary", section_essay_summary),
 ]
 SECTION_NAMES = ["extraction"] + [name for name, _ in SECTIONS]
 
@@ -323,23 +507,21 @@ def main_test(only: str | None = None) -> None:
         sys.exit(f"error: unknown --section '{only}'. Sections: "
                  f"{', '.join(SECTION_NAMES)}.")
 
-    # Load .env (a no-op today — AUTHORLM_ENV is pinned to /nonexistent
-    # above) before reading GEMINI_API_KEY, so the banner below reflects
-    # the same environment the LLM call itself will see. Computing
-    # key_available before any env loading is what let the suite print
-    # "absent" and then make a live call moments later.
+    # Load authorlm/.env before reading GEMINI_API_KEY, so the banner
+    # below reflects the same environment the LLM calls will see.
     _paths.load_env()
     key_available = bool(os.environ.get("GEMINI_API_KEY"))
     cached_before, in_before, out_before = cache_usage()
     print(
         f"Live-LLM suite — model {MODEL}, replay cache {CACHE_DIR} "
         f"({cached_before} recorded), GEMINI_API_KEY "
-        f"{'present' if key_available else 'absent (replay-only)'}"
+        f"{'present (misses record live)' if key_available else 'absent (replay-only; misses skip)'}"
         + (f", section={only!r}" if only else "")
     )
 
     root = Path(tempfile.mkdtemp(prefix="authorlm-live-"))
     failures: list[str] = []
+    skipped: list[str] = []
     try:
         ws = root / "ws"
         ms = ws / "manuscript"
@@ -376,10 +558,25 @@ def main_test(only: str | None = None) -> None:
 
         def run_section(name: str, fn) -> None:
             before = _cache_files()
+            misses_before = len(_llm.REPLAY_MISSES)
             print(f"\n-- {name} --")
+            error = None
             try:
                 fn(ctx)
             except Exception as err:  # noqa: BLE001 — collected, not fatal
+                error = err
+            misses = _llm.REPLAY_MISSES[misses_before:]
+            if misses:
+                # The section needed a recording that isn't there and no
+                # key could make it: one SKIP, whatever the downstream
+                # symptom was — including none, when a caller swallowed
+                # the miss and the section's checks never ran.
+                print(f"SKIP: {name} — no recording for {', '.join(misses)} "
+                      f"and GEMINI_API_KEY is not set (add it to "
+                      f"{_paths.env_path()} to record).")
+                skipped.append(name)
+                return
+            if error is not None:
                 # Recording hygiene: only files this section itself wrote
                 # are candidates for removal — anything recorded by an
                 # earlier, PASSING section (or present before this run
@@ -390,7 +587,7 @@ def main_test(only: str | None = None) -> None:
                 removed = (f" (removed {len(new_files)} newly-recorded "
                           f"fixture(s): {', '.join(p.name for p in new_files)})"
                           if new_files else "")
-                print(f"SECTION FAILED: {name} — {err}{removed}")
+                print(f"SECTION FAILED: {name} — {error}{removed}")
                 failures.append(name)
 
         # Bootstrap: every section needs the manuscript registered and a
@@ -400,13 +597,12 @@ def main_test(only: str | None = None) -> None:
         # behind (the incident this file exists to fix), so it gets the
         # same try/except + hygiene treatment as any other section. A
         # `--section` run that isn't testing extraction registers with
-        # `--no-extract`: it still needs the manuscript row, not a second
+        # no extraction: it still needs the manuscript row, not a second
         # concept-extraction call it isn't there to test or pay for.
         if only in (None, "extraction"):
             run_section("extraction", section_extraction)
         else:
-            run(ws, "init", "--name", "sample", "--path", str(ms),
-                "--no-extract")
+            run(ws, "init", "--name", "sample", "--path", str(ms))
         run(ws, "session", "start")
 
         for name, fn in SECTIONS:
@@ -422,18 +618,33 @@ def main_test(only: str | None = None) -> None:
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
+    # New calls are counted before pruning, which only ever removes.
+    recorded, in_rec, out_rec = cache_usage()
+    pruned = []
+    if only is None and not failures and not skipped:
+        pruned = sorted(_cache_files() - _llm.TOUCHED_RECORDINGS)
+        for path in pruned:
+            path.unlink()
+
     cached_after, in_after, out_after = cache_usage()
     stats = (
-        f"LLM: {cached_after - cached_before} new live call(s) "
-        f"({in_after - in_before:,} in / {out_after - out_before:,} out tokens); "
+        f"LLM: {recorded - cached_before} new live call(s) "
+        f"({in_rec - in_before:,} in / {out_rec - out_before:,} out tokens); "
         f"replay cache covers {cached_after} call(s) "
-        f"({in_after:,} in / {out_after:,} out tokens total)."
+        f"({in_after:,} in / {out_after:,} out tokens total)"
+        + (f"; pruned {len(pruned)} unused recording(s)" if pruned else "")
+        + "."
     )
     if failures:
         print(f"\n{PASSED} check(s) passed; {len(failures)} section(s) "
               f"FAILED: {', '.join(failures)}.")
         print(stats)
         sys.exit(1)
+    if skipped:
+        print(f"\n{PASSED} check(s) passed; {len(skipped)} section(s) "
+              f"SKIPPED for missing recordings: {', '.join(skipped)}.")
+        print(stats)
+        return
     print(f"\nAll {PASSED} checks passed.")
     print(stats)
 

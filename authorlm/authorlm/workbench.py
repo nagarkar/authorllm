@@ -202,7 +202,7 @@ class Session:
             "manuscript": self.manuscript["name"],
             "terms": rows,
             "warnings": warnings,
-            "dictionary": config["tts"]["dictionary"],
+            "dictionary": audio.dictionary_name(self.manuscript, config),
             "model": config["tts"]["model"],
             "phoneme_model": config["tts"]["model"] in audio.PHONEME_MODELS,
             "locator": locator,
@@ -281,10 +281,10 @@ class Session:
                     (self.root / pron.FILENAME).read_text(encoding="utf-8")
                     if (self.root / pron.FILENAME).exists() else "")[0]):
             raise LookupError(f"'{term}' is not a row in {pron.FILENAME}")
-        client = None
-        config = audio.load_config(self.root)
-        if (config["tts"]["dictionary"] or "").strip():
-            client = self.client()
+        # Every book has a dictionary (named or the manuscript's name);
+        # the remote rule goes too when a key is at hand.
+        client = self.client() if (CLIENT_FACTORY or
+                                   audio.api_key(required=False)) else None
         result = audio.remove_say(self.manuscript, term, client)
         self._built = None
         return result
@@ -294,10 +294,10 @@ class Session:
         term = (term or "").strip()
         if not term:
             raise ValueError("a term is needed")
-        client = None
-        config = audio.load_config(self.root)
-        if (config["tts"]["dictionary"] or "").strip():
-            client = self.client()
+        # Every book has a dictionary (named or the manuscript's name);
+        # the remote rule goes too when a key is at hand.
+        client = self.client() if (CLIENT_FACTORY or
+                                   audio.api_key(required=False)) else None
         result = audio.clear_say(self.manuscript, term, client)
         self._built = None
         return result

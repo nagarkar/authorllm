@@ -436,7 +436,7 @@ def status(db: Database, manuscript: dict) -> dict:
             "evidence", "knowledge_proposals",
         )
     }
-    # Open [Footnote: …] / [Explain: …] tags ride here (footnote design
+    # Open [Footnote: …] / [Explain: …] / [Suggestion: …] tags ride here (footnote design
     # §8): the author learns about an undrafted request without having
     # to remember to ask.
     from . import directives
@@ -450,7 +450,20 @@ def status(db: Database, manuscript: dict) -> dict:
         "session": dict(session) if session else None,
         "counts": counts,
         "directives": open_tags,
+        "media": _media_not_ready(manuscript),
     }
+
+
+def _media_not_ready(manuscript: dict) -> list[dict]:
+    """Clips, collages and montages not ready (docs/video-clips-design.md
+    §8e): drafts, broken field combinations, structural faults. Read
+    only; a failure here must never break a collect or a status."""
+    from . import media
+
+    try:
+        return media.not_ready(Path(manuscript["path"]))
+    except (OSError, ValueError):
+        return []
 
 
 def ensure_session(db: Database, manuscript: dict) -> tuple[dict, bool]:
@@ -870,7 +883,7 @@ def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[
 
 def collect(db: Database, manuscript: dict, config: dict,
             auto: bool = False, source: str = "snapshot",
-            analyze: bool | None = None, episode=None) -> dict:
+            episode=None) -> dict:
     """The observation pipeline: snapshot → transitions → episode →
     realization/co-occurrence scans → extract hint → prerequisite delta.
     Returns a structured report; {"staged": [...]} when the auto path held
@@ -907,6 +920,14 @@ def collect(db: Database, manuscript: dict, config: dict,
         excerpt_fixes = maintain_excerpts(Path(manuscript["path"]))
     except OSError:
         excerpt_fixes = []
+    # Clip keys are minted, and clip excerpts maintained, at the same
+    # moment and for the same reason (docs/video-clips-design.md §8a).
+    try:
+        from .media import maintain_keys
+
+        media_keys = maintain_keys(Path(manuscript["path"]))
+    except OSError:
+        media_keys = []
 
     session = ses.active_session(db, mid)
     before = db.one(
@@ -1079,48 +1100,16 @@ def collect(db: Database, manuscript: dict, config: dict,
     except Exception:  # observation must never die on a structural read
         pass
 
-    # The author never has to remember the analyzers: a collected change
-    # runs incremental extraction (concepts, links, aliasing statements)
-    # when an LLM is configured. Best-effort — analysis failure must never
-    # block observation.
-    if analyze is None:
-        analyze = auto
-    if analyze:
-        from .extraction import (extraction_enabled,
-                                 manuscript_extraction_enabled)
-
-        llm = LLMClient(config)
-        if not extraction_enabled(config):
-            report["extraction"] = "off"
-        elif not manuscript_extraction_enabled(db, manuscript):
-            # The manuscript's own switch: same report, same silence —
-            # the scans above still ran, and find nothing to do on a
-            # manuscript that has no concepts.
-            report["extraction"] = "off"
-        elif llm.enabled:
-            try:
-                summary = run_extraction(db, manuscript, llm) or {}
-            except Exception as err:
-                summary = {}
-                from . import tracelog
-
-                tracelog.record(
-                    "extraction", surface="api",
-                    workspace=str(db.path.parent.parent),
-                    manuscript=manuscript.get("name"),
-                    ok=False, error=f"{type(err).__name__}: {err}")
-            if summary and not summary.get("up_to_date"):
-                report["auto_analysis"] = {
-                    "new_concepts": len(summary.get("nodes", [])),
-                    "new_edges": len(summary.get("edges", [])),
-                    "proposed": summary.get("proposed", 0),
-                }
-
-    # Inline directives — [Footnote: …] and [Explain: …] — are REPORTED
-    # here, beside the illustration slots, and never drafted (footnote
-    # design §2): no LLM runs at collect and nothing is written unasked.
-    # Drafting is chat; `footnote apply` / `explain apply` land the
-    # author's ruling.
+    # No LLM runs at collect. Concept extraction is LAZY (ruling
+    # 2026-10-25, docs/extraction-redesign.md §0.9): the graph is mined
+    # when someone asks for a fresh one — `authorlm extract --native` or
+    # the MCP tool — never as a side effect of observing an edit. The
+    # extract hint above is all a collect says about it.
+    # Inline directives — [Footnote: …], [Explain: …] and [Suggestion: …]
+    # — are REPORTED here, beside the illustration slots, and never
+    # drafted (footnote design §2): no LLM runs at collect and nothing is
+    # written unasked. Drafting is chat; `footnote apply` / `explain
+    # apply` / `suggestion apply` land the author's ruling.
     try:
         from . import directives
 
@@ -1129,6 +1118,13 @@ def collect(db: Database, manuscript: dict, config: dict,
         open_tags = []
     if open_tags:
         report["directives"] = open_tags
+    # Media tags that are not ready are reported the same way
+    # (docs/video-clips-design.md §8e): no model runs, nothing is written.
+    media_rows = _media_not_ready(manuscript)
+    if media_rows:
+        report["media"] = media_rows
+    if media_keys:
+        report["media_keys"] = media_keys
     return report
 
 
@@ -3259,24 +3255,8 @@ def write_complete(db: Database, manuscript: dict, config: dict,
     report = collect(db, manuscript, config, source="write-complete",
                      episode=_writeup_episode(db, manuscript, writeup,
                                               session))
-    extraction = None
-    llm = LLMClient(config)
-    from .extraction import extraction_allowed
-
-    if not extraction_allowed(db, manuscript, config):
-        extraction = {"off": True}
-    elif llm.enabled:
-        try:
-            extraction = run_extraction(db, manuscript, llm)
-        except Exception as err:
-            extraction = None
-            from . import tracelog
-
-            tracelog.record(
-                "extraction", surface="api",
-                workspace=str(db.path.parent.parent),
-                manuscript=manuscript.get("name"),
-                ok=False, error=f"{type(err).__name__}: {err}")
+    # No extraction here either: the concept graph is mined on request
+    # (ruling §0.9), and the report's summary_hint says what to rebuild.
     plan = loads(writeup["plan"], [])
     remaining = max(0, len(plan) - writeup["cursor"])
     db.update("writeups", writeup["id"], {"status": "completed"})
@@ -3291,7 +3271,7 @@ def write_complete(db: Database, manuscript: dict, config: dict,
             "toc_stanza": toc_stanza, "toc_placement": placement,
             "marker_present": marker_survives,
             "summary_hint": writeup["file"],
-            "collect": report, "extraction": extraction}
+            "collect": report}
 
 
 def write_abandon(db: Database, manuscript: dict, config: dict,
@@ -4114,8 +4094,6 @@ def compact_collect(report: dict) -> dict:
                    "after": len(report["gaps_after"])}
     out["gaps_resolved"] = [_compact_gap(g) for g in report["gaps_resolved"]]
     out["gaps_new"] = [_compact_gap(g) for g in report["gaps_new"]]
-    if "auto_analysis" in report:
-        out["auto_analysis"] = report["auto_analysis"]
     if "illustrations" in report:
         out["illustrations"] = report["illustrations"]
     if "directives" in report:
@@ -4353,14 +4331,93 @@ def compact_show_concept(result: dict) -> dict:
     return {"node": keep, "edges": [_compact_edge(e) for e in result["edges"]]}
 
 
+def extraction_scope(db: Database, manuscript: dict, knob: dict,
+                     files: list[str] | None = None, full: bool = False
+                     ) -> list[tuple[str, list]]:
+    """The essays a non-interactive run assembles, [(file, payloads)] in
+    reading order: the named files whole, the whole book with `full`,
+    else the sections changed since the extraction watermark (everything
+    when there is none). Mirrors `cli._extract_scope` without its exits:
+    an unknown file is a LookupError for the caller to report."""
+    from . import extraction as ex
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    on_disk = read_manuscript_files(Path(manuscript["path"]))
+    if files:
+        # A named file held by an active writeup (its text on disk is the
+        # placeholder) has nothing to mine: dropped, never sent.
+        scope = [(rel, None) for rel in (_resolve(on_disk, f) for f in files)
+                 if not ex.is_in_flight(on_disk.get(rel, ""))]
+    elif full:
+        scope = [(name, None) for name in ex.eligible_files(on_disk)]
+    else:
+        changed = ex.changed_units(db, manuscript, on_disk,
+                                   int(knob["max_section_chars"]))
+        scope = ([(name, None) for name in ex.eligible_files(on_disk)]
+                 if changed is None else list(changed.items()))
+    out = []
+    for name, units in scope:
+        payloads = ex.assemble_essay(db, manuscript, name, units=units,
+                                     knob=knob)
+        if payloads:
+            out.append((name, payloads))
+    return out
+
+
 def run_extraction(db: Database, manuscript: dict, llm: LLMClient,
                    files: list[str] | None = None, full: bool = False,
-                   edges_only: bool = False,
-                   aliases_only: bool = False) -> dict | None:
-    from .extraction import extract_concepts
+                   adjudicator: str | None = None) -> dict | None:
+    """The non-interactive front on `extraction.run` (the redesigned
+    pipeline, docs/extraction-redesign.md) — the MCP tool's road, and the
+    one a script takes. Extraction is lazy (ruling §0.9): nothing calls
+    this as a side effect; the author, or the chat on their word, asks for
+    a fresh graph. Incremental by default: the sections changed since the
+    watermark; `files` or `full` widen it.
 
-    return extract_concepts(db, manuscript, llm, files=files, full=full,
-                            edges_only=edges_only, aliases_only=aliases_only)
+    The adjudicator is chosen before the first call (ruling §0.2, never
+    spend unasked): `adjudicator` answers it outright, `[extraction]
+    adjudicator_prompt = "default"` takes `adjudicator_model`, and with
+    neither there is no one to ask here, so the run stops before any call
+    and returns {"stopped": …} pointing at `authorlm extract --native`.
+    {"up_to_date": True} when nothing changed. Raises ExtractionDisabled
+    when either switch is off. The report is `extraction.run`'s, made
+    JSON-safe (the per-essay screenings dropped) and printable by
+    `extraction.render_run`."""
+    from . import extraction as ex
+    from . import extraction_adjudicator as adj
+
+    config = getattr(llm, "config", None) or {}
+    if not ex.extraction_enabled(config):
+        raise ex.ExtractionDisabled(ex.DISABLED_MESSAGE)
+    if not ex.manuscript_extraction_enabled(db, manuscript):
+        raise ex.ExtractionDisabled(ex.MANUSCRIPT_DISABLED_MESSAGE)
+    knob = ex.knobs(config, db, manuscript)
+    essays = extraction_scope(db, manuscript, knob, files=files, full=full)
+    if not essays:
+        return {"up_to_date": True}
+    est = adj.estimate_scope(essays, knob["proposable_relations"])
+    try:
+        model = adj.choose(config, knob, est, answer=adjudicator, ask=None)
+    except LookupError as err:
+        return {"stopped": f"{err}. Nothing was spent: run `authorlm extract "
+                           "--native` to be asked, or set [extraction] "
+                           "adjudicator_prompt = \"default\".",
+                "essays": [name for name, _ in essays],
+                "sections": est["sections"]}
+    # The caller's client makes the section calls (so its usage line is
+    # the run's), under `[extraction] model` when one is set.
+    if knob.get("model"):
+        llm.model = knob["model"]
+    llm.purpose = "extraction"
+    judge = adj.adjudicator_llm(config, model)
+    report = ex.run(db, manuscript, essays, extract_llm=llm,
+                    judge_llm=judge, knob=knob,
+                    run_id=ex.new_run_id("extract"),
+                    advance_watermark=not files)
+    report["essays"] = [{k: v for k, v in r.items() if k != "screening"}
+                        for r in report["essays"]]
+    return report
 
 
 # ----------------------------------------------- self-improvement tasks
@@ -5825,11 +5882,11 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
     falsified = _falsified_prefix(db, mid, run)
 
     summary = {"rebuilt": False, "error": None, "usage": None}
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            sums.rebuild_one(db, manuscript, rel, llm)
-            summary.update(rebuilt=True, usage=llm.stats_line())
+            sums.rebuild_one(db, manuscript, rel, llms)
+            summary.update(rebuilt=True, usage=sums.stats_lines(llms))
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
     # The learnings duty, on BOTH transports — the half of the loop that
@@ -6154,6 +6211,7 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     from . import lenses as _lenses
     from . import morph as _morph
     from . import summaries as sums
+    from . import threads as th
 
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
@@ -6184,39 +6242,28 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     path = Path(manuscript["path"]) / rel
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="pre-morph-settle")
-    # Judgment tags are INSERTION forms (`{{[Judgment: …]}}` as their own
-    # paragraph, nothing struck) — ruled by presence, not matched by old
-    # text: the tag still in the tab, braced or unbraced, accepts the
-    # finding and stands in the file as an open directive; the tag gone
-    # rejects it. Ruled here, before the replace forms, so
-    # record_resolution's unmatched loop never sees them; and only
-    # morph's own insert threads are touched, never an author's `{{…}}`.
-    marked = fetched["marked"]
-    for t in [t for t in written if (t.get("proposed_old") or "") == ""]:
-        tag = t["proposed_new"]
-        braced = "{{" + tag + "}}"
-        present = braced if braced in marked else (tag if tag in marked
-                                                    else None)
-        if present is not None:
-            marked = _fold_judgment(marked, present, tag)
-            db.update("doc_threads", t["id"], {"state": "cleaned"})
-            passes._edit_evidence(db, mid, t, "resolved",
-                                  evidence_type=_morph.MORPH_EVIDENCE)
-        else:
-            db.update("doc_threads", t["id"], {"state": "declined"})
-            passes._edit_evidence(db, mid, t, "declined",
-                                  evidence_type=_morph.MORPH_EVIDENCE)
+    # Judgment tags first (`_rule_judgments`), so record_resolution's
+    # unmatched loop never sees them. Nothing is written until the local
+    # file is known to merge — the same shape as `lens_resolve`.
+    marked, rulings = _rule_judgments(fetched["marked"], written)
     replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
     final, forms = passes.final_text_from_marked(
         marked, written=replaces, kinds=("replace",))
+    final, _ = th.strip_form_remnants(
+        final, [t["proposed_new"] for t in written])
+    landed = _door_final_text(rel, fetched, final, path, "morph resolve")
+    _apply_judgment_rulings(db, mid, rulings, _morph.MORPH_EVIDENCE)
     diffs = passes.record_resolution(db, mid, rel, forms,
                                      origin_type=_morph.MORPH_ORIGIN,
                                      evidence_type=_morph.MORPH_EVIDENCE,
-                                     final_text=final)
-    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
+                                     final_text=landed)
+    _write_resolved_text(path, Path(manuscript["path"]), landed)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="morph-settle",
                 episode=NO_EPISODE)
+    still_marked = _clear_door_forms(db, manuscript, rel, written,
+                                     fetched["marked"], docs_service,
+                                     final, warnings)
     after = {t["id"]: dict(db.one(
         "SELECT * FROM doc_threads WHERE id = ?", (t["id"],)))
         for t in written}
@@ -6227,11 +6274,11 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     verdicts = _lenses.propagate_verdicts(db, manuscript, after.values(),
                                           kind=_morph.MORPH_KIND)
     summary = {"rebuilt": False, "error": None, "usage": None}
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            sums.rebuild_one(db, manuscript, rel, llm)
-            summary.update(rebuilt=True, usage=llm.stats_line())
+            sums.rebuild_one(db, manuscript, rel, llms)
+            summary.update(rebuilt=True, usage=sums.stats_lines(llms))
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
     candidate = passes.settle_learnings(db, manuscript, diffs, config)
@@ -6239,7 +6286,7 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
             "declined": states.count("declined"),
             "forms": len(forms), "diffs": diffs, "warnings": warnings,
             "summary": summary, "pattern_candidate": candidate,
-            "findings": verdicts, "tab_still_marked": True}
+            "findings": verdicts, "tab_still_marked": still_marked}
 
 
 def lens_unmark(db: Database, manuscript: dict, file: str,
@@ -6287,15 +6334,146 @@ def _fold_judgment(text: str, present: str, tag: str) -> str:
     return text[:j] + tag + text[i + len(present):]
 
 
+def _rule_judgments(marked: str, written: list[dict]
+                    ) -> tuple[str, list[tuple[dict, bool]]]:
+    """Judgment tags are INSERTION forms (`{{[Judgment: …]}}` as their
+    own paragraph, nothing struck), ruled by presence, not matched by
+    old text: the tag still in the tab, braced or unbraced, accepts the
+    finding and folds back onto the END of the paragraph it follows
+    (where the file has always carried an open judgment and where
+    `lens repair` looks for it); the tag gone rejects it. Only the
+    door's own insert threads are ruled, never an author's `{{…}}`.
+    Pure: returns (marked text, [(thread, accepted)]) and writes
+    nothing, so a resolve can still stop before any verdict lands."""
+    rulings = []
+    for t in [t for t in written if (t.get("proposed_old") or "") == ""]:
+        tag = t["proposed_new"]
+        braced = "{{" + tag + "}}"
+        present = braced if braced in marked else (tag if tag in marked
+                                                    else None)
+        if present is not None:
+            marked = _fold_judgment(marked, present, tag)
+        rulings.append((t, present is not None))
+    return marked, rulings
+
+
+def _apply_judgment_rulings(db: Database, mid: str, rulings,
+                            evidence_type: str) -> None:
+    for t, accepted in rulings:
+        db.update("doc_threads", t["id"],
+                  {"state": "cleaned" if accepted else "declined"})
+        passes._edit_evidence(db, mid, t,
+                              "resolved" if accepted else "declined",
+                              evidence_type=evidence_type)
+
+
+def _merge_local_edits(base: str, local: str, resolved: str) -> str | None:
+    """Three-way, line by line: `base` is the tab's text as last agreed
+    (its forms collapsed to the old half), `local` the file as it now
+    stands, `resolved` the tab's text with the forms settled. Each
+    side's changes against the base are kept; None when a local change
+    touches lines the resolve also changed (it-459f2c04ef77)."""
+    b, lo, r = (x.split("\n") for x in (base, local, resolved))
+
+    def edits(other):
+        return [(i1, i2, other[j1:j2]) for tag, i1, i2, j1, j2 in
+                difflib.SequenceMatcher(None, b, other,
+                                        autojunk=False).get_opcodes()
+                if tag != "equal"]
+
+    ours, theirs = edits(lo), edits(r)
+    for a1, a2, ra in ours:
+        for c1, c2, rc in theirs:
+            if (a1, a2, ra) == (c1, c2, rc):
+                continue
+            if a1 <= c2 and c1 <= a2:
+                return None
+    merged = list(b)
+    every = {(e[0], e[1], tuple(e[2])) for e in ours + theirs}
+    for i1, i2, lines in sorted(every, key=lambda e: (e[0], e[1]),
+                                reverse=True):
+        merged[i1:i2] = list(lines)
+    return "\n".join(merged)
+
+
+def _door_final_text(rel: str, fetched: dict, final: str, path: Path,
+                     verb: str) -> str:
+    """The text a door's resolve writes: the resolved tab text, with any
+    local edit made since the last push kept (it-459f2c04ef77). The
+    resolve used to write the tab's text over the file and silently
+    revert such an edit. An edit that meets a form's own lines cannot
+    be kept beside it, and stops the resolve before anything settles."""
+    from . import gdocs
+    from .revisions import strip_embed_lines
+
+    if fetched["state"] != "local_ahead":
+        return final
+    local = gdocs.normalize_markdown(strip_embed_lines(
+        path.read_text(encoding="utf-8")))
+    merged = _merge_local_edits(fetched["collapsed"], local,
+                                gdocs.normalize_markdown(final))
+    if merged is None:
+        raise ValueError(
+            f"'{rel}' was edited locally since the last push, on a line "
+            f"that also carries one of the tab's forms, so the resolve "
+            f"cannot keep both and has settled nothing. Make that edit in "
+            f"the Doc tab instead (or undo it in {rel}), then re-run "
+            f"'{verb} {rel}'.")
+    return merged
+
+
+def _clear_door_forms(db: Database, manuscript: dict, rel: str,
+                      written: list[dict], marked: str, docs_service,
+                      base_text: str, warnings: list[str]) -> bool:
+    """Take a door's settled forms out of the tab IN PLACE — the markers
+    and each form's losing half, nothing else — so no follow-up push is
+    needed to clear them, and a comment anchored on any other text in
+    the tab keeps its anchor. Never a rebuild: the author's constraint
+    is that clearing the tab must not orphan a comment
+    (it-459f2c04ef77). Returns True when some form is still there."""
+    from . import gdocs
+
+    rows = [dict(db.one("SELECT * FROM doc_threads WHERE id = ?",
+                        (t["id"],))) for t in written]
+
+    def where(r: dict) -> int:
+        old = r.get("proposed_old") or ""
+        at = marked.find(f"<<{old}>>" if old
+                         else "{{" + (r.get("proposed_new") or "") + "}}")
+        return at if at >= 0 else len(marked)
+
+    outcomes = [{"old": r.get("proposed_old") or "",
+                 "new": r.get("proposed_new") or "",
+                 "keep": "new" if r["state"] == "cleaned" else "old"}
+                for r in sorted(rows, key=where)
+                if r["state"] in ("cleaned", "declined")]
+    try:
+        faults = gdocs.settle_forms_in_tab(
+            db, manuscript, rel, outcomes, docs_service,
+            base_text=base_text,
+            remnants=[r.get("proposed_new") or "" for r in rows])
+    except Exception as err:                            # noqa: BLE001
+        faults = [str(err)]
+    if faults:
+        warnings.append(
+            f"the resolve landed locally, but {rel}'s tab still shows some "
+            f"of its forms (" + "; ".join(faults) + "). Nothing was "
+            f"rebuilt; 'doc push {rel}' takes settled forms out in place.")
+    return bool(faults)
+
+
 def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
                 services=None) -> dict:
     """Read the tab back and finalize the lens forms — `filter resolve`'s
     doc road for the lens door: the author's post-edits win, a
     hand-resolved form's verdict is inferred from the prose
     (it-4c5a8038c304), evidence lands as `lens_edit` under NO episode,
-    and the tab keeps its marks until the next ordinary `doc push`."""
+    a local edit made since the push is kept, and the settled forms are
+    taken out of the tab in place (`_clear_door_forms`,
+    it-459f2c04ef77)."""
     from . import gdocs
     from . import summaries as sums
+    from . import threads as th
 
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
@@ -6325,44 +6503,28 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
     path = Path(manuscript["path"]) / rel
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="pre-lens-settle")
-    # Judgment tags are INSERTION forms (`{{[Judgment: …]}}` as their own
-    # paragraph, nothing struck). They are ruled by presence, not matched
-    # by old text: the tag still in the tab, braced or unbraced, accepts
-    # the finding and stands in the file as an open directive; the tag
-    # gone rejects it. Ruled here, before the replace forms, so
-    # record_resolution's unmatched loop never sees them; and only the
-    # lens's own insert threads are touched, never an author's `{{…}}`.
-    marked = fetched["marked"]
-    for t in [t for t in written if (t.get("proposed_old") or "") == ""]:
-        tag = t["proposed_new"]
-        braced = "{{" + tag + "}}"
-        present = braced if braced in marked else (tag if tag in marked
-                                                    else None)
-        if present is not None:
-            # Accepted: the tag folds back onto the END of the paragraph
-            # it follows, which is where the file has always carried an
-            # open judgment and where `lens repair` looks for it — the
-            # separate paragraph was the TAB's lighter form, not the
-            # record's.
-            marked = _fold_judgment(marked, present, tag)
-            db.update("doc_threads", t["id"], {"state": "cleaned"})
-            passes._edit_evidence(db, mid, t, "resolved",
-                                  evidence_type=LENS_EVIDENCE)
-        else:
-            db.update("doc_threads", t["id"], {"state": "declined"})
-            passes._edit_evidence(db, mid, t, "declined",
-                                  evidence_type=LENS_EVIDENCE)
+    # Judgment tags first (`_rule_judgments`), so record_resolution's
+    # unmatched loop never sees them. Nothing is written until the local
+    # file is known to merge.
+    marked, rulings = _rule_judgments(fetched["marked"], written)
     replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
     final, forms = passes.final_text_from_marked(
         marked, written=replaces, kinds=("replace",))
+    final, _ = th.strip_form_remnants(
+        final, [t["proposed_new"] for t in written])
+    landed = _door_final_text(rel, fetched, final, path, "lens resolve")
+    _apply_judgment_rulings(db, mid, rulings, LENS_EVIDENCE)
     diffs = passes.record_resolution(db, mid, rel, forms,
                                      origin_type=LENS_ORIGIN,
                                      evidence_type=LENS_EVIDENCE,
-                                     final_text=final)
-    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
+                                     final_text=landed)
+    _write_resolved_text(path, Path(manuscript["path"]), landed)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="lens-settle",
                 episode=NO_EPISODE)
+    still_marked = _clear_door_forms(db, manuscript, rel, written,
+                                     fetched["marked"], docs_service,
+                                     final, warnings)
     after = {t["id"]: dict(db.one(
         "SELECT * FROM doc_threads WHERE id = ?", (t["id"],)))
         for t in written}
@@ -6373,11 +6535,11 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
     from . import lenses as _lenses
     verdicts = _lenses.propagate_verdicts(db, manuscript, after.values())
     summary = {"rebuilt": False, "error": None, "usage": None}
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            sums.rebuild_one(db, manuscript, rel, llm)
-            summary.update(rebuilt=True, usage=llm.stats_line())
+            sums.rebuild_one(db, manuscript, rel, llms)
+            summary.update(rebuilt=True, usage=sums.stats_lines(llms))
         except Exception as err:                        # noqa: BLE001
             summary["error"] = str(err)
     candidate = passes.settle_learnings(db, manuscript, diffs, config)
@@ -6385,7 +6547,7 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
             "declined": states.count("declined"),
             "forms": len(forms), "diffs": diffs, "warnings": warnings,
             "summary": summary, "pattern_candidate": candidate,
-            "findings": verdicts, "tab_still_marked": True}
+            "findings": verdicts, "tab_still_marked": still_marked}
 
 
 def filter_unmark(db: Database, manuscript: dict, file: str,
@@ -6588,9 +6750,25 @@ def filter_status(db: Database, manuscript: dict,
     classes = {f["name"]: f["class"] for f in flt.list_filters(manuscript)}
     links = gdocs._mapping(db, manuscript).get("gdocs", {})
     master_id = links.get("_master_id")
+    # One read of every filter-origin thread, grouped by run, instead of
+    # one `_run_threads` query per run: the report would otherwise cost
+    # a full scan of the filter threads for each run in the history.
+    # origin_id is '{run_id}:{file}:{ordinal}', so dropping the last
+    # segment gives the run's key; rows keep the global (created_at, id)
+    # order, which is the order the per-run query returned.
+    by_key: dict[str, list[dict]] = {}
+    for r in db.all(
+            "SELECT * FROM doc_threads WHERE manuscript_id = ? AND "
+            "origin_type = ?" + (" AND file = ?" if file else "")
+            + " ORDER BY created_at, id",
+            (mid, FILTER_ORIGIN, file) if file else (mid, FILTER_ORIGIN)):
+        t = dict(r)
+        by_key.setdefault((t["origin_id"] or "").rsplit(":", 1)[0],
+                          []).append(t)
     runs = []
     for run in rows:
-        threads = _run_threads(db, mid, run)
+        threads = [t for t in by_key.get(f"{run['id']}:{run['file']}", [])
+                   if t["file"] == run["file"]]
         drift = (classes.get(run["filter"])
                  if classes.get(run["filter"]) not in (None, run["class"])
                  else None)

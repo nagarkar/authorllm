@@ -22,7 +22,8 @@
 
 % The review filter invokes this only for the default PDF profile. A
 % --print-ready export never emits the invocation, leaving a clean PDF.
-\providecommand{\AuthorLMReviewMode}[2]{%
+% #3 is the recipient line from export --notice (empty: standard footer).
+\providecommand{\AuthorLMReviewMode}[3]{%
   \AuthorLMEnableReviewPageStyle{}
   \AddToShipoutPictureBG{%
     \AtPageCenter{%
@@ -39,9 +40,14 @@
   \AddToShipoutPictureFG{%
     \AtPageLowerLeft{%
       \raisebox{0.3in}{%
-        \makebox[\paperwidth][c]{\scriptsize
-          CONFIDENTIAL REVIEW DRAFT · DO NOT SHARE ·
-          \textcopyright{} #2 #1\hspace{1.5em}\thepage}%
+        \makebox[\paperwidth][c]{%
+          \parbox{0.82\paperwidth}{\centering\scriptsize
+            \if\relax\detokenize{#3}\relax\else
+              \textbf{#3}\\[1pt]%
+            \fi
+            CONFIDENTIAL REVIEW DRAFT · DO NOT COPY, SHARE, OR DISTRIBUTE ·
+            \textcopyright{} #2 #1. All rights reserved.\hspace{1.5em}\thepage}%
+        }%
       }%
     }%
   }%

@@ -48,9 +48,14 @@ pip install -e ".[gdocs]"     # Google Docs bridge and session-start reconcile
 pip install -e ".[all]"       # everything above
 ```
 
-There is no build step for normal installation; the compiled Triage App is
-included in the package. Frontend contributors rebuild it with `npm install &&
-npm run build` from `web/triage-app/`. The MCP server is a long-running
+Installing builds the web pages (the Triage App, the audiobook page, and the
+pronunciation workbench) into the package, so it needs **Node and npm**: the
+version in `.nvmrc` (`nvm use`), within each page's `engines` range.
+The built pages are not tracked in git (`setup.py`). Without npm the install
+stops, unless the pages are already built or `AUTHORLM_SKIP_WEB_BUILD=1` is
+set (then the commands that serve a page say it has not been built). After a
+frontend change or a `git pull`, rebuild a page with `npm run build` in its
+`web/<page>/` directory, or reinstall. The MCP server is a long-running
 process; after changing its code or rebuilding the app, restart it with
 `pkill -f authorlm-mcp` (the MCP client respawns it on the next call).
 
@@ -193,6 +198,8 @@ outstanding questions.
 | `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`; with an LLM enabled, auto-extracts concepts (`--no-extract` to skip) |
 | `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, and format-specific ISBN-13 fields); the CLI and MCP tools share this record |
 | `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
+| `export <fmt> … --upload [--as-doc] [--drive-id ID]` | Also put the written file on Google Drive (the manuscript's folder); re-exporting replaces the same Drive file in place. `--as-doc` converts a DOCX to a Google Doc; `--drive-id` adopts a file already on Drive |
+| `export teleprompter --file F` | The passages the author reads on camera (clips marked `voice: author`) as a large-type `_exports/<stem>.teleprompter.docx` and `.txt`, labelled Intro / Outro |
 | `audio init/export/check` | The audiobook (docs/audiobook-pipeline-design.md): seed `_audio/audiobook.toml` and `cast.md` once; compile `audiobook.json` and `chapters/*.json` for the audiostation app (only what changed is rewritten; section ids hash text, voice and pronunciations so a change regenerates exactly what it touched); the readiness report from sources to generated state |
 | `audio voices/audition/cast set` | Free voice discovery with preview clips into an audition gallery (`--library` for the shared library); paid auditions on the book's own words (`--file F --paragraphs N-M`, cost confirmed first); write one row of `cast.md` |
 | `audio dictionary push` | `pronunciations.md` → the ElevenLabs dictionary named in `audiobook.toml`, append-only with replacement, after showing the plan |
@@ -372,8 +379,9 @@ Optional LLM settings: `"timeout_seconds"` (default 120) and
 `"extraction_max_chars"` (default 24000) — the cap on manuscript text sent
 per extraction call, balancing cost against coverage (concept selection
 also degrades on very long inputs). Incremental extraction usually keeps
-payloads far below the cap; when a payload does exceed it you get an
-explicit truncation warning suggesting per-file extraction.
+payloads far below the cap; a scope that exceeds it runs as several bounded
+passes instead of being truncated. Only `extract --edges-only` still sends
+one payload cut at the cap.
 
 Any LiteLLM model string works (`gpt-4o-mini`, `claude-sonnet-5`,
 `ollama/llama3`, …) with the matching key exported. Alternatively, point at
@@ -464,12 +472,15 @@ server — no network or keys needed.
 
 **Live-LLM suite** (record/replay): exercises the real LiteLLM → Gemini
 path against a generated sample manuscript (never your manuscripts; reset
-to the same default state every run). Every unique payload is sent to the
-LLM **at most once** — responses are recorded in `tests/llm_cache/*.json`
-and replayed thereafter, so an unchanged suite makes zero live calls and
-runs without a key. Changing a prompt, the sample text, or the model
-re-records exactly the affected calls (or delete a cache file to force
-one). With no key and an incomplete cache, the suite skips loudly.
+to the same default state every run). It reads `GEMINI_API_KEY` from
+`authorlm/.env` like every other verb. Each request is hashed (model,
+temperature, messages, and `max_tokens`/`effort`/`thinking_budget` when
+set); a hash with no recording in `tests/llm_cache/*.json` is sent live
+once and recorded. **Commit new recordings with the change that caused
+them**: a clean checkout then makes zero billed calls. A full run that
+passes deletes recordings nothing asked for. With no key anywhere, a
+section that needs a missing recording reports one SKIP (`ReplayMiss`),
+never a failure.
 
 ## Logging & traces
 
@@ -631,6 +642,9 @@ the tables reads like the history of the book (RFC §18.7). See
   as the policy statement (with an LLM they are distilled).
 - Concept realization is word-boundary matching (plural-tolerant); it does
   not disambiguate homonyms.
-- Extraction reads at most the first ~24k characters of the manuscript.
+- `extract --edges-only` sends a single payload capped at
+  `extraction_max_chars` (default 24k characters) and truncates anything
+  beyond it; other extractions split oversized scopes into multiple
+  bounded passes rather than truncating.
 - Inferred intents, replay, and cross-manuscript long-term memory are
   schema-ready but deferred (RFC growth stages 7–8).

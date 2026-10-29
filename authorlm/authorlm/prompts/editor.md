@@ -38,6 +38,16 @@ proposal about the prose around an equation copies the equation verbatim.
   promises earlier units made about this essay; (d) keep terms of art
   consistent with their first use. Never propose changes to OTHER essays
   here — that belongs in a suggestion.
+- OUTLINE — this essay's own sections, each with its POINT, MOVES (citing
+  paragraph numbers), DEPENDS ON and LEAVES OPEN. It is the map of the
+  argument you are editing: use it to tell a load-bearing paragraph from a
+  redundant one, and to keep an edit inside the move its paragraph makes.
+  A section marked `!! no section summary` has no map; read its
+  paragraphs for yourself.
+- REFERENCED SECTIONS — the text of sections in OTHER essays that this
+  essay refers back to ("as the Metaphysic showed"), each under its file,
+  section and hash. Where this essay restates or leans on one of them,
+  keep it consistent with that text; never propose edits to it here.
 - THE ESSAY — every paragraph numbered `[n]`. A "paragraph" is any block
   separated by a blank line: headings, epigraphs, list items, and
   illustration tags count and keep their own numbers.

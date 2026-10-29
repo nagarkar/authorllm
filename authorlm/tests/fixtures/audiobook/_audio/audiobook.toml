@@ -8,6 +8,7 @@
 schema = 1
 
 [text]
+voice = "narrator"
 paragraph_gap_ms = 700        # silence after every paragraph section
 rule_gap_ms = 1500            # a horizontal rule (---) is silence, not speech
 footnotes = "drop"            # drop | inline | end  (only "drop" is built)
@@ -36,3 +37,7 @@ paragraphs = 3
 
 [cover]
 path = "_assets/audiobook-cover.png"
+
+[[chapter]]
+file = "sermons.md"
+voice = "herdsman"

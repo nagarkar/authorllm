@@ -9,14 +9,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import triage_transport
+from . import branding, triage_transport
 from .triage import TriageConflict
 
 
 def app_html() -> str:
     path = Path(__file__).parent / "triage_dist" / "index.html"
     if not path.exists():
-        raise RuntimeError("the Triage App frontend has not been built")
+        raise RuntimeError("the Triage App frontend has not been built — "
+                           "cd web/triage-app && npm install && npm run build")
     return path.read_text(encoding="utf-8")
 
 
@@ -41,6 +42,8 @@ def make_handler(workspace: str | None, manuscript: str | None):
                 return
             if self.path == "/health":
                 self._json(200, {"ok": True})
+                return
+            if branding.send(self, self.path):
                 return
             self.send_error(404)
 

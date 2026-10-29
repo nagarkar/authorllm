@@ -52,12 +52,22 @@ def live_beliefs(db: Database, manuscript_id: str, source: str | None = None,
     return [dict(r) for r in db.all(sql, tuple(args))]
 
 
+def belief_labels(rows: list[dict]) -> dict[str, str]:
+    """Menu label → belief id. The menu shows B1, B2, … rather than the
+    random ids, so the same beliefs make the same prompt (the record/replay
+    suite keys on its exact bytes). A reply naming the raw id still
+    resolves."""
+    labels = {f"B{i}": r["id"] for i, r in enumerate(rows, 1)}
+    labels.update({r["id"]: r["id"] for r in rows})
+    return labels
+
+
 def belief_menu(rows: list[dict]) -> str:
     if not rows:
         return "BELIEFS ON RECORD: (none yet — every explanation is NEW)"
     lines = []
-    for r in rows:
-        line = f"  {r['id']} | {r['statement']}"
+    for i, r in enumerate(rows, 1):
+        line = f"  B{i} | {r['statement']}"
         if r["status"] == "retired":
             line += " [retired]"
         example = (loads(r.get("metadata"), {}) or {}).get("example")
@@ -71,10 +81,11 @@ def belief_menu(rows: list[dict]) -> str:
 
 
 def parse_distiller(reply: str | None,
-                    valid_ids: set[str]) -> tuple[str, str | None, str | None]:
+                    labels: dict[str, str]) -> tuple[str, str | None, str | None]:
     """(verdict, statement_or_id, example) where verdict is none | match | new.
+    `labels` is `belief_labels(rows)`; a match returns the real id.
 
-    An unparseable or unknown-id reply is treated as NONE — declining is the
+    An unparseable or unknown-label reply is treated as NONE — declining is the
     default posture, so a confused model declines rather than invents.
 
     A NEW with no EXAMPLE is also refused. That is the structural guard
@@ -90,8 +101,8 @@ def parse_distiller(reply: str | None,
     lines = text.splitlines()
     for line in lines:
         if line.strip().upper().startswith("MATCH:"):
-            bid = line.split(":", 1)[1].strip()
-            return ("match", bid, None) if bid in valid_ids else ("none", None, None)
+            bid = labels.get(line.split(":", 1)[1].strip())
+            return ("match", bid, None) if bid else ("none", None, None)
     statement = example = None
     for line in lines:
         stripped = line.strip()
@@ -347,32 +358,38 @@ def reinforce_belief(db: Database, belief_id: str, signal: str, question: str | 
 def seed_candidate_belief(
     db: Database, manuscript_id: str, statement: str, source: str,
     llm: LLMClient | None = None, episode_id: str | None = None,
+    distilled: bool = False,
 ) -> dict | None:
     """An explained review outcome seeds (or reinforces) a candidate belief.
-    With an LLM available, the raw explanation is distilled into a normative
-    belief statement (the verbatim explanation is kept in metadata); the LLM
-    may also judge the explanation too situation-specific to generalize, in
-    which case no belief is seeded (returns None) — the explanation still
-    persists as review evidence either way."""
+
+    `statement` is the author's raw explanation, which becomes a belief only
+    through the distiller: it is rewritten as a normative statement (the
+    verbatim explanation kept in metadata), matched to a belief on record,
+    or judged too situation-specific (NONE). With no LLM, or no reply,
+    nothing is seeded (returns None) — the explanation still persists as
+    review evidence. Seeding the raw words is how "a one-off exception for
+    this chapter only" became a belief (author ruling 2026-10-05).
+
+    `distilled=True` is for a statement a model already wrote (episode
+    analysis, the margin distiller); it skips the distiller."""
     original = statement
     example = None
-    if llm and getattr(llm, "enabled", False):
+    if not distilled:
+        if not (llm and getattr(llm, "enabled", False)):
+            return None
         rows = live_beliefs(db, manuscript_id, source)
         reply = llm.complete(belief_distill_system(),
                              f"{belief_menu(rows)}\n\nEXPLANATION:\n{statement}")
-        # An empty reply is an unreachable model, NOT a decline. Only an
-        # explicit NONE declines; otherwise fall through and seed the raw
-        # explanation, which is what happens with no LLM configured at all.
-        if reply:
-            verdict, payload, example = parse_distiller(
-                reply, {r["id"] for r in rows})
-            if verdict == "none":
-                return None
-            if verdict == "match":
-                return _reinforce_or_revive(db, manuscript_id, payload, original,
-                                            source=source, episode_id=episode_id)
-            statement = payload
-    # Exact match is now only a safety net (and the whole story with no LLM):
+        verdict, payload, example = parse_distiller(
+            reply, belief_labels(rows))
+        if verdict == "none":
+            return None
+        if verdict == "match":
+            return _reinforce_or_revive(db, manuscript_id, payload, original,
+                                        source=source, episode_id=episode_id)
+        statement = payload
+    # Exact match is only a safety net: semantic matching happens in the
+    # distiller above, because paraphrase is what string equality cannot see.
     # semantic matching happens in the distiller above, because paraphrase is
     # exactly what string equality cannot see.
     existing = db.one(
@@ -649,8 +666,8 @@ def seed_margin_candidate(db: Database, manuscript_id: str,
         return None
     for line in reply.strip().splitlines():
         if line.strip().upper().startswith("MATCH:"):
-            bid = line.split(":", 1)[1].strip()
-            if bid in {r["id"] for r in rows}:
+            bid = belief_labels(rows).get(line.split(":", 1)[1].strip())
+            if bid:
                 return _reinforce_or_revive(db, manuscript_id, bid, explanation,
                                             source="margin-thread")
             return None
@@ -666,7 +683,7 @@ def seed_margin_candidate(db: Database, manuscript_id: str,
     if not statement or scope_kind not in ("file", "guide", "manuscript"):
         return None
     seeded = seed_candidate_belief(db, manuscript_id, statement,
-                                   source="margin-thread", llm=None)
+                                   source="margin-thread", distilled=True)
     if seeded and seeded.get("id"):
         scope_ref = (file if scope_kind == "file"
                      else guide_chain[0]["id"] if scope_kind == "guide"

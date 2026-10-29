@@ -280,7 +280,7 @@ def analyze_pending(db: Database, manuscript: dict, llm: LLMClient,
                 continue
             seen_patterns.add(normalized_pattern)
             seeded = bel.seed_candidate_belief(
-                db, mid, pattern, source="episode-analysis", llm=None,
+                db, mid, pattern, source="episode-analysis", distilled=True,
                 episode_id=episode["id"],
             )
             if seeded is None:

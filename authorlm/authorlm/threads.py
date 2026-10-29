@@ -168,6 +168,34 @@ def strip_pending(text: str) -> tuple[str, list[str]]:
     return stripped, warnings
 
 
+def form_remnants(text: str, news) -> list[tuple[int, str]]:
+    """Where `text` carries the `}}` a hand-resolved form left behind:
+    the author deleted `<<old>>{{` in the Doc and kept the new half with
+    its closing braces (it-459f2c04ef77). `news` are the new halves of
+    the file's OWN forms (its thread rows); a `}}` counts only when it
+    directly follows one of them and that half is not itself opened by
+    `{{` — any other `}}` is the author's prose and is not touched.
+    Returns (offset of the `}}`, the half it closes), in text order."""
+    found: dict[int, str] = {}
+    for new in sorted({n for n in news if n}, key=len, reverse=True):
+        at = text.find(new + "}}")
+        while at >= 0:
+            close = at + len(new)
+            if text[max(0, at - 2):at] != "{{" and close not in found:
+                found[close] = new
+            at = text.find(new + "}}", at + 1)
+    return sorted(found.items())
+
+
+def strip_form_remnants(text: str, news) -> tuple[str, list[str]]:
+    """`text` without the `}}` remnants `form_remnants` finds. Returns
+    (text, the new halves whose remnant was taken out)."""
+    spots = form_remnants(text, news)
+    for close, _ in reversed(spots):
+        text = text[:close] + text[close + 2:]
+    return text, [new for _, new in spots]
+
+
 def strip_replacements(text: str) -> tuple[str, list[str]]:
     """`strip_pending` narrowed to the REPLACE form alone.
 

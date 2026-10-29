@@ -32,7 +32,7 @@ alone; the byline is the pen name Chitta Darshana.
 
 ## 1. The verse flag
 
-One toc attribute marks a file as verse, beside `register`, `voice`, and
+One toc attribute marks a file as verse, beside `register` and
 `illustrations`:
 
 ```toml
@@ -499,7 +499,7 @@ by hand.
 | Export title, variant, cover, PDF engine; *proposed* `type_size`, `layout` | `<manuscript>/_exports/settings.toml` (DON: not yet written; created on first `export set`) | `authorlm export set`; defaults and loader `authorlm/export.py:317-325` |
 | Illustration model and size, global default today | `authorlm/config.toml:109` `[illustrations]` | Hand edit; read by `authorlm/llm.py:1306` `resolve_image_setting` |
 | Per-manuscript illustration pin (§7) | *proposed, does not exist yet*: `<manuscript>/_illustrations/settings.toml` | Written at first render; changed by an explicit verb (tool change 2) |
-| `form`, `matter`, `register`, `voice`, `illustrations` per file | `<manuscript>/toc.toml` | Hand edit; parsed in `authorlm/structure.py:127` (`form` is *proposed*, tool change 3) |
+| `form`, `matter`, `register`, `illustrations` per file | `<manuscript>/toc.toml` | Hand edit; parsed in `authorlm/structure.py:127` (`form` is *proposed*, tool change 3) |
 | Audio text rules, TTS model, credits | `<manuscript>/_audio/audiobook.toml` | Hand edit after `audio init` |
 | Market, audience, pitch | `<manuscript>/_profiles/*.md` | `authorlm profile set` |
 | Style law (verse, commentary, glossary, illustration) | `style_laws` table, `~/.authorlm/authorlm.db`, guide "DON house style" | `authorlm style add … --guide "DON house style"` |
