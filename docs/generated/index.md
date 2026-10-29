@@ -650,6 +650,12 @@ The per-essay adjudicator and the writes (docs/extraction-redesign.md §4.5, §4
 
 `extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1, §9 phase 4): the historical candidates through the gates and the adjudicator, against the author's verdicts, and the thresholds moved.
 
+## `tests.test_extraction_gate_helpers`
+
+`authorlm/tests/test_extraction_gate_helpers.py`
+
+Direct pins for extraction gate-1/2/3 pure helpers (§4.4).
+
 ## `tests.test_extraction_gates`
 
 `authorlm/tests/test_extraction_gates.py`
@@ -679,6 +685,12 @@ The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, �
 `authorlm/tests/test_findings_edit_entry.py`
 
 `findings.edit_entry` is the one gate every producer's `replacement` passes through before it is staged as a `<<old>>{{new}}` edit in the author's Doc tab.
+
+## `tests.test_flat_prose`
+
+`authorlm/tests/test_flat_prose.py`
+
+`gdocs._flat_prose` matches Doc comment anchors across emphasis.
 
 ## `tests.test_gallery`
 
@@ -764,6 +776,12 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_reply_records`
+
+`authorlm/tests/test_reply_records.py`
+
+Paragraph-record reply unwrap (`_reply_records`) and JSON schema shape.
+
 ## `tests.test_section_summaries`
 
 `authorlm/tests/test_section_summaries.py`
@@ -781,6 +799,12 @@ Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5,
 `authorlm/tests/test_signature_tag.py`
 
 The [Signature: uri] tag: plain text in the files, a signature block (image, author's name, export date) in every reader output, dropped from the audio-clean build. Run: python3 tests/test_signature_tag.py
+
+## `tests.test_silent_preview`
+
+`authorlm/tests/test_silent_preview.py`
+
+`generation._silent` — the say-preview silence door (#304).
 
 ## `tests.test_summaries`
 
