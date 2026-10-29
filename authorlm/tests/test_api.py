@@ -493,12 +493,17 @@ def check_model_profiles() -> None:
           == llm_mod.VENDOR_DEFAULT_ONLY
           and llm_mod.model_profile("gemini/gemini-2.5-flash").temperature
           == llm_mod.ANY, "")
+    # gpt-5.6-sol has its own row since llmlm a17daeb (verified live
+    # 2026-10-22: strict json_schema, reasoning_effort, no temperature),
+    # so it is no longer the unverified sibling; terra still is.
+    check("gpt-5.6-sol reads its own verified row, not luna's",
+          llm_mod.model_profile("openai/gpt-5.6-sol").name == "gpt-5.6-sol"
+          and llm_mod.model_profile("openai/gpt-5.6-sol").temperature
+          == llm_mod.VENDOR_DEFAULT_ONLY, "")
     check("a model nobody verified gets the UNKNOWN profile rather than a "
-          "guessed row — gpt-5.6-sol/terra are siblings of luna and are "
-          "NOT assumed to share its contract",
-          llm_mod.model_profile("openai/gpt-5.6-sol")
-          is llm_mod.UNKNOWN_PROFILE
-          and llm_mod.model_profile("openai/gpt-5.6-terra")
+          "guessed row — gpt-5.6-terra is a sibling of luna and sol and is "
+          "NOT assumed to share their contract",
+          llm_mod.model_profile("openai/gpt-5.6-terra")
           is llm_mod.UNKNOWN_PROFILE
           and llm_mod.model_profile("stub-writer")
           is llm_mod.UNKNOWN_PROFILE, "")
@@ -748,9 +753,29 @@ def check_shipped_config_bills_no_anthropic_path() -> None:
 
     billed = {k: v for k, v in found.items()
               if v.strip().lower().startswith("anthropic/")}
+    # The one deliberate re-arming: the extraction adjudicator's default.
+    # Ruled 2026-10-25 first as a run-time question (docs/extraction-
+    # redesign.md §0.2: "let's do claude opus-class but have the system
+    # prompt me for what model I want to use"), then the same day as an
+    # UNATTENDED default (the author's words: "I want to extract lazily,
+    # and unattended", choosing anthropic/claude-opus-5 over the Gemini
+    # options with their costs in front of them). So this ONE key may name
+    # an Anthropic model with `adjudicator_prompt = "default"`; it is the
+    # only silent Anthropic bill the shipped config carries, and it is
+    # bounded by `[extraction] run_cost_ceiling_usd` per run and by the
+    # `enabled` switch above it.
+    extraction = config.get("extraction") or {}
+    if extraction.get("adjudicator_prompt", "ask") in ("ask", "default"):
+        billed.pop("[extraction] adjudicator_model", None)
+    check("the unattended adjudicator is the deliberate exception, and it "
+          "is named in full here",
+          extraction.get("adjudicator_model") == "anthropic/claude-opus-5"
+          and extraction.get("adjudicator_prompt") == "default",
+          str(extraction))
     check("no model-bearing key in the shipped config.toml names an "
           "anthropic/ model — the author ruled the billed paths off, and "
-          "re-arming one must be a deliberate edit to THIS check",
+          "re-arming one must be a deliberate edit to THIS check (the "
+          "extraction adjudicator's asked-for default is the one so far)",
           not billed, f"billed keys present: {billed!r}; all: {found!r}")
 
     # The ruling names five keys. Each is either absent (the two the
@@ -797,25 +822,18 @@ def check_shipped_config_bills_no_anthropic_path() -> None:
           and "write draft" in raw, raw[:400])
 
 
-def check_extraction_failure_traced() -> None:
-    """OPS-2: a raising run_extraction must leave a trace, not just a
-    silently-empty result.
-
-    `collect(..., analyze=True)` and `write_complete` both swallow
-    run_extraction's exceptions with a bare `except Exception:` — by
-    design, extraction failure must never block observation — but before
-    this fix nothing recorded that it happened: `collect`/`write_complete`
-    returned the same shape as a genuinely empty extraction pass, so a
-    silently-broken LLM pipeline was indistinguishable from a quiet day.
-    This does not change control flow (still swallowed, still returns
-    `{}`/`None`) — it only asserts a `trace.jsonl` record now exists."""
+def check_extraction_switch() -> None:
+    """`[extraction] enabled` is a plain kill switch on the one road that
+    extracts, `api.run_extraction`: off means no LLM extraction, said by
+    name, while the deterministic graph upkeep keeps running. Nothing
+    else extracts — a collect and a writeup close make no extraction call
+    at all (ruling §0.9: lazy)."""
     import io
-    import json as _tjson
 
     from authorlm import api as _api
-    from authorlm import tracelog
+    from authorlm.extraction import ExtractionDisabled, extraction_enabled
 
-    root = Path(tempfile.mkdtemp(prefix="authorlm-ops2-"))
+    root = Path(tempfile.mkdtemp(prefix="authorlm-switch-"))
     try:
         ws = root / "ws"
         ms = ws / "manuscript"
@@ -827,105 +845,53 @@ def check_extraction_failure_traced() -> None:
         db = _api.open_db(str(ws))
         manuscript = _api.get_manuscript(db)
         config = {"llm": {"enabled": True, "model": "gemini/gemini-2.5-flash"}}
-        trace_path = tracelog.log_dir(str(ws)) / "trace.jsonl"
-
-        def boom(*a, **kw):
-            raise RuntimeError("stub extraction failure")
-
-        # --- [extraction] enabled = false: the switch (author ruling
-        # 2026-09-25). Off means no LLM extraction anywhere, said plainly,
-        # while the deterministic graph upkeep keeps running.
-        from authorlm.extraction import (ExtractionDisabled,
-                                         extract_concepts as _extract_fn,
-                                         extraction_enabled)
 
         check("extraction is on by default and off by the switch",
               extraction_enabled({}) and extraction_enabled({"extraction": {}})
               and not extraction_enabled({"extraction": {"enabled": False}}))
         off_cfg = {**config, "extraction": {"enabled": False}}
-        never = {"n": 0}
-
-        def must_not_run(*a, **kw):
-            never["n"] += 1
-            raise RuntimeError("extraction ran while switched off")
-
-        prev_run_extraction = _api.run_extraction
-        _api.run_extraction = must_not_run
-        try:
-            (ms / "01-draft.md").write_text("# Draft\n\nSwitched-off text.\n")
-            off_report = _api.collect(db, manuscript, off_cfg, analyze=True)
-        finally:
-            _api.run_extraction = prev_run_extraction
-        check("an analysed collect skips extraction when the switch is off, "
-              "and says so",
-              never["n"] == 0 and off_report.get("extraction") == "off",
-              str(off_report.get("extraction")))
 
         class _OffLLM:
             config = off_cfg
             enabled = True
 
         try:
-            _extract_fn(db, manuscript, _OffLLM())
+            _api.run_extraction(db, manuscript, _OffLLM())
             declined = None
         except ExtractionDisabled as err:
             declined = str(err)
-        check("extract_concepts declines by name when switched off",
+        check("run_extraction declines by name when switched off",
               declined is not None and "[extraction] enabled = false" in declined
               and "concept add" in declined, str(declined))
 
-        # --- collect(..., analyze=True): api.py's first swallow site ---
-        prev_run_extraction = _api.run_extraction
-        _api.run_extraction = boom
+        never = {"n": 0}
+
+        def must_not_run(*a, **kw):
+            never["n"] += 1
+            raise RuntimeError("extraction ran as a side effect")
+
+        prev = _api.run_extraction
+        _api.run_extraction = must_not_run
         try:
             (ms / "01-draft.md").write_text("# Draft\n\nChanged text.\n")
-            report = _api.collect(db, manuscript, config, analyze=True)
-        finally:
-            _api.run_extraction = prev_run_extraction
-        check("collect() with a raising run_extraction still returns "
-              "(swallow behaviour unchanged)",
-              "auto_analysis" not in report, report)
-        entries = [_tjson.loads(line)
-                  for line in trace_path.read_text().splitlines()]
-        collect_entry = entries[-1]
-        check("collect()'s swallowed extraction failure is traced",
-              collect_entry["verb"] == "extraction"
-              and collect_entry["surface"] == "api"
-              and collect_entry["manuscript"] == "book"
-              and collect_entry["ok"] is False
-              and "stub extraction failure" in collect_entry["error"],
-              collect_entry)
-
-        # --- write_complete: api.py's second swallow site ---
-        _api.define_style_guide(db, manuscript, "house")
-        _api.attach_style(db, manuscript, "01-draft.md", "house")
-        declared = _api.declare_intent(db, manuscript, "Finish the draft")
-        intent_id = declared["intent"]["id"]
-        _api.write_start(db, manuscript, config, "01-draft.md", intent_id[:8])
-        # `write start` leaves the mid-rewrite placeholder, and completing
-        # on a placeholder-only file is refused (design §14.3). This test
-        # is about the extraction-failure swallow, so stand in for the
-        # accepted beat that would normally have replaced it.
-        (ms / "01-draft.md").write_text("# Draft\n\nThe rewritten draft.\n")
-
-        _api.run_extraction = boom
-        try:
+            report = _api.collect(db, manuscript, config)
+            auto = _api.collect(db, manuscript, config, auto=True)
+            _api.define_style_guide(db, manuscript, "house")
+            _api.attach_style(db, manuscript, "01-draft.md", "house")
+            declared = _api.declare_intent(db, manuscript, "Finish the draft")
+            _api.write_start(db, manuscript, config, "01-draft.md",
+                             declared["intent"]["id"][:8])
+            (ms / "01-draft.md").write_text("# Draft\n\nThe rewritten draft.\n")
             result = _api.write_complete(db, manuscript, config)
         finally:
-            _api.run_extraction = prev_run_extraction
-        check("write_complete() with a raising run_extraction still "
-              "returns (swallow behaviour unchanged)",
-              result["extraction"] is None, result)
-        entries = [_tjson.loads(line)
-                  for line in trace_path.read_text().splitlines()]
-        complete_entry = entries[-1]
-        check("write_complete()'s swallowed extraction failure is traced",
-              complete_entry["verb"] == "extraction"
-              and complete_entry["surface"] == "api"
-              and complete_entry["manuscript"] == "book"
-              and complete_entry["ok"] is False
-              and "stub extraction failure" in complete_entry["error"],
-              complete_entry)
+            _api.run_extraction = prev
+        check("a collect (plain or --auto) and a writeup close make NO "
+              "extraction call, with the switch on and an LLM configured: "
+              "the graph is mined on request only",
+              never["n"] == 0 and "extraction" not in report
+              and "auto_analysis" not in report and "extraction" not in result
+              and auto.get("version_no") is None,
+              str((never, sorted(report), sorted(result))))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -937,9 +903,7 @@ def check_manuscript_extraction_switch() -> None:
     import io
 
     from authorlm import api as _api
-    from authorlm.extraction import (ExtractionDisabled,
-                                     extract_concepts as _extract_fn,
-                                     extraction_allowed,
+    from authorlm.extraction import (ExtractionDisabled, extraction_allowed,
                                      manuscript_extraction_enabled)
 
     root = Path(tempfile.mkdtemp(prefix="authorlm-msx-"))
@@ -971,45 +935,18 @@ def check_manuscript_extraction_switch() -> None:
               and "extraction" not in json.loads(m_book["metadata"] or "{}"))
 
         config = {"llm": {"enabled": True, "model": "gemini/gemini-2.5-flash"}}
-        calls: list[str] = []
-
-        def counting(db_, manuscript_, llm_, **kw):
-            calls.append(manuscript_["name"])
-            return {"up_to_date": True}
-
-        prev = _api.run_extraction
-        _api.run_extraction = counting
-        try:
-            (kept / "01-draft.md").write_text("# Kept\n\nChanged once.\n")
-            (book / "01-draft.md").write_text("# Book\n\nChanged once.\n")
-            r_kept = _api.collect(db, m_kept, config, analyze=True)
-            r_kept_auto = None
-            (kept / "01-draft.md").write_text("# Kept\n\nChanged twice.\n")
-            r_kept_auto = _api.collect(db, m_kept, config, auto=True)
-            after_kept = list(calls)
-            r_book = _api.collect(db, m_book, config, analyze=True)
-        finally:
-            _api.run_extraction = prev
-        check("collect with analyze/auto set makes NO extraction call on "
-              "the switched-off manuscript, with the global switch on, "
-              "and reports it",
-              after_kept == [] and r_kept.get("extraction") == "off"
-              and r_kept_auto.get("extraction") == "off"
-              and r_kept.get("version_no"), str((after_kept, r_kept)))
-        check("a second manuscript in the same workspace still extracts",
-              calls == ["book"] and "extraction" not in r_book, str(calls))
 
         class _OnLLM:
             enabled = True
 
         _OnLLM.config = config
         try:
-            _extract_fn(db, m_kept, _OnLLM())
+            _api.run_extraction(db, m_kept, _OnLLM())
             declined = None
         except ExtractionDisabled as err:
             declined = str(err)
-        check("extract_concepts declines by name on a switched-off "
-              "manuscript (the explicit verb and the MCP tool's road)",
+        check("run_extraction declines by name on a switched-off "
+              "manuscript (the writeup close's and the MCP tool's road)",
               declined is not None and "for this manuscript" in declined
               and "manuscript set --extraction on" in declined,
               str(declined))
@@ -1056,432 +993,24 @@ def check_manuscript_extraction_switch() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def check_extraction_prompt_provenance() -> None:
-    """The author asked: when extraction (or its adjudication pass) runs,
-    say which prompt files shaped it, so they can go read them. The list
-    must be derived from prompt_registry.REGISTRY (never a hardcoded
-    filename), must reflect the run that actually happened — adjudication
-    appears whenever the call was actually made (opted in, not an
-    aliases-only pass), including a call that ran but came back with
-    nothing usable — and CLI and MCP must report the identical set, since
-    both surfaces just forward the same `prompt_files` field returned by
-    `extraction.extract_concepts`."""
-    import io
-
-    from authorlm import api as _api
-    from authorlm import cli as cli_module
-    from authorlm import extraction
-    from authorlm import mcp_server
+def check_prompt_registry_locations() -> None:
+    """Every registered prompt's location (prompt_registry.py) names a
+    real file on disk — a module-backed one after its ':SYMBOL' suffix is
+    stripped."""
     from authorlm import prompt_registry as pr
 
     repo_root = Path(__file__).resolve().parent.parent
 
     def _on_disk(location: str) -> bool:
-        # module-backed locations carry a ":SYMBOL" suffix after the real
-        # file path (prompt_registry.Prompt.location) — strip it before
-        # checking existence.
         return (repo_root / location.split(":", 1)[0]).is_file()
 
     check("every registered prompt's location resolves to a real file "
           "on disk",
           all(_on_disk(p.location) for p in pr.REGISTRY),
           str([p.location for p in pr.REGISTRY if not _on_disk(p.location)]))
-
-    extraction_loc = pr.by_name("extraction").location
-    adjudication_loc = pr.by_name("adjudication").location
-    edges_loc = pr.by_name("extraction-edges").location
-    aliases_loc = pr.by_name("extraction-aliases").location
-
-    root = Path(tempfile.mkdtemp(prefix="authorlm-promptprov-"))
-    try:
-        ws = root / "ws"
-        ms = ws / "manuscript"
-        ms.mkdir(parents=True)
-        (ms / "00-seed.md").write_text("# Seed\n\nNothing to see here.\n")
-        with contextlib.redirect_stdout(io.StringIO()):
-            cli_main(["--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms)])
-        db = _api.open_db(str(ws))
-        manuscript = _api.get_manuscript(db, "book")
-
-        def two_context_paragraphs(name: str) -> str:
-            return (f"# {name}\n\n" + (f"{name} appears here. " * 4)
-                    + f"\n\n## Later\n\n" + (f"{name} returns here. " * 4)
-                    + "\n")
-
-        class ExtractOnlyLLM:
-            """No `.config` attribute — adjudication.enabled() reads
-            `getattr(llm, 'config', None) or {}`, so this stays off."""
-            enabled = True
-            extraction_max_chars = 24000
-
-            def __init__(self, concept_name: str):
-                self.concept_name = concept_name
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [
-                    {"name": self.concept_name, "kind": "concept",
-                     "notes": "a definition"}],
-                        "links": [], "aliases": []}
-
-            def stats_line(self):
-                return None
-
-        class AdjudicatingLLM:
-            """Opts into adjudication and answers both LLM calls the pass
-            makes: extraction (plain payload) then adjudication (payload
-            starts with 'CANDIDATE ...', per adjudication._render_candidates)."""
-            enabled = True
-            extraction_max_chars = 24000
-
-            def __init__(self, concept_name: str):
-                self.config = {"extraction": {"adjudicate": True}}
-                self.concept_name = concept_name
-                self.calls = 0
-
-            def complete_json(self, system, user, thinking_budget=None):
-                self.calls += 1
-                if user.startswith("CANDIDATE"):
-                    return {"concepts": [
-                        {"name": self.concept_name, "verdict": "new"}],
-                            "links": []}
-                return {"concepts": [
-                    {"name": self.concept_name, "kind": "concept",
-                     "notes": "a definition"}],
-                        "links": [], "aliases": []}
-
-            def stats_line(self):
-                return None
-
-        # --- (a)+(b): adjudication OFF — only extraction.md is reported,
-        # via the CLI surface (_run_extraction's printed output). ---
-        (ms / "01-cli-off.md").write_text(two_context_paragraphs("CliOffConcept"))
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            cli_module._run_extraction(db, manuscript, ExtractOnlyLLM("CliOffConcept"),
-                                       files=["01-cli-off.md"])
-        cli_off_out = buf.getvalue()
-        check("CLI reports the extraction prompt file after a plain pass",
-              f"Prompts: {extraction_loc}" in cli_off_out, cli_off_out)
-        check("CLI does NOT report adjudication.md when adjudication "
-              "never ran",
-              adjudication_loc not in cli_off_out, cli_off_out)
-
-        # --- same scenario via MCP: adjudication OFF. ---
-        (ms / "02-mcp-off.md").write_text(two_context_paragraphs("McpOffConcept"))
-        prev_workspace = mcp_server._WORKSPACE
-        prev_llm = mcp_server._llm
-        mcp_server._WORKSPACE = str(ws)
-        try:
-            mcp_server._llm = lambda: ExtractOnlyLLM("McpOffConcept")
-            mcp_off = mcp_server.extract_concepts(
-                files=["02-mcp-off.md"], manuscript="book")
-        finally:
-            mcp_server._WORKSPACE = prev_workspace
-            mcp_server._llm = prev_llm
-        check("MCP extract_concepts carries prompt_files as structured "
-              "data, matching the CLI's set when adjudication is off",
-              mcp_off["ok"] is True
-              and mcp_off["result"]["prompt_files"] == [extraction_loc],
-              str(mcp_off))
-
-        # --- (b): adjudication ON, via CLI — both files listed. ---
-        (ms / "03-cli-on.md").write_text(two_context_paragraphs("CliOnConcept"))
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            cli_module._run_extraction(db, manuscript, AdjudicatingLLM("CliOnConcept"),
-                                       files=["03-cli-on.md"])
-        cli_on_out = buf.getvalue()
-        check("CLI reports BOTH extraction.md and adjudication.md when "
-              "adjudication actually ran",
-              f"Prompts: " in cli_on_out
-              and extraction_loc in cli_on_out
-              and adjudication_loc in cli_on_out,
-              cli_on_out)
-
-        # --- same scenario via MCP: adjudication ON — identical set. ---
-        (ms / "04-mcp-on.md").write_text(two_context_paragraphs("McpOnConcept"))
-        mcp_server._WORKSPACE = str(ws)
-        try:
-            mcp_server._llm = lambda: AdjudicatingLLM("McpOnConcept")
-            mcp_on = mcp_server.extract_concepts(
-                files=["04-mcp-on.md"], manuscript="book")
-        finally:
-            mcp_server._WORKSPACE = prev_workspace
-            mcp_server._llm = prev_llm
-        check("MCP reports the same prompt set as the CLI when "
-              "adjudication ran (deterministic: reflects the actual run)",
-              mcp_on["ok"] is True
-              and set(mcp_on["result"]["prompt_files"])
-              == {extraction_loc, adjudication_loc},
-              str(mcp_on))
-
-        # --- CORRECTION (it-b6fd1a7e5ea0 follow-up): adjudication that
-        # RAN but came back with nothing usable (malformed reply here;
-        # zero candidates or a model failure hit the same `verdicts is
-        # None` path inside adjudication.adjudicate()) must still report
-        # adjudication.md. The Sponsor's own trade: "as long as the
-        # adjudicator prompts are visible every time it runs, I'll be
-        # able to figure out if there is something wrong with the
-        # prompt" — every time it RUNS, not every time it succeeds. ---
-        class AdjudicatingButEmptyLLM:
-            """Opts into adjudication; the adjudication call itself
-            returns a non-dict reply, so adjudication.adjudicate() comes
-            back with verdicts=None — exercising the 'ran but empty'
-            path, distinct from 'never ran'."""
-            enabled = True
-            extraction_max_chars = 24000
-
-            def __init__(self, concept_name: str):
-                self.config = {"extraction": {"adjudicate": True}}
-                self.concept_name = concept_name
-
-            def complete_json(self, system, user, thinking_budget=None):
-                if user.startswith("CANDIDATE"):
-                    return "not a dict"  # malformed adjudication reply
-                return {"concepts": [
-                    {"name": self.concept_name, "kind": "concept",
-                     "notes": "a definition"}],
-                        "links": [], "aliases": []}
-
-            def stats_line(self):
-                return None
-
-        (ms / "07-empty.md").write_text(two_context_paragraphs("EmptyAdjConcept"))
-        empty_result = extraction.extract_concepts(
-            db, manuscript, AdjudicatingButEmptyLLM("EmptyAdjConcept"),
-            files=["07-empty.md"])
-        check("adjudication.md is reported even when the adjudication "
-              "call ran but returned nothing usable",
-              empty_result is not None
-              and adjudication_loc in empty_result["prompt_files"],
-              str(empty_result))
-        check("a run where adjudication ran but yielded nothing is "
-              "distinctly flagged (adjudication_empty), not silently "
-              "indistinguishable from a clean pass",
-              empty_result.get("adjudication_empty") is True,
-              str(empty_result))
-
-        (ms / "08-flag-off.md").write_text(two_context_paragraphs("FlagOffConcept"))
-        flag_off_result = extraction.extract_concepts(
-            db, manuscript, ExtractOnlyLLM("FlagOffConcept"),
-            files=["08-flag-off.md"])
-        check("adjudication_empty stays False when adjudication never "
-              "ran at all (flag off) — 'never ran' and 'ran but empty' "
-              "must stay distinguishable",
-              flag_off_result is not None
-              and flag_off_result.get("adjudication_empty") is False
-              and adjudication_loc not in flag_off_result["prompt_files"],
-              str(flag_off_result))
-
-        # --- same 'ran but empty' scenario via the CLI surface: the
-        # prompt still appears on the Prompts line, plus a distinct note. ---
-        (ms / "09-cli-empty.md").write_text(two_context_paragraphs("CliEmptyConcept"))
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            cli_module._run_extraction(
-                db, manuscript, AdjudicatingButEmptyLLM("CliEmptyConcept"),
-                files=["09-cli-empty.md"])
-        cli_empty_out = buf.getvalue()
-        check("CLI still lists adjudication.md when the call ran but "
-              "returned nothing usable",
-              adjudication_loc in cli_empty_out, cli_empty_out)
-        check("CLI surfaces a distinct note for 'ran but empty', so it "
-              "reads differently from a clean adjudicated pass",
-              "adjudication ran but the model returned nothing usable"
-              in cli_empty_out, cli_empty_out)
-
-        # --- edges-only and aliases-only runs report THEIR prompt, not
-        # the base 'extraction' one — the flags change which prompt the
-        # run actually used. ---
-        _api.add_concept(db, manuscript, "EdgeAlpha", kind="concept")
-        _api.add_concept(db, manuscript, "EdgeBeta", kind="concept")
-        (ms / "05-edges.md").write_text(
-            "# Edges\n\nEdgeAlpha relates closely to EdgeBeta in this text.\n")
-
-        class EdgesLLM:
-            enabled = True
-            extraction_max_chars = 24000
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [], "links": [
-                    {"from": "EdgeAlpha", "relation": "depends_on",
-                     "to": "EdgeBeta"}]}
-
-            def stats_line(self):
-                return None
-
-        edges_result = extraction.extract_concepts(
-            db, manuscript, EdgesLLM(), files=["05-edges.md"], edges_only=True)
-        check("an --edges run reports extraction-edges' prompt, not the "
-              "base extraction prompt",
-              edges_result is not None
-              and edges_result["prompt_files"] == [edges_loc],
-              str(edges_result))
-
-        _api.add_concept(db, manuscript, "AliasGamma", kind="concept")
-        _api.add_concept(db, manuscript, "AliasGammaAlt", kind="concept")
-        sentence = "AliasGammaAlt is another name for AliasGamma in this text."
-        (ms / "06-aliases.md").write_text(f"# Aliases\n\n{sentence}\n")
-
-        class AliasesLLM:
-            enabled = True
-            extraction_max_chars = 24000
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [], "links": [], "aliases": [
-                    {"alias": "AliasGammaAlt", "canonical": "AliasGamma",
-                     "sentence": sentence}]}
-
-            def stats_line(self):
-                return None
-
-        aliases_result = extraction.extract_concepts(
-            db, manuscript, AliasesLLM(), files=["06-aliases.md"],
-            aliases_only=True)
-        check("an --aliases run reports extraction-aliases' prompt, not "
-              "the base extraction prompt",
-              aliases_result is not None
-              and aliases_result["prompt_files"] == [aliases_loc],
-              str(aliases_result))
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def check_extraction_skip_reasons() -> None:
-    """it-b6fd1a7e5ea0: extraction lumped five unrelated skip causes into
-    one `skipped` counter and one CLI word — "malformed" — which was
-    simply false for two of them: an unknown relation (VALID_RELATIONS)
-    and an unknown endpoint (not yet a known concept) are the extractor's
-    own deliberate policy, not a bad model reply. This proves the split:
-    each cause lands in its own bucket, the CLI never calls a policy
-    rejection "malformed", and the three buckets always reconstitute the
-    OLD single total exactly for the same input — reporting changed,
-    skip BEHAVIOR did not."""
-    import io
-
-    from authorlm import api as _api
-    from authorlm import cli as cli_module
-    from authorlm import extraction
-
-    root = Path(tempfile.mkdtemp(prefix="authorlm-skipreasons-"))
-    try:
-        ws = root / "ws"
-        ms = ws / "manuscript"
-        ms.mkdir(parents=True)
-        (ms / "00-seed.md").write_text("# Seed\n\nNothing to see here.\n")
-        with contextlib.redirect_stdout(io.StringIO()):
-            cli_main(["--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms)])
-        db = _api.open_db(str(ws))
-        manuscript = _api.get_manuscript(db, "book")
-
-        _api.add_concept(db, manuscript, "KnownAlpha", kind="concept")
-        _api.add_concept(db, manuscript, "KnownBeta", kind="concept")
-        (ms / "01-skips.md").write_text(
-            "# Skips\n\nKnownAlpha relates to KnownBeta in this passage. "
-            "KnownAlpha also touches Ghost here.\n")
-
-        class SkipMixLLM:
-            """One payload exercising all five original skip sites: two
-            malformed concepts, two malformed links, one unknown-relation
-            link, one unknown-endpoint link, two malformed aliases."""
-            enabled = True
-            extraction_max_chars = 24000
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {
-                    "concepts": [
-                        "not-a-dict",           # malformed: not a dict
-                        {"kind": "concept"},    # malformed: no name
-                    ],
-                    "links": [
-                        "not-a-dict",           # malformed: not a dict
-                        {"from": "KnownAlpha", "relation": "depends_on",
-                         "to": "KnownAlpha"},   # malformed: src == dst
-                        {"from": "KnownAlpha", "relation": "not-a-real-relation",
-                         "to": "KnownBeta"},    # unknown relation (policy)
-                        {"from": "KnownAlpha", "relation": "depends_on",
-                         "to": "Ghost"},        # unknown endpoint (Ghost unknown)
-                    ],
-                    "aliases": [
-                        "not-a-dict",           # malformed: not a dict
-                        {"alias": "", "canonical": "", "sentence": ""},
-                    ],
-                }
-
-            def stats_line(self):
-                return None
-
-        result = extraction.extract_concepts(
-            db, manuscript, SkipMixLLM(), files=["01-skips.md"])
-
-        check("an unknown-relation item lands in skipped_unknown_relation, "
-              "NOT skipped_malformed",
-              result is not None and result["skipped_unknown_relation"] == 1,
-              str(result))
-        check("an unknown-endpoint item lands in skipped_unknown_endpoint, "
-              "NOT skipped_malformed",
-              result["skipped_unknown_endpoint"] == 1, str(result))
-        check("a non-dict item (concept/link/alias) lands in "
-              "skipped_malformed",
-              result["skipped_malformed"] == 6, str(result))
-        check("the three buckets sum EXACTLY to the old single 'skipped' "
-              "total for the same input — reporting split, skip BEHAVIOR "
-              "unchanged",
-              result["skipped_malformed"] + result["skipped_unknown_endpoint"]
-              + result["skipped_unknown_relation"] == result["skipped"]
-              and result["skipped"] == 8,
-              str(result))
-
-        # --- CLI wording: only the malformed bucket may say "malformed";
-        # the other two are named for what they actually are. ---
-        (ms / "02-skips.md").write_text(
-            "# Skips2\n\nKnownAlpha relates to KnownBeta in this passage too. "
-            "KnownAlpha also touches Ghost2 here.\n")
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            cli_module._run_extraction(db, manuscript, SkipMixLLM(),
-                                       files=["02-skips.md"])
-        cli_out = buf.getvalue()
-        check("CLI reports the malformed count under the word 'malformed'",
-              "skipped 6 malformed item(s)" in cli_out, cli_out)
-        check("CLI names the unknown-relation skips honestly, not as "
-              "'malformed'",
-              "1 relationship(s) named an unrecognized relation" in cli_out,
-              cli_out)
-        check("CLI names the unknown-endpoint skips honestly, not as "
-              "'malformed'",
-              "1 relationship(s) named an unknown concept" in cli_out,
-              cli_out)
-
-        # --- MCP carries the same three buckets as structured data,
-        # resolved in the same one place extraction.py already computes
-        # them — no separate MCP-side logic to drift. ---
-        from authorlm import mcp_server
-
-        (ms / "03-skips.md").write_text(
-            "# Skips3\n\nKnownAlpha relates to KnownBeta in this passage as "
-            "well. KnownAlpha also touches Ghost3 here.\n")
-        prev_workspace = mcp_server._WORKSPACE
-        prev_llm = mcp_server._llm
-        mcp_server._WORKSPACE = str(ws)
-        try:
-            mcp_server._llm = lambda: SkipMixLLM()
-            mcp_result = mcp_server.extract_concepts(
-                files=["03-skips.md"], manuscript="book")
-        finally:
-            mcp_server._WORKSPACE = prev_workspace
-            mcp_server._llm = prev_llm
-        check("MCP extract_concepts carries the split skip buckets as "
-              "structured data, matching the CLI/direct-call shape",
-              mcp_result["ok"] is True
-              and mcp_result["result"]["skipped_malformed"] == 6
-              and mcp_result["result"]["skipped_unknown_relation"] == 1
-              and mcp_result["result"]["skipped_unknown_endpoint"] == 1,
-              str(mcp_result))
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    check("the old extraction prompts are gone from the registry",
+          not any(p.name in ("extraction-legacy", "extraction-edges",
+                             "extraction-aliases") for p in pr.REGISTRY))
 
 
 def check_backup_and_restore() -> None:
@@ -1746,7 +1275,7 @@ def check_backup_and_restore() -> None:
 
 def _guard_fixture(prefix: str):
     """Common workspace/manuscript setup for the Q-remediation guard tests
-    (check_alias_guard / check_alias_dedupe / check_note_group /
+    (check_alias_fates / check_alias_dedupe / check_note_group /
     check_note_materiality below). Caller is responsible for
     shutil.rmtree(root, ignore_errors=True) in a finally block."""
     import io
@@ -1764,61 +1293,156 @@ def _guard_fixture(prefix: str):
     return root, ws, ms, db, manuscript
 
 
-def check_alias_guard() -> None:
-    """Q/alias-guard: never propose an alias whose name is already a live
-    concept — refused at the extraction.py creation site and recorded as
-    system-provenance evidence instead of silently dropped.
+class _SectionStub:
+    """A section-call model for `extraction.run`: answers every section
+    with the same candidate list, citing the first paragraph the call
+    shows (the test's fixtures are one paragraph long)."""
+    enabled = True
 
-    Ratified against measured evidence on the author's live graph: 13 of
-    20 open alias proposals named a concept that was already its own live
-    concept (e.g. 'History' -> 'Rebirth', with 'History' itself live)."""
+    def __init__(self, reply: dict, config: dict | None = None):
+        self.reply, self.config = reply, config or {}
+        self.model, self.purpose = "stub/section", "extraction"
+        self.input_tokens = self.output_tokens = 0
+        self.cache_read_tokens = self.cache_write_tokens = 0
+        self.calls: list[tuple[str, str]] = []
+
+    def complete_json(self, system, user, thinking_budget=None):
+        import re as _re
+
+        self.calls.append((system, user))
+        prose = [int(m.group(1)) for m in _re.finditer(
+            r"^\[(\d+)\] (.)", user.split("E — THE SECTION", 1)[1], _re.M)
+            if m.group(2) != "#"]                    # a paragraph, not a heading
+        n = prose[0] if prose else 1
+        out = json.loads(json.dumps(self.reply))
+        for key in ("concepts", "links", "aliases"):
+            for item in out.get(key) or []:
+                item.setdefault("paragraphs" if key == "concepts"
+                                else "paragraph", [n] if key == "concepts"
+                                else n)
+        return out
+
+    def stats_line(self):
+        return None
+
+    def _missing_key_var(self):
+        return None
+
+
+class _JudgeStub(_SectionStub):
+    """The adjudicator: one verdict for every candidate it is shown."""
+
+    def __init__(self, verdict: dict | None):
+        super().__init__({})
+        self.verdict, self.model = verdict, "stub/judge"
+
+    def complete_json(self, system, user, thinking_budget=None):
+        import re as _re
+
+        self.calls.append((system, user))
+        if self.verdict is None:
+            return None
+        ids = _re.findall(r"^\[([cl]\d+)\] ", user, _re.M)
+        return {"verdicts": [{"id": i, **self.verdict} for i in ids]}
+
+
+def _run_native(db, manuscript, file: str, section: _SectionStub,
+                judge: _JudgeStub, run_id: str = "extract-t") -> dict:
     from authorlm import extraction
 
-    root, ws, ms, db, manuscript = _guard_fixture("authorlm-alias-guard-")
+    api.collect(db, manuscript, {})
+    knob = extraction.knobs({})
+    payloads = extraction.assemble_essay(db, manuscript, file, knob=knob)
+    return extraction.run(db, manuscript, [(file, payloads)],
+                          extract_llm=section, judge_llm=judge, knob=knob,
+                          run_id=run_id, advance_watermark=False)
+
+
+def check_alias_fates() -> None:
+    """§4.7 through `extraction.run`, the three Q/alias rulings in one
+    place. Q/alias-guard: an alias whose name is already a LIVE concept is
+    a merge mislabelled, refused and recorded as system-provenance
+    evidence (13 of 20 open proposals on the author's live graph).
+    Q/alias-retired-guard: a name that is a RETIRED concept is a side
+    door around the retired-name ban, refused under a DISTINCT signal (6
+    of 20). Q/alias-guide-flip: a genuinely new name bestowed on a known
+    concept — the naming ceremony — PRODUCES an adoptable proposal that
+    ADDS the name (the positive case; without it the feature is dead)."""
+    from authorlm import proposals as prop
+    from authorlm.concepts import get_concept as _get_concept
+
+    root, ws, ms, db, manuscript = _guard_fixture("authorlm-alias-fates-")
     try:
         mid = manuscript["id"]
-        api.add_concept(db, manuscript, "AliasHistory", kind="concept")
-        api.add_concept(db, manuscript, "AliasRebirth", kind="concept")
-        sentence = "AliasHistory is what we mean by AliasRebirth in this text."
-        (ms / "01-alias.md").write_text(f"# Alias\n\n{sentence}\n")
+        for name in ("AliasHistory", "AliasRebirth", "FlipCanonical",
+                     "RetiredGuardName"):
+            api.add_concept(db, manuscript, name, kind="concept")
+        db.update("concept_nodes", db.one(
+            "SELECT id FROM concept_nodes WHERE manuscript_id = ? AND "
+            "name = ?", (mid, "RetiredGuardName"))["id"], {"status": "retired"})
+        live = "AliasHistory is what we mean by AliasRebirth in this text."
+        new = "We call it FlipBestowed, the resolved name for FlipCanonical."
+        retired = "We once called FlipCanonical by the name RetiredGuardName."
+        (ms / "01-alias.md").write_text(f"# Alias\n\n{live} {new} {retired}\n")
+        check("the bestowed name does not exist as a concept before "
+              "extraction", _get_concept(db, mid, "FlipBestowed") is None)
+        before = db.one("SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+                        "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
+        report = _run_native(db, manuscript, "01-alias.md", _SectionStub({
+            "concepts": [], "links": [], "aliases": [
+                {"alias": "AliasHistory", "canonical": "AliasRebirth",
+                 "sentence": live},
+                {"alias": "FlipBestowed", "canonical": "FlipCanonical",
+                 "sentence": new},
+                {"alias": "RetiredGuardName", "canonical": "FlipCanonical",
+                 "sentence": retired}]}), _JudgeStub({"verdict": "new"}))
+        written = report["essays"][0]["written"]
+        check("the run reports each alias candidate's fate by name",
+              written["aliases"] == {"alias_fold_refused": 1,
+                                     "alias_retired_refused": 1,
+                                     "proposed": 1}, str(written))
+        after = db.one("SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
+                       "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
+        check("only the naming ceremony creates a proposal",
+              after == before + 1, str((before, after)))
 
-        class LiveAliasLLM:
-            enabled = True
-            extraction_max_chars = 24000
+        def evidence(signal: str) -> list[dict]:
+            return [dict(r) for r in db.all(
+                "SELECT * FROM evidence WHERE manuscript_id = ? AND "
+                "evidence_type = 'extraction_adjudication' AND signal = ?",
+                (mid, signal))]
 
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [], "links": [], "aliases": [
-                    {"alias": "AliasHistory", "canonical": "AliasRebirth",
-                     "sentence": sentence}]}
+        fold, ret = evidence("alias_fold_refused"), evidence("alias_retired_refused")
+        check("the live-concept fold is recorded as low-weight "
+              "system-provenance evidence, not silently dropped",
+              len(fold) == 1 and fold[0]["weight"] == "low", str(fold))
+        check("the retired-name refusal is recorded under its own signal — "
+              "the two reasons stay separable",
+              len(ret) == 1 and ret[0]["weight"] == "low"
+              and loads(ret[0]["metadata"], {}).get("alias")
+              == "RetiredGuardName", str(ret))
 
-            def stats_line(self):
-                return None
-
-        alias_before = db.one(
-            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
-            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
-        alias_result = extraction.extract_concepts(
-            db, manuscript, LiveAliasLLM(), files=["01-alias.md"],
-            aliases_only=True)
-        alias_after = db.one(
-            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
-            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
-        check("an alias whose name is already a live concept creates no "
-              "proposal",
-              alias_result is not None and alias_after == alias_before,
-              str(alias_result))
-        check("extract_concepts reports exactly one refused fold",
-              alias_result is not None
-              and alias_result.get("alias_folds_refused") == 1,
-              str(alias_result))
-        alias_evidence = db.all(
-            "SELECT * FROM evidence WHERE manuscript_id = ? "
-            "AND evidence_type = 'extraction_adjudication' "
-            "AND signal = 'alias_fold_refused'", (mid,))
-        check("the refusal is recorded as low-weight system-provenance "
-              "evidence, not silently dropped",
-              len(alias_evidence) == 1 and alias_evidence[0]["weight"] == "low",
-              str([dict(r) for r in alias_evidence]))
+        row = db.one("SELECT * FROM knowledge_proposals WHERE manuscript_id "
+                     "= ? AND kind = 'alias' AND state = 'open'", (mid,))
+        payload = loads(row["payload"], {})
+        check("the produced proposal is flagged as a new-name naming "
+              "ceremony, not a merge, and carries where it was read",
+              payload.get("alias_is_new") is True
+              and payload.get("location") == "01-alias.md"
+              and payload.get("paragraph") == 2, str(payload))
+        summary, details = prop.describe(dict(row))
+        check("describe() phrases adoption as 'add', not 'merge', for a "
+              "naming ceremony", "adopt = add:" in " ".join(details), details)
+        message = prop.adopt(db, mid, dict(row))
+        canonical = db.one("SELECT * FROM concept_nodes WHERE manuscript_id = "
+                           "? AND name = ?", (mid, "FlipCanonical"))
+        check("adopting it ADDS the name to the canonical concept; no "
+              "second node is created",
+              "recorded as a new name for 'FlipCanonical'" in message
+              and "FlipBestowed" in loads(canonical["aliases"], [])
+              and db.one("SELECT COUNT(*) AS n FROM concept_nodes WHERE "
+                         "manuscript_id = ? AND lower(name) = lower(?)",
+                         (mid, "FlipBestowed"))["n"] == 0, message)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -1998,227 +1622,50 @@ def check_note_materiality() -> None:
               "over-cutting; do not lower it to 0.75)",
               allowed_refine is None, str(allowed_refine))
 
-        # End-to-end through extract_concepts, not just the helper: the
-        # near-paraphrase creates no proposal and is reported refused; the
-        # 0.75-0.90 refinement still reaches the queue as a real proposal.
+        # End-to-end through `extraction.run`, not just the helper: an
+        # `improves` verdict whose notes are a near-paraphrase creates no
+        # proposal and the candidate is logged subsumed with the floor
+        # named; the 0.75-0.90 refinement still reaches the queue.
         api.add_concept(db, manuscript, "MaterialTerm", kind="concept",
                         notes=base_note)
-        (ms / "02-materiality-block.md").write_text(
-            f"# M\n\nMaterialTerm: {near_paraphrase}\n")
-
-        class NearParaphraseLLM:
-            enabled = True
-            extraction_max_chars = 24000
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [
-                    {"name": "MaterialTerm", "kind": "concept",
-                     "notes": near_paraphrase}],
-                        "links": [], "aliases": []}
-
-            def stats_line(self):
-                return None
-
+        (ms / "02-materiality.md").write_text(
+            "# M\n\nThe MaterialTerm is discussed at length here.\n")
         note_before = db.one(
             "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
             "manuscript_id = ? AND kind = 'note_update'", (mid,))["n"]
-        block_result = extraction.extract_concepts(
-            db, manuscript, NearParaphraseLLM(),
-            files=["02-materiality-block.md"])
+        candidate = {"concepts": [
+            {"name": "MaterialTerm", "kind": "concept", "notes": base_note,
+             "span": "The MaterialTerm is discussed at length here.",
+             "confidence": 0.9}], "links": [], "aliases": []}
+        report = _run_native(db, manuscript, "02-materiality.md",
+                             _SectionStub(candidate),
+                             _JudgeStub({"verdict": "improves",
+                                         "notes": near_paraphrase,
+                                         "reason": "reworded"}), "extract-m1")
         note_after = db.one(
             "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
             "manuscript_id = ? AND kind = 'note_update'", (mid,))["n"]
+        row = db.one("SELECT * FROM evidence WHERE manuscript_id = ? AND "
+                     "evidence_type = 'extraction_adjudication' AND "
+                     "target = 'MaterialTerm (concept)' ORDER BY created_at "
+                     "DESC", (mid,))
         check("end-to-end: a >=0.90 paraphrase creates no note_update "
-              "proposal", note_after == note_before, str(block_result))
-        check("end-to-end: extract_concepts reports the materiality "
-              "refusal",
-              block_result is not None
-              and len(block_result.get("materiality_refused") or []) == 1
-              and "MaterialTerm" in block_result["materiality_refused"][0],
-              str(block_result))
-
-        (ms / "03-materiality-allow.md").write_text(
-            f"# M2\n\nMaterialTerm: {refinement}\n")
-
-        class RefinementLLM:
-            enabled = True
-            extraction_max_chars = 24000
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [
-                    {"name": "MaterialTerm", "kind": "concept",
-                     "notes": refinement}],
-                        "links": [], "aliases": []}
-
-            def stats_line(self):
-                return None
-
-        allow_result = extraction.extract_concepts(
-            db, manuscript, RefinementLLM(),
-            files=["03-materiality-allow.md"])
+              "proposal, and the run says the floor held it back",
+              note_after == note_before
+              and report["essays"][0]["signals"].get("subsumed") == 1
+              and "materiality floor" in loads(row["metadata"], {})["reason"],
+              str((note_after, report["essays"][0]["signals"],
+                   loads(row["metadata"], {}).get("reason"))))
+        _run_native(db, manuscript, "02-materiality.md",
+                    _SectionStub(candidate),
+                    _JudgeStub({"verdict": "improves", "notes": refinement,
+                                "reason": "refined"}), "extract-m2")
         note_after_allow = db.one(
             "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
             "manuscript_id = ? AND kind = 'note_update'", (mid,))["n"]
         check("end-to-end: a genuine ~0.80-similarity refinement still "
               "reaches the queue as a real note_update proposal",
-              note_after_allow == note_after + 1, str(allow_result))
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def check_alias_guide_flip() -> None:
-    """Q/alias-guide-flip: the ALIAS GUIDE now requires the canonical to
-    already be a known concept and the alias to be a name that is NOT yet
-    its own known concept — the naming-ceremony case ("we call it The
-    Chid"). Measured against the author's 20 open alias proposals: 14
-    alias names were LIVE concepts (genuine merges mislabelled as
-    aliases), 6 were RETIRED, and 0 were the naming-ceremony case the old
-    guide actually forbade ("BOTH names are known concepts"). This proves
-    the positive case: a genuinely new name bestowed on a known concept
-    now PRODUCES a real, adoptable alias proposal — without it the guard
-    would leave the whole feature dead."""
-    from authorlm import extraction, proposals as prop
-    from authorlm.concepts import get_concept as _get_concept
-
-    root, ws, ms, db, manuscript = _guard_fixture("authorlm-alias-flip-")
-    try:
-        mid = manuscript["id"]
-        api.add_concept(db, manuscript, "FlipCanonical", kind="concept",
-                        notes="the established term")
-        sentence = "We call it FlipBestowed, the resolved name for FlipCanonical."
-        (ms / "01-flip.md").write_text(f"# Flip\n\n{sentence}\n")
-
-        class NamingCeremonyLLM:
-            enabled = True
-            extraction_max_chars = 24000
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [], "links": [], "aliases": [
-                    {"alias": "FlipBestowed", "canonical": "FlipCanonical",
-                     "sentence": sentence}]}
-
-            def stats_line(self):
-                return None
-
-        check("the bestowed name does not exist as a concept before "
-              "extraction",
-              _get_concept(db, mid, "FlipBestowed") is None)
-        before = db.one(
-            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
-            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
-        result = extraction.extract_concepts(
-            db, manuscript, NamingCeremonyLLM(), files=["01-flip.md"],
-            aliases_only=True)
-        after = db.one(
-            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
-            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
-        check("a naming ceremony for a genuinely new name PRODUCES an "
-              "alias proposal",
-              result is not None and after == before + 1, str(result))
-        row = db.one(
-            "SELECT * FROM knowledge_proposals WHERE manuscript_id = ? "
-            "AND kind = 'alias' AND state = 'open'", (mid,))
-        payload = loads(row["payload"], {})
-        check("the produced proposal is flagged as a new-name naming "
-              "ceremony, not a merge",
-              payload.get("alias_is_new") is True, str(payload))
-        summary, details = prop.describe(dict(row))
-        check("describe() phrases adoption as 'add', not 'merge', for a "
-              "naming ceremony",
-              "adopt = add:" in " ".join(details), details)
-
-        message = prop.adopt(db, mid, dict(row))
-        check("adopting the naming-ceremony proposal ADDS the name rather "
-              "than attempting a merge",
-              "recorded as a new name for 'FlipCanonical'" in message,
-              message)
-        canonical = db.one(
-            "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND name = ?",
-            (mid, "FlipCanonical"))
-        check("the canonical concept's aliases now include the bestowed "
-              "name",
-              "FlipBestowed" in loads(canonical["aliases"], []),
-              canonical["aliases"])
-        check("no second concept_nodes row was created for the bestowed "
-              "name (it is an alias, not a new node)",
-              db.one(
-                  "SELECT COUNT(*) AS n FROM concept_nodes WHERE "
-                  "manuscript_id = ? AND lower(name) = lower(?)",
-                  (mid, "FlipBestowed"))["n"] == 0)
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def check_alias_retired_guard() -> None:
-    """Q/alias-retired-guard: an alias whose name is a RETIRED concept is
-    also refused, not just one whose name is a live concept. Retired names
-    are banned from re-entering the graph (extraction.py's `banned` set in
-    the concepts loop); an alias would be a side door around that ban, so
-    it is refused and recorded under a signal DISTINCT from the
-    live-concept fold (Q/alias-guard) — the two reasons stay separable in
-    the evidence: 6 of the author's 20 open alias proposals named a
-    retired concept."""
-    from authorlm import extraction
-
-    root, ws, ms, db, manuscript = _guard_fixture("authorlm-alias-retired-")
-    try:
-        mid = manuscript["id"]
-        api.add_concept(db, manuscript, "RetiredGuardCanon", kind="concept")
-        api.add_concept(db, manuscript, "RetiredGuardName", kind="concept")
-        db.update(
-            "concept_nodes",
-            db.one("SELECT id FROM concept_nodes WHERE manuscript_id = ? "
-                   "AND name = ?", (mid, "RetiredGuardName"))["id"],
-            {"status": "retired"})
-        sentence = ("We once called RetiredGuardCanon by the name "
-                    "RetiredGuardName.")
-        (ms / "01-retired.md").write_text(f"# Retired\n\n{sentence}\n")
-
-        class RetiredAliasLLM:
-            enabled = True
-            extraction_max_chars = 24000
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [], "links": [], "aliases": [
-                    {"alias": "RetiredGuardName",
-                     "canonical": "RetiredGuardCanon",
-                     "sentence": sentence}]}
-
-            def stats_line(self):
-                return None
-
-        before = db.one(
-            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
-            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
-        result = extraction.extract_concepts(
-            db, manuscript, RetiredAliasLLM(), files=["01-retired.md"],
-            aliases_only=True)
-        after = db.one(
-            "SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
-            "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
-        check("an alias naming a retired concept creates no proposal",
-              result is not None and after == before, str(result))
-        check("extract_concepts reports exactly one retired-name refusal, "
-              "separately from live-concept folds",
-              result is not None
-              and result.get("alias_retired_refused") == 1
-              and result.get("alias_folds_refused") == 0,
-              str(result))
-        retired_evidence = db.all(
-            "SELECT * FROM evidence WHERE manuscript_id = ? "
-            "AND evidence_type = 'extraction_adjudication' "
-            "AND signal = 'alias_retired_refused'", (mid,))
-        check("the retired-name refusal is recorded under its own signal",
-              len(retired_evidence) == 1
-              and retired_evidence[0]["weight"] == "low", str(
-                  [dict(r) for r in retired_evidence]))
-        live_evidence = db.all(
-            "SELECT * FROM evidence WHERE manuscript_id = ? "
-            "AND evidence_type = 'extraction_adjudication' "
-            "AND signal = 'alias_fold_refused'", (mid,))
-        check("no live-concept-fold evidence is recorded for a retired-name "
-              "refusal — the two reasons stay separable",
-              len(live_evidence) == 0, str([dict(r) for r in live_evidence]))
+              note_after_allow == note_after + 1, str(note_after_allow))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -3259,7 +2706,7 @@ def check_scope_evidence_batched_lookup() -> None:
             (ms / name).write_text(f"# {name}\n\nText.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms), "--no-extract"])
+                      "--path", str(ms)])
         db = api.open_db(str(ws))
         manuscript = api.get_manuscript(db)
         api.ensure_session(db, manuscript)
@@ -3364,7 +2811,7 @@ def check_scope_evidence() -> None:
             (ms / name).write_text(f"# {name}\n\nText.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms), "--no-extract"])
+                      "--path", str(ms)])
         db = api.open_db(str(ws))
         manuscript = api.get_manuscript(db)
         api.ensure_session(db, manuscript)
@@ -3700,11 +3147,14 @@ def check_placeholder_reader_paths() -> None:
         from authorlm import summaries as _sums
         from authorlm.db import ko_fields as _ko
 
+        pinned_text = "# Epictetus\n\nThe old essay stands here.\n"
         srow = _ko("es")
         srow.update(manuscript_id=manuscript["id"], file="01-epictetus.md",
                     summary="MOVES: [1] the pre-rewrite essay.",
-                    source_hash=_sums._hash(
-                        "# Epictetus\n\nThe old essay stands here.\n"),
+                    source_hash=_sums._hash(pinned_text),
+                    sections_hash=_sums.sections_hash(
+                        [s["section_hash"]
+                         for s in _sums.sections_of(pinned_text)]),
                     upstream_hash="", upstream_stale=0, status="current")
         db.insert("essay_summaries", srow)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -6404,7 +5854,7 @@ def check_workspace_guard() -> None:
         check("...and creates nothing (logs may appear; the database file is the tell)",
               not api.db_path(ws).exists())
         _, code = run("--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms), "--no-extract")
+                      "--path", str(ms))
         check("-w init creates the database", code is None and api.db_path(ws).exists(), f"{code}")
 
         # 3. no pointer, no database, no terminal: refuse and name setup.
@@ -6431,7 +5881,7 @@ def check_workspace_guard() -> None:
               isinstance(code, str) and "mount" in code and "AUTHORLM_WORKSPACE" in code, f"{code}")
         check("an empty directory at the pointer does not pass as a database",
               not api.db_path(ws).exists())
-        _, code = run("init", "--name", "again", "--path", str(ms), "--no-extract")
+        _, code = run("init", "--name", "again", "--path", str(ms))
         check("even init refuses under a stale pointer", isinstance(code, str) and "mount" in code, f"{code}")
         check("...and still creates nothing", not api.db_path(ws).exists())
         shutil.rmtree(ws)  # the stand-in mount point (plus any logs the refusals wrote)
@@ -6482,7 +5932,7 @@ def check_filter_prelude_opt_in_frame() -> None:
             "Readers who already know the literature.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(ws), "init", "--name", "book",
-                      "--path", str(ms), "--no-extract"])
+                      "--path", str(ms)])
         db = api.open_db(str(ws))
         manuscript = api.get_manuscript(db)
         run = {"id": "fr-prelude", "file": "02-middle.md",
@@ -6526,6 +5976,81 @@ def check_filter_prelude_opt_in_frame() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def check_retired_link(root: Path, FakeGoogle) -> None:
+    """A retired file is no longer mapped: `doc retire` drops its Doc
+    link, and a link left behind by an older retire does not count as
+    mapped either, so a pull after its tab is deleted reports no
+    "no tab found" for it. Own workspace, own FakeGoogle."""
+    from authorlm.gdocs import _mapping, _save_mapping, pull_doc, push_doc
+
+    ws = root / "retired-link-ws"
+    ms = ws / "manuscript"
+    ms.mkdir(parents=True)
+    (ms / "01-keep.md").write_text("# Keep\n\nKept prose.\n")
+    (ms / "02-gone.md").write_text("# Gone\n\nRetired prose.\n")
+    (ms / "03-old.md").write_text("# Old\n\nRetired long ago.\n")
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "retirebook",
+                  "--path", str(ms)])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    stub = FakeGoogle()
+    for name in ("01-keep.md", "02-gone.md", "03-old.md"):
+        pushed = push_doc(db, manuscript, name, service=stub,
+                          docs_service=stub)
+        manuscript = api.get_manuscript(db)
+    stale = dict(_mapping(db, manuscript)["gdocs"]["03-old.md"])
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "doc", "retire", "02-gone"])
+        cli_main(["--workspace", str(ws), "doc", "retire", "03-old"])
+    manuscript = api.get_manuscript(db)
+    links = _mapping(db, manuscript)["gdocs"]
+    check("doc retire drops the retired file's Doc link",
+          "02-gone.md" not in links and "03-old.md" not in links
+          and "01-keep.md" in links, str(sorted(links)))
+
+    # A link an older retire left behind (the SpiritualHindu state).
+    meta = _mapping(db, manuscript)
+    meta["gdocs"]["03-old.md"] = stale
+    _save_mapping(db, manuscript, meta)
+    manuscript = api.get_manuscript(db)
+    tabs = stub.state["docs"][pushed["doc_id"]]
+    tabs[:] = [t for t in tabs
+               if t["title"] not in ("02-gone.md", "03-old.md")]
+    report = pull_doc(db, manuscript, service=stub, docs_service=stub,
+                      with_comments=False)
+    check("a stale link to a file in _retired/ does not count as mapped: "
+          "no 'no tab found' for it after its tab is deleted",
+          report["missing"] == [] and "01-keep.md" in
+          (report["changed"] + report["unchanged"]), str(report))
+    links = _mapping(db, api.get_manuscript(db))["gdocs"]
+    check("pull prunes the stale link once its tab is gone and its file "
+          "is retired", "03-old.md" not in links
+          and report.get("pruned") == ["03-old.md"], str(report))
+
+    # A link whose file no longer exists anywhere, and a live file whose
+    # tab the author deleted (maybe by mistake: push recreates it).
+    (ms / "04-vanish.md").write_text("# Vanish\n\nSoon gone.\n")
+    (ms / "05-live.md").write_text("# Live\n\nStill here.\n")
+    manuscript = api.get_manuscript(db)
+    for name in ("04-vanish.md", "05-live.md"):
+        push_doc(db, manuscript, name, service=stub, docs_service=stub)
+        manuscript = api.get_manuscript(db)
+    (ms / "04-vanish.md").unlink()
+    tabs[:] = [t for t in tabs
+               if t["title"] not in ("04-vanish.md", "05-live.md")]
+    report = pull_doc(db, manuscript, service=stub, docs_service=stub,
+                      with_comments=False)
+    links = _mapping(db, api.get_manuscript(db))["gdocs"]
+    check("pull prunes a link whose tab and file are both gone",
+          "04-vanish.md" not in links
+          and "04-vanish.md" in report.get("pruned", []), str(report))
+    check("a live file whose tab vanished keeps its link and its warning",
+          "05-live.md" in links and report["missing"] == ["05-live.md"],
+          str(report))
+
+
 def check_omit_all(root: Path, FakeGoogle) -> None:
     """`[Omit: all]` (issue #132): one tag that drops a region from every
     export output, present and future, while the Doc TAB — the working
@@ -6549,7 +6074,7 @@ def check_omit_all(root: Path, FakeGoogle) -> None:
     (ms / "02-ledger.md").write_text(ledger)
     with contextlib.redirect_stdout(io.StringIO()):
         cli_main(["--workspace", str(ws), "init", "--name", "omitbook",
-                  "--path", str(ms), "--no-extract"])
+                  "--path", str(ms)])
     db = api.open_db(str(ws))
     manuscript = api.get_manuscript(db)
 
@@ -6642,7 +6167,7 @@ def check_read_manuscript(root: Path, FakeGoogle) -> None:
         "# B\n\nOriginal b content.\n\nSecond paragraph of b.\n")
     with contextlib.redirect_stdout(io.StringIO()):
         cli_main(["--workspace", str(ws), "init", "--name", "readbook",
-                  "--path", str(ms), "--no-extract"])
+                  "--path", str(ms)])
     db = api.open_db(str(ws))
     manuscript = api.get_manuscript(db)
 
@@ -6910,21 +6435,18 @@ def main_test() -> None:
     check_drafting_cache_warning()
     check_drafting_cache_layer()
     check_model_profiles()
-    check_extraction_failure_traced()
+    check_extraction_switch()
     check_manuscript_extraction_switch()
-    check_extraction_prompt_provenance()
-    check_extraction_skip_reasons()
+    check_prompt_registry_locations()
     check_backup_and_restore()
     check_vanished_directory_guard()
     check_unregister_safety()
     check_backup_on_active_session()
     check_summary_deprecation()
-    check_alias_guard()
+    check_alias_fates()
     check_alias_dedupe()
     check_note_group()
     check_note_materiality()
-    check_alias_guide_flip()
-    check_alias_retired_guard()
     check_digest_schema()
     check_workspace_guard()
     check_filter_prelude_opt_in_frame()
@@ -7485,12 +7007,6 @@ def main_test() -> None:
         api.collect(db, manuscript, {})
 
         from authorlm import extraction
-
-        extraction_prompt = extraction.extraction_system()
-        check("extraction prompt keeps definitions out of concept names",
-              '"name" is the shortest stable label' in extraction_prompt
-              and "Do not promote\n  the definiens" in extraction_prompt
-              and 'emit name "Hard\nFloor"' in extraction_prompt)
 
         graph = api.list_concepts(db, manuscript)
         check("list_concepts returns nodes and named edges",
@@ -8346,13 +7862,18 @@ def main_test() -> None:
                 whole = "\n".join(
                     f"# **{t['title']}**\n\n{as_markdown(t['text'])}"
                     for t in dfs(None))
+                self.state["exports"] += 1
                 return FakeRequest(whole.encode("utf-8"))
 
         class FakeDocuments:
             def __init__(self, state):
                 self.state = state
 
-            def get(self, documentId=None, includeTabsContent=None):
+            def get(self, documentId=None, includeTabsContent=None,
+                    fields=None):
+                rev = f"rev-{self.state['rev']}"
+                if fields == "revisionId":
+                    return FakeRequest({"revisionId": rev})
                 if documentId in self.state["uploads"]:
                     content = [{"paragraph": {"elements": [
                         {"textRun": {"content": line + "\n"}}]}}
@@ -8384,10 +7905,17 @@ def main_test() -> None:
                                           if c.get("parent") == t["id"]]}
 
                 return FakeRequest({"tabs": [node(t) for t in flat
-                                             if not t.get("parent")]})
+                                             if not t.get("parent")],
+                                    "revisionId": rev})
 
             def batchUpdate(self, documentId=None, body=None):
                 tabs = self.state["docs"][documentId]
+                required = ((body or {}).get("writeControl") or {}).get(
+                    "requiredRevisionId")
+                if required and required != f"rev-{self.state['rev']}":
+                    raise LookupError("fake Docs: revision moved")
+                if (body or {}).get("requests"):
+                    self.state["rev"] += 1
 
                 def tab(tid):
                     return next(t for t in tabs if t["id"] == tid)
@@ -8438,7 +7966,8 @@ def main_test() -> None:
                                               + target["text"][i:])
                         else:
                             target["text"] += req["insertText"]["text"]
-                return FakeRequest({"replies": replies})
+                return FakeRequest({"replies": replies, "writeControl": {
+                    "requiredRevisionId": f"rev-{self.state['rev']}"}})
 
         class FakeComments:
             def __init__(self, state):
@@ -8469,7 +7998,8 @@ def main_test() -> None:
             def __init__(self):
                 self.state = {"counter": 0, "tab_counter": 0,
                               "comments": {}, "reply_counter": 0,
-                              "folders": [], "docs": {}, "uploads": {}}
+                              "folders": [], "docs": {}, "uploads": {},
+                              "rev": 0, "exports": 0}
                 self._files = FakeFiles(self.state)
                 self._documents = FakeDocuments(self.state)
 
@@ -8503,6 +8033,7 @@ def main_test() -> None:
                     for t in tabs:
                         if t["title"] == title:
                             t["text"] = text
+                self.state["rev"] += 1
 
         stub = FakeGoogle()
         pushed = push_doc(db, manuscript, "01-choice.md",
@@ -8831,7 +8362,7 @@ def main_test() -> None:
             "# B\n\nOriginal b content, never individually pushed.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(t2_root), "init", "--name", "t2book",
-                      "--path", str(t2_ms), "--no-extract"])
+                      "--path", str(t2_ms)])
         t2_db = api.open_db(str(t2_root))
         t2_manuscript = api.get_manuscript(t2_db)
         t2_stub = FakeGoogle()
@@ -8856,6 +8387,7 @@ def main_test() -> None:
               and "Original a content" in (t2_ms / "a.md").read_text())
 
         check_omit_all(root, FakeGoogle)
+        check_retired_link(root, FakeGoogle)
         check_read_manuscript(root, FakeGoogle)
         check_stage_revisions(root, FakeGoogle)
 
@@ -10043,7 +9575,7 @@ def main_test() -> None:
             check("review filter inserts the legal notice ahead of the title",
                   filtered.returncode == 0
                   and filtered.stdout.index(
-                      "CONFIDENTIAL PREPUBLICATION REVIEW DRAFT")
+                      "CONFIDENTIAL REVIEW DRAFT")
                   < filtered.stdout.index("The Book")
                   and "Author House LLC" in filtered.stdout,
                   filtered.stderr or filtered.stdout[:1000])
@@ -11686,6 +11218,65 @@ def main_test() -> None:
                            docs_service=stub)
         check("a push on a comment-bearing tab goes surgical",
               guarded.get("mode") == "diff", str(guarded))
+
+        # 2026-10-27: a surgical push records the Doc revision it left;
+        # the next guarded push, with nobody editing the Doc since, reads
+        # no export but the read-back (one, not three).
+        from authorlm.gdocs import DocChanged
+
+        def orrery_entry():
+            return api.get_manuscript(db)["metadata"]
+        rev_after = json.loads(orrery_entry())["gdocs"]["06-orrery.md"].get(
+            "doc_rev")
+        check("a surgical push records the revision it left the Doc at",
+              rev_after == f"rev-{stub.state['rev']}",
+              str((rev_after, stub.state["rev"])))
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails, oiled.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        exports = stub.state["exports"]
+        quick = push_doc(db, api.get_manuscript(db), "06-orrery.md",
+                         service=stub, docs_service=stub, guard=True)
+        orrery_tab = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                          if t["title"] == "06-orrery.md")
+        # The fake's paragraph edit lands on the second attempt (its
+        # deleteContentRange clears the tab), so the read-backs and the
+        # retry's read are three exports; the guard and the first read
+        # are none.
+        check("a guarded push on an untouched Doc reads no export before "
+              "it writes",
+              quick.get("mode") == "diff"
+              and stub.state["exports"] - exports == 3
+              and "oiled" in orrery_tab,
+              str((quick, stub.state["exports"] - exports, orrery_tab)))
+        exports = stub.state["exports"]
+        again = push_doc(db, api.get_manuscript(db), "06-orrery.md",
+                         service=stub, docs_service=stub, guard=True)
+        check("pushing it again, unchanged on both sides, reads no export",
+              again.get("ops") == 0 and stub.state["exports"] == exports,
+              str((again, stub.state["exports"] - exports)))
+        stub.set_tab("06-orrery.md", orrery_tab.replace(
+            "oiled", "oiled in the Doc"))
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails, waxed.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        exports = stub.state["exports"]
+        caught = None
+        try:
+            push_doc(db, api.get_manuscript(db), "06-orrery.md",
+                     service=stub, docs_service=stub, guard=True)
+        except DocChanged as err:
+            caught = str(err)
+        check("an edit in the Doc moves its revision, so the guard reads "
+              "the tab and stops the push",
+              caught is not None and stub.state["exports"] - exports == 1,
+              str((caught, stub.state["exports"] - exports)))
+        stub.set_tab("06-orrery.md", orrery_tab)
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails, polished.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        push_doc(db, api.get_manuscript(db), "06-orrery.md", service=stub,
+                 docs_service=stub)
         stub.add_comment("c-nowhere", "a quote matching no file at all",
                          "Where does this belong?")
         check("an unattributable anchor makes every mapped tab bearing",
@@ -11915,236 +11506,143 @@ def main_test() -> None:
               and "[Illustration: old emblem at the gate]" not in rev_text,
               rev_text)
 
-        # Multi-pass extraction must not advance the watermark when a later
-        # pass returns None — otherwise the missed payload is skipped forever.
-        from authorlm.extraction import extract_concepts
+        # --- api.run_extraction: the non-interactive front on the
+        # redesigned pipeline (init, the writeup close, an analysed
+        # collect, the MCP tool). Ruling §0.2 first: with the adjudicator
+        # unsettled it has no one to ask, so it stops before any call. ---
+        from authorlm import extraction_adjudicator as _adj
+        from authorlm import mcp_server as _mcp
 
-        class FlakyLLM:
-            enabled = True
-            extraction_max_chars = 80
-
-            def __init__(self):
-                self.calls = 0
-
-            def complete_json(self, system, user, thinking_budget=None):
-                self.calls += 1
-                if self.calls == 1:
-                    return {"concepts": [
-                        {"name": "AlphaConcept", "kind": "definition",
-                         "notes": "first payload"}],
-                            "links": [], "aliases": []}
-                return None  # second payload fails
-
-            def stats_line(self):
-                return None
-
-        # Two distinct contexts, not one paragraph repeated: the recurrence
-        # bar admits a concept only when it appears in separate contexts,
-        # and eight repeats in a single paragraph is one context — the
-        # rule landed after this test was written.
         (ms / "07-alpha.md").write_text(
-            "# Alpha\n\n" + ("AlphaConcept appears here. " * 4) + "\n\n"
-            "## Later\n\n" + ("AlphaConcept returns here. " * 4) + "\n")
-        (ms / "08-beta.md").write_text(
-            "# Beta\n\n" + ("BetaConcept appears here. " * 8) + "\n")
+            "# Alpha\n\nThe AlphaConcept appears here.\n\n"
+            "## Later\n\nThe AlphaConcept returns here.\n")
         api.collect(db, manuscript, {})
-        latest = db.one(
-            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
-        before_meta = _json.loads(manuscript["metadata"] or "{}")
-        flaky = FlakyLLM()
-        multi = extract_concepts(
-            db, manuscript, flaky, files=["07-alpha.md", "08-beta.md"])
-        after_meta = _json.loads(
-            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
-                   (manuscript["id"],))["metadata"] or "{}")
-        check("multi-pass LLM miss leaves watermark unadvanced",
-              multi is not None
-              and multi.get("incomplete") is True
-              and after_meta.get("last_extracted_version")
-              == before_meta.get("last_extracted_version")
-              and after_meta.get("last_extracted_version") != latest["id"],
-              str({"multi": multi, "before": before_meta, "after": after_meta,
-                   "latest": latest["id"], "calls": flaky.calls}))
-        check("first multi-pass payload still commits its concepts",
-              db.one("SELECT id FROM concept_nodes WHERE manuscript_id = ? "
-                     "AND name = ?",
-                     (manuscript["id"], "AlphaConcept")) is not None,
-              str(multi))
+        front_cfg = {"llm": {"enabled": True, "model": "stub"},
+                     "extraction": {"adjudicator_choices": ["stub-judge"]}}
+        alpha = {"concepts": [
+            {"name": "AlphaConcept", "kind": "concept", "notes": "first",
+             "span": "The AlphaConcept appears here.", "confidence": 0.9}],
+            "links": [], "aliases": []}
+        section = _SectionStub(alpha, front_cfg)
+        stopped = api.run_extraction(db, manuscript, section,
+                                     files=["07-alpha.md"])
+        check("run_extraction with the adjudicator unsettled stops before "
+              "any call and points at `extract --native`",
+              "stopped" in stopped and "extract --native" in stopped["stopped"]
+              and "--adjudicator" in stopped["stopped"]
+              and stopped["essays"] == ["07-alpha.md"] and not section.calls,
+              str(stopped))
+        prev_adj = _adj.adjudicator_llm
+        judges: list = []
 
-        # --- BUG-7: extraction must never overwrite the author's ratified
-        # concept notes, even when a materially different paraphrase comes
-        # back for text the author actually changed. ---
-        (ms / "09-ratified.md").write_text(
-            "# Ratified\n\nRatifiedTerm is discussed at length here.\n"
-        )
-        api.add_concept(db, manuscript, "RatifiedTerm", kind="concept",
-                        notes="AUTHOR RATIFIED TEXT")
-        note_proposals_before = db.one(
-            "SELECT COUNT(*) AS n FROM knowledge_proposals "
-            "WHERE manuscript_id = ? AND kind = 'note_update'",
-            (manuscript["id"],))["n"]
+        def fake_judge(config, model):
+            judges.append(_JudgeStub({"verdict": "new", "reason": "kept"}))
+            judges[-1].model = model
+            return judges[-1]
 
-        class NoteOverwriteLLM:
-            enabled = True
-            extraction_max_chars = 24000
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [
-                    {"name": "RatifiedTerm", "kind": "concept",
-                     "notes": "machine paraphrase of the definition"}],
-                        "links": [], "aliases": []}
-
-            def stats_line(self):
-                return None
-
-        extract_concepts(db, manuscript, NoteOverwriteLLM(),
-                         files=["09-ratified.md"])
-        ratified_after = concepts.get_concept(db, manuscript["id"], "RatifiedTerm")
-        note_proposals_after = db.one(
-            "SELECT COUNT(*) AS n FROM knowledge_proposals "
-            "WHERE manuscript_id = ? AND kind = 'note_update'",
-            (manuscript["id"],))["n"]
-        check("extraction never overwrites the author's ratified concept notes",
-              ratified_after["notes"] == "AUTHOR RATIFIED TEXT",
-              f"notes became: {ratified_after['notes']!r}")
-        check("a materially different extraction files a note_update "
-              "proposal instead of applying itself",
-              note_proposals_after == note_proposals_before + 1,
-              f"before={note_proposals_before} after={note_proposals_after}")
-
-        # --- BUG-8: a hit on a concept's ALIAS (not its primary name) must
-        # not be treated as a brand-new concept — that discards a confirmed
-        # concept's metadata (including 'confirmed': True) and reopens it to
-        # silent auto-retirement. ---
-        (ms / "10-alias.md").write_text(
-            "# Alias\n\nAliasSecondary shows up in the prose here.\n\n"
-            "## Elsewhere\n\nAliasSecondary appears again in a different "
-            "section, clearing the recurrence bar.\n"
-        )
-        api.add_concept(db, manuscript, "AliasPrimary", kind="concept",
-                        notes="primary notes")
-        api.confirm_concept(db, manuscript, "AliasPrimary")
-        api.alias_concept(db, manuscript, "AliasPrimary", ["AliasSecondary"])
-        primary_meta_before = _json.loads(
-            concepts.get_concept(db, manuscript["id"], "AliasPrimary")["metadata"]
-            or "{}")
-        check("fixture concept starts confirmed",
-              primary_meta_before.get("confirmed") is True,
-              str(primary_meta_before))
-
-        class AliasHitLLM:
-            enabled = True
-            extraction_max_chars = 24000
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [
-                    {"name": "AliasSecondary", "kind": "concept",
-                     "notes": "some notes about the alias"}],
-                        "links": [], "aliases": []}
-
-            def stats_line(self):
-                return None
-
-        extract_concepts(db, manuscript, AliasHitLLM(), files=["10-alias.md"])
-        primary_after = concepts.get_concept(db, manuscript["id"], "AliasPrimary")
-        primary_meta_after = _json.loads(primary_after["metadata"] or "{}")
-        check("an alias hit does not reset the primary concept's 'confirmed' flag",
-              primary_meta_after.get("confirmed") is True,
-              f"metadata became: {primary_meta_after}")
-        check("an alias hit does not fork a duplicate concept node",
-              db.one("SELECT COUNT(*) AS n FROM concept_nodes WHERE "
-                     "manuscript_id = ? AND lower(name) = lower(?)",
-                     (manuscript["id"], "AliasSecondary"))["n"] == 0)
-
-        # --- BUG-21: a model-shaped-but-malformed reply (a list where a
-        # string kind is expected, null where an empty list is expected)
-        # must not abort the extraction pass with a TypeError. ---
-        (ms / "11-coerce.md").write_text(
-            "# Coerce\n\nCoerceTarget needs a name here.\n\n"
-            "## Elsewhere\n\nCoerceTarget appears again in a different "
-            "section, clearing the recurrence bar.\n"
-        )
-
-        class MalformedLLM:
-            enabled = True
-            extraction_max_chars = 24000
-
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": [
-                    {"name": "CoerceTarget", "kind": ["concept"]}],
-                        "links": None, "aliases": []}
-
-            def stats_line(self):
-                return None
-
-        coerce_error = None
+        _adj.adjudicator_llm = fake_judge
         try:
-            extract_concepts(db, manuscript, MalformedLLM(),
-                             files=["11-coerce.md"])
-        except TypeError as err:
-            coerce_error = err
-        check("a malformed 'kind' (list, not str) does not abort extraction",
-              coerce_error is None, str(coerce_error))
-        coerced_node = concepts.get_concept(db, manuscript["id"], "CoerceTarget")
-        check("the malformed kind coerces to the 'concept' default",
-              coerced_node is not None and coerced_node["kind"] == "concept",
-              str(coerced_node))
+            report = api.run_extraction(db, manuscript, section,
+                                        files=["07-alpha.md"],
+                                        adjudicator="stub-judge")
+            check("`adjudicator` answers the question: the run happens, "
+                  "section by section, judged by the named model, and the "
+                  "report is JSON-safe and printable",
+                  report["run"]["adjudicator"] == "stub-judge"
+                  and len(section.calls) == 2
+                  and report["run"]["reached"]["concepts"] == 1
+                  and "screening" not in report["essays"][0]
+                  and json.dumps(report)
+                  and "run extract-" in extraction.render_run(report),
+                  str(report["run"]))
+            check("a named-file run leaves the watermark where it was",
+                  _json.loads(db.one(
+                      "SELECT metadata FROM manuscripts WHERE id = ?",
+                      (manuscript["id"],))["metadata"] or "{}")
+                  .get("last_extracted_version")
+                  == _json.loads(manuscript["metadata"] or "{}")
+                  .get("last_extracted_version"))
 
-        # --- BUG-21 follow-up: a null 'concepts' payload (as opposed to a
-        # malformed item inside a present list) must be treated as a FAILED
-        # pass, not a clean "nothing found" pass. Coercing null to []
-        # (the original BUG-21 fix) let the watermark advance on a broken
-        # reply, permanently skipping the section on every future
-        # incremental run — a silent, unrecoverable content skip. ---
-        (ms / "12-nullconcepts.md").write_text(
-            "# NullConcepts\n\nNullConceptsTarget needs a name here.\n\n"
-            "## Elsewhere\n\nNullConceptsTarget appears again in a "
-            "different section, clearing the recurrence bar.\n"
-        )
+            # The same tool, over MCP, carries the argument through.
+            prev_workspace, prev_llm = _mcp._WORKSPACE, _mcp._llm
+            _mcp._WORKSPACE = str(ws)
+            try:
+                _mcp._llm = lambda: _SectionStub(alpha, front_cfg)
+                via_mcp = _mcp.extract_concepts(files=["07-alpha.md"],
+                                                adjudicator="stub-judge")
+                asked = _mcp.extract_concepts(files=["07-alpha.md"])
+            finally:
+                _mcp._WORKSPACE, _mcp._llm = prev_workspace, prev_llm
+            check("MCP extract_concepts runs the redesigned pipeline with "
+                  "`adjudicator`, and stops with the pointer without it",
+                  via_mcp["ok"] and via_mcp["result"]["run"]["adjudicator"]
+                  == "stub-judge" and asked["ok"]
+                  and "stopped" in asked["result"], str((via_mcp, asked)))
 
-        class NullConceptsLLM:
-            enabled = True
-            extraction_max_chars = 24000
+            # A section the model did not answer — no JSON, or a null
+            # where the contract wants a list — leaves the run incomplete
+            # and the watermark unadvanced, so the section is asked again.
+            (ms / "08-beta.md").write_text(
+                "# Beta\n\nThe BetaConcept appears here.\n")
+            api.collect(db, manuscript, {})
+            latest = db.one(
+                "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+                "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
 
-            def complete_json(self, system, user, thinking_budget=None):
-                return {"concepts": None, "links": [], "aliases": []}
+            class Flaky(_SectionStub):
+                def complete_json(self, system, user, thinking_budget=None):
+                    self.calls.append((system, user))
+                    return (None if "08-beta.md" in user
+                            else {"concepts": None, "links": [], "aliases": []})
 
-            def stats_line(self):
-                return None
+            before_meta = _json.loads(db.one(
+                "SELECT metadata FROM manuscripts WHERE id = ?",
+                (manuscript["id"],))["metadata"] or "{}")
+            flaky = api.run_extraction(db, manuscript, Flaky({}, front_cfg),
+                                       adjudicator="stub-judge")
+            after_meta = _json.loads(db.one(
+                "SELECT metadata FROM manuscripts WHERE id = ?",
+                (manuscript["id"],))["metadata"] or "{}")
+            check("an unanswered section (no JSON, or null for a list) is "
+                  "reported, the run is INCOMPLETE and the watermark stays",
+                  flaky["run"]["incomplete"]
+                  and all(e["answered"] == 0 for e in flaky["essays"])
+                  and after_meta.get("last_extracted_version")
+                  == before_meta.get("last_extracted_version")
+                  and after_meta.get("last_extracted_version") != latest["id"]
+                  and "INCOMPLETE" in extraction.render_run(flaky),
+                  str({"flaky": flaky["run"], "before": before_meta,
+                       "after": after_meta, "latest": latest["id"]}))
 
-        api.collect(db, manuscript, {})
-        nullconcepts_latest = db.one(
-            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
-        # Query the DB directly rather than trusting the long-lived in-memory
-        # `manuscript` dict: several extractions upstream in this same test
-        # (FlakyLLM's first payload, NoteOverwriteLLM, AliasHitLLM,
-        # MalformedLLM/BUG-21) have already advanced the real watermark in
-        # the DB since `manuscript` was first bound.
-        nullconcepts_before_meta = _json.loads(
-            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
-                   (manuscript["id"],))["metadata"] or "{}")
-        nullconcepts_result = extract_concepts(
-            db, manuscript, NullConceptsLLM(), files=["12-nullconcepts.md"])
-        nullconcepts_after_meta = _json.loads(
-            db.one("SELECT metadata FROM manuscripts WHERE id = ?",
-                   (manuscript["id"],))["metadata"] or "{}")
-        check("a null 'concepts' payload is reported as a failed pass, "
-              "not a clean miss",
-              nullconcepts_result is None, str(nullconcepts_result))
-        check("a null 'concepts' payload does not advance the watermark "
-              "(the section stays eligible for re-mining)",
-              nullconcepts_after_meta.get("last_extracted_version")
-              == nullconcepts_before_meta.get("last_extracted_version")
-              and nullconcepts_after_meta.get("last_extracted_version")
-              != nullconcepts_latest["id"],
-              str({"before": nullconcepts_before_meta,
-                   "after": nullconcepts_after_meta,
-                   "latest": nullconcepts_latest["id"]}))
-        check("a null 'concepts' payload creates no concept node",
-              concepts.get_concept(db, manuscript["id"], "NullConceptsTarget")
-              is None)
+            # BUG-8's rule, kept: a hit on a concept's ALIAS is the live
+            # concept, never a second node, and the author's 'confirmed'
+            # flag survives it.
+            (ms / "10-alias.md").write_text(
+                "# Alias\n\nThe AliasSecondary shows up in the prose here.\n")
+            api.add_concept(db, manuscript, "AliasPrimary", kind="concept",
+                            notes="primary notes")
+            api.confirm_concept(db, manuscript, "AliasPrimary")
+            api.alias_concept(db, manuscript, "AliasPrimary", ["AliasSecondary"])
+            hit = api.run_extraction(db, manuscript, _SectionStub({
+                "concepts": [{"name": "AliasSecondary", "kind": "concept",
+                              "notes": "some notes about the alias",
+                              "span": "The AliasSecondary shows up",
+                              "confidence": 0.9}],
+                "links": [], "aliases": []}, front_cfg),
+                files=["10-alias.md"], adjudicator="stub-judge")
+            primary_after = concepts.get_concept(db, manuscript["id"],
+                                                 "AliasPrimary")
+            check("an alias hit is subsumed into the primary concept: no "
+                  "duplicate node, 'confirmed' intact",
+                  hit["essays"][0]["signals"].get("subsumed") == 1
+                  and _json.loads(primary_after["metadata"] or "{}")
+                  .get("confirmed") is True
+                  and db.one("SELECT COUNT(*) AS n FROM concept_nodes WHERE "
+                             "manuscript_id = ? AND lower(name) = lower(?)",
+                             (manuscript["id"], "AliasSecondary"))["n"] == 0,
+                  str(hit["essays"][0]["signals"]))
+        finally:
+            _adj.adjudicator_llm = prev_adj
 
         # --- BUG-5: the watermark write must re-read metadata from the DB
         # immediately before writing, not merge into an in-memory dict
@@ -13467,11 +12965,10 @@ def main_test() -> None:
         (virgin_ms / "start.md").write_text("# Start\n\nFresh prose.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(virgin_ws), "init",
-                      "--name", "virgin", "--path", str(virgin_ms),
-                      "--no-extract"])
+                      "--name", "virgin", "--path", str(virgin_ms)])
         virgin_db = api.open_db(str(virgin_ws))
         virgin_m = api.get_manuscript(virgin_db)
-        check("init --no-extract leaves a virgin manuscript (no baseline)",
+        check("init leaves a virgin manuscript (no baseline)",
               virgin_db.one(
                   "SELECT id FROM manuscript_versions "
                   "WHERE manuscript_id = ? LIMIT 1",
@@ -13516,8 +13013,7 @@ def main_test() -> None:
         (style_root / "98-child.md").write_text("# Child\n\nMore prose.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(style_ws), "init",
-                      "--name", "styled", "--path", str(style_root),
-                      "--no-extract"])
+                      "--name", "styled", "--path", str(style_root)])
         sdb = api.open_db(str(style_ws))
         sm = api.get_manuscript(sdb)
         bare = api.style_show(sdb, sm, "97-styled.md")

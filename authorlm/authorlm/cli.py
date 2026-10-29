@@ -30,7 +30,6 @@ from .briefing import build_briefing
 from . import beliefs as bel_mod
 from . import paths as paths_mod
 from .db import Database, ko_fields, loads
-from .extraction import extract_concepts
 from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
 from .revisions import collect_revision, detect_transitions
@@ -176,99 +175,6 @@ def _report_llm(llm: LLMClient) -> None:
         print(ui.dim(line))
 
 
-def _run_extraction(db: Database, manuscript: dict, llm: LLMClient,
-                    files: list[str] | None = None, full: bool = False,
-                    edges_only: bool = False, aliases_only: bool = False) -> None:
-    """Collect the current text (if new) and bootstrap the Concept Graph."""
-    before = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (manuscript["id"],),
-    )
-    version = collect_revision(db, manuscript, session_id=None, source="extract")
-    if version:
-        detect_transitions(db, manuscript["id"], dict(before) if before else None, version)
-        print(f"Collected revision v{version['version_no']}.")
-    print("Extracting concepts and relationships with the LLM…")
-    summary = extract_concepts(db, manuscript, llm, files=files, full=full,
-                               edges_only=edges_only, aliases_only=aliases_only)
-    if summary is None:
-        print("Extraction produced nothing (LLM unavailable or empty manuscript); "
-              "the graph is unchanged.")
-        _report_llm(llm)
-        return
-    if summary.get("up_to_date"):
-        print("Nothing new since the last extraction — everything is already "
-              "processed. Use 'extract --full' to reprocess the whole "
-              "manuscript, or name files: extract <file>…")
-        return
-    print(ui.dim(f"Scope: {summary['scope']}."))
-    if summary.get("truncated"):
-        print(ui.yellow(
-            "warning: text exceeded the extraction size limit and was "
-            "truncated — run extraction file-by-file to cover everything: "
-            "extract <file>"
-        ))
-    print(
-        f"Extracted {len(summary['nodes'])} new concept(s) and "
-        f"{len(summary['edges'])} inferred relationship(s)"
-        + (f"; skipped {summary['skipped_malformed']} malformed item(s)"
-           if summary.get("skipped_malformed") else "")
-        + (f"; {summary['skipped_unknown_relation']} relationship(s) named an "
-           "unrecognized relation" if summary.get("skipped_unknown_relation") else "")
-        + (f"; {summary['skipped_unknown_endpoint']} relationship(s) named an "
-           "unknown concept" if summary.get("skipped_unknown_endpoint") else "")
-        + (f"; suppressed {summary['suppressed']} previously-rejected concept(s)"
-           if summary.get("suppressed") else "")
-        + (f"; dropped {summary['ungrounded_links']} ungrounded link(s) "
-           "(endpoint not in the mined text)"
-           if summary.get("ungrounded_links") else "")
-        + (f"; {len(summary['below_bar'])} below the recurrence bar"
-           if summary.get("below_bar") else "")
-        + (f"; adjudication screened out {summary['screened']} candidate(s) "
-           "before triage" if summary.get("screened") else "")
-        + (f"; refused {summary['alias_folds_refused']} alias proposal(s) "
-           "naming an already-live concept (would be a merge, not an "
-           "alias — logged, not queued)"
-           if summary.get("alias_folds_refused") else "")
-        + (f"; refused {summary['alias_retired_refused']} alias proposal(s) "
-           "naming a retired concept (would re-enter a banned name — "
-           "logged, not queued)"
-           if summary.get("alias_retired_refused") else "")
-        + (f"; refused {len(summary['materiality_refused'])} note update(s) "
-           "below the materiality floor"
-           if summary.get("materiality_refused") else "")
-        + "."
-    )
-    if summary.get("prompt_files"):
-        print(ui.dim("Prompts: " + ", ".join(summary["prompt_files"])))
-    if summary.get("adjudication_empty"):
-        print(ui.yellow(
-            "note: adjudication ran but the model returned nothing usable "
-            "— worth checking authorlm/prompts/adjudication.md"))
-    if summary.get("below_bar"):
-        print(ui.dim(
-            "Below the recurrence bar (single-context phrases, not "
-            "admitted; self-healing on a future mention): "
-            + ", ".join(f"'{n}'" for n in summary["below_bar"])))
-    if summary.get("materiality_refused"):
-        print(ui.dim(
-            "Note updates below the materiality floor (case/whitespace-only "
-            "or >=0.90 similarity — not queued): "
-            + ", ".join(f"'{n}'" for n in summary["materiality_refused"])))
-    if summary.get("proposed"):
-        print(ui.yellow(
-            f"{summary['proposed']} proposal(s) against settled knowledge — "
-            "new material conflicts with earlier judgments. Review: proposal review"
-        ))
-    for node in summary["nodes"]:
-        print(f"  • {node['name']} ({node['kind']})")
-    if summary["edges"]:
-        print("Relationships are hypotheses awaiting your confirmation "
-              "(see 'concept list' / next briefing).")
-    _report_llm(llm)
-
-
 def cmd_init(args):
     db = _open_db(args)
     path = Path(args.path).resolve()
@@ -289,18 +195,13 @@ def cmd_init(args):
           + (f" {pin['image_size']}" if pin["image_size"] else "")
           + f" → {_illus.ILLUS_DIR}/{_illus.PIN_FILE} (stamped from "
           "config.toml [illustrations]; owned by the manuscript from now on)")
-    from .extraction import extraction_enabled
-
-    llm = LLMClient(_load_config(args))
-    if not extraction_enabled(_load_config(args)):
-        print(ui.dim("Concept extraction is off ([extraction] enabled = "
-                     "false); the graph grows by 'concept add' only."))
-    elif args.extraction == "off":
+    if args.extraction == "off":
         print(ui.dim("Concept extraction is off for this manuscript "
                      "(--extraction off); 'manuscript set --extraction on' "
                      "turns it back on."))
-    elif llm.enabled and not args.no_extract:
-        _run_extraction(db, row, llm)
+    else:
+        print(ui.dim("The Concept Graph is mined on request: 'authorlm "
+                     "extract --native' when you want a fresh one."))
     print("Next: 'session start', then 'intent declare \"...\"', then 'collect'.")
 
 
@@ -442,6 +343,16 @@ def _print_comment_harvest(result: dict) -> None:
             "Address every comment above; when acting on one, "
             "record the author's words verbatim as the "
             "evidence/reason."))
+    still = result.get("still_open") or []
+    if still:
+        print(ui.bold(f"Still open from earlier pulls ({len(still)}):"))
+        for c in still:
+            print(f"  • [{c['location']}] on \"{c['quote']}\"  ({c['comment_id']})")
+            print(f"    {c['content']}")
+        if any(c["location"] == "(anchor text gone)" for c in still):
+            print(ui.dim("An anchor-text-gone comment no longer shows in the "
+                         "Doc's margin (only under Show all comments); "
+                         "resolve it once addressed: doc resolve-comments <id>."))
     if result.get("comments_error"):
         print(ui.yellow("warning: comment harvest failed "
                         f"({result['comments_error']}) — "
@@ -1295,7 +1206,11 @@ def _critique_run(db: Database, manuscript: dict, args) -> None:
     p = _critique_pass_row(db, manuscript)
     config = _load_config(args)
     try:
-        ctx = passes.build_context(db, manuscript, file, p, force=args.force)
+        # The summaries the pass reads are rebuilt on use (ruling 3), each
+        # level on its own model, each printing its cost line (ruling 9).
+        from . import summaries as sums
+        ctx = passes.build_context(db, manuscript, file, p, force=args.force,
+                                   llm=sums.clients(config))
     except (RuntimeError, LookupError) as err:
         sys.exit(f"error: {err}")
     if ctx["forced"]:
@@ -1606,12 +1521,13 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="critique-resolve",
                     episode=api.NO_EPISODE)
-    llm = sums.summarizer_llm(config)
-    if llm.enabled:
+    llms = sums.clients(config)
+    if llms["essay"].enabled:
         try:
-            new_row = sums.rebuild_one(db, manuscript, file, llm)
+            new_row = sums.rebuild_one(db, manuscript, file, llms,
+                                       echo=lambda line: print(ui.dim(line)))
             print(ui.dim("summary rebuilt; downstream marked upstream_stale"))
-            _print_coverage_note(file, new_row.get("paragraph_coverage"))
+            _print_coverage_note(file, new_row.get("coverage"))
         except Exception as err:  # noqa: BLE001
             print(ui.yellow(f"summary rebuild failed ({err}) — run "
                             f"'summarize rebuild {file}'"))
@@ -1856,18 +1772,134 @@ def _critique_triage(db: Database, manuscript: dict, args) -> None:
 
 
 def _print_coverage_note(file: str, cov: dict | None) -> None:
-    """Report (never silently) when a rebuilt summary's MOVES didn't cite
-    every paragraph number, or cited one that doesn't exist — verified
-    coverage, not just requested."""
+    """Report (never silently) when a rebuilt essay summary's MOVES did
+    not cite every section with a body, cited one the essay lacks, or
+    its FLOW skipped a heading — the structural check of summary-
+    hierarchy design §3.4, verified, not just requested."""
     if not cov or cov["complete"]:
         return
     parts = []
-    if cov["missing"]:
-        parts.append(f"missing paragraph(s) {cov['missing']}")
-    if cov["out_of_range"]:
-        parts.append(f"cited out-of-range paragraph(s) {cov['out_of_range']}")
-    print(ui.yellow(f"  {file}: paragraph coverage incomplete — "
+    if cov.get("missing"):
+        parts.append(f"section(s) {cov['missing']} not cited in MOVES")
+    if cov.get("unknown"):
+        parts.append(f"cited section(s) {cov['unknown']} the essay lacks")
+    if cov.get("flow_missing"):
+        parts.append("FLOW skips " + ", ".join(
+            f"'{h}'" for h in cov["flow_missing"]))
+    print(ui.yellow(f"  {file}: section coverage incomplete — "
                     + "; ".join(parts)))
+
+
+def _summarize_unit_text(db, manuscript: dict, file: str) -> str:
+    from . import summaries as sums
+
+    texts, _unlisted, _flight = sums.capture(db, manuscript)
+    if file not in texts:
+        sys.exit(f"error: '{file}' is not a unit of the manuscript.")
+    return texts[file]
+
+
+def _summarize_show(args, db, manuscript: dict) -> None:
+    """`summarize show <file> [--section N] [--paragraph N] [--json]`
+    (summary-hierarchy design §8): the essay block; one section's block
+    with its paragraph gists; one paragraph's record."""
+    from . import summaries as sums
+
+    text = _summarize_unit_text(db, manuscript, args.file)
+    verse = args.file in sums.verse_files_of(manuscript)
+    secs = sums.sections_of(text, verse_file=verse)
+    if args.paragraph is not None:
+        para = next((p for s in secs for p in s["paragraphs"]
+                     if p["ordinal"] == args.paragraph), None)
+        if para is None:
+            sys.exit(f"error: {args.file} has no paragraph {args.paragraph} "
+                     f"(it has {sum(len(s['paragraphs']) for s in secs)}).")
+        row = sums._current_paragraph_rows(db, manuscript["id"], args.file
+                                           ).get(para["para_hash"])
+        rec = {"file": args.file, "ordinal": para["ordinal"],
+               "section_ordinal": para["section_ordinal"],
+               "kind": para["kind"], "para_hash": para["para_hash"],
+               "text": para["text"],
+               "record": sums._record_of(row) if row else None,
+               "model": row["model"] if row else None}
+        if args.json:
+            print(json.dumps(rec, indent=2, ensure_ascii=False))
+            return
+        print(ui.bold(f"{args.file} ¶{para['ordinal']}")
+              + ui.dim(f"  ({para['kind']}, §{para['section_ordinal']})"))
+        print(ui.dim(para["text"]))
+        if rec["record"] is None:
+            print(ui.yellow("  no current record — run 'summarize rebuild "
+                            f"{args.file} --level paragraph'."))
+            return
+        print(json.dumps(rec["record"], indent=2, ensure_ascii=False))
+        return
+    if args.section is not None:
+        sec = next((s for s in secs if s["section_ordinal"] == args.section),
+                   None)
+        if sec is None:
+            sys.exit(f"error: {args.file} has no section {args.section} "
+                     f"(it has {len(secs)}).")
+        row = sums._current_section_rows(db, manuscript["id"], args.file
+                                         ).get(sec["section_hash"])
+        records = sums._current_paragraph_rows(db, manuscript["id"], args.file)
+        gists = [{"ordinal": p["ordinal"], "kind": p["kind"],
+                  "gist": (sums._record_of(records[p["para_hash"]])["gist"]
+                           if p["para_hash"] in records else None)}
+                 for p in sec["paragraphs"] if p["kind"] != "heading"]
+        out = {"file": args.file, "section_ordinal": sec["section_ordinal"],
+               "heading": sec["heading"], "section_hash": sec["section_hash"],
+               "summary": row["summary"] if row else None,
+               "model": row["model"] if row else None, "paragraphs": gists}
+        if args.json:
+            print(json.dumps(out, indent=2, ensure_ascii=False))
+            return
+        print(ui.bold(f"{args.file} §{sec['section_ordinal']} "
+                      f"{sec['heading'] or '(preamble)'}"))
+        if row is None:
+            print(ui.yellow("  no current summary — run 'summarize rebuild "
+                            f"{args.file} --level section'."))
+        else:
+            print(row["summary"])
+        print(ui.dim("paragraphs:"))
+        for g in gists:
+            print(f"  [{g['ordinal']}] " + (g["gist"] or ui.yellow("(no record)")))
+        return
+    row = db.one("SELECT * FROM essay_summaries WHERE manuscript_id = ? "
+                 "AND file = ?", (manuscript["id"], args.file))
+    if args.json:
+        unit = sums.for_unit(db, manuscript, args.file, text=text)
+        print(json.dumps(unit, indent=2, ensure_ascii=False, default=str))
+        return
+    if not row:
+        sys.exit(f"no summary for {args.file} — run 'summarize rebuild'.")
+    state = sums.level_status(db, manuscript, args.file, text,
+                              verse_file=verse)["essay"]["state"]
+    print(ui.bold(args.file) + ui.dim(f"  ({state}; {row['created_at'][:19]}Z"
+                                      f"{', ' + row['model'] if row['model'] else ''})"))
+    print(row["summary"])
+
+
+def _summarize_outline(args, db, manuscript: dict) -> None:
+    """`summarize outline <file>`: the FLOW paragraph and each section's
+    POINT, the one-screen map (§8)."""
+    from . import summaries as sums
+
+    text = _summarize_unit_text(db, manuscript, args.file)
+    verse = args.file in sums.verse_files_of(manuscript)
+    row = db.one("SELECT summary FROM essay_summaries WHERE manuscript_id = ? "
+                 "AND file = ?", (manuscript["id"], args.file))
+    rows = sums._current_section_rows(db, manuscript["id"], args.file)
+    print(ui.bold(args.file))
+    flow = sums.flow_of(row["summary"]) if row else ""
+    print(ui.cyan("FLOW: ") + (flow or ui.yellow(
+        "(no essay summary — run 'summarize rebuild')")))
+    for sec in sums.sections_of(text, verse_file=verse):
+        srow = rows.get(sec["section_hash"])
+        point = (sums.point_of(srow["summary"]) if srow
+                 else ui.yellow("(no section summary)"))
+        print(f"  [{sec['section_ordinal']}] "
+              f"{ui.bold(sec['heading'] or '(preamble)')} — {point}")
 
 
 def cmd_summarize(args):
@@ -1876,6 +1908,22 @@ def cmd_summarize(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
     if args.action == "status":
+        if args.level:
+            if args.level not in sums.LEVELS:
+                sys.exit(f"error: --level must be one of "
+                         f"{', '.join(sums.LEVELS)}.")
+            for r in sums.hierarchy_status(db, manuscript):
+                st = r[args.level]
+                color = {"fresh": ui.green, "stale": ui.yellow,
+                         "upstream_stale": ui.dim, "missing": ui.yellow,
+                         "deprecated": ui.yellow, "rewriting": ui.cyan,
+                         "unwritten": ui.cyan}.get(st["state"], ui.yellow)
+                counts = (f"  {st['current']}/{st['needed']} row(s)"
+                          if "needed" in st else
+                          ("  sections moved" if st.get("sections_moved")
+                           else ""))
+                print(f"  {r['file']:<22} {color(st['state'])}{ui.dim(counts)}")
+            return
         rows = sums.status(db, manuscript)
         counts: dict[str, int] = {}
         for r in rows:
@@ -1890,43 +1938,60 @@ def cmd_summarize(args):
             print(f"  {r['file']:<22} {color(r['state'])}{ui.dim(words)}")
         print(ui.dim("  " + ", ".join(f"{n} {s}" for s, n in counts.items())))
         return
-    if args.action == "show":
+    if args.action in ("show", "outline"):
         if not args.file:
-            sys.exit("usage: summarize show <file>")
-        row = db.one("SELECT * FROM essay_summaries WHERE manuscript_id = ? "
-                     "AND file = ?", (manuscript["id"], args.file))
-        if not row:
-            sys.exit(f"no summary for {args.file} — run 'summarize rebuild'.")
-        print(ui.bold(args.file) + ui.dim(f"  ({row['created_at'][:19]}Z)"))
-        print(row["summary"])
+            sys.exit(f"usage: summarize {args.action} <file>")
+        (_summarize_show if args.action == "show" else _summarize_outline)(
+            args, db, manuscript)
         return
-    # rebuild
-    llm = sums.summarizer_llm(_load_config(args))
-    if not llm.enabled:
+    # rebuild [file] [--level …] [--all]: the deliberate pass of
+    # summary-hierarchy design §4.5 / §8. Each level that built anything
+    # prints its own line with its cost (ruling 9). A named file's ESSAY
+    # row is rebuilt whatever its state (the confirmation-gate shape), its
+    # lower levels lazily first; with --level the named file is simply
+    # the scope and only --all forces.
+    level = args.level or "essay"
+    if level not in sums.LEVELS:
+        sys.exit(f"error: --level must be one of {', '.join(sums.LEVELS)}.")
+    llms = sums.clients(_load_config(args))
+    if not llms[level].enabled:
         sys.exit("error: the LLM is disabled ([llm] enabled = false) — "
                  "summaries need it.")
-    print(ui.dim(f"summarizer model: {llm.model}"))
-    if args.file:
-        row = sums.rebuild_one(db, manuscript, args.file, llm)
-        print(ui.green(f"rebuilt {args.file}") + ui.dim(
-            f" ({len(row['summary'].split())} words); downstream summaries "
-            "marked upstream_stale"))
-        _print_coverage_note(args.file, row.get("paragraph_coverage"))
+    print(ui.dim("models: " + ", ".join(
+        f"{lv} {c.model}" for lv, c in llms.items()
+        if lv in sums.LEVELS[:sums.LEVELS.index(level) + 1])))
+    try:
+        report = sums.rebuild(
+            db, manuscript, llms, level=level,
+            files=[args.file] if args.file else None,
+            force=args.all or (bool(args.file) and level == "essay"),
+            echo=lambda line: print(ui.dim(line)),
+            progress=lambda f: print(ui.dim(f"  {level} level: {f}…")))
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+    if level == "essay":
+        if args.file and args.file in report["built"]:
+            row = db.one("SELECT summary FROM essay_summaries WHERE "
+                         "manuscript_id = ? AND file = ?",
+                         (manuscript["id"], args.file))
+            print(ui.green(f"rebuilt {args.file}") + ui.dim(
+                f" ({len(row['summary'].split())} words); downstream "
+                "summaries marked upstream_stale"))
+        else:
+            print(ui.green(f"built {len(report['built'])}") + ui.dim(
+                " essay summar" + ("y" if len(report["built"]) == 1 else "ies")))
+        for f, cov in report["misses"]:
+            _print_coverage_note(f, cov)
+        for f, why in report["skipped"]:
+            print(ui.yellow(f"  skipped {f} — {why}"))
     else:
-        result = sums.rebuild(
-            db, manuscript, llm, only_missing_or_stale=not args.all,
-            progress=lambda f: print(ui.dim(f"  summarizing {f}…")))
-        print(ui.green(f"built {len(result['built'])}") + ui.dim(
-            f", reused {len(result['reused'])} fresh"))
-        for f in result.get("skipped_inflight", []):
+        print(ui.green(f"{level} level up to date over "
+                       f"{len(report['files'])} file(s) touched"))
+    for f, pinned in sums.inflight_sources(db, manuscript).items():
+        if pinned is None and (not args.file or f == args.file):
             print(ui.cyan(
                 f"  skipped {f} — a writeup is writing it for the first "
                 "time, so there is no pre-rewrite text to summarize"))
-        for f, cov in result.get("incomplete_coverage", {}).items():
-            _print_coverage_note(f, cov)
-    line = llm.stats_line()
-    if line:
-        print(ui.dim(line))
 
 
 def cmd_prompts(args):
@@ -3018,12 +3083,7 @@ def _print_collect_report(report):
                          f"{what}."))
     if report.get("media"):
         _print_media_not_ready(report["media"])
-    if report.get("auto_analysis"):
-        aa = report["auto_analysis"]
-        print(ui.dim(f"Auto-analysis: {aa['new_concepts']} new concept(s), "
-                     f"{aa['new_edges']} new relationship(s), "
-                     f"{aa['proposed']} proposal(s)."))
-    elif report["extract_hint"]:
+    if report["extract_hint"]:
         print(ui.dim(f"{report['new_paragraphs']} new/rewritten paragraph(s) — mine them "
                      "for new concepts with 'extract'."))
     gaps_before, gaps_after = report["gaps_before"], report["gaps_after"]
@@ -5311,7 +5371,8 @@ def cmd_export(args):
                 "export teleprompter needs --file <file> — the monologue "
                 "whose on-camera passages to collect"))
         try:
-            result = ex.export_teleprompter(manuscript, args.file)
+            result = ex.export_teleprompter(manuscript, args.file,
+                                            whole=args.whole)
         except (LookupError, ValueError) as err:
             raise SystemExit(ui.yellow(f"export failed: {err}"))
         print(f"Wrote {result['docx']} ({', '.join(result['passages'])}).")
@@ -5638,7 +5699,17 @@ def cmd_audio(args):
         if args.action == "stitch":
             from . import generation
             if not rest:
-                raise SystemExit("usage: audio stitch <chapter>")
+                raise SystemExit("usage: audio stitch <chapter> [--preview [--json]]")
+            if args.preview:
+                result = generation.stitch_preview(
+                    manuscript, rest[0],
+                    progress=None if args.json else (lambda m: print(ui.dim(f"  {m}"))))
+                if args.json:
+                    import json as _json
+                    print(_json.dumps(result))
+                else:
+                    print(result["path"])
+                return
             result = generation.stitch(manuscript, rest[0],
                                        progress=lambda m: print(ui.dim(f"  {m}")))
             dur = result["durationSecs"]
@@ -5701,7 +5772,7 @@ def cmd_audiostation(args):
 # parser builder, and the test that asserts the note is present listed
 # five of these by hand — so a new LLM verb was unchecked by
 # construction.
-LLM_VERBS = {"init", "extract", "collect", "intent", "guide", "review",
+LLM_VERBS = {"extract", "intent", "guide", "review",
              "analyze", "lens", "sweep", "illus", "summarize", "doc",
              "belief", "critique", "triage-app", "workbench",
              # `filter run --native` is the filter pass's one call, and
@@ -6582,28 +6653,347 @@ def cmd_profile(args):
         sys.exit(str(err))
 
 
+def _extract_scope(db: Database, manuscript: dict, args, knob: dict
+                   ) -> list[tuple[str, list[dict] | None]]:
+    """(file, units) in reading order for `extract`: the named files
+    (all their units, or `--section`'s), the whole book with `--full`, else
+    the sections changed since the extraction watermark (everything when
+    there is none). `units` None means every unit of the file."""
+    from . import extraction as ex
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    if args.section and len(args.target or []) != 1:
+        sys.exit("error: --section names a section of ONE file: "
+                 "extract <file> --section <n|heading>")
+    if args.target:
+        try:
+            return [(_resolve(files, f), None) for f in args.target]
+        except LookupError as err:
+            sys.exit(f"error: {err}")
+    if args.full:
+        return [(name, None) for name in ex.eligible_files(files)]
+    changed = ex.changed_units(db, manuscript, files,
+                               int(knob["max_section_chars"]))
+    if changed is None:
+        return [(name, None) for name in ex.eligible_files(files)]
+    return list(changed.items())
+
+
+def _extract_payloads(db: Database, manuscript: dict, args, knob: dict
+                      ) -> list[tuple[str, list]]:
+    from . import extraction as ex
+    from .revisions import read_manuscript_files
+
+    out = []
+    for name, units in _extract_scope(db, manuscript, args, knob):
+        if ex.is_in_flight(read_manuscript_files(
+                Path(manuscript["path"])).get(name, "")):
+            # Named while held by an active writeup: nothing to mine, and
+            # never a marker sent to a model. Dropped, said, the rest runs.
+            print(ui.dim(f"{name}: held by an active writeup (its text on "
+                         "disk is the placeholder) — skipped."))
+            continue
+        try:
+            payloads = ex.assemble_essay(db, manuscript, name, args.section,
+                                         units=units, knob=knob)
+        except (LookupError, ValueError) as err:
+            sys.exit(f"error: {err}")
+        if payloads:
+            out.append((name, payloads))
+    return out
+
+
+def _ask_adjudicator(intro: str):
+    """The run-time question of ruling §0.2, on the terminal: the offered
+    models with their estimated cost; a number, Enter for the default, or
+    q to stop before anything is spent."""
+    def ask(rows: list[dict]) -> str | None:
+        print(intro)
+        default = next((i for i, r in enumerate(rows, 1) if r["default"]), 1)
+        while True:
+            answer = input(f"Adjudicator [1-{len(rows)}, Enter = {default}, "
+                           "q = stop]: ").strip().lower()
+            if answer in ("q", "quit", "stop"):
+                return None
+            if not answer:
+                return rows[default - 1]["model"]
+            if answer.isdigit() and 1 <= int(answer) <= len(rows):
+                return rows[int(answer) - 1]["model"]
+            print(f"  one of 1-{len(rows)}, Enter, or q")
+    return ask
+
+
+def _extract_choose(config: dict, knob: dict, essays: list, llm, args,
+                    est: dict | None = None) -> str | None:
+    """Price the scope and settle the adjudicator before the first call.
+    `est` is given by the replay, which knows its candidate count."""
+    from . import extraction_adjudicator as adj
+
+    if est is None:
+        est = adj.estimate_scope(essays, knob["proposable_relations"])
+    rows = None
+    if not args.adjudicator and knob.get("adjudicator_prompt") != "default":
+        rows = adj.choice_rows(config, knob, est)
+    model = llm.model if llm is not None else None
+    intro = adj.render_choices(
+        rows, est, model,
+        adj.cost(model, est["extraction_in"], est["extraction_out"])
+        if model else None) if rows else ""
+    try:
+        return adj.choose(config, knob, est, answer=args.adjudicator,
+                          ask=_ask_adjudicator(intro)
+                          if sys.stdin.isatty() else None)
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+
+
+def _extract_screened(db: Database, manuscript: dict, args) -> None:
+    from . import extraction as ex
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    if len(args.target) != 2:
+        sys.exit("usage: authorlm extract screened <file>")
+    files = read_manuscript_files(Path(manuscript["path"]))
+    try:
+        rel = _resolve(files, args.target[1])
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+    rows = ex.screened(db, manuscript, rel)
+    if not rows:
+        print(f"Nothing screened for {rel} — every candidate that passed the "
+              "adjudicator reached triage.")
+        return
+    run = None
+    for row in rows:
+        if row["run"] != run:
+            run = row["run"]
+            print(ui.bold(f"run {run}"))
+        print(f"  {row['score']:.2f}  {row['label']}  [§{row['unit']}]")
+        print(ui.dim(f"        “{row['span']}” — {row['reason']}"))
+
+
+def _extract_calibrate(db: Database, manuscript: dict, args,
+                       config: dict) -> None:
+    """`extract calibrate [--replay [file…]] [--gates-only]`
+    (docs/extraction-redesign.md §4.6, §6.1). Not behind the
+    [extraction] switch: calibration is what earns the switch (§5.5)."""
+    from . import extraction as ex
+    from . import extraction_adjudicator as adj
+    from . import extraction_calibration as cal
+    from .lenses import _resolve
+    from .revisions import read_manuscript_files
+
+    try:
+        knob = ex.knobs(config, db, manuscript)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    if args.replay is None:
+        print(cal.describe_current(db, manuscript, knob))
+        return
+    only = None
+    named = [*args.target[1:], *args.replay]
+    if named:
+        files = read_manuscript_files(Path(manuscript["path"]))
+        try:
+            only = [_resolve(files, f) for f in named]
+        except LookupError as err:
+            sys.exit(f"error: {err}")
+    replay = cal.prepare(db, manuscript, knob, only=only)
+    if not replay.groups:
+        print("No historical candidates to replay.")
+        return
+    judge = None
+    if not args.gates_only:
+        model = _extract_choose(config, knob, [], None, args,
+                                est=cal.estimate(replay))
+        if model is None:
+            print("Stopped before any call; nothing was spent.")
+            return
+        judge = adj.adjudicator_llm(config, model)
+        if not judge.enabled:
+            sys.exit("error: the replay's adjudicator needs an LLM — [llm] "
+                     "enabled = true, and the model's key in .env (or "
+                     "--gates-only, which needs none).")
+        cal.adjudicate(replay, judge)
+    section = (config.get("extraction") or {})
+    configured = {k: section.get(k, ex.KNOB_DEFAULTS[k])
+                  for k in ("max_concepts_per_essay", "max_links_per_essay")}
+    report = cal.measure(replay, knob, configured)
+    print(cal.render(report))
+    if report["adjudicated"]:
+        entry = cal.record(db, manuscript, report, ex.new_run_id("calibrate"),
+                           ex.spent(judge))
+        print(f"Recorded as {entry['id']}: the next run reads these "
+              "thresholds.")
+        _report_llm(judge)
+
+
+def _extract_backup(db: Database) -> None:
+    """`extract backup` (docs/extraction-redesign.md §5.1): the WAL-safe
+    copy the migration is rolled back to."""
+    from . import extraction_migration as mig
+
+    path = mig.backup(db)
+    print(f"Backup written: {path}")
+
+
+def _extract_migrate(db: Database, manuscript: dict, args,
+                     config: dict) -> None:
+    """`extract migrate [--dry-run] [--gates-only] [--adjudicator M]
+    [--run ID] [--undo ID]` (docs/extraction-redesign.md §5.2-5.3, §5.6).
+    Not behind the [extraction] switch: the migration is what prepares
+    the graph for it."""
+    from . import extraction as ex
+    from . import extraction_adjudicator as adj
+    from . import extraction_migration as mig
+
+    run_id = args.run or mig.DEFAULT_RUN
+    if args.undo:
+        report = mig.undo(db, manuscript, args.undo)
+        print(mig.render_undo(report))
+        return
+    try:
+        knob = ex.knobs(config, db, manuscript)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    prior = [r for r in ex.runs(db, manuscript)
+             if r.get("kind") == "migrate" and r.get("id") == run_id]
+    if prior and not args.dry_run:
+        sys.exit(f"error: migration run '{run_id}' is already recorded on "
+                 f"this manuscript — undo it first (extract migrate --undo "
+                 f"{run_id}) or name another with --run.")
+    judge = None
+    if not args.gates_only:
+        gated = mig.plan(db, manuscript, knob, run_id=run_id)
+        model = _extract_choose(config, knob, [], None, args,
+                                est=mig.estimate(gated, knob))
+        if model is None:
+            print("Stopped before any call; nothing was spent.")
+            return
+        judge = adj.adjudicator_llm(config, model)
+        if not judge.enabled:
+            sys.exit("error: the migration's adjudicator needs an LLM — "
+                     "[llm] enabled = true, and the model's key in .env (or "
+                     "--gates-only, which needs none).")
+    p = mig.plan(db, manuscript, knob, judge_llm=judge, run_id=run_id)
+    text = mig.render_plan(p)
+    if args.dry_run:
+        out = db.path.parent / f"extraction-migration-{run_id}-dry-run.txt"
+        out.write_text(text + "\n", encoding="utf-8")
+        print(text)
+        print(f"\nDry run: nothing written to the database. Report: {out}")
+        if judge is not None:
+            _report_llm(judge)
+        return
+    report = mig.apply(db, manuscript, p)
+    print(text)
+    print()
+    print(mig.render_report(report))
+    if judge is not None:
+        _report_llm(judge)
+
+
+def _extract_runs(db: Database, manuscript: dict) -> None:
+    from . import extraction as ex
+
+    entries = ex.runs(db, manuscript)
+    if not entries:
+        print("No extraction runs recorded for this manuscript.")
+        return
+    for e in entries:
+        money = f"${e['cost']:.2f}" if e.get("cost") is not None else "cost ?"
+        if e.get("kind") in ("migrate", "migrate-undo"):
+            print(f"{e['started'][:16]}  {e['id']}  {e['kind']}  "
+                  f"{e.get('adjudicator') or 'gates only'}  "
+                  f"{json.dumps(e.get('report'))}"
+                  + ("  INCOMPLETE" if e.get("incomplete") else ""))
+        elif e.get("kind") == "calibrate":
+            print(f"{e['started'][:16]}  {e['id']}  calibrate  "
+                  f"{e.get('model')}  {e.get('units')} essay(s)  {money}  "
+                  f"thresholds: {json.dumps(e.get('thresholds'))}")
+        else:
+            reached = e.get("reached") or {}
+            print(f"{e['started'][:16]}  {e['id']}  extract  {e.get('model')}"
+                  f" → {e.get('adjudicator')}  {e.get('units')} section(s)  "
+                  f"{money}  reached {reached.get('concepts', 0)}c/"
+                  f"{reached.get('relations', 0)}r/"
+                  f"{reached.get('proposals', 0)}p"
+                  + ("  INCOMPLETE" if e.get("incomplete") else ""))
+
+
 def cmd_extract(args):
+    """The redesigned extraction (docs/extraction-redesign.md §4.9). No
+    flag: print the assembled payloads, no model call, nothing written
+    (the polarity of `filter run`). `--native`: make the calls. The first
+    word may instead be `screened <file>` or `runs`."""
+    from . import extraction as ex
+
     db = _open_db(args)
     manuscript = _manuscript(db, args)
-    from .extraction import (DISABLED_MESSAGE, MANUSCRIPT_DISABLED_MESSAGE,
-                             extraction_enabled,
-                             manuscript_extraction_enabled)
-
-    if not extraction_enabled(_load_config(args)):
-        sys.exit("error: " + DISABLED_MESSAGE)
-    if not manuscript_extraction_enabled(db, manuscript):
-        sys.exit("error: " + MANUSCRIPT_DISABLED_MESSAGE)
-    llm = LLMClient(_load_config(args))
+    action = args.target[0] if args.target and args.target[0] in (
+        "screened", "runs", "calibrate", "backup", "migrate") else None
+    if action == "calibrate":
+        _extract_calibrate(db, manuscript, args, _load_config(args))
+        return
+    if action == "backup":
+        _extract_backup(db)
+        return
+    if action == "migrate":
+        _extract_migrate(db, manuscript, args, _load_config(args))
+        return
+    if action == "screened":
+        _extract_screened(db, manuscript, args)
+        return
+    if action == "runs":
+        _extract_runs(db, manuscript)
+        return
+    config = _load_config(args)
+    try:
+        knob = ex.knobs(config, db, manuscript)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    if not args.native:
+        essays = _extract_payloads(db, manuscript, args, knob)
+        if not essays:
+            print("Nothing to extract — no section changed since the last "
+                  "extraction. Name a file, or use --full.")
+            return
+        for _name, payloads in essays:
+            print(ex.render_essay(payloads))
+        return
+    if not ex.extraction_enabled(config):
+        sys.exit("error: " + ex.DISABLED_MESSAGE)
+    if not ex.manuscript_extraction_enabled(db, manuscript):
+        sys.exit("error: " + ex.MANUSCRIPT_DISABLED_MESSAGE)
+    llm = ex.extraction_llm(config, knob)
     if not llm.enabled:
-        sys.exit(
-            "error: extraction needs an LLM. Enable one in .authorlm/config.toml, e.g.\n"
-            "  [llm]\n"
-            "  enabled = true\n"
-            '  model = "gemini/gemini-2.5-flash"\n'
-            "(provider 'litellm' is the default; export GEMINI_API_KEY first)."
-        )
-    _run_extraction(db, manuscript, llm, files=args.files or None, full=args.full,
-                    edges_only=args.edges_only, aliases_only=args.aliases)
+        sys.exit("error: extraction needs an LLM — [llm] enabled = true in "
+                 "config.toml, and the model's key in .env.")
+    version = collect_revision(db, manuscript, session_id=None,
+                               source="extract")
+    if version:
+        print(f"Collected revision v{version['version_no']}.")
+    essays = _extract_payloads(db, manuscript, args, knob)
+    if not essays:
+        print("Nothing to extract — no section changed since the last "
+              "extraction. Name a file, or use --full.")
+        return
+    model = _extract_choose(config, knob, essays, llm, args)
+    if model is None:
+        print("Stopped before any call; nothing was spent.")
+        return
+    from . import extraction_adjudicator as adj
+
+    judge = adj.adjudicator_llm(config, model)
+    report = ex.run(db, manuscript, essays, extract_llm=llm, judge_llm=judge,
+                    knob=knob, run_id=ex.new_run_id("extract"),
+                    advance_watermark=not args.target)
+    print(ex.render_run(report))
+    _report_llm(llm)
+    _report_llm(judge)
 
 
 def cmd_guide(args):
@@ -7171,7 +7561,8 @@ def cmd_doc(args):
                                             title=args.title, service=service,
                                             docs_service=docs_service,
                                             rebuild=(args.rebuild
-                                                     and target == args.name))
+                                                     and target == args.name),
+                                            guard=True)
                     normalized_any = normalized_any or result["locally_normalized"]
                     print(f"Pushed {result['relpath']} → tab "
                           f"{ui.dim(ui.link(result['url']))}")
@@ -7306,6 +7697,9 @@ def cmd_doc(args):
                         f"({', '.join(sorted(set(refs)))}) — stripped. "
                         "Images belong in _illustrations/ via "
                         "[Illustration: …] tags."))
+                for relpath in result.get("pruned", []):
+                    print(f"Dropped the Doc link for {relpath}: its tab is "
+                          "gone and the file is retired or deleted.")
                 for relpath in result["missing"]:
                     print(ui.yellow(f"warning: no tab found for {relpath} — "
                                     "was its tab renamed? Tab titles must "
@@ -7349,6 +7743,17 @@ def cmd_doc(args):
                           "trip, nothing to collect.")
                 _print_comment_harvest(result)
                 print(ui.dim("Checkouts cleared — local editing is safe again."))
+                if result["missing"]:
+                    # A tab that could not be read is a failed pull, never
+                    # a clean one: the exit code says so, so a script or an
+                    # agent cannot read "nothing came down" as "nothing
+                    # changed" (2026-10-26, when Google's export dropped
+                    # the tab titles and every pull exited 0).
+                    sys.exit("error: nothing pulled for "
+                             f"{', '.join(result['missing'])}: its tab was "
+                             "not found in the Doc's export. 'doc list' "
+                             "shows the tabs; tab titles must stay exact "
+                             "filenames.")
         except (LookupError, FileExistsError, ValueError) as err:
             sys.exit(f"error: {err}")
         return
@@ -7393,11 +7798,21 @@ def cmd_doc(args):
         sys.exit(f"usage: doc {args.action} <name>")
     try:
         if args.action == "add":
-            path = docs.add_doc(manuscript, args.name, title=args.title)
+            path = docs.add_doc(manuscript, args.name, title=args.title,
+                                after=getattr(args, "doc_after", None))
             print(f"Created {path.relative_to(manuscript['path'])} "
                   + ui.dim("(scaffold only — the writing is yours)"))
+            hint = docs.about_the_book_hint(args.name)
+            if hint:
+                print(ui.yellow(hint))
         elif args.action == "retire":
             path = docs.retire_doc(manuscript, args.name)
+            from .gdocs import drop_link
+            relpath = str(path.relative_to(Path(manuscript["path"])
+                                           / docs.RETIRED_DIR))
+            if drop_link(db, manuscript, relpath):
+                print(ui.dim(f"Dropped {relpath}'s Doc link — delete its "
+                             "tab in the Doc by hand."))
             print(f"Retired to {docs.RETIRED_DIR}/{path.name} — history stays replayable; "
                   "concepts it introduced remain in the graph (retire those separately if wanted).")
         else:  # revive
@@ -8636,8 +9051,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ISBN-13 assigned to the paperback edition")
     p.add_argument("--hardcover-isbn", default="",
                    help="ISBN-13 assigned to the hardcover edition")
-    p.add_argument("--no-extract", action="store_true",
-                   help="skip automatic LLM concept extraction")
     p.add_argument("--extraction", default=None, choices=["on", "off"],
                    help="off registers the manuscript with concept "
                         "extraction switched off for good, not just at "
@@ -8793,17 +9206,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "summarize",
-        help="essay summaries — the editor's working memory of the whole "
-             "book, built autoregressively in reading order "
-             "(docs/critique-pass-design.md §4)")
-    p.add_argument("action", choices=["status", "show", "rebuild"])
+        help="the summary hierarchy — paragraph records, section summaries "
+             "and the essay summaries that are the editor's working memory "
+             "of the whole book (docs/summary-hierarchy-design.md)")
+    p.add_argument("action", choices=["status", "show", "rebuild", "outline"])
     p.add_argument("file", nargs="?",
-                   help="show: the unit; rebuild: one unit only (against "
-                        "current prior summaries; downstream marked stale)")
+                   help="show/outline: the unit; rebuild: one unit only "
+                        "(against current prior summaries; downstream "
+                        "marked stale)")
+    p.add_argument("--level", choices=["paragraph", "section", "essay"],
+                   help="status: that level's row counts per unit; rebuild: "
+                        "bring this level up to date, lower levels first "
+                        "(default essay)")
     p.add_argument("--all", action="store_true",
-                   help="rebuild: every unit from scratch (default reuses "
-                        "fresh summaries and rebuilds from the first "
-                        "missing/stale one onward)")
+                   help="rebuild: every row of the level from scratch "
+                        "(default rebuilds only missing, stale and "
+                        "upstream-stale rows)")
+    p.add_argument("--section", type=int, metavar="N",
+                   help="show: section N's summary and its paragraph gists")
+    p.add_argument("--paragraph", type=int, metavar="N",
+                   help="show: paragraph N's record")
+    p.add_argument("--json", action="store_true",
+                   help="show: machine-readable output")
     p.set_defaults(func=cmd_summarize)
 
     p = sub.add_parser(
@@ -8973,6 +9397,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "_drafts/<stem>.merged.md under the manuscript)")
     p.add_argument("--title", help="heading for a new document / Doc title "
                                    "(push, create-manuscript)")
+    p.add_argument("--after", dest="doc_after", metavar="FILE",
+                   help="add: the toc.toml file the new one follows, or "
+                        "'start' (default: the end of toc.toml)")
     p.add_argument("--open", action="store_true",
                    help="open the Google Doc in your browser after push")
     p.add_argument("--force", action="store_true",
@@ -9258,6 +9685,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "manuscript's folder); re-uploading the same "
                         "output replaces it in place — same file, same "
                         "link")
+    p.add_argument("--whole", action="store_true",
+                   help="teleprompter only: the whole file read on camera "
+                        "— the narrated prose as Body between the "
+                        "'voice: author' clips")
     p.add_argument("--as-doc", action="store_true",
                    help="with --upload, docx/teleprompter only: convert "
                         "to a Google Doc instead of keeping the .docx")
@@ -9307,6 +9738,8 @@ def build_parser() -> argparse.ArgumentParser:
                "has a take (paid)\n"
                "  audio stitch becker                one file, ffmpeg, "
                "loudness-normalised (free)\n"
+               "  audio stitch becker --preview [--json]   the free stand-in "
+               "narration from say previews\n"
                "  audio preview becker | --all       the free listen: macOS "
                "say, respellings substituted, one mp3 per paragraph\n"
                "  audio serve [--port 8792] [--no-open]   the review page on "
@@ -9329,6 +9762,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="serve: do not open the browser")
     p.add_argument("--force", action="store_true",
                    help="preview: re-render even where a preview exists")
+    p.add_argument("--preview", action="store_true",
+                   help="stitch: join the chapter's free macOS say previews "
+                        "(rendering any missing) into _audio/preview/chapters/"
+                        "<stem>.mp3 with a <stem>.sections.json timing sidecar")
+    p.add_argument("--json", action="store_true",
+                   help="stitch --preview: print {path, duration_s, sections, rendered}")
     p.add_argument("--remaining", action="store_true",
                    help="generate: every paragraph of the chapter without a take")
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
@@ -9642,21 +10081,42 @@ def build_parser() -> argparse.ArgumentParser:
                         "push/pull)")
     p.set_defaults(func=cmd_profile)
 
-    p = sub.add_parser("extract",
-                       help="LLM-extract concepts/links (incremental: only files "
-                            "changed since the last extraction)")
-    p.add_argument("files", nargs="*",
-                   help="restrict extraction to these manuscript files")
+    p = sub.add_parser(
+        "extract",
+        help="concept and edge extraction (docs/extraction-redesign.md): "
+             "prints the per-section payloads; --native makes the calls")
+    p.add_argument("target", nargs="*",
+                   help="manuscript file(s); none = the sections changed "
+                        "since the last extraction. Or: 'screened <file>' "
+                        "(what the per-essay ceiling held back), 'runs', "
+                        "'calibrate [--replay [file…]]', 'backup', "
+                        "'migrate [--dry-run] [--undo ID]'")
+    p.add_argument("--section", default=None,
+                   help="one section of the file: its number ('3', '3.2' "
+                        "for a part) or its heading's text")
     p.add_argument("--full", action="store_true",
-                   help="reprocess the whole manuscript, not just changes")
-    p.add_argument("--edges-only", action="store_true",
-                   help="extract only relationships among existing concepts "
-                        "(no new concepts; does not advance the watermark)")
-    p.add_argument("--aliases", action="store_true",
-                   help="sweep the full text for aliasing statements "
-                        "(naming/defining sentences) and file merge "
-                        "proposals; extracts nothing else and does not "
-                        "advance the watermark")
+                   help="every essay in reading order, not just changes")
+    p.add_argument("--native", action="store_true",
+                   help="make the model calls (needs [extraction] enabled)")
+    p.add_argument("--replay", nargs="*", default=None, metavar="FILE",
+                   help="with 'calibrate': replay the historical candidates "
+                        "(of these essays, or all) through the gates and the "
+                        "adjudicator against the author's verdicts, and "
+                        "move the thresholds")
+    p.add_argument("--gates-only", action="store_true",
+                   help="with 'calibrate --replay': the deterministic half "
+                        "alone — free, records nothing")
+    p.add_argument("--adjudicator", default=None, metavar="MODEL",
+                   help="the per-essay adjudicator's model for this run — "
+                        "answers the run-time question non-interactively "
+                        "(ruling §0.2)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="with 'migrate': plan and report, write nothing")
+    p.add_argument("--run", default=None, metavar="ID",
+                   help="with 'migrate': the run id its rows are tagged "
+                        "with (default migration-1)")
+    p.add_argument("--undo", default=None, metavar="ID",
+                   help="with 'migrate': reverse the migration run ID")
     p.set_defaults(func=cmd_extract)
 
     p = sub.add_parser("guide", help="generate editorial guidance (or abstain)")

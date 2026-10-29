@@ -65,6 +65,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
+import _summary_stubs  # noqa: E402
 from authorlm import api, critique, gdocs, passes, summaries as sums  # noqa: E402
 from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
@@ -2452,8 +2453,9 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
 
     # 4. A comment INSIDE the table: the changed table is held at its
     #    old text and reported (it-e26a44f924be holds any changed unit
-    #    an open comment is anchored in); --rebuild is the knowing
-    #    opt-in.
+    #    an open comment is anchored in); --rebuild over it is refused
+    #    (2026-10-26, the author: "make --rebuild refuse while open
+    #    comments anchor in the tab").
     _, db2, man2, ms2, fake2 = _table_fixture(
         root, "tbl-cell-ws", commented("Choice scores"))
     before = fake2.tab_text("agency.md")
@@ -2467,12 +2469,16 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
           == "Choice scores", str(push))
     check("and leaves the tab and the comment untouched",
           fake2.tab_text("agency.md") == before and not fake2.orphaned)
-    push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
-                          docs_service=fake2, rebuild=True)
-    check("rebuild=True rebuilds the tab, accepting the orphan",
-          push.get("mode") is None and fake2.orphaned
-          and _tab_md(fake2) == gdocs.normalize_markdown(changed),
-          f"{push}\n{_tab_md(fake2)}")
+    try:
+        gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                       docs_service=fake2, rebuild=True)
+        check("rebuild=True over an anchored comment is refused", False)
+    except LookupError as err:
+        check("rebuild=True over an anchored comment is refused by name, "
+              "the tab and the comment untouched",
+              "rebuild refused" in str(err) and "Choice scores" in str(err)
+              and fake2.tab_text("agency.md") == before and not fake2.orphaned,
+              str(err))
 
     # 5. A table tab with no comments still pushes, by rebuild as before.
     _, db3, man3, ms3, fake3 = _table_fixture(
@@ -2606,16 +2612,21 @@ def _a_commented_paragraph_is_held(root: Path) -> None:
           and _tab_md(fake2) == gdocs.normalize_markdown(_HOLD_LOCAL),
           f"{push}\n{_tab_md(fake2)}")
 
-    # 6. --rebuild still overrides, as the author's explicit opt-in.
+    # 6. --rebuild no longer overrides the hold: it is refused while the
+    #    comment anchors in the tab (2026-10-26).
     _, db3, man3, ms3, fake3 = _table_fixture(
         root, "hold-rebuild-ws", commented("escape"), text=_HOLD_DOC)
     (ms3 / "agency.md").write_text(_HOLD_LOCAL)
-    push = gdocs.push_doc(db3, man3, "agency.md", service=fake3,
-                          docs_service=fake3, rebuild=True)
-    check("rebuild=True overrides the hold",
-          push.get("mode") is None and not push.get("held")
-          and _tab_md(fake3) == gdocs.normalize_markdown(_HOLD_LOCAL),
-          f"{push}\n{_tab_md(fake3)}")
+    before3 = fake3.tab_text("agency.md")
+    try:
+        gdocs.push_doc(db3, man3, "agency.md", service=fake3,
+                       docs_service=fake3, rebuild=True)
+        check("rebuild=True does not override the hold", False)
+    except LookupError as err:
+        check("rebuild=True does not override the hold: refused, tab untouched",
+              "rebuild refused" in str(err)
+              and fake3.tab_text("agency.md") == before3 and not fake3.orphaned,
+              str(err))
 
     # 7. The CLI names each held paragraph and its comment.
     ws4, db4, man4, ms4, fake4 = _table_fixture(
@@ -4045,9 +4056,12 @@ class Stub(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
+        stub = _summary_stubs.reply(system, user)
         if "THE UNIT: " in user:
             unit = user.split("THE UNIT: ", 1)[1].split("\n", 1)[0]
-            content = f"MOVES: summary of {unit}."
+            content = f"MOVES: [1] summary of {unit}."
+        elif stub is not None:
+            content = stub
         elif "Essay editor" in system:
             Stub.editor_calls.append(user)
             content = json.dumps(Stub.editor_replies.pop(0))
@@ -6047,6 +6061,31 @@ def main_test() -> None:
             for v in dp_versions)
         check("doc pull snapshots the uncollected local edit into history "
               "before the Doc overwrites it (BUG-1 / A2)", recovered)
+
+        # A tab the export does not carry: the pull says so and EXITS
+        # NON-ZERO (2026-10-26: every pull exited 0 while nothing came down).
+        def _missing_pull_doc(db, manuscript, query=None, service=None,
+                              force=False, with_comments=True,
+                              docs_service=None, bridge=None):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [], "missing": ["solo.md"], "doc_id": "doc-1"}
+        _gdocs_mod.get_service = _fake_service2
+        _gdocs_mod.get_docs_service = _fake_service2
+        _gdocs_mod.pull_doc = _missing_pull_doc
+        out_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out_buf):
+                cli_main(["--workspace", str(dp_ws), "doc", "pull", "solo.md"])
+            exit_msg = None
+        except SystemExit as err:
+            exit_msg = str(err.code)
+        finally:
+            (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
+             _gdocs_mod.pull_doc) = _orig2
+        check("a pull whose tab is missing exits with an error naming it",
+              exit_msg is not None and "nothing pulled for solo.md" in exit_msg
+              and "clean round trip" not in out_buf.getvalue(),
+              f"{exit_msg!r} / {out_buf.getvalue()[-200:]!r}")
 
         _local_transport_guards(root)
         _identical_old_halves(root)
