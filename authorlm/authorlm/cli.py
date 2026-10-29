@@ -1388,7 +1388,12 @@ def _critique_edits_triage(db: Database, manuscript: dict, args) -> None:
 
 def _critique_write(db: Database, manuscript: dict, args) -> None:
     """Diff-write: accepted edits → the essay's Doc tab as pending forms.
-    Pins the pre-pass version. Local keeps OLD."""
+    Pins the pre-pass version. Local keeps OLD.
+
+    The checkout gate matches `filter push` (RISK-4): accepted edits were
+    staged against local, and `write_pending_forms` opens with a levelling
+    push that would overwrite Doc-side prose edits if the file is
+    checked out. Refuse and name `doc pull` — never a silent wipe."""
     from . import gdocs, passes
 
     if not args.target:
@@ -1400,6 +1405,11 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
     accepted = [t for t in threads if t["state"] == "accepted"]
     if not accepted:
         sys.exit(f"error: no accepted edits for {file} — triage first.")
+    # Before pin / OAuth / Doc writes: staging read `old` from local.
+    try:
+        api._checkout_gate(db, manuscript, file)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
     # Pristine check + pin: the pass row remembers what to roll back to.
     from .revisions import collect_revision
     version = collect_revision(db, manuscript, session_id=None,
