@@ -710,6 +710,12 @@ Hermetic tests for tools/gallery.py — self-contained image-review pages.
 
 docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generated-docs.
 
+## `tests.test_holds_doc_edits`
+
+`authorlm/tests/test_holds_doc_edits.py`
+
+`gdocs._holds_doc_edits` is the push-guard door for a hand-settled conflict.
+
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`
@@ -733,6 +739,12 @@ Proposal learning loop — firewall, screen, distillation, retraction.
 `authorlm/tests/test_media.py`
 
 Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
+
+## `tests.test_merge_changes`
+
+`authorlm/tests/test_merge_changes.py`
+
+`gdocs._merge_changes` writes one caller's mapping edits onto current metadata.
 
 ## `tests.test_morph_targets`
 
@@ -799,6 +811,12 @@ Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5,
 `authorlm/tests/test_signature_tag.py`
 
 The [Signature: uri] tag: plain text in the files, a signature block (image, author's name, export date) in every reader output, dropped from the audio-clean build. Run: python3 tests/test_signature_tag.py
+
+## `tests.test_split_by_anchors`
+
+`authorlm/tests/test_split_by_anchors.py`
+
+`gdocs._plain` / `_split_by_anchors` cut a Doc export when tab titles are missing from the markdown.
 
 ## `tests.test_summaries`
 
