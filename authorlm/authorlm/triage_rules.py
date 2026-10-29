@@ -23,11 +23,6 @@ RULES: dict[str, dict[str, str]] = {
         "action": "alias",
         "label": "duplicates a resolved concept name",
     },
-    "concept_unmentioned": {
-        "triage_type": "concepts",
-        "action": "retire",
-        "label": "absent from the manuscript",
-    },
     "concept_below_recurrence_bar": {
         "triage_type": "concepts",
         "action": "retire",
@@ -47,11 +42,6 @@ RULES: dict[str, dict[str, str]] = {
         "triage_type": "edges",
         "action": "reject",
         "label": "duplicates a resolved relationship",
-    },
-    "edge_unmentioned_endpoint": {
-        "triage_type": "edges",
-        "action": "reject",
-        "label": "has an endpoint absent from the manuscript",
     },
 }
 
@@ -106,11 +96,12 @@ def _concept_decisions(db: Database, manuscript: dict,
             "AND status NOT IN ('inferred', 'rejected', 'retired')", (mid,))
         for ident in (row["from_node"], row["to_node"])
     }
-    ungrounded = {row["id"]: row for row in
-                  hygiene.ungrounded_concepts(db, mid, files)}
+    # Absence from the text is no longer a rule here: the redesigned
+    # extraction's gate 1 (docs/extraction-redesign.md §4.4) grounds every
+    # candidate in a quoted span before it can reach the graph, and the
+    # migration (§5.2) re-gates what was already pending.
     below_bar = {row["id"]: row for row in
-                 hygiene.below_recurrence_bar(
-                     db, mid, files, {row["name"] for row in ungrounded.values()})}
+                 hygiene.below_recurrence_bar(db, mid, files, set())}
 
     decisions = []
     protected = []
@@ -134,17 +125,13 @@ def _concept_decisions(db: Database, manuscript: dict,
                 f"a resolved concept already has the name '{canonical['name']}'",
                 {"canonical_id": canonical["id"]}))
             continue
-        finding = ungrounded.get(node["id"])
-        rule = "concept_unmentioned"
-        reason = "its name and aliases do not occur in the current manuscript"
-        if not finding and node["id"] in below_bar:
-            finding = below_bar[node["id"]]
-            rule = "concept_below_recurrence_bar"
-            reason = (f"{finding['contexts']} context(s) across "
-                      f"{finding['sections']} section(s) and "
-                      f"{finding['files']} file(s)")
+        finding = below_bar.get(node["id"])
         if not finding:
             continue
+        rule = "concept_below_recurrence_bar"
+        reason = (f"{finding['contexts']} context(s) across "
+                  f"{finding['sections']} section(s) and "
+                  f"{finding['files']} file(s)")
         if node["id"] in proposal_targets:
             protected.append({"triage_type": "concepts", "object_id": node["id"],
                               "object_label": node["name"],
@@ -170,8 +157,6 @@ def _edge_decisions(db: Database, manuscript: dict,
     drafts = {row["object_id"] for row in db.all(
         "SELECT object_id FROM triage_drafts WHERE manuscript_id = ? "
         "AND triage_type = 'edges'", (mid,))}
-    ungrounded = {row["id"]: row for row in
-                  hygiene.ungrounded_edges(db, mid, files)}
 
     decisions = []
     protected = []
@@ -201,10 +186,6 @@ def _edge_decisions(db: Database, manuscript: dict,
         ):
             rule = "edge_duplicate_settled"
             reason = "the same relationship is already settled"
-        elif edge["id"] in ungrounded:
-            rule = "edge_unmentioned_endpoint"
-            missing = ", ".join(ungrounded[edge["id"]]["unmentioned"])
-            reason = f"manuscript text does not mention: {missing}"
         else:
             continue
         decisions.append(_decision(rule, edge, label, reason))

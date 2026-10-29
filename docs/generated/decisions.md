@@ -7,6 +7,7 @@ Rules that span modules, from each package's `Decisions:`. Owner rules end with 
 ## Owner
 
 - `authorlm.audio`: Export resolves explicitly configured per-paragraph voices from the manuscript's `_audio/audiobook.toml` and cast into the shared manifest; both consumers use those resolved parameters. Enforced by: tests/test_audio_voice_config.py::VoiceConfigTests::test_required_voice_fields_are_not_filled_in and tests/test_audio_voice_config.py::VoiceConfigTests::test_chapter_override_is_exact_file_without_inheritance. (owner)
+- `authorlm.audio`: Mac say previews and export do not require an ElevenLabs Voice ID; paid synthesis does. Explicit cast roles remain required. Enforced by tests/test_audio_preview_without_paid_voice.py. (owner)
 
 ## Agent-drafted
 
