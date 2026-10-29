@@ -60,10 +60,17 @@ def _alias_canonical_conflict(db: Database, manuscript_id: str,
 
 def create(
     db: Database, manuscript_id: str, kind: str, target: str, payload: dict,
-    source: str = "extraction",
+    source: str = "extraction", *, firewall: bool = True,
 ) -> dict | None:
     """Record an open proposal. Returns None (creates nothing) if an open,
-    dismissed, or demoted proposal with identical content already exists."""
+    dismissed, or demoted proposal with identical content already exists.
+
+    `firewall=False` skips the near-duplicate firewall (never the
+    identical-content check) for the one caller whose own rule already
+    decides when a settled question may be asked again: extraction's
+    revival door, which re-asks a revival dismissed without a reason only
+    once the name's recurrence has doubled (docs/extraction-redesign.md
+    §4.10, ruling §0.8)."""
     content_hash = _content_hash(payload)
     existing = db.one(
         "SELECT id FROM knowledge_proposals WHERE manuscript_id = ? AND kind = ? "
@@ -73,7 +80,8 @@ def create(
     )
     if existing:
         return None
-    if _suppressed_as_near_duplicate(db, manuscript_id, kind, target, payload):
+    if firewall and _suppressed_as_near_duplicate(db, manuscript_id, kind,
+                                                  target, payload):
         return None
     if kind == "alias" and _alias_canonical_conflict(
         db, manuscript_id, payload.get("alias", ""), payload.get("canonical", "")
@@ -239,6 +247,14 @@ def describe(row: dict) -> tuple[str, list[str]]:
         details = [f"as: {payload.get('kind', 'concept')}"]
         if payload.get("notes"):
             details.append(f"notes: {payload['notes']}")
+        recurrence = payload.get("recurrence") or {}
+        if recurrence:
+            details.append(
+                f"recurs in {recurrence.get('contexts')} context(s) across "
+                f"{recurrence.get('files')} file(s) written since it was "
+                "retired")
+        details.extend(f"“{s.get('span', '')}” ({s.get('file', '?')})"
+                       for s in (payload.get("spans") or [])[:3])
     elif kind == "edge_reproposal":
         summary = (f"reconsider rejected relationship: {payload['from_name']} "
                    f"—{payload['relation']}→ {payload['to_name']}")
@@ -509,6 +525,18 @@ def dismiss(db: Database, manuscript_id: str, row: dict, reason: str | None = No
     db.update("knowledge_proposals", row["id"], {"state": "dismissed"})
     _record_evidence(db, manuscript_id, row, "dismissed", reason)
     summary, _ = describe(row)
+    if row["kind"] == "revival" and reason:
+        # A revival dismissed WITH a reason closes the door for good: the
+        # name is never asked about again, only logged by extraction's
+        # gate 5 (docs/extraction-redesign.md §4.10). Without a reason it
+        # may be asked once more, when its recurrence has doubled.
+        node = db.one("SELECT metadata FROM concept_nodes WHERE id = ?",
+                      (row["target"],))
+        if node is not None:
+            meta = loads(node["metadata"], {}) or {}
+            meta["retired_for_good"] = True
+            db.update("concept_nodes", row["target"],
+                      {"metadata": json.dumps(meta)})
     if row["kind"] == "vanished":
         # Dismissal has declared semantics here: keep the concept as a
         # placeholder awaiting future text (it will re-realize on mention).

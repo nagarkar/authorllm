@@ -6,8 +6,8 @@ AuthorLM, an editorial collaborator for the owner's philosophy writing: a CLI (`
 
 ## Commands
 
-- Install: `cd authorlm && pip install -e ".[all]"` (builds the web pages; needs Node at the version in `authorlm/.nvmrc`)
-- Test: `cd authorlm && for f in tests/test_*.py; do [ "$f" = tests/test_live_llm.py ] || python3 "$f" || break; done` (hermetic). `python3 tests/test_live_llm.py` sends any request without a recording in `tests/llm_cache/` to the live, billed model.
+- Install: `cd authorlm && pip install -e ../../llmlm -e ".[all]"` (llmlm, the shared model-call layer, is the sibling checkout, editable; Python 3.12) (builds the web pages; needs Node at the version in `authorlm/.nvmrc`)
+- Test: `cd authorlm && for f in tests/test_*.py; do [ "$f" = tests/test_live_llm.py ] || python3 "$f" || break; done` (hermetic). `python3 tests/test_live_llm.py` sends any request without a recording in `tests/llm_cache/` to the live, billed model. In a worktree, first `ln -s <main checkout>/authorlm/.env authorlm/.env` (gitignored): the keys file lives only in the main checkout, and the test pins `AUTHORLM_ENV`, so the env override does not reach it (2026-10-25).
 - Lint: none yet (`docs/design/exceptions.md`).
 - Docs: `metalm-gendocs` regenerates `docs/generated/`; the pre-commit hook runs it.
 - CLI: `authorlm <verb>`; see `.claude/skills/authorlm/SKILL.md`.
@@ -20,6 +20,7 @@ AuthorLM, an editorial collaborator for the owner's philosophy writing: a CLI (`
 
 - Issue tracker: GitHub issues on `nagarkar/authorllm`. See `docs/agents/issue-tracker.md`.
 - Triage labels: defaults. See `docs/agents/triage-labels.md`.
+- Papers and commentaries: `.claude/skills/papers/` (core) with a field skill; read `.claude/skills/papers/house-rules.md` before writing anything for the author, in every session, local or cloud.
 
 ## Repo notes (moved verbatim from AGENTS.md; to be sorted by the metalm migration)
 
