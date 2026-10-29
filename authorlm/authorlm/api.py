@@ -7079,31 +7079,17 @@ def stage_revisions(db: Database, manuscript: dict, file: str,
     return result
 
 
-def _own_line(text: str, start: int, end: int) -> bool:
-    """True when text[start:end] is the whole of the line(s) it sits on
-    — the shape the writer gives an insertion form, and never the shape
-    of a `{{…}}` the author wrote inside a sentence."""
-    line_start = text.rfind("\n", 0, start) + 1
-    line_end = text.find("\n", end)
-    if line_end == -1:
-        line_end = len(text)
-    return (not text[line_start:start].strip()
-            and not text[end:line_end].strip())
-
-
 def _rule_external_marked(marked: str, replaces: list[dict],
                           inserts: list[dict]) -> tuple[str, dict]:
     """The part of an outside caller's resolve that the shared settle
     steps do not cover, done on the marked text BEFORE they run.
 
-    Additions. `passes.final_text_from_marked` pairs insertion forms
-    with insertion threads by position alone, which is right for a pass
-    that owns every `{{…}}` in its tab and wrong here: the tab may hold
-    another producer's insertion, or the author's own braces. So each
-    addition is paired with its own form — the same new text first, then
-    the closest reworded one — and unwrapped in place. An addition whose
-    form is gone, or emptied, is a decline; one whose braces the author
-    removed by hand, text kept, is an acceptance.
+    Additions. Pair each addition with its own form — the same new text
+    first, then the closest reworded one — and unwrap in place.
+    `threads.pending_forms` already lists own-line insertions only (inline
+    author braces are not forms). An addition whose form is gone, or
+    emptied, is a decline; one whose braces the author removed by hand,
+    text kept, is an acceptance.
 
     Replacements the author turned down by deleting the green half:
     `<<old>>{{}}` and a bare `<<old>>` are put back to `old`, so the
@@ -7124,9 +7110,7 @@ def _rule_external_marked(marked: str, replaces: list[dict],
             r"(?:~~)?<<" + old + r">>(?:~~)?(?:\{\{\s*\}\}|(?!~~|\{\{))",
             lambda m, t=t: t["proposed_old"], marked, count=1)
 
-    forms = [f for f in th.pending_forms(marked)
-             if f["kind"] == "insert" and _own_line(marked, f["start"],
-                                                    f["end"])]
+    forms = [f for f in th.pending_forms(marked) if f["kind"] == "insert"]
     free = [f for f in forms if f["new"].strip()]
     pairs: dict[str, dict] = {}
     for t in inserts:                       # the same text, first
