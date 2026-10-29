@@ -41,3 +41,7 @@ authorlm export docx --file papers/<paper>.md -m <Manuscript> --upload --as-doc 
 `--drive-id` is needed only on the first upload; later uploads of the same paper remember the rendered Doc and replace it in place.
 
 Then the PDF goes to the author. The rendered Doc ids live in the project's `papersequence` tab.
+
+## Rulings
+
+- Every mention of a ruling in a message links inline to the document that records it: a markdown link whose target is the absolute path of the rulings file, or the full URL of its Doc tab, on the ruling's id, for example `[R2](/Users/nagarkar/workspace/repos/<repo>/<path>/rulings.md)`. A ruling named without its link is a claim the owner cannot check. Standard for every repo skill: metalm `guidelines/requirements.md`, "Capturing owner input" (owner).
