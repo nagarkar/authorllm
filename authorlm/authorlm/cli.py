@@ -5371,7 +5371,8 @@ def cmd_export(args):
                 "export teleprompter needs --file <file> — the monologue "
                 "whose on-camera passages to collect"))
         try:
-            result = ex.export_teleprompter(manuscript, args.file)
+            result = ex.export_teleprompter(manuscript, args.file,
+                                            whole=args.whole)
         except (LookupError, ValueError) as err:
             raise SystemExit(ui.yellow(f"export failed: {err}"))
         print(f"Wrote {result['docx']} ({', '.join(result['passages'])}).")
@@ -9684,6 +9685,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "manuscript's folder); re-uploading the same "
                         "output replaces it in place — same file, same "
                         "link")
+    p.add_argument("--whole", action="store_true",
+                   help="teleprompter only: the whole file read on camera "
+                        "— the narrated prose as Body between the "
+                        "'voice: author' clips")
     p.add_argument("--as-doc", action="store_true",
                    help="with --upload, docx/teleprompter only: convert "
                         "to a Google Doc instead of keeping the .docx")
