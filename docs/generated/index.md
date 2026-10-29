@@ -572,6 +572,12 @@ API-layer tests + CLI/MCP parity checklist (P11).
 
 The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
+## `tests.test_audio_preview_without_paid_voice`
+
+`authorlm/tests/test_audio_preview_without_paid_voice.py`
+
+Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
+
 ## `tests.test_audio_voice_config`
 
 `authorlm/tests/test_audio_voice_config.py`

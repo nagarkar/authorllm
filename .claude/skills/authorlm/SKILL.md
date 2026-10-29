@@ -1585,6 +1585,12 @@ do it only on the author's word in chat (given 2026-09-25 for these).
 
 **Set up and cast the manuscript before exporting:**
 
+For Mac `say` previews, leave ElevenLabs Voice IDs blank if the author has
+not selected paid voices. Explicit cast roles are still required. Export
+with `--offline`; `[preview].voice` selects the installed Mac voice.
+Only paid synthesis requires an ElevenLabs Voice ID. Do not ask the author
+to choose an ElevenLabs voice just to listen with Mac `say`.
+
 1. If either `_audio/audiobook.toml` or `_audio/cast.md` is missing,
    run `authorlm audio init -m <ms>` (CLI only), then inspect both files.
    To change existing settings, edit the per-manuscript files directly.
