@@ -832,6 +832,77 @@ def chapter_sections(name: str, source: str, config: dict,
     return sections, warnings, title
 
 
+# ---------------------------------------------------- editing on the page
+
+def locate_block(root: Path, names: list[str], config: dict, spoken: str,
+                 kind: str) -> dict | None:
+    """The raw markdown block behind one speech section, for the page's
+    on-the-spot edit (author's ask 2026-10-26: "fix problems while I'm
+    listening"). The export's line numbers count the pre-passed text
+    (regions resolved, tag lines gone), so a section is found by what it
+    says: the first block of `names` (the chapter file and its
+    continuations) whose spoken form is `spoken`. Returns
+    `{file, line, lines, markdown}` or None when no block says it whole
+    — a paragraph carrying an inline tag the audio strips, a list read
+    one item at a time."""
+    from .export import _REGION_CLOSE, _REGION_OPEN
+
+    def is_tag(line: str) -> bool:
+        return bool(_REGION_OPEN.match(line) or _REGION_CLOSE.match(line))
+
+    for name in names:
+        path = root / name
+        if not path.exists():
+            continue
+        raw_lines = path.read_text(encoding="utf-8").split("\n")
+        for block in blocks_of("\n".join(raw_lines)):
+            if block["kind"] in ("voice", "footnote", "illustration", "rule"):
+                continue
+            count = block["text"].count("\n") + 1
+            raw = raw_lines[block["line"] - 1:block["line"] - 1 + count]
+            # A region tag written against its paragraph ([Only: audio]
+            # on the line above) is part of the block here but not of
+            # what is said: match on the prose, offer the whole block.
+            prose = "\n".join(ln for ln in raw if not is_tag(ln)).strip("\n")
+            if not prose.strip():
+                continue
+            inner_kind, extra = _block_kind(prose)
+            inner = {"kind": inner_kind, "line": block["line"], "text": prose, **extra}
+            if (inner["kind"] == "heading") != (kind == "heading"):
+                continue
+            if inner["kind"] == "heading":
+                inner["text_heading"] = inner["text"]
+            try:
+                said, _w = _spoken(inner, config)
+            except AudioError:
+                continue
+            if said == spoken:
+                return {"file": name, "line": block["line"], "lines": count,
+                        "markdown": "\n".join(raw)}
+    return None
+
+
+def replace_block(root: Path, found: dict, markdown: str) -> Path:
+    """Write `markdown` over the block `locate_block` found, and nothing
+    else of the file: the lines before and after are kept byte for byte.
+    Refuses when the block has moved since it was located (a save from
+    another editor in between), or when the new text is blank."""
+    new = markdown.replace("\r\n", "\n").strip("\n")
+    if not new.strip():
+        raise AudioError("the paragraph would be empty — delete it in the "
+                         "file instead")
+    path = root / found["file"]
+    text = path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    start, count = found["line"] - 1, found["lines"]
+    if "\n".join(lines[start:start + count]) != found["markdown"]:
+        raise AudioError(f"{found['file']}:{found['line']} changed since it "
+                         "was opened — reload and edit again")
+    lines[start:start + count] = new.split("\n")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 # ---------------------------------------------------------- metadata
 
 def _title_page(files: dict[str, str]) -> tuple[str, str]:
@@ -1025,7 +1096,7 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
     chapter_voices: dict[str, str] = {}
     for chapter in config.get("chapter", []):
         name = chapter["file"]
-        if name not in order or name in (TITLE_FILE, pron.FILENAME, "manifest.md"):
+        if name not in order or name in (TITLE_FILE, pron.FILENAME):
             raise AudioError(f"{CONFIG_FILENAME}: chapter file {name!r} "
                              "is not a manuscript audio chapter")
         _resolve_voice(cast, chapter["voice"], {},
@@ -1044,7 +1115,7 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
     previous: dict | None = None
     from .api import is_placeholder
     for name in order:
-        if name == TITLE_FILE or name in (pron.FILENAME, "manifest.md"):
+        if name == TITLE_FILE or name == pron.FILENAME:
             continue
         if is_placeholder(files[name]):
             warnings.append(f"{name}: mid-rewrite (a writeup is open) — "
@@ -1309,7 +1380,7 @@ def check(db, manuscript: dict) -> dict:
         pass
     # Unresolved directive tags.
     for name, text in files.items():
-        if not name.endswith(".md") or name in (pron.FILENAME, "manifest.md"):
+        if not name.endswith(".md") or name == pron.FILENAME:
             continue
         _t, unresolved = directives.strip_tags(normalize_markdown(text))
         for tag in unresolved:
@@ -1406,7 +1477,7 @@ def api_key(required: bool = True) -> str | None:
     key = os.environ.get(KEY_ENV, "").strip()
     if not key and required:
         raise AudioError(f"{KEY_ENV} is not set — put it in the checkout's "
-                         ".env (see .env.example)")
+                         ".env (see env.example)")
     return key or None
 
 

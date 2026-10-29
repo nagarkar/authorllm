@@ -67,12 +67,16 @@ _SENTINEL = "⟦media{}⟧"            # ⟦media3⟧ — survives regions
 _SENTINEL_RE = re.compile(r"⟦media(\d+)⟧")
 
 FIELDS = ("start", "end", "cast", "prior", "look", "text", "use", "youtube",
-          "audio")
+          "audio", "voice")
 # What happens to a clip's own sound (ruled 2026-10-17). `mute`: silent
 # under the voice; `duck`: kept low under the voice (good music); `full`:
 # played at its own level, which only a Collage allows — narration stops.
 AUDIO = ("mute", "duck", "full")
 AUDIO_DEFAULT = {"span": "mute", "montage": "mute", "point": "full"}
+# Who speaks in the clip (2026-10-19). `author`: the author on camera —
+# a Collage cutaway such as a recorded intro or outro, whose text (the
+# clip's note) is the script `export teleprompter` collects.
+VOICES = ("author",)
 VIDEO_EXT = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 
@@ -317,6 +321,21 @@ def _check_audio(item: dict) -> None:
                               "stops there); under the voice use duck or mute")
 
 
+def _check_voice(item: dict) -> None:
+    """The `voice:` field: one of VOICES, and only in a Collage — a clip
+    under the narration has the narrator's voice, not its own."""
+    value = item["fields"].get("voice")
+    if value is None:
+        return
+    if value not in VOICES:
+        item["errors"].append(f"voice: '{value}' is not one of "
+                              f"{', '.join(VOICES)}")
+    elif item["shape"] != "point":
+        item["errors"].append("voice: author marks a cutaway the author "
+                              "speaks on camera, which only a Collage holds "
+                              "(narration stops there)")
+
+
 def _check(item: dict, root: Path, known: dict) -> None:
     """The field rules of §5 and the reference rules of §8i, in place:
     `kind_of` (generated | quoted | used), `errors`, `warnings`."""
@@ -486,6 +505,7 @@ def _file_entries(name: str, raw: str, root: Path, known: dict) -> list[dict]:
         item["spec_words"] = len(item["description"].split())
         _check(item, root, known)
         _check_audio(item)
+        _check_voice(item)
         if region_error:
             item["errors"].append(f"regions do not resolve: {region_error}")
         elif item["i"] not in survived:

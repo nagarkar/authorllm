@@ -63,7 +63,9 @@ import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
+import _summary_stubs  # noqa: E402
 from authorlm import api, critique, gdocs, passes, summaries as sums  # noqa: E402
 from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
@@ -2451,8 +2453,9 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
 
     # 4. A comment INSIDE the table: the changed table is held at its
     #    old text and reported (it-e26a44f924be holds any changed unit
-    #    an open comment is anchored in); --rebuild is the knowing
-    #    opt-in.
+    #    an open comment is anchored in); --rebuild over it is refused
+    #    (2026-10-26, the author: "make --rebuild refuse while open
+    #    comments anchor in the tab").
     _, db2, man2, ms2, fake2 = _table_fixture(
         root, "tbl-cell-ws", commented("Choice scores"))
     before = fake2.tab_text("agency.md")
@@ -2466,12 +2469,16 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
           == "Choice scores", str(push))
     check("and leaves the tab and the comment untouched",
           fake2.tab_text("agency.md") == before and not fake2.orphaned)
-    push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
-                          docs_service=fake2, rebuild=True)
-    check("rebuild=True rebuilds the tab, accepting the orphan",
-          push.get("mode") is None and fake2.orphaned
-          and _tab_md(fake2) == gdocs.normalize_markdown(changed),
-          f"{push}\n{_tab_md(fake2)}")
+    try:
+        gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                       docs_service=fake2, rebuild=True)
+        check("rebuild=True over an anchored comment is refused", False)
+    except LookupError as err:
+        check("rebuild=True over an anchored comment is refused by name, "
+              "the tab and the comment untouched",
+              "rebuild refused" in str(err) and "Choice scores" in str(err)
+              and fake2.tab_text("agency.md") == before and not fake2.orphaned,
+              str(err))
 
     # 5. A table tab with no comments still pushes, by rebuild as before.
     _, db3, man3, ms3, fake3 = _table_fixture(
@@ -2605,16 +2612,21 @@ def _a_commented_paragraph_is_held(root: Path) -> None:
           and _tab_md(fake2) == gdocs.normalize_markdown(_HOLD_LOCAL),
           f"{push}\n{_tab_md(fake2)}")
 
-    # 6. --rebuild still overrides, as the author's explicit opt-in.
+    # 6. --rebuild no longer overrides the hold: it is refused while the
+    #    comment anchors in the tab (2026-10-26).
     _, db3, man3, ms3, fake3 = _table_fixture(
         root, "hold-rebuild-ws", commented("escape"), text=_HOLD_DOC)
     (ms3 / "agency.md").write_text(_HOLD_LOCAL)
-    push = gdocs.push_doc(db3, man3, "agency.md", service=fake3,
-                          docs_service=fake3, rebuild=True)
-    check("rebuild=True overrides the hold",
-          push.get("mode") is None and not push.get("held")
-          and _tab_md(fake3) == gdocs.normalize_markdown(_HOLD_LOCAL),
-          f"{push}\n{_tab_md(fake3)}")
+    before3 = fake3.tab_text("agency.md")
+    try:
+        gdocs.push_doc(db3, man3, "agency.md", service=fake3,
+                       docs_service=fake3, rebuild=True)
+        check("rebuild=True does not override the hold", False)
+    except LookupError as err:
+        check("rebuild=True does not override the hold: refused, tab untouched",
+              "rebuild refused" in str(err)
+              and fake3.tab_text("agency.md") == before3 and not fake3.orphaned,
+              str(err))
 
     # 7. The CLI names each held paragraph and its comment.
     ws4, db4, man4, ms4, fake4 = _table_fixture(
@@ -4044,9 +4056,12 @@ class Stub(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
+        stub = _summary_stubs.reply(system, user)
         if "THE UNIT: " in user:
             unit = user.split("THE UNIT: ", 1)[1].split("\n", 1)[0]
-            content = f"MOVES: summary of {unit}."
+            content = f"MOVES: [1] summary of {unit}."
+        elif stub is not None:
+            content = stub
         elif "Essay editor" in system:
             Stub.editor_calls.append(user)
             content = json.dumps(Stub.editor_replies.pop(0))
@@ -4401,6 +4416,127 @@ def _directives_on_the_doc_road(root: Path) -> None:
           db.one("SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
                  "AND evidence_type IN ('footnote_edit', 'explain_edit')",
                  (mid,))["n"] == 7)
+
+
+SUGGESTION_ESSAY = "\n\n".join([
+    "# The Wall",
+    "Alpha opens the essay.[Suggestion: tighten this] Then on.",
+    "Beta states the claim without a case.",
+    "[Suggestion: add an example]",
+    "Gamma hedges every clause.[Suggestion: cut the hedges] More.",
+    "Delta is fine.",
+    "[Suggestion: reconsider the claim]",
+    "Epsilon is long.",
+    "[Suggestion: split it]",
+]) + "\n"
+
+
+def _suggestions_on_the_doc_road(root: Path) -> None:
+    """[Suggestion: …] on a CHECKED-OUT file (docs/suggestion-directive-
+    design.md §3): the form wraps the TARGET paragraph — inline, tag and
+    all; standalone, the paragraph before it, the tag line left standing
+    until resolve consumes it on acceptance. A decline wraps the tag
+    itself. Local stays pristine; resolve lands the author's ruling."""
+    print("suggestions on the Doc road:")
+    from authorlm import directives as dv
+
+    db, manuscript, ms, fake = _twin_fixture(root, "suggestion-ws",
+                                             essay=SUGGESTION_ESSAY)
+    mid = manuscript["id"]
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, meta)
+    services = lambda: (fake, fake)  # noqa: E731
+
+    rep = dv.apply(db, manuscript, {}, "suggestion", "solo.md", [
+        (1, "Alpha opens. Then on."),
+        {"tag": "add an example", "text": "Beta states the claim: a wall "
+                                          "that holds forever is a tomb."},
+        {"tag": 3, "decline": True, "reason": "the hedges are the point"},
+        {"tag": 4, "decline": True, "reason": "the claim is load-bearing"},
+        (5, "Epsilon is short."),
+    ], services=services)
+    tab = fake.tab_text("solo.md")
+    check("apply on a checked-out file STAGES one form per suggestion: "
+          "inline wraps the paragraph with its tag; standalone wraps the "
+          "paragraph BEFORE the tag and leaves the tag line standing; a "
+          "decline wraps the tag (inline: the paragraph without it; "
+          "standalone: an empty green half)",
+          rep["mode"] == "marked" and not rep["failed"]
+          and "<<Alpha opens the essay.[Suggestion: tighten this] Then on.>>"
+              "{{Alpha opens. Then on.}}\n" in tab
+          and "<<Beta states the claim without a case.>>{{Beta states the "
+              "claim: a wall that holds forever is a tomb.}}\n"
+              "[Suggestion: add an example]\n" in tab
+          and "<<Gamma hedges every clause.[Suggestion: cut the hedges] "
+              "More.>>{{Gamma hedges every clause. More.}}\n" in tab
+          and "Delta is fine.\n<<[Suggestion: reconsider the claim]>>{{}}\n"
+              in tab
+          and "<<Epsilon is long.>>{{Epsilon is short.}}\n[Suggestion: split "
+              "it]\n" in tab, tab)
+    check("...the local file is PRISTINE and the report names the declines",
+          (ms / "solo.md").read_text() == SUGGESTION_ESSAY
+          and [(r["n"], r["declined"]) for r in rep["landed"]]
+          == [(1, False), (2, False), (3, True), (4, True), (5, False)],
+          str(rep))
+    check("the staged rows are `written` suggestion threads; the push gate "
+          "and a second apply name 'suggestion resolve'",
+          len(passes.staged_threads(db, mid, "solo.md", states=("written",),
+                                    origin_type="suggestion")) == 5
+          and gdocs.forms_pending(db, mid, "solo.md") == "suggestion"
+          and _refuses(lambda: dv.apply(db, manuscript, {}, "suggestion",
+                                        "solo.md", [(1, "x")],
+                                        services=services),
+                       "suggestion resolve solo.md")
+          and _refuses(lambda: gdocs.push_doc(db, manuscript, "solo.md",
+                                              service=fake,
+                                              docs_service=fake),
+                       "suggestion resolve solo.md"))
+    check("list reports the forms out in the Doc",
+          [t["proposed_new"] for t in dv.pending(db, mid, "suggestion")]
+          [:1] == ["Alpha opens. Then on."])
+
+    # The author: edits one green half, deletes the standalone accept's
+    # form (restoring the paragraph), leaves the rest to stand.
+    fake.edit("tab-2", "{{Alpha opens. Then on.}}",
+              "{{Alpha opens, and opens well. Then on.}}")
+    fake.edit("tab-2",
+              "<<Beta states the claim without a case.>>{{Beta states the "
+              "claim: a wall that holds forever is a tomb.}}",
+              "Beta states the claim without a case.")
+    res = dv.resolve(db, manuscript, {}, "suggestion", "solo.md",
+                     services=services)
+    local = (ms / "solo.md").read_text()
+    check("resolve lands the edited paragraph; a deleted form is a decline "
+          "that keeps the paragraph AND its tag; an accepted decline removes "
+          "the tag and keeps the paragraph; an accepted standalone "
+          "suggestion lands and its tag line is consumed",
+          "Alpha opens, and opens well. Then on.\n" in local
+          and "Beta states the claim without a case.\n"
+              "[Suggestion: add an example]\n" in local
+          and "Gamma hedges every clause. More.\n" in local
+          and "Delta is fine.\nEpsilon is short.\n" in local
+          and "[Suggestion: split it]" not in local
+          and "[Suggestion: reconsider" not in local
+          and "[Suggestion: cut" not in local
+          and "<<" not in local and "{{" not in local, local)
+    check("the resolve report: four landed (one reworded), one declined",
+          res["accepted"] == 4 and res["declined"] == 1
+          and len(res["diffs"]) == 1
+          and "opens well" in res["diffs"][0]["final"]
+          and res["version_no"] and res["url"], str(res))
+    check("...and pushed the tab clean",
+          "<<" not in fake.tab_text("solo.md")
+          and "Epsilon is short." in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+    check("one tag stays open; the evidence carries the producer's type",
+          [(r["n"], r["gist"]) for r in dv.open_report(ms)]
+          == [(1, "add an example")]
+          and db.one("SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id "
+                     "= ? AND evidence_type = 'suggestion_edit'",
+                     (mid,))["n"] == 5
+          and gdocs.forms_pending(db, mid, "solo.md") is None,
+          str(dv.open_report(ms)))
 
 
 SKY_TAG = ("[Illustration: A sky of parted clouds from which no hand "
@@ -5999,6 +6135,31 @@ def main_test() -> None:
         check("doc pull snapshots the uncollected local edit into history "
               "before the Doc overwrites it (BUG-1 / A2)", recovered)
 
+        # A tab the export does not carry: the pull says so and EXITS
+        # NON-ZERO (2026-10-26: every pull exited 0 while nothing came down).
+        def _missing_pull_doc(db, manuscript, query=None, service=None,
+                              force=False, with_comments=True,
+                              docs_service=None, bridge=None):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [], "missing": ["solo.md"], "doc_id": "doc-1"}
+        _gdocs_mod.get_service = _fake_service2
+        _gdocs_mod.get_docs_service = _fake_service2
+        _gdocs_mod.pull_doc = _missing_pull_doc
+        out_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out_buf):
+                cli_main(["--workspace", str(dp_ws), "doc", "pull", "solo.md"])
+            exit_msg = None
+        except SystemExit as err:
+            exit_msg = str(err.code)
+        finally:
+            (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
+             _gdocs_mod.pull_doc) = _orig2
+        check("a pull whose tab is missing exits with an error naming it",
+              exit_msg is not None and "nothing pulled for solo.md" in exit_msg
+              and "clean round trip" not in out_buf.getvalue(),
+              f"{exit_msg!r} / {out_buf.getvalue()[-200:]!r}")
+
         _local_transport_guards(root)
         _identical_old_halves(root)
         _inline_markup_forms(root)
@@ -6033,6 +6194,7 @@ def main_test() -> None:
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
         _directives_on_the_doc_road(root)
+        _suggestions_on_the_doc_road(root)
         _footnotes_after_a_closing_illustration(root)
         _an_outside_caller_resolves_one_tab(root)
         _a_new_half_that_extends_its_old(root)

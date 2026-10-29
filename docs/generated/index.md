@@ -98,12 +98,6 @@ AuthorLM — a Decision Learning Engine specialization for philosophy writing.
 
 Engine-specific hook adapters.
 
-## `authorlm.adjudication`
-
-`authorlm/authorlm/adjudication.py`
-
-Step two of a two-step extraction: adjudicate the candidates (opt-in).
-
 ## `authorlm.analysis`
 
 `authorlm/authorlm/analysis.py`
@@ -182,6 +176,12 @@ Bash tab-completion, generated from the live argument parser.
 
 The Concept Graph (RFC AuthorLM Chapter 21) — AuthorLM's enduring asset.
 
+## `authorlm.context`
+
+`authorlm/authorlm/context.py`
+
+Declared inputs — what a pass asks for, and the one place that supplies it (summary-hierarchy-design.md ruling 10, §6.7).
+
 ## `authorlm.critic`
 
 `authorlm/authorlm/critic.py`
@@ -210,7 +210,7 @@ Always-on database performance log.
 
 `authorlm/authorlm/directives.py`
 
-Inline directives: `[Footnote: …]` and `[Explain: …]` — shorthand instructions written in the prose, drafted in CHAT, landed by the CLI (designs: docs/footnote-directive-design.md, docs/explain-directive-design.md).
+Inline directives: `[Footnote: …]`, `[Explain: …]` and `[Suggestion: …]` — shorthand instructions written in the prose, drafted in CHAT, landed by the CLI (designs: docs/footnote-directive-design.md, docs/explain-directive-design.md, docs/suggestion-directive-design.md).
 
 ## `authorlm.docs`
 
@@ -229,6 +229,24 @@ Single-file manuscript export — a transient, regenerate-on-demand artifact.
 `authorlm/authorlm/extraction.py`
 
 LLM-backed concept and relationship extraction (RFC AuthorLM §7.2, §21.7).
+
+## `authorlm.extraction_adjudicator`
+
+`authorlm/authorlm/extraction_adjudicator.py`
+
+The per-essay adjudicator (docs/extraction-redesign.md §4.5).
+
+## `authorlm.extraction_calibration`
+
+`authorlm/authorlm/extraction_calibration.py`
+
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1): the historical candidates replayed through the gates and the adjudicator, measured against the author's own verdicts, and the three thresholds of §4.6 moved on the measurement. Zero author cost; modelled on the retired tools/measure_adjudication.py (track-a §4, now superseded).
+
+## `authorlm.extraction_migration`
+
+`authorlm/authorlm/extraction_migration.py`
+
+Migration of the old pipeline's pending rows (docs/extraction-redesign.md §5, phase 5 of §9).
 
 ## `authorlm.filtering`
 
@@ -318,7 +336,7 @@ The proposal learning loop, once, for every triage queue.
 
 `authorlm/authorlm/manifest.py`
 
-The reader-load manifest — a DERIVED report, refreshed on every push.
+The Reader load — a DERIVED report, recomputed on every push.
 
 ## `authorlm.mcp_server`
 
@@ -524,11 +542,23 @@ Dependency-free local HTTP shell for the compiled pronunciation workbench.
 
 The drafting payload seam — stored state in, four blocks out.
 
-## `tests.test_adjudication`
+## `tests._extraction_fixture`
 
-`authorlm/tests/test_adjudication.py`
+`authorlm/tests/_extraction_fixture.py`
 
-Step-two adjudication: opt-in, and inert when off.
+The twenty edges of docs/extraction-redesign.md §2.4, as a fixture.
+
+## `tests._offline_prices`
+
+`authorlm/tests/_offline_prices.py`
+
+Pins llmlm's price cache to an empty one that never reaches the network.
+
+## `tests._summary_stubs`
+
+`authorlm/tests/_summary_stubs.py`
+
+Canned replies for the three summary-hierarchy prompts, shared by the hermetic suites that stand in for the provider over HTTP (test_e2e's StubLLMHandler, test_summaries' EchoSummarizer). Each stub reads the user message the real builder sends and answers in the shape the builder parses, so a `summarize rebuild --all` runs all three levels offline.
 
 ## `tests.test_api`
 
@@ -548,6 +578,12 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_context`
+
+`authorlm/tests/test_context.py`
+
+Declared inputs (summary-hierarchy-design.md ruling 10, §6.7, step 5): the `Input` enum, `context.supply`, the critique pass's OUTLINE and REFERENCED SECTIONS blocks, and the reader load derived from paragraph records. No model call anywhere in this suite: records and section summaries are stored directly.
+
 ## `tests.test_continuation`
 
 `authorlm/tests/test_continuation.py`
@@ -559,6 +595,18 @@ Continuation files: export setting `continuation_level`.
 `authorlm/tests/test_critique.py`
 
 Critique-pass tests (docs/critique-pass-design.md).
+
+## `tests.test_doc_add_toc`
+
+`authorlm/tests/test_doc_add_toc.py`
+
+`doc add` registers the new file in toc.toml when the manuscript has one, so a Doc push of it never leaves toc.toml and the Doc's tab order disagreeing. Run: python3 tests/test_doc_add_toc.py
+
+## `tests.test_doc_bind`
+
+`authorlm/tests/test_doc_bind.py`
+
+`doc bind`: adopt an existing master Doc for a manuscript that has none (a fresh workspace, a cloud session), so `doc pull` fills the folder from its tabs instead of `doc push` creating a new Doc.
 
 ## `tests.test_doc_road_escapes`
 
@@ -577,6 +625,48 @@ Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, 
 `authorlm/tests/test_e2e.py`
 
 End-to-end test of every MVP use case, driven through the real CLI.
+
+## `tests.test_essay_summaries`
+
+`authorlm/tests/test_essay_summaries.py`
+
+Summary hierarchy, step 4 (docs/summary-hierarchy-design.md §3.4, §4.5, §6.6, §11.4): the essay-summary pass. The essay is composed from its section summaries (never the text) and the prior essay summaries; the model writes FLOW, MOVES, MOTIFS, DOES NOT and code derives INTRODUCES, ASSUMES, PROMISES, DEBTS from the paragraph records and renders them under those labels; `sections_hash` tells "my sections changed"; `ensure(level="essay")` rebuilds the two lower levels first and prints one cost line per level; the structural coverage check replaces the paragraph citation parser. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `essay-summary` section.
+
+## `tests.test_export_upload`
+
+`authorlm/tests/test_export_upload.py`
+
+`export … --upload` (any export to the author's Drive, replaced in place on re-export) and `export teleprompter` (the passages the author reads on camera, `voice: author` clips, as a large-type DOCX).
+
+## `tests.test_extraction_adjudicator`
+
+`authorlm/tests/test_extraction_adjudicator.py`
+
+The per-essay adjudicator and the writes (docs/extraction-redesign.md §4.5, §4.8, §9 phase 3), and the run-time model choice (ruling §0.2).
+
+## `tests.test_extraction_calibration`
+
+`authorlm/tests/test_extraction_calibration.py`
+
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1, §9 phase 4): the historical candidates through the gates and the adjudicator, against the author's verdicts, and the thresholds moved.
+
+## `tests.test_extraction_gates`
+
+`authorlm/tests/test_extraction_gates.py`
+
+The candidate contract and the eight gates (docs/extraction-redesign.md §4.4, §4.10, §9 phase 2), on the twenty edges of §2.4.
+
+## `tests.test_extraction_migration`
+
+`authorlm/tests/test_extraction_migration.py`
+
+The migration verbs (docs/extraction-redesign.md §5, §9 phase 5): backup, migrate (plan, apply, dry-run), undo as a round trip.
+
+## `tests.test_extraction_payload`
+
+`authorlm/tests/test_extraction_payload.py`
+
+The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, §9 phase 1): `extraction.assemble` and `authorlm extract <file>`.
 
 ## `tests.test_filter_reply_json`
 
@@ -644,6 +734,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
 
+## `tests.test_paragraph_records`
+
+`authorlm/tests/test_paragraph_records.py`
+
+Summary hierarchy, step 2 (docs/summary-hierarchy-design.md §3.2, §3.5, §4.5, §11.2): the paragraph-records pass. One call per heading section, headings with no call, the span check counted in the build report, the 24,000-character split, lazy rebuild of dirty rows only, and the one cost line. A fake LLM throughout; the live recording is tests/test_live_llm.py's `paragraph-records` section.
+
 ## `tests.test_passes`
 
 `authorlm/tests/test_passes.py`
@@ -668,17 +764,35 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_section_summaries`
+
+`authorlm/tests/test_section_summaries.py`
+
+Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5, §11.3): the section-summary pass. One call per section with the text as authority and the paragraph records as skeleton, conditioned on the earlier sections' POINT lines; MOVES coverage as set equality on the body paragraphs, misses reported; heading-only sections stored with no call; `ensure(level="section")` rebuilds the paragraph level first and prints one cost line per level. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `section-summary` section.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
 
 `setup.py` builds the web pages at install time, because the built pages (`authorlm/*_dist/index.html`) are not tracked in git.
 
+## `tests.test_signature_tag`
+
+`authorlm/tests/test_signature_tag.py`
+
+The [Signature: uri] tag: plain text in the files, a signature block (image, author's name, export date) in every reader output, dropped from the audio-clean build. Run: python3 tests/test_signature_tag.py
+
 ## `tests.test_summaries`
 
 `authorlm/tests/test_summaries.py`
 
-Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
+Essay summaries (critique-pass design §4; summary-hierarchy design §3.4): reading order, autoregressive conditioning, composition from the section summaries, mark-don't-cascade staleness, rebuild semantics.
+
+## `tests.test_summary_hierarchy`
+
+`authorlm/tests/test_summary_hierarchy.py`
+
+Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): paragraph kinds, content hashes, section hashes, the two new tables, freshness derived at read time, and the read API over current rows. No model call anywhere in this suite.
 
 ## `tests.test_toc_outside`
 
@@ -698,11 +812,11 @@ _No docstring._
 
 Distil beliefs from the author's decisions already on record.
 
-## `tools.measure_adjudication`
+## `tools.convert_llm_cache`
 
-`authorlm/tools/measure_adjudication.py`
+`authorlm/tools/convert_llm_cache.py`
 
-Measure the triage burden with and without step-two adjudication.
+One-off: convert authorlm's record/replay recordings to llmlm's cache format.
 
 ## `tools.pdf2md`
 
