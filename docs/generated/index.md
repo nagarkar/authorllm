@@ -722,6 +722,12 @@ Hermetic tests for tools/gallery.py — self-contained image-review pages.
 
 docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generated-docs.
 
+## `tests.test_generation_take_atomic`
+
+`authorlm/tests/test_generation_take_atomic.py`
+
+Retake must not destroy a good paragraph take when the write fails mid-flight.
+
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`
