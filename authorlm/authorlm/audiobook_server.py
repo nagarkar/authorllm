@@ -5,8 +5,13 @@ on a loopback port and opens it in the browser; the page posts to
 `/api/audiobook`, which is `audiobook.dispatch` (and `/api/workbench`,
 which is `workbench.dispatch` — the pronunciation workbench is a mode of
 the same page), and streams audio from
-`/preview/<id>.mp3`, `/take/<stem>/<id>.mp3` and `/stitched/<stem>.mp3`
-with HTTP ranges honoured so a phone can seek. The phone reaches the
+`/preview/<stem>/<id>.mp3` (rendered on the request when missing — the
+lazy listen), `/take/<stem>/<id>.mp3` and `/stitched/<stem>.mp3`
+with HTTP ranges honoured so a phone can seek, and the brand icons
+(`branding.py`). Any manuscript with an
+audio export can be open: the page names it on every request (`params.
+manuscript`, and `?m=` on the audio urls), and `-m` is only the one the
+page opens on. The phone reaches the
 port over Tailscale (`tailscale serve --bg <port>`); the server itself
 never leaves 127.0.0.1.
 """
@@ -20,8 +25,9 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
-from . import audiobook
+from . import audiobook, branding
 
 _RANGE = re.compile(r"bytes=(\d*)-(\d*)")
 
@@ -81,7 +87,7 @@ def make_handler(workspace: str | None, manuscript: str | None):
                     left -= len(chunk)
 
         def _get(self, head: bool) -> None:
-            path = self.path.split("?", 1)[0]
+            path, _, query = self.path.partition("?")
             if path in {"/", "/index.html"}:
                 payload = audiobook.app_html().encode()
                 self.send_response(200)
@@ -95,10 +101,16 @@ def make_handler(workspace: str | None, manuscript: str | None):
             if path == "/health":
                 self._json(200, {"ok": True})
                 return
+            if branding.send(self, path, head=head):
+                return
             if path.startswith(("/preview/", "/take/", "/stitched/")):
+                named = (parse_qs(query).get("m") or [None])[0]
                 try:
-                    s = audiobook.session(workspace, manuscript)
+                    s = audiobook.session(workspace, named or manuscript)
                     target = audiobook.audio_file_for(s, path)
+                except LookupError:
+                    self.send_error(404)
+                    return
                 except Exception as err:  # noqa: BLE001
                     self._json(500, {"ok": False, "error": str(err)})
                     return
@@ -152,10 +164,9 @@ def run(workspace: str | None, manuscript: str | None, host: str = "127.0.0.1",
     server = ThreadingHTTPServer((host, port), make_handler(workspace, manuscript))
     url = f"http://{host}:{server.server_port}/"
     # Open the session (and its worker) now, so the first request is
-    # not the one that pays for the database open, and refresh the
-    # previews of anything the last export left without one.
+    # not the one that pays for the database open. Previews render when
+    # first played, so nothing is rendered ahead.
     s = audiobook.session(workspace, manuscript)
-    s.enqueue("preview")
     print(f"audiobook page for {s.manuscript['name']}: {url}")
     print("  phone: tailscale serve --bg "
           f"{server.server_port}   (then https://<mac>.<tailnet>.ts.net)")

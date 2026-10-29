@@ -1,10 +1,13 @@
-"""Inline directives: `[Footnote: …]` and `[Explain: …]` — shorthand
-instructions written in the prose, drafted in CHAT, landed by the CLI
-(designs: docs/footnote-directive-design.md, docs/explain-directive-design.md).
+"""Inline directives: `[Footnote: …]`, `[Explain: …]` and
+`[Suggestion: …]` — shorthand instructions written in the prose, drafted
+in CHAT, landed by the CLI (designs: docs/footnote-directive-design.md,
+docs/explain-directive-design.md, docs/suggestion-directive-design.md).
 
     …the vital lie.[Footnote: cite Becker ch. 2 | label: RD]
     …the vital lie.[Explain: what Becker means by a vital lie]
     [Explain: why the Field is not a substance]           (a line of its own)
+    …the vital lie.[Suggestion: simplify this sentence]
+    [Suggestion: add an example]                          (the paragraph before)
 
 A tag is plain text, so it survives Obsidian, the Doc tabs, and every
 push and pull unchanged — the same grammar as `[Illustration: …]`.
@@ -15,7 +18,7 @@ law, the concept notes, and the essay, the author disposes in chat, and
 `apply` is the state machine and the evidence channel — the division of
 labour beats and margin proposals already use.
 
-The two kinds differ only in what landing means:
+The kinds differ only in what landing means:
 
 - footnote: the tag becomes `[^label]` at its exact position and the
   definition `[^label]: text` is appended after the file's last
@@ -25,6 +28,13 @@ The two kinds differ only in what landing means:
 - explain: the drafted passage replaces the tag at its exact position —
   inline it continues the sentence's paragraph, alone on a line it is a
   paragraph of its own.
+- suggestion: a request to EVALUATE the enclosing paragraph (alone on a
+  line: the paragraph before it) and act on it in any way the gist names.
+  The agreed text REPLACES that paragraph, tag and all; or the item is
+  DECLINED with a reason — the tag goes, the paragraph stays, the reason
+  is the evidence (the author's ruling of 2026-10-19: "Use 'suggestion'
+  as a thing to evaluate … It's similar to a comment but doesn't have
+  some of the problems with comments").
 
 An unresolved tag never reaches a reader: every export strips it and
 warns (footnote design §6).
@@ -38,12 +48,14 @@ from pathlib import Path
 
 from .revisions import iter_manuscript_paths
 
-KINDS = ("footnote", "explain", "judgment")
+KINDS = ("footnote", "explain", "suggestion", "judgment")
 _TAGS = {
     # Keyword case-insensitive; the body never spans a line and never
     # nests a bracket; an empty body is not a tag at all.
     "footnote": re.compile(r"\[Footnote:\s*(?P<body>[^\[\]\n]+?)\s*\]", re.IGNORECASE),
     "explain": re.compile(r"\[Explain:\s*(?P<body>[^\[\]\n]+?)\s*\]", re.IGNORECASE),
+    "suggestion": re.compile(r"\[Suggestion:\s*(?P<body>[^\[\]\n]+?)\s*\]",
+                             re.IGNORECASE),
     # A lens finding the author ACCEPTED in the tab: a work order at its
     # anchor, resolved by `lens repair` (a rewrite, a question, or an
     # intent), never by `apply`. Deleting it in the tab rejects it.
@@ -76,8 +88,11 @@ def scan_text(text: str, kind: str) -> list[dict]:
     """Every open tag of one kind in one file's text, in document order:
     the ordinal `n` (1-based within the file — the `--tag` handle), the
     line, the character span, the gist, the raw tag, whether it stands
-    alone on its line, the paragraph that holds it, and — footnotes —
-    the `| label:` override when the author gave one."""
+    alone on its line, the paragraph that holds it, the TARGET paragraph
+    a suggestion acts on (`target`, `target_start`, `target_end`: the
+    holding paragraph inline, the paragraph BEFORE a standalone tag,
+    None when nothing precedes it), and — footnotes — the `| label:`
+    override when the author gave one."""
     pattern = _TAGS[_kind(kind)]
     paragraphs = [(m.start(), m.end(), m.group(0))
                   for m in _PARAGRAPH.finditer(text)]
@@ -91,14 +106,24 @@ def scan_text(text: str, kind: str) -> list[dict]:
             if opt:
                 label = opt.group("label").upper()
                 body = body[:opt.start()].strip()
-        paragraph = next((p for a, b, p in paragraphs if a <= start < b), "")
+        here = next(((a, b, p) for a, b, p in paragraphs if a <= start < b),
+                    (start, end, ""))
+        standalone = _standalone(text, start, end)
+        if standalone:
+            target = next(((a, b, p) for a, b, p in reversed(paragraphs)
+                           if b <= start), None)
+        else:
+            target = here
         tags.append({
             "kind": kind, "n": n,
             "line": text.count("\n", 0, start) + 1,
             "start": start, "end": end,
             "gist": body, "raw": m.group(0), "label": label,
-            "standalone": _standalone(text, start, end),
-            "paragraph": paragraph,
+            "standalone": standalone,
+            "paragraph": here[2],
+            "target": target[2] if target else None,
+            "target_start": target[0] if target else None,
+            "target_end": target[1] if target else None,
         })
     return tags
 
@@ -157,22 +182,31 @@ def strip_tags(text: str) -> tuple[str, list[dict]]:
                   key=lambda t: t["start"], reverse=True)
     for tag in tags:
         removed.append({"kind": tag["kind"], "gist": tag["gist"]})
-        start, end = tag["start"], tag["end"]
-        if tag["standalone"]:
-            line_start = out.rfind("\n", 0, start) + 1
-            line_end = out.find("\n", end)
-            line_end = len(out) if line_end == -1 else line_end + 1
-            out = out[:line_start] + out[line_end:]
-            if line_start > 0 and out[line_start - 1:line_start + 1] == "\n\n":
-                out = out[:line_start] + out[line_start + 1:]
-            continue
-        before = out[start - 1] if start > 0 else ""
-        after = out[end] if end < len(out) else ""
-        if before == " " and (after == " " or after in ".,;:!?)"):
-            start -= 1
-        out = out[:start] + out[end:]
+        out = remove_tag(out, tag)
     removed.reverse()
     return out, removed
+
+
+def remove_tag(text: str, tag: dict) -> str:
+    """The text with ONE tag gone: a standalone tag takes its line with
+    it (and the blank line that separated it); an inline tag leaves the
+    sentence's spacing as it was. Offsets are the tag's in `text`."""
+    start, end = tag["start"], tag["end"]
+    if tag["standalone"]:
+        line_start = text.rfind("\n", 0, start) + 1
+        line_end = text.find("\n", end)
+        line_end = len(text) if line_end == -1 else line_end + 1
+        out = text[:line_start] + text[line_end:]
+        if line_start > 0 and out[line_start - 1:line_start + 1] == "\n\n":
+            out = out[:line_start] + out[line_start + 1:]
+        elif line_start >= len(out) and out.endswith("\n\n"):
+            out = out[:-1]      # the file's last line went: one newline stays
+        return out
+    before = text[start - 1] if start > 0 else ""
+    after = text[end] if end < len(text) else ""
+    if before == " " and (after == " " or after in ".,;:!?)"):
+        start -= 1
+    return text[:start] + text[end:]
 
 
 def find_tag(tags: list[dict], handle) -> dict:
@@ -246,6 +280,27 @@ def _land_explain(text: str, tag: dict, draft: str) -> str:
     return text[:tag["start"]] + _spaced(text, tag, draft) + text[tag["end"]:]
 
 
+def _land_suggestion(text: str, tag: dict, draft: str) -> str:
+    """The agreed text REPLACES the target paragraph. Inline, that
+    paragraph holds the tag, so the tag goes with it; standalone, the
+    tag's own line goes too."""
+    if tag["standalone"]:
+        line_end = text.find("\n", tag["end"])
+        line_end = len(text) if line_end == -1 else line_end
+        return text[:tag["target_start"]] + draft + text[line_end:]
+    return text[:tag["target_start"]] + draft + text[tag["target_end"]:]
+
+
+def _target_without_tag(tag: dict) -> str:
+    """An inline suggestion's paragraph as it reads once the tag is
+    gone — the Doc road's {{new}} half for a decline."""
+    inner = dict(tag)
+    inner["start"] = tag["start"] - tag["target_start"]
+    inner["end"] = tag["end"] - tag["target_start"]
+    inner["standalone"] = False
+    return remove_tag(tag["target"], inner)
+
+
 def _land_ref(text: str, tag: dict, label: str) -> str:
     """The superscript lands exactly where the tag was."""
     start, end = tag["start"], tag["end"]
@@ -289,20 +344,26 @@ def _append_definition(body: str, label: str, definition: str) -> str:
 
 
 def _evidence_row(db, manuscript_id: str, file: str, tag: dict,
-                  new: str, label: str | None) -> None:
+                  new: str, label: str | None, old: str | None = None,
+                  state: str = "applied", reason: str | None = None) -> None:
+    """The direct road's record: the tag (a suggestion: its target
+    paragraph) as old, what landed as new, the gist as note. A declined
+    suggestion is state `declined` with the reason in the metadata."""
     from .db import ko_fields
 
     row = ko_fields("dt")
+    meta = {"kind": tag["kind"], "gist": tag["gist"], "line": tag["line"],
+            "label": label, "standalone": tag["standalone"]}
+    if reason is not None:
+        meta["reason"] = reason
     row.update(
         manuscript_id=manuscript_id, origin_type=tag["kind"],
         origin_id=f"{tag['kind']}:{file}:{row['id'][-12:]}", file=file,
         anchor_quote=tag["paragraph"][:200] or None,
-        proposed_old=tag["raw"], proposed_new=new, note=tag["gist"],
-        state="applied", our_reply_ids="[]", last_author_reply_id=None,
-        scope_kind="file", scope_ref=file,
-        metadata=json.dumps({"kind": tag["kind"], "gist": tag["gist"],
-                             "line": tag["line"], "label": label,
-                             "standalone": tag["standalone"]}),
+        proposed_old=tag["raw"] if old is None else old, proposed_new=new,
+        note=tag["gist"], state=state, our_reply_ids="[]",
+        last_author_reply_id=None, scope_kind="file", scope_ref=file,
+        metadata=json.dumps(meta),
     )
     db.insert("doc_threads", row)
 
@@ -343,21 +404,36 @@ def _clean(n: int, what: str, draft: str | None) -> str:
     return draft
 
 
+def _item(pair) -> dict:
+    """One apply item, from a (handle, text[, footnote]) tuple or a
+    {tag, text?, footnote?, decline?, reason?} dict."""
+    if isinstance(pair, dict):
+        return {"tag": pair.get("tag"), "text": pair.get("text"),
+                "footnote": pair.get("footnote"),
+                "decline": bool(pair.get("decline")),
+                "reason": pair.get("reason")}
+    return {"tag": pair[0], "text": pair[1],
+            "footnote": pair[2] if len(pair) > 2 else None,
+            "decline": False, "reason": None}
+
+
 def _choose(text: str, kind: str, file: str, pairs: list) -> list[dict]:
-    """Resolve every (handle, text[, footnote]) against ONE scan.
-    Returns [{tag, text, footnote}] in document order. `footnote` is
-    the explain directive's optional companion (the author's ruling of
+    """Resolve every item against ONE scan. Returns [{tag, text,
+    footnote, decline, reason}] in document order. `footnote` is the
+    explain directive's optional companion (the author's ruling of
     2026-09-03): an explanation that needs a source or a qualification
     the sentence cannot carry lands it as a footnote in the same
-    review, instead of a second [Footnote:] round."""
+    review, instead of a second [Footnote:] round. `decline` is the
+    suggestion directive's "no": evaluated, not taken, with a reason."""
     tags = scan_text(text, kind)
     if not tags:
         raise LookupError(f"{file} has no open [{kind.title()}: …] tag")
     chosen: list[dict] = []
     seen: set[int] = set()
+    targets: dict[int, int] = {}
     for pair in pairs:
-        handle, draft = pair[0], pair[1]
-        note = pair[2] if len(pair) > 2 else None
+        item = _item(pair)
+        handle, draft, note = item["tag"], item["text"], item["footnote"]
         tag = find_tag(tags, handle)
         if tag["n"] in seen:
             raise ValueError(f"tag #{tag['n']}: named twice")
@@ -365,12 +441,38 @@ def _choose(text: str, kind: str, file: str, pairs: list) -> list[dict]:
             note = None
         if note is not None and kind != "explain":
             raise ValueError(f"tag #{tag['n']}: a footnote rides only on an "
-                             f"explain apply — a [{kind.title()}:] tag IS "
-                             "the footnote")
+                             f"explain apply — a [{kind.title()}:] tag "
+                             + ("IS the footnote" if kind == "footnote"
+                                else "lands a paragraph, not an apparatus"))
+        if item["decline"] and kind != "suggestion":
+            raise ValueError(f"tag #{tag['n']}: only a [Suggestion:] tag is "
+                             "declined on apply — a declined draft for a "
+                             f"[{kind.title()}:] tag simply stays open")
+        if kind == "suggestion":
+            if tag["target"] is None:
+                raise ValueError(f"tag #{tag['n']}: a standalone [Suggestion:] "
+                                 "acts on the paragraph before it, and "
+                                 "nothing precedes this one")
+            other = targets.get(tag["target_start"])
+            if other is not None:
+                raise ValueError(f"tag #{tag['n']} and tag #{other} act on "
+                                 "the same paragraph — land one, then the "
+                                 "other")
+            targets[tag["target_start"]] = tag["n"]
         seen.add(tag["n"])
+        if item["decline"]:
+            if draft is not None and str(draft).strip():
+                raise ValueError(f"tag #{tag['n']}: a decline carries a "
+                                 "reason, not a text")
+            chosen.append({"tag": tag, "text": None, "footnote": None,
+                           "decline": True,
+                           "reason": _clean(tag["n"], "reason",
+                                            item["reason"])})
+            continue
         chosen.append({"tag": tag, "text": _clean(tag["n"], "text", draft),
                        "footnote": (_clean(tag["n"], "footnote", note)
-                                    if note is not None else None)})
+                                    if note is not None else None),
+                       "decline": False, "reason": None})
     return sorted(chosen, key=lambda c: c["tag"]["start"])
 
 
@@ -383,7 +485,7 @@ def _mint_labels(text: str, file: str, chosen: list[dict],
     labels: dict[int, str] = {}
     probe = text
     for c in chosen:
-        if kind == "explain" and c["footnote"] is None:
+        if kind != "footnote" and c["footnote"] is None:
             continue
         tag = c["tag"]
         label = next_label(probe, Path(file).stem, tag["label"])
@@ -408,7 +510,10 @@ def _definition_text(definition: str) -> str:
 def apply(db, manuscript: dict, config: dict, kind: str, file: str,
           pairs: list[tuple[str | int, str]], services=None) -> dict:
     """Land — or stage — one or more agreed drafts in one file. `pairs`
-    are (`--tag` handle, text); handles resolve against ONE scan.
+    are (`--tag` handle, text) tuples or {tag, text, footnote?, decline?,
+    reason?} dicts; handles resolve against ONE scan. A suggestion item
+    with `decline: true` and a `reason` removes the tag and leaves the
+    paragraph as it stands — evaluated, not taken.
 
     Two roads, chosen by the file's checkout state (the author's ruling
     of 2026-09-03):
@@ -437,6 +542,15 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
                          "applied as text.")
     if not pairs:
         raise ValueError("nothing to apply — give at least one --tag/--text pair")
+    # Confinement: the Doc-mapping key and the write path are the same
+    # manuscript-relative name. An absolute (or `..`-escaping) argument
+    # that skipped this step missed `checked_out` and wrote locally while
+    # the Doc was still the working copy (found 2026-10-01 / confirmed
+    # 2026-10-04).
+    try:
+        file = api._resolve_relpath(manuscript, file)
+    except LookupError:
+        raise LookupError(f"no manuscript file '{file}'") from None
     root = Path(manuscript["path"])
     path = root / file
     if not path.is_file():
@@ -452,8 +566,12 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
     new_text = text
     for c in reversed(chosen):
         tag = c["tag"]
-        if kind == "footnote":
+        if c["decline"]:
+            new_text = remove_tag(new_text, tag)
+        elif kind == "footnote":
             new_text = _land_ref(new_text, tag, labels[tag["n"]])
+        elif kind == "suggestion":
+            new_text = _land_suggestion(new_text, tag, c["text"])
         else:
             new_text = _land_explain(new_text, tag, _passage(c, labels))
     # Definitions join in DOCUMENT order, so the block reads as the
@@ -469,15 +587,24 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
     landed: list[dict] = []
     for c in chosen:
         tag, label = c["tag"], labels.get(c["tag"]["n"])
-        if kind == "footnote":
-            new = f"[^{label}]: {c['text']}"
+        if c["decline"]:
+            _evidence_row(db, manuscript["id"], file, tag, "", None,
+                          old=tag["target"], state="declined",
+                          reason=c["reason"])
+        elif kind == "footnote":
+            _evidence_row(db, manuscript["id"], file, tag,
+                          f"[^{label}]: {c['text']}", label)
+        elif kind == "suggestion":
+            _evidence_row(db, manuscript["id"], file, tag, c["text"], None,
+                          old=tag["target"])
         else:
             new = _passage(c, labels) + (f"\n\n[^{label}]: {c['footnote']}"
                                          if label else "")
-        _evidence_row(db, manuscript["id"], file, tag, new, label)
+            _evidence_row(db, manuscript["id"], file, tag, new, label)
         landed.append({"n": tag["n"], "line": tag["line"], "gist": tag["gist"],
                        "label": label, "text": c["text"],
-                       "footnote": c["footnote"]})
+                       "footnote": c["footnote"], "declined": c["decline"],
+                       "reason": c["reason"]})
     import contextlib
     import io
 
@@ -490,7 +617,7 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
 
 def _thread_row(db, manuscript_id: str, kind: str, file: str, tag: dict,
                 old: str, new: str, anchor: int, form: str,
-                label: str | None) -> dict:
+                label: str | None, reason: str | None = None) -> dict:
     from .db import ko_fields
 
     row = ko_fields("dt")
@@ -505,7 +632,8 @@ def _thread_row(db, manuscript_id: str, kind: str, file: str, tag: dict,
                              "intent_id": None, "original_new": new,
                              "gist": tag["gist"], "line": tag["line"],
                              "label": label, "standalone": tag["standalone"],
-                             "directive": kind}),
+                             "directive": kind, "raw": tag["raw"],
+                             "reason": reason}),
     )
     db.insert("doc_threads", row)
     return row
@@ -536,12 +664,25 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
     inserts: list[dict] = []
     for c in chosen:
         tag, label = c["tag"], labels.get(c["tag"]["n"])
-        if kind == "footnote":
+        old, anchor, definition = tag["raw"], paragraph_of(tag), None
+        if kind == "suggestion":
+            # The form wraps the TARGET paragraph — inline, tag and all;
+            # standalone, the paragraph before it, the tag line left
+            # standing until resolve consumes it on acceptance. A decline
+            # wraps the tag itself: the author sees it going and the
+            # paragraph staying.
+            if c["decline"]:
+                old = tag["raw"] if tag["standalone"] else tag["target"]
+                new = "" if tag["standalone"] else _target_without_tag(tag)
+            else:
+                old, new = tag["target"], c["text"]
+                anchor -= 1 if tag["standalone"] else 0
+        elif kind == "footnote":
             new, definition = f"[^{label}]", c["text"]
         else:
             new, definition = _spaced(text, tag, _passage(c, labels)), c["footnote"]
-        replaces.append(_thread_row(db, mid, kind, file, tag, tag["raw"], new,
-                                    paragraph_of(tag), "replace", label))
+        replaces.append(_thread_row(db, mid, kind, file, tag, old, new,
+                                    anchor, "replace", label, c["reason"]))
         if label:
             inserts.append(_thread_row(
                 db, mid, kind, file, tag, "",
@@ -552,8 +693,11 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
     # over in reverse so the tab reads the definitions in series order.
     # (`pending_write_order` is a stable sort and keeps that order.)
     threads = replaces + list(reversed(inserts))
+    # Atomic: a superscript whose definition could not be placed is a
+    # marker pointing nowhere, so the file's forms land together or not
+    # at all (it-816cd7998fec).
     result = gdocs.write_pending_forms(db, manuscript, file, threads,
-                                       service, docs_service)
+                                       service, docs_service, atomic=True)
     written_ids = {t["id"] for t in result["written"]}
     for t in threads:
         if t["id"] in written_ids:
@@ -570,9 +714,83 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
         if ok:
             staged.append({"n": tag["n"], "line": tag["line"],
                            "gist": tag["gist"], "label": labels.get(tag["n"]),
-                           "text": c["text"], "footnote": c["footnote"]})
+                           "text": c["text"], "footnote": c["footnote"],
+                           "declined": c["decline"], "reason": c["reason"]})
     return {"kind": kind, "file": file, "mode": "marked", "landed": staged,
             "version_no": None, "url": result["url"], "failed": failed}
+
+
+def _settle_empty_declines(db, manuscript_id: str, marked: str,
+                           written: list[dict]) -> tuple[str, list[dict], int]:
+    """A standalone suggestion's decline is staged as `<<tag>>{{}}` on a
+    line of its own. Left as it is, the author accepted the decline:
+    the WHOLE line goes (the generic resolve would leave an empty
+    paragraph where the tag stood), the thread is cleaned and its
+    evidence written here. A green half the author typed into, or a
+    deleted form (the tag standing again), is left to the generic
+    resolve. Returns (marked, the threads still to resolve, settled)."""
+    from . import passes, threads as th
+
+    remaining, settled = [], 0
+    for t in written:
+        meta = json.loads(t.get("metadata") or "{}")
+        if not (meta.get("standalone") and meta.get("reason")
+                and t["proposed_old"] and t["proposed_new"] == ""):
+            remaining.append(t)
+            continue
+        form = th.render_pending(t["proposed_old"], "")
+        at = marked.find(form)
+        if at < 0 or not _standalone(marked, at, at + len(form)):
+            remaining.append(t)
+            continue
+        line_start = marked.rfind("\n", 0, at) + 1
+        line_end = marked.find("\n", at + len(form))
+        line_end = len(marked) if line_end == -1 else line_end + 1
+        marked = marked[:line_start] + marked[line_end:]
+        if line_start > 0 and marked[line_start - 1:line_start + 1] == "\n\n":
+            marked = marked[:line_start] + marked[line_start + 1:]
+        db.update("doc_threads", t["id"], {"state": "cleaned"})
+        passes._edit_evidence(db, manuscript_id, t, "resolved",
+                              explanation=meta.get("reason"),
+                              evidence_type="suggestion_edit")
+        settled += 1
+    return marked, remaining, settled
+
+
+def _consume_standalone_tags(db, final: str, written: list[dict]) -> str:
+    """A standalone suggestion's form wraps the paragraph BEFORE the tag
+    and leaves the tag line standing in the tab; once the author has
+    accepted it (the thread ended `cleaned`), the tag is consumed here —
+    the first matching tag line after the landed paragraph. A declined
+    form leaves its tag open. (A decline staged as `<<tag>>{{}}` has
+    no standalone paragraph to find: the form itself removed the tag.)"""
+    for t in written:
+        meta = json.loads(t.get("metadata") or "{}")
+        if (not meta.get("standalone") or meta.get("kind") != "replace"
+                or meta.get("reason")):
+            continue
+        fresh = db.one("SELECT state, proposed_new FROM doc_threads "
+                       "WHERE id = ?", (t["id"],))
+        if not fresh or fresh["state"] != "cleaned":
+            continue
+        at = 0
+        landed = " ".join((fresh["proposed_new"] or "").split())
+        pos = " ".join(final.split()).find(landed) if landed else -1
+        if pos >= 0:
+            # Map the flattened position back: count non-space characters.
+            need = len("".join(" ".join(final.split())[:pos + len(landed)].split()))
+            seen = 0
+            for i, ch in enumerate(final):
+                seen += 0 if ch.isspace() else 1
+                if seen >= need:
+                    at = i
+                    break
+        for tag in scan_text(final, "suggestion"):
+            if (tag["standalone"] and tag["raw"] == meta.get("raw")
+                    and tag["start"] >= at):
+                final = remove_tag(final, tag)
+                break
+    return final
 
 
 def loads_gist(thread: dict) -> str:
@@ -610,6 +828,10 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
 
     _kind(kind)
     mid = manuscript["id"]
+    try:
+        file = api._resolve_relpath(manuscript, file)
+    except LookupError:
+        raise LookupError(f"no manuscript file '{file}'") from None
     written = passes.staged_threads(db, mid, file, states=("written",),
                                     origin_type=kind)
     if not written:
@@ -630,8 +852,12 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
             f"local file against the Doc tab by hand, then re-run "
             f"'{kind} resolve {file}'.")
     warnings = list(fetched["marker_warnings"])
-    final, forms = passes.final_text_from_marked(fetched["marked"],
-                                                 written=written)
+    marked, to_resolve = fetched["marked"], list(written)
+    settled = 0
+    if kind == "suggestion":
+        marked, to_resolve, settled = _settle_empty_declines(
+            db, mid, marked, written)
+    final, forms = passes.final_text_from_marked(marked, written=to_resolve)
     import contextlib
     import io
 
@@ -640,7 +866,10 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
         api.collect(db, manuscript, config, source=f"pre-{kind}-resolve")
     diffs = passes.record_resolution(db, mid, file, forms, origin_type=kind,
                                      evidence_type=f"{kind}_edit",
-                                     final_text=final)
+                                     final_text=final, threads=to_resolve)
+    n_forms = len(forms) + settled
+    if kind == "suggestion":
+        final = _consume_standalone_tags(db, final, written)
     api._write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source=f"{kind}-resolve",
@@ -654,7 +883,7 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
     except Exception as err:                            # noqa: BLE001
         warnings.append(f"the resolve landed locally but the push failed "
                         f"({err}) — 'doc push {file}' clears the marks.")
-    return {"kind": kind, "file": file, "forms": len(forms),
+    return {"kind": kind, "file": file, "forms": n_forms,
             "accepted": states.count("cleaned"),
             "declined": states.count("declined"), "diffs": diffs,
             "version_no": after.get("version_no"), "url": url,

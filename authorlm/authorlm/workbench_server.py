@@ -15,7 +15,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
-from . import workbench
+from . import branding, workbench
 
 
 def make_handler(workspace: str | None, manuscript: str | None):
@@ -39,6 +39,8 @@ def make_handler(workspace: str | None, manuscript: str | None):
                 return
             if self.path == "/health":
                 self._json(200, {"ok": True})
+                return
+            if branding.send(self, self.path):
                 return
             self.send_error(404)
 

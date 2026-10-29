@@ -686,17 +686,17 @@ def _critique_by_prefix(db, mid: str, prefix: str):
 @mcp.tool()
 def collect_revision(manuscript: str | None = None,
                      verbose: bool = False) -> dict:
-    """Snapshot the manuscript now: detects transitions, realizes concepts,
-    runs incremental extraction (concepts, links, aliasing statements) when
-    an LLM is configured, and reports the prerequisite-gap delta. Call
-    after the author says they saved/finished edits. Compact by default
-    (gap counts + resolved/new deltas); verbose=True returns the full
-    gaps_before/gaps_after rows."""
+    """Snapshot the manuscript now: detects transitions, realizes concepts
+    and reports the prerequisite-gap delta. No model call: the Concept
+    Graph is mined on request (extract_concepts), never as a side effect
+    of a collect. Call after the author says they saved/finished edits.
+    Compact by default (gap counts + resolved/new deltas); verbose=True
+    returns the full gaps_before/gaps_after rows."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
         api.ensure_session(db, ms)
-        report = api.collect(db, ms, api.load_config(_WORKSPACE), analyze=True)
+        report = api.collect(db, ms, api.load_config(_WORKSPACE))
         return report if verbose else api.compact_collect(report)
     return _guard(run)
 
@@ -762,13 +762,17 @@ def _doc_services():
 
 
 def _apply_directive(kind: str, file: str, tag, text, items,
-                     manuscript: str | None, footnote=None) -> dict:
+                     manuscript: str | None, footnote=None,
+                     decline: bool = False, reason: str | None = None) -> dict:
     from . import directives as dv
 
-    pairs = [(i.get("tag"), i.get("text"), i.get("footnote"))
+    pairs = [{"tag": i.get("tag"), "text": i.get("text"),
+              "footnote": i.get("footnote"),
+              "decline": bool(i.get("decline")), "reason": i.get("reason")}
              for i in (items or [])]
-    if tag is not None or text is not None:
-        pairs.append((tag, text, footnote))
+    if tag is not None or text is not None or decline:
+        pairs.append({"tag": tag, "text": text, "footnote": footnote,
+                      "decline": bool(decline), "reason": reason})
     db = _db()
     ms = _manuscript(db, manuscript)
     return dv.apply(db, ms, api.load_config(_WORKSPACE), kind, file, pairs,
@@ -782,6 +786,222 @@ def _resolve_directive(kind: str, file: str, manuscript: str | None) -> dict:
     ms = _manuscript(db, manuscript)
     return dv.resolve(db, ms, api.load_config(_WORKSPACE), kind, file,
                       services=_doc_services)
+
+
+@mcp.tool()
+def list_media(file: str | None = None, key: str | None = None,
+               manuscript: str | None = None) -> dict:
+    """Every [Clip], [Collage], [Montage] and [Illustration] in reading
+    order, each with everything AuthorLM knows (docs/video-clips-design.md
+    §8f): kind, key (provisional until minting), shape (span | point in a
+    collage | montage), kind_of
+    (generated | quoted | used), fields, status (ready | draft | invalid |
+    unrendered), errors and warnings. A span or a montage carries the words
+    it plays under (spoken form), first/last sentence and
+    estimated_seconds; a collage (a cutaway: narration stops) carries the
+    sentence before it and the one after; a clip inside a montage carries
+    the sentences around it. Paths only,
+    never bytes. Scope with `file` or `key` — a whole manuscript is ~5 KB
+    per clip. A draft clip (spec under 150 words) is drafted in CHAT from
+    the shorthand, the words it plays under, its neighbours and the cast."""
+    def run():
+        from pathlib import Path
+
+        from . import media
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return media.list_media(Path(ms["path"]), [file] if file else None, key)
+    return _guard(run)
+
+
+def _clip_guard(db, ms, key: str):
+    from pathlib import Path
+
+    from . import directives, media
+
+    clip = media.find_clip(Path(ms["path"]), key)
+    if directives._checked_out(db, ms, clip["file"]):
+        raise ValueError(f"{clip['file']} is checked out to the Doc — pull it "
+                         "first (doc pull), then call this again, then push")
+    return clip
+
+
+@mcp.tool()
+def set_clip_spec(specs: dict[str, str], supersede: bool = False,
+                  manuscript: str | None = None) -> dict:
+    """Land drafted text for clips, collages or montages
+    (docs/video-clips-design.md §8e). `specs` is {key: text}. The tag's
+    kind decides what the text is, where it lives and how it is checked:
+    - a `youtube:` clip takes a YOUTUBE BRIEF: what to look for so the
+      search and the quote location succeed, as `source:` (work or person,
+      title, year, channel), `moment:` (the scene), `quote:` (exact words
+      spoken), `on screen:` (who and what). Ready with a source and a quote
+      or moment; no word minimum. Never describe how to render it.
+    - a clip to be generated takes a GENERATION SPEC for the video model:
+      `subject:`, `setting:`, `look:`, `camera:`, `light:`, `motion:`,
+      `sound:`, `continuity:`, `on-screen text:` ('none' is an answer),
+      150+ words.
+    - a container or a `use:` clip takes a note (its title or label).
+    Draft IN CHAT first from the shorthand, the words the clip plays under,
+    its neighbours and the cast. The file's checkout chooses the road: a
+    local file lands now; a file checked out to the Doc gets pending forms
+    in its tab for the author to review, then resolve_clip_specs. Keys come
+    from list_media (`spec_kind` says which text a tag takes). `supersede`
+    withdraws this file's spec forms already out in the tab, unruled, and
+    stages these instead."""
+    def run():
+        from pathlib import Path
+
+        from . import directives, media, media_road
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        root = Path(ms["path"])
+        files = {media.find_clip(root, k)["file"] for k in specs}
+        if any(directives._checked_out(db, ms, f) for f in files):
+            return media_road.stage_specs(db, ms, specs, _doc_services,
+                                          supersede=supersede)
+        return {"mode": "applied",
+                "landed": [media.set_spec(root, k, t) for k, t in specs.items()]}
+    return _guard(run)
+
+
+@mcp.tool()
+def clip_ensure(key: str, generate: bool = False, dry_run: bool = True,
+                confirm: bool = False, model: str | None = None,
+                manuscript: str | None = None) -> dict:
+    """A generated clip's takes (docs/video-clips-design.md §8c, §8f). By
+    default a DRY RUN: the model, length, estimated cost, the exact prompt,
+    the gate's reasons, and any fresh takes' paths — nothing spent. With
+    generate=True and dry_run=False it starts a Veo or Omni generation (BILLED) and
+    returns the job; poll it with clip_job. Only with the author's yes for
+    the stated cost. `confirm` passes a per-call or per-day cap. Paths
+    only."""
+    def run():
+        from . import media_gen
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        plan = media_gen.plan(db, ms, key, model)
+        if dry_run or not generate:
+            return {"plan": plan}
+        return {"job": media_gen.start(db, ms, key, model, confirm=confirm)}
+    return _guard(run)
+
+
+@mcp.tool()
+def clip_job(job_id: str, manuscript: str | None = None) -> dict:
+    """Check a clip generation job; when the model is done it downloads the take
+    (paths only) and, if the clip has no chosen take yet, chooses it."""
+    def run():
+        from . import media_gen
+
+        db = _db()
+        return media_gen.poll(_manuscript(db, manuscript), job_id)
+    return _guard(run)
+
+
+@mcp.tool()
+def clip_edit(key: str, take: str, instruction: str, generate: bool = False,
+              confirm: bool = False, manuscript: str | None = None) -> dict:
+    """Revise a take Omni made, by instruction ("warmer light, slower
+    push-in"). By default a DRY RUN: the cost, the prompt and the gate's
+    reasons. With generate=True it starts the revision (BILLED) — only
+    with the author's yes for the stated cost; poll it with clip_job. The
+    revision lands as take eNN beside the original, which is kept."""
+    def run():
+        from . import media_gen
+
+        ms = _manuscript(_db(), manuscript)
+        if not generate:
+            return {"plan": media_gen.edit_plan(ms, key, take, instruction)}
+        return {"job": media_gen.edit_start(ms, key, take, instruction,
+                                            confirm=confirm)}
+    return _guard(run)
+
+
+@mcp.tool()
+def clip_pick(key: str, take: str, manuscript: str | None = None) -> dict:
+    """Register the take the AUTHOR chose for a clip (e.g. in podlm's
+    gallery); never choose on their behalf. AuthorLM is the store of
+    record (_clips/chosen.json)."""
+    def run():
+        from pathlib import Path
+
+        from . import media_gen
+
+        db = _db()
+        return media_gen.pick(Path(_manuscript(db, manuscript)["path"]), key, take)
+    return _guard(run)
+
+
+@mcp.tool()
+def clip_attach(key: str, path: str, manuscript: str | None = None) -> dict:
+    """Bring a video made elsewhere in as take iNN of a clip; returns its
+    path."""
+    def run():
+        from pathlib import Path
+
+        from . import media_gen
+
+        db = _db()
+        return media_gen.attach(Path(_manuscript(db, manuscript)["path"]), key,
+                                Path(path))
+    return _guard(run)
+
+
+@mcp.tool()
+def resolve_clip_specs(file: str, manuscript: str | None = None) -> dict:
+    """Finish the Doc road for clip specs: read the tab back, land every
+    spec form the author accepted (with their edits) in its spec file, put
+    the tags back to excerpt + ⇢, collect, and push the tab. A deleted
+    form is a decline. Run it when the author says they have reviewed the
+    specs in the Doc."""
+    def run():
+        from . import media_road
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        return media_road.resolve_specs(db, ms, api.load_config(_WORKSPACE),
+                                        file, _doc_services)
+    return _guard(run)
+
+
+@mcp.tool()
+def set_clip_fields(key: str, youtube: str | None = None,
+                    start: str | None = None, end: str | None = None,
+                    use: str | None = None, text: str | None = None,
+                    cast: str | None = None, prior: str | None = None,
+                    look: str | None = None, audio: str | None = None,
+                    clear: list[str] | None = None,
+                    manuscript: str | None = None) -> dict:
+    """Write fields into a [Clip] tag: e.g. the confirmed `youtube` url
+    and `start`/`end` timestamps (m:ss) the author chose after watching,
+    or `audio` (mute | duck | full: what happens to the clip's own sound).
+    Given fields are set, `clear` names fields to remove, the rest keep
+    their order. Returns the new tag line and the clip's errors from
+    list_media. Write only values the author confirmed. A file checked out
+    to the Doc is left alone (pull first)."""
+    def run():
+        from pathlib import Path
+
+        from . import media
+
+        db = _db()
+        ms = _manuscript(db, manuscript)
+        _clip_guard(db, ms, key)
+        given = {"youtube": youtube, "start": start, "end": end, "use": use,
+                 "text": text, "cast": cast, "prior": prior, "look": look,
+                 "audio": audio}
+        updates = {k: v for k, v in given.items() if v is not None}
+        for name in clear or []:
+            updates[name] = None
+        out = media.set_fields(Path(ms["path"]), key, updates)
+        entry = media.list_media(Path(ms["path"]), [out["file"]], key)["media"]
+        out["errors"] = entry[0]["errors"] if entry else []
+        return out
+    return _guard(run)
 
 
 @mcp.tool()
@@ -888,6 +1108,64 @@ def resolve_explains(file: str, manuscript: str | None = None) -> dict:
     episode, and push the tab clean. Returns {kind, file, forms,
     accepted, declined, diffs, version_no, url, warnings}."""
     return _guard(lambda: _resolve_directive("explain", file, manuscript))
+
+
+@mcp.tool()
+def list_suggestion_tags(file: str | None = None,
+                         manuscript: str | None = None) -> dict:
+    """Open [Suggestion: gist] tags — the author's inline requests to
+    EVALUATE a paragraph and act on it as the gist says (rewrite,
+    simplify, tighten, add an example, reconsider a claim — anything;
+    the author's ruling of 2026-10-19: a suggestion is "a thing to
+    evaluate", unlike [Explain:], which asks for a passage) — per file
+    (or one file): ordinal (the `tag` handle), line, gist; plus
+    `in_doc`, the drafts already out in a tab as forms awaiting the
+    author's ruling. Inline, the tag's paragraph is the target; alone on
+    a line, the paragraph BEFORE it. Drafting is CHAT: read the gist
+    against the paragraph, the style law and the concept notes, and
+    draft the WHOLE revised paragraph — or decide the suggestion should
+    not be taken and say why. Then apply_suggestion."""
+    return _guard(lambda: _list_directive("suggestion", file, manuscript))
+
+
+@mcp.tool()
+def apply_suggestion(file: str, tag=None, text: str | None = None,
+                     decline: bool = False, reason: str | None = None,
+                     items: list[dict] | None = None,
+                     manuscript: str | None = None) -> dict:
+    """Land the ruling on the agreed suggestion(s): `tag` (ordinal in
+    the file, first open tag is 1, or an unambiguous gist excerpt) +
+    `text`, or several as `items: [{tag, text}]`. `text` is the WHOLE
+    revised paragraph: it REPLACES the target paragraph, tag and all.
+    A suggestion evaluated and NOT taken is landed as `decline: true`
+    with a `reason` instead of a text (items: `{tag, decline: true,
+    reason}`): the tag goes, the paragraph stays, the reason is the
+    evidence. Two roads, chosen by the file's checkout state. NOT
+    checked out: the text lands directly (chat was the review) — one
+    evidence row per landing, collected under no episode; 'doc push'
+    carries it later. CHECKED OUT to the Doc: nothing is written
+    locally; each target paragraph goes into the tab as a
+    <<paragraph>>{{revised paragraph}} form (a decline: <<tag>>{{…}} with
+    the tag gone) for the author to edit or accept in the Doc, and
+    resolve_suggestions lands their ruling. Land ALL of a file's agreed
+    drafts in ONE call (`items`): a second apply while forms are out is
+    refused until the file is resolved. Returns {kind, file, mode:
+    applied|marked, landed, version_no, url, failed}."""
+    return _guard(lambda: _apply_directive("suggestion", file, tag, text,
+                                           items, manuscript, None,
+                                           decline, reason))
+
+
+@mcp.tool()
+def resolve_suggestions(file: str, manuscript: str | None = None) -> dict:
+    """Finish a suggestion apply that went into the Doc: read the tab's
+    <<paragraph>>{{revised}} forms back, honour the author's edits to
+    every green half (a deleted form is a decline — the paragraph and
+    its tag stay), land the final text locally (an accepted standalone
+    suggestion's tag line is consumed here), record the evidence,
+    collect under no episode, and push the tab clean. Returns {kind,
+    file, forms, accepted, declined, diffs, version_no, url, warnings}."""
+    return _guard(lambda: _resolve_directive("suggestion", file, manuscript))
 
 
 @mcp.tool()
@@ -1527,19 +1805,23 @@ def close_session(manuscript: str | None = None) -> dict:
 
 @mcp.tool()
 def extract_concepts(files: list[str] | None = None, full: bool = False,
-                     edges_only: bool = False, aliases_only: bool = False,
+                     adjudicator: str | None = None,
                      manuscript: str | None = None) -> dict:
-    """LLM-mine the manuscript for concepts and relationships (incremental
-    by default: only files changed since the last extraction). New items
-    arrive as hypotheses for the author to triage. aliases_only sweeps the
-    full text for aliasing statements (naming/defining sentences) and files
-    merge proposals; it extracts nothing else."""
+    """Mine the Concept Graph afresh (docs/extraction-redesign.md) over
+    the sections changed since the last run — or `files`, or the whole
+    book with `full`. Extraction is LAZY: this is the chat's one road to
+    it, taken when the author wants a fresh graph; collect, init and the
+    writeup close never extract. Candidates reach the author's triage only
+    past the eight gates and the per-essay adjudicator, each with its span
+    and reason. The adjudicator is the shipped default unless `adjudicator`
+    names another; with `[extraction] adjudicator_prompt = "ask"` and no
+    name, the result is {"stopped": …} and the author runs `authorlm
+    extract --native` to be asked."""
     def run():
         db = _db()
         return api.run_extraction(db, _manuscript(db, manuscript), _llm(),
                                   files=files, full=full,
-                                  edges_only=edges_only,
-                                  aliases_only=aliases_only)
+                                  adjudicator=adjudicator)
     return _guard(run)
 
 

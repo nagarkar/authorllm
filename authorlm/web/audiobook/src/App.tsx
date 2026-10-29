@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { request, workbenchTransport } from "./transport";
+import { request, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
 
 // Mirrors audiobook.Session.status (authorlm/audiobook.py).
@@ -27,13 +27,33 @@ const fmt = (n: number) => n.toLocaleString();
 const when = (iso: string | null | undefined) => iso ? iso.slice(0, 16).replace("T", " ") : "";
 const mmss = (s: number | null | undefined) => s == null ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 type PageMode = "chapters" | "pron";
-const parseHash = (): {mode: PageMode; stem: string; term: string} => {
-  const h = decodeURIComponent(location.hash.replace(/^#/, ""));
-  if (h.startsWith("pron")) return {mode: "pron", stem: "", term: h.slice(5)};
-  return {mode: "chapters", stem: h, term: ""};
+// #<manuscript>/<stem> or #<manuscript>/pron:<term>; a bare #<stem> opens
+// on the server's -m manuscript.
+const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string} => {
+  let h = decodeURIComponent(location.hash.replace(/^#/, ""));
+  let ms = "";
+  const slash = h.indexOf("/");
+  if (slash >= 0) { ms = h.slice(0, slash); h = h.slice(slash + 1); }
+  if (h.startsWith("pron")) return {ms, mode: "pron", stem: "", term: h.slice(5)};
+  return {ms, mode: "chapters", stem: h, term: ""};
 };
 
 export function App() {
+  // The manuscript dropdown: every manuscript with an audio export. Nothing
+  // loads until the choice is known, so no request goes to the wrong book.
+  const [ms, setMs] = useState<string>("");
+  const [manuscripts, setManuscripts] = useState<string[]>([]);
+  useEffect(() => {
+    request<{current: string; manuscripts: string[]}>("manuscripts", {})
+      .then(r => {
+        const asked = parseHash().ms;
+        const pick = asked && r.manuscripts.includes(asked) ? asked : r.current;
+        setManuscripts(r.manuscripts.includes(r.current) ? r.manuscripts : [r.current, ...r.manuscripts]);
+        setManuscript(pick);
+        setMs(pick);
+      })
+      .catch(err => setError((err as Error).message));
+  }, []);
   const [status, setStatus] = useState<Status | null>(null);
   const [stem, setStem] = useState<string>(parseHash().stem);
   const [mode, setMode] = useState<PageMode>(parseHash().mode);
@@ -49,11 +69,14 @@ export function App() {
   // still in flight when the user switched chapters) is stale and dropped, so
   // the view never shows one chapter while actions target another.
   const latestStem = useRef(stem);
+  const latestMs = useRef(ms);
 
   const load = useCallback(async (s: string) => {
+    const m = latestMs.current;
+    if (!m) return;
     try {
       const st = await request<Status>("status", s ? {stem: s} : {});
-      if (s !== latestStem.current) return;
+      if (s !== latestStem.current || m !== latestMs.current) return;
       setStatus(st);
       setError("");
       if (!s && st.book.chapters.length) {
@@ -61,20 +84,42 @@ export function App() {
         const first = st.book.chapters.find(c => c.remaining > 0) || st.book.chapters[0];
         setStem(first.stem);
       }
-    } catch (err) { if (s === latestStem.current) setError((err as Error).message); }
+    } catch (err) { if (s === latestStem.current && m === latestMs.current) setError((err as Error).message); }
   }, []);
 
-  useEffect(() => { latestStem.current = stem; load(stem); }, [stem, load]);
-  useEffect(() => { location.hash = mode === "pron" ? (term ? `pron:${term}` : "pron") : stem; }, [stem, mode, term]);
+  useEffect(() => { latestStem.current = stem; latestMs.current = ms; load(stem); }, [ms, stem, load]);
+  useEffect(() => {
+    if (!ms) return;
+    const rest = mode === "pron" ? (term ? `pron:${term}` : "pron") : stem;
+    location.hash = `${encodeURIComponent(ms)}/${rest}`;
+  }, [ms, stem, mode, term]);
+  const switchManuscript = useCallback((name: string) => {
+    audioRef.current?.pause();
+    setNow(null);
+    setStatus(null);
+    setError("");
+    setManuscript(name);
+    latestStem.current = "";
+    setStem("");
+    setMs(name);
+  }, []);
   const openWord = useCallback((t: string) => { setTerm(t); setMode("pron"); window.scrollTo({top: 0}); }, []);
   useEffect(() => {
     const t = setInterval(() => load(stem), busy ? 2000 : 10000);
     return () => clearInterval(t);
-  }, [stem, busy, load]);
+  }, [ms, stem, busy, load]);
 
   const act = useCallback(async (method: string, params: Record<string, unknown>) => {
     try { await request<Job>(method, params); setError(""); await load(stem); }
     catch (err) { setError((err as Error).message); }
+  }, [stem, load]);
+
+  // An edited paragraph returns under a new id (the id hashes the text), so
+  // the one playing, if it was edited, is gone: stop there rather than
+  // jump to the top of the chapter.
+  const onEdited = useCallback(async (id: string) => {
+    setNow(cur => cur && cur.id === id ? null : cur);
+    await load(stem);
   }, [stem, load]);
 
   // ------------------------------------------------------- playback
@@ -106,21 +151,38 @@ export function App() {
 
   const onEnded = useCallback(() => { if (continuous) step(1); else setNow(null); }, [continuous, step]);
 
+  // Previews render on first request (about a second and a half), so while
+  // one paragraph plays, ask for the next: walking on never waits.
+  useEffect(() => {
+    if (!now || now.source !== "preview" || !continuous) return;
+    const i = playable.findIndex(s => s.id === now.id);
+    const next = playable[i + 1]?.previewUrl;
+    if (next) fetch(next, {method: "HEAD"}).catch(() => {});
+  }, [now, playable, continuous]);
+
   // ------------------------------------------------------- render
   if (error && !status) return <div className="boot bad">{error}</div>;
-  if (!status) return <div className="boot">Opening the audiobook…</div>;
+  if (!status) return <div className="boot">Opening {ms || "the audiobook"}…</div>;
   const {book, doc, account, jobs} = status;
   const stale = status.export;
   const refreshing = [jobs.running, ...jobs.queued].some(j => j && j.kind === "refresh");
+  const pushing = [jobs.running, ...jobs.queued].some(j => j && j.kind === "push");
+  const pulling = [jobs.running, ...jobs.queued].some(j => j && j.kind === "pull");
+  const docBusy = pushing || pulling;
   const cur = book.chapters.find(c => c.stem === stem);
 
   return (
     <div className="page">
       <header>
         <div className="title-row">
-          <h1 className="display">{book.title}</h1>
+          <h1 className="display"><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />{book.title}</h1>
           <span className="count">{account ? `${fmt(account.remaining)} chars left` : book.quality}</span>
         </div>
+        {manuscripts.length > 1 && <div className="bar">
+          <select value={ms} onChange={e => switchManuscript(e.target.value)} aria-label="Manuscript">
+            {manuscripts.map(name => <option key={name} value={name}>{name}</option>)}
+          </select>
+        </div>}
         <div className="modes">
           <button className={`chip${mode === "chapters" ? " on" : ""}`} aria-pressed={mode === "chapters"} onClick={() => setMode("chapters")}>Chapters</button>
           <button className={`chip${mode === "pron" ? " on" : ""}`} aria-pressed={mode === "pron"} onClick={() => setMode("pron")}>Pronunciations</button>
@@ -136,7 +198,15 @@ export function App() {
           <button className="chip" onClick={() => act("refresh", {stem})} title="Export and preview what changed on disk">↻ Refresh</button>
         </div>}
         <div className="doc">
-          exported {when(stale.exported) || when(book.exportedAt) || "?"} · Doc: {doc.state}
+          <span title="When this chapter's tab was last pushed to the Google Doc (recorded since 2026-10-26)">
+            {doc.at ? `pushed ${when(doc.at)}` : "no push recorded yet"}{doc.state ? ` · ${doc.state}` : ""}
+          </span>
+          {mode === "chapters" && stem && <span className="doc-actions">
+            <button className="chip" onClick={() => act("pull", {stem})} disabled={docBusy}
+              title="Bring this chapter's tab down from the Google Doc">{pulling ? "pulling…" : "⇩ Pull"}</button>
+            <button className="chip" onClick={() => act("push", {stem})} disabled={docBusy}
+              title="Push this chapter's file to its tab of the Google Doc">{pushing ? "pushing…" : "⇧ Push"}</button>
+          </span>}
         </div>
         {stale.stale && (
           <div className="stale" role="status">
@@ -147,7 +217,7 @@ export function App() {
       </header>
 
       {error && <div className="status bad">{error}</div>}
-      {mode === "pron" && <Workbench transport={workbenchTransport} initialTerm={term || undefined} />}
+      {mode === "pron" && <Workbench key={ms} transport={workbenchTransport} manuscript={ms} initialTerm={term || undefined} />}
       {mode === "chapters" && <JobStrip jobs={jobs} />}
 
       {mode === "chapters" && chapter && cur && (
@@ -171,7 +241,7 @@ export function App() {
         <Card key={sec.id} sec={sec} stem={stem}
           retail={chapter.inRetailSample.includes(sec.id)}
           playing={now?.id === sec.id ? now.source : null}
-          onPlay={play} onWord={openWord}
+          onPlay={play} onWord={openWord} onEdited={onEdited}
           onGenerate={() => act("generate", {stem, ids: [sec.id]})}
           onRetake={() => setConfirm({
             label: `Re-render ¶ ${sec.ordinal} — ${fmt(sec.characters)} characters? The current take is replaced.`,
@@ -230,11 +300,52 @@ function ChapterBar({chapter, onGenerateAll, onStitch}: {chapter: Chapter; onGen
   );
 }
 
-function Card({sec, retail, playing, onPlay, onWord, onGenerate, onRetake}: {
+interface SourceBlock { file: string; line: number; markdown: string; }
+
+function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate, onRetake}: {
   sec: Section; stem: string; retail: boolean; playing: Source | null;
-  onPlay: (s: Source, sec: Section) => void; onWord: (term: string) => void; onGenerate: () => void; onRetake: () => void;
+  onPlay: (s: Source, sec: Section) => void; onWord: (term: string) => void; onEdited: (id: string) => Promise<void>;
+  onGenerate: () => void; onRetake: () => void;
 }) {
   const badge = sec.kind === "heading" ? `H${sec.level ?? ""}` : "¶";
+  // Editing on the spot (2026-10-26): the box holds the paragraph's markdown
+  // as it is in the file; Save writes it back and the server re-exports, so
+  // the card comes back under a new id with nothing rendered.
+  const [edit, setEdit] = useState<null | {where: string; text: string}>(null);
+  const [saving, setSaving] = useState<"" | "opening" | "saving">("");
+  const [editError, setEditError] = useState("");
+  const openEdit = async () => {
+    setSaving("opening"); setEditError("");
+    try {
+      const src = await request<SourceBlock>("source", {stem, id: sec.id});
+      setEdit({where: `${src.file}:${src.line}`, text: src.markdown});
+    } catch (err) { setEditError((err as Error).message); }
+    setSaving("");
+  };
+  const save = async () => {
+    if (!edit) return;
+    setSaving("saving"); setEditError("");
+    try {
+      const r = await request<{changed: boolean}>("edit", {stem, id: sec.id, markdown: edit.text});
+      setEdit(null);
+      setSaving("");
+      // The card remounts under the paragraph's new id once the refresh
+      // lands; there is nothing to say on this one.
+      if (r.changed) await onEdited(sec.id);
+    } catch (err) { setEditError((err as Error).message); setSaving(""); }
+  };
+  const cancel = () => { setEdit(null); setEditError(""); };
+  // The overlay (2026-10-26, the author: the card "is jumping around quite
+  // a bit if I'm also playing some audio"): the box is fixed over the page,
+  // so the player can walk on and scroll beneath it. Closing it saves, as
+  // the in-place box did; Cancel is the one way out that writes nothing.
+  // Escape closes (and saves); a save that fails keeps the box open.
+  useEffect(() => {
+    if (!edit) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); void save(); } };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
   return (
     <article id={`card-${sec.id}`} className={`card${playing ? " playing" : ""}${sec.take ? " done" : ""}`}>
       <div className="card-head">
@@ -247,12 +358,31 @@ function Card({sec, retail, playing, onPlay, onWord, onGenerate, onRetake}: {
           {sec.take ? "rendered" : sec.preview ? "preview" : "no preview"}
         </span>
       </div>
-      <p className="text">{sec.text}</p>
+      <p className="text" onDoubleClick={openEdit} title="Double-tap to edit">{sec.text}</p>
+      {editError && !edit && <div className="moved bad-note">{editError}</div>}
+      {edit && <div className="overlay" onClick={e => { if (e.target === e.currentTarget) void save(); }}>
+        <div className="overlay-box" role="dialog" aria-modal="true" aria-label={`Edit ¶ ${sec.ordinal}`}>
+          <div className="overlay-head">
+            <span className="display">Edit ¶ {sec.ordinal}</span>
+            <span className="where">{edit.where}</span>
+            <button className="close" onClick={() => void save()} disabled={saving === "saving"} aria-label="Save and close">✕</button>
+          </div>
+          <textarea className="markdown" value={edit.text}
+            onChange={e => setEdit({...edit, text: e.target.value})} aria-label={`Markdown of ¶ ${sec.ordinal}`} autoFocus />
+          {editError && <div className="moved bad-note">{editError}</div>}
+          <div className="edit-row">
+            <span className="hint">Closing saves. Esc or ✕ too.</span>
+            <button className="btn plain" onClick={cancel} disabled={saving === "saving"}>Cancel</button>
+            <button className="btn gen" onClick={() => void save()} disabled={saving === "saving"}>{saving === "saving" ? "Saving…" : "Save & close"}</button>
+          </div>
+        </div>
+      </div>}
       {sec.pronunciations.length > 0 && <div className="alias">
         {sec.pronunciations.map(p => <button key={p.term} className="word" onClick={() => onWord(p.term)} title="Open in the pronunciation workbench">{p.term} → {p.say}</button>)}
       </div>}
       {sec.moved && <div className="moved">changed since {when(sec.moved.since) || "its take"}: {sec.moved.detail.join(", ")}</div>}
       <div className="actions seg">
+        {!edit && <button className="btn plain" onClick={openEdit} disabled={saving === "opening"}>{saving === "opening" ? "…" : "✎ Edit"}</button>}
         {sec.previewUrl && <button className={`btn preview${playing === "preview" ? " on" : ""}`} onClick={() => onPlay("preview", sec)}>{playing === "preview" ? "◼" : "▶"} Preview</button>}
         {sec.takeUrl && <button className={`btn take${playing === "take" ? " on" : ""}`} onClick={() => onPlay("take", sec)}>{playing === "take" ? "◼" : "▶"} Take</button>}
         {sec.take
