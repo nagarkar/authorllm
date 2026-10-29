@@ -7862,13 +7862,18 @@ def main_test() -> None:
                 whole = "\n".join(
                     f"# **{t['title']}**\n\n{as_markdown(t['text'])}"
                     for t in dfs(None))
+                self.state["exports"] += 1
                 return FakeRequest(whole.encode("utf-8"))
 
         class FakeDocuments:
             def __init__(self, state):
                 self.state = state
 
-            def get(self, documentId=None, includeTabsContent=None):
+            def get(self, documentId=None, includeTabsContent=None,
+                    fields=None):
+                rev = f"rev-{self.state['rev']}"
+                if fields == "revisionId":
+                    return FakeRequest({"revisionId": rev})
                 if documentId in self.state["uploads"]:
                     content = [{"paragraph": {"elements": [
                         {"textRun": {"content": line + "\n"}}]}}
@@ -7900,10 +7905,17 @@ def main_test() -> None:
                                           if c.get("parent") == t["id"]]}
 
                 return FakeRequest({"tabs": [node(t) for t in flat
-                                             if not t.get("parent")]})
+                                             if not t.get("parent")],
+                                    "revisionId": rev})
 
             def batchUpdate(self, documentId=None, body=None):
                 tabs = self.state["docs"][documentId]
+                required = ((body or {}).get("writeControl") or {}).get(
+                    "requiredRevisionId")
+                if required and required != f"rev-{self.state['rev']}":
+                    raise LookupError("fake Docs: revision moved")
+                if (body or {}).get("requests"):
+                    self.state["rev"] += 1
 
                 def tab(tid):
                     return next(t for t in tabs if t["id"] == tid)
@@ -7954,7 +7966,8 @@ def main_test() -> None:
                                               + target["text"][i:])
                         else:
                             target["text"] += req["insertText"]["text"]
-                return FakeRequest({"replies": replies})
+                return FakeRequest({"replies": replies, "writeControl": {
+                    "requiredRevisionId": f"rev-{self.state['rev']}"}})
 
         class FakeComments:
             def __init__(self, state):
@@ -7985,7 +7998,8 @@ def main_test() -> None:
             def __init__(self):
                 self.state = {"counter": 0, "tab_counter": 0,
                               "comments": {}, "reply_counter": 0,
-                              "folders": [], "docs": {}, "uploads": {}}
+                              "folders": [], "docs": {}, "uploads": {},
+                              "rev": 0, "exports": 0}
                 self._files = FakeFiles(self.state)
                 self._documents = FakeDocuments(self.state)
 
@@ -8019,6 +8033,7 @@ def main_test() -> None:
                     for t in tabs:
                         if t["title"] == title:
                             t["text"] = text
+                self.state["rev"] += 1
 
         stub = FakeGoogle()
         pushed = push_doc(db, manuscript, "01-choice.md",
@@ -11203,6 +11218,65 @@ def main_test() -> None:
                            docs_service=stub)
         check("a push on a comment-bearing tab goes surgical",
               guarded.get("mode") == "diff", str(guarded))
+
+        # 2026-10-27: a surgical push records the Doc revision it left;
+        # the next guarded push, with nobody editing the Doc since, reads
+        # no export but the read-back (one, not three).
+        from authorlm.gdocs import DocChanged
+
+        def orrery_entry():
+            return api.get_manuscript(db)["metadata"]
+        rev_after = json.loads(orrery_entry())["gdocs"]["06-orrery.md"].get(
+            "doc_rev")
+        check("a surgical push records the revision it left the Doc at",
+              rev_after == f"rev-{stub.state['rev']}",
+              str((rev_after, stub.state["rev"])))
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails, oiled.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        exports = stub.state["exports"]
+        quick = push_doc(db, api.get_manuscript(db), "06-orrery.md",
+                         service=stub, docs_service=stub, guard=True)
+        orrery_tab = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                          if t["title"] == "06-orrery.md")
+        # The fake's paragraph edit lands on the second attempt (its
+        # deleteContentRange clears the tab), so the read-backs and the
+        # retry's read are three exports; the guard and the first read
+        # are none.
+        check("a guarded push on an untouched Doc reads no export before "
+              "it writes",
+              quick.get("mode") == "diff"
+              and stub.state["exports"] - exports == 3
+              and "oiled" in orrery_tab,
+              str((quick, stub.state["exports"] - exports, orrery_tab)))
+        exports = stub.state["exports"]
+        again = push_doc(db, api.get_manuscript(db), "06-orrery.md",
+                         service=stub, docs_service=stub, guard=True)
+        check("pushing it again, unchanged on both sides, reads no export",
+              again.get("ops") == 0 and stub.state["exports"] == exports,
+              str((again, stub.state["exports"] - exports)))
+        stub.set_tab("06-orrery.md", orrery_tab.replace(
+            "oiled", "oiled in the Doc"))
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails, waxed.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        exports = stub.state["exports"]
+        caught = None
+        try:
+            push_doc(db, api.get_manuscript(db), "06-orrery.md",
+                     service=stub, docs_service=stub, guard=True)
+        except DocChanged as err:
+            caught = str(err)
+        check("an edit in the Doc moves its revision, so the guard reads "
+              "the tab and stops the push",
+              caught is not None and stub.state["exports"] - exports == 1,
+              str((caught, stub.state["exports"] - exports)))
+        stub.set_tab("06-orrery.md", orrery_tab)
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails, polished.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        push_doc(db, api.get_manuscript(db), "06-orrery.md", service=stub,
+                 docs_service=stub)
         stub.add_comment("c-nowhere", "a quote matching no file at all",
                          "Where does this belong?")
         check("an unattributable anchor makes every mapped tab bearing",

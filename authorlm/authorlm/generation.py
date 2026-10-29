@@ -670,9 +670,21 @@ def render_preview(root: Path, speech: dict, voice: str, rate: int,
     with tempfile.TemporaryDirectory(prefix="authorlm-preview-") as tmp:
         text_file = Path(tmp) / "text.txt"
         aiff = Path(tmp) / "take.aiff"
-        text_file.write_text(preview_text(speech) + "\n", encoding="utf-8")
+        text = preview_text(speech)
+        text_file.write_text(text + "\n", encoding="utf-8")
         _run([say, "-v", voice, "-r", str(wpm), "-f", str(text_file),
               "-o", str(aiff)], f"say ({voice})")
+        if _silent(aiff) and re.search(r"[-–—]", text):
+            # A macOS voice bug (2026-10-26, Jamie (Premium)): a date then
+            # a dash, "Thursday, February 2nd - day after day.", renders
+            # silence and the page skipped the paragraph. Read the dashes
+            # as commas; the preview is only a listen, the take is not.
+            text_file.write_text(re.sub(r"\s*[-–—]+\s*(?=\D)", ", ", text)
+                                 + "\n", encoding="utf-8")
+            _run([say, "-v", voice, "-r", str(wpm), "-f", str(text_file),
+                  "-o", str(aiff)], f"say ({voice})")
+        if _silent(aiff) and re.search(r"\w", text):
+            raise AudioError(f"say ({voice}) rendered silence for: {text[:80]}")
         # The part file is unique to this render: two renderers on the
         # same id (a CLI run beside the server's job) must not race on
         # one temporary name. The last replace wins, with the same bytes.
@@ -681,6 +693,12 @@ def render_preview(root: Path, speech: dict, voice: str, rate: int,
               "-b:a", "48k", str(part)], "ffmpeg preview")
         os.replace(part, out)
     return out
+
+
+def _silent(aiff: Path) -> bool:
+    """`say` writes a header and no samples when a voice gives up: about
+    4.6 KB, where a single word runs past 30 KB."""
+    return not aiff.exists() or aiff.stat().st_size < 8192
 
 
 PREVIEW_STAMP = ".voice"
