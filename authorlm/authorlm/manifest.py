@@ -8,38 +8,36 @@ ordinary tab; one derived tab is enough (ruled by the author 2026-10-19).
 It answers one question, per essay and across the book: **what does this
 essay assume that no earlier essay ever supplied?** For essay N that is
 `ASSUMES(N)` minus everything essays 1..N-1 `INTRODUCED` — set arithmetic
-over the stored summaries, normalized against the concept graph's names and
-aliases so that "The Dharma", "Dharma" and an alias of either collapse to
-one concept.
+over the PARAGRAPH RECORDS (summary-hierarchy-design.md ruling 6, §6.6;
+its declaration is `INPUTS` below): a term an essay introduces or defines
+with no earlier such mention is INTRODUCED there, a term it only uses is
+ASSUMED, normalized against the concept graph's names and aliases so that
+"The Dharma", "Dharma" and an alias of either collapse to one concept.
+Until 2026-10-25 both lists were prose written by the essay summarizer and
+parsed back; a fraction of every debt column was sentence fragments. The
+lists are now exact: every term is a mention with a verbatim span.
 
 **It is DERIVED, and it is never a source of truth.** Nothing reads it back;
 every push recomputes it from scratch, and the `manifest` tab is ignored on
 pull like the rest of that tab.
 
-**It never blocks anything.** The summaries it reads can be missing, stale,
-deprecated or upstream-stale; every one of those is rendered with the `!!`
-marker `write status` uses and the row is still shown. A report that will
-not appear when the book is mid-flight is a report that is never there when
-it is wanted.
-
-The known limitation, stated because the numbers look more exact than they
-are: `ASSUMES` and `INTRODUCES` are prose lists written by the summarizer,
-not a controlled vocabulary, so a fraction of every debt column is sentence
-fragments rather than concepts. Normalizing against the graph fixes the alias
-half of that and cannot fix the fragment half. The real repair is upstream,
-in the summarizer prompt.
+**It never blocks anything, and it builds nothing.** An essay with no
+paragraph records, or with stale ones (paragraphs the table has no row
+for), is rendered with the `!!` marker `write status` uses and the row is
+still shown. A report that will not appear when the book is mid-flight is a
+report that is never there when it is wanted; the push that wants exact
+rows runs `summarize rebuild` first.
 """
 
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
+from .context import Input
 from .db import Database, loads
 
-# The summary's own section labels (summaries.summarizer_prompt).
-_ASSUMES = "ASSUMES"
-_INTRODUCES = "INTRODUCES"
+# The reader load's declaration (ruling 10).
+INPUTS = (Input.PARAGRAPH_RECORDS,)
 
 
 def _canonical_names(db: Database, manuscript_id: str) -> dict[str, str]:
@@ -62,23 +60,6 @@ def _normalize(term: str, canon: dict[str, str]) -> str | None:
     return canon.get(t.lower(), t)
 
 
-def _field(summary: str, key: str, canon: dict[str, str]) -> list[str]:
-    """One labelled list out of a summary, normalized against the graph."""
-    m = re.search(rf"^{key}:(.*?)(?=^[A-Z ]+:|\Z)", summary or "",
-                  re.S | re.M)
-    if not m:
-        return []
-    body = m.group(1).strip()
-    if body.lower().startswith("none"):
-        return []
-    out = []
-    for part in re.split(r"[;,]| and ", body):
-        term = _normalize(part, canon)
-        if term:
-            out.append(term)
-    return out
-
-
 def compute(db: Database, manuscript: dict) -> list[dict]:
     """One row per essay in reading order, each with its unmet debt.
 
@@ -91,29 +72,26 @@ def compute(db: Database, manuscript: dict) -> list[dict]:
     from . import summaries as sums
 
     canon = _canonical_names(db, manuscript["id"])
-    root = Path(manuscript["path"])
-    # `status` carries the reading order and each summary's freshness;
-    # `all_summaries` carries the text. Two calls rather than one because
-    # freshness is the thing this report must not hide, and `status` is the
-    # single place the whole system decides it.
-    stored = sums.all_summaries(db, manuscript["id"])
-    order = sums.status(db, manuscript)
+    texts, _unlisted, flight = sums.capture(db, manuscript)
+    verse = sums.verse_files_of(manuscript)
 
     rows, supplied = [], set()
-    for entry in order:
-        row = stored.get(entry["file"]) or {}
-        summary = row.get("summary") or ""
-        introduces = set(_field(summary, _INTRODUCES, canon))
-        assumes = set(_field(summary, _ASSUMES, canon))
+    for file, text in texts.items():
+        pinned = flight.get(file, sums.NOT_IN_FLIGHT)
+        level = sums.level_status(db, manuscript, file, text, pinned,
+                                  verse_file=file in verse)["paragraph"]
+        state = "unwritten" if pinned is None else level["state"]
+        records = sums.paragraph_records(db, manuscript, files=[file],
+                                         texts={file: text})
+        lists = sums.derived_lists(db, manuscript, file, records, texts)
+        introduces = {t for t in (_normalize(x, canon)
+                                  for x in lists["introduces"]) if t}
+        assumes = {t for t in (_normalize(x, canon)
+                               for x in lists["assumes"]) if t}
         debt = sorted(assumes - supplied)
-        path = root / entry["file"]
-        try:
-            words = len(path.read_text(encoding="utf-8").split())
-        except OSError:
-            words = 0
-        rows.append({"file": entry["file"], "words": words,
+        rows.append({"file": file, "words": len(text.split()),
                      "introduces": len(introduces), "debt": debt,
-                     "state": entry.get("state") or "missing"})
+                     "state": state})
         supplied |= introduces | assumes
     return rows
 
@@ -125,15 +103,15 @@ def render_lines(rows: list[dict]) -> list[str]:
     out = ["", "Reader load — for each essay, what it assumes that no "
                "earlier essay supplied."]
     if not rows:
-        return out + ["No essay summaries on record yet. Run 'authorlm "
+        return out + ["No paragraph records on record yet. Run 'authorlm "
                       "summarize rebuild'."]
     worst = max((len(r["debt"]) for r in rows), default=0) or 1
     stale = [r["file"] for r in rows if r["state"] != "fresh"]
     if stale:
         out.append(
-            f"{len(stale)} of {len(rows)} summaries are not fresh, and their "
-            "rows are marked !!. A marked row describes the essay as it was "
-            "when its summary was last built, not as it stands now — "
+            f"{len(stale)} of {len(rows)} essays have missing or stale "
+            "paragraph records, and their rows are marked !!. A marked row "
+            "counts only the paragraphs that have a record — "
             "'authorlm summarize rebuild' clears this.")
     out.append("")
     for r in rows:
@@ -142,10 +120,9 @@ def render_lines(rows: list[dict]) -> list[str]:
         out.append(f"{r['file']} — introduces {r['introduces']} · debt "
                    f"{len(r['debt'])}  {bar}{mark}".rstrip())
 
-    out += ["", "Debts — assumed by the essay, introduced by no essay "
-                "before it. Some entries are sentence fragments rather than "
-                "concepts: the summaries' lists are prose, not a controlled "
-                "vocabulary."]
+    out += ["", "Debts — terms the essay uses that no essay before it "
+                "introduced or defined (from the paragraph records; each is "
+                "a mention with a verbatim span)."]
     debts = [r for r in rows if r["debt"]]
     for r in debts:
         mark = "" if r["state"] == "fresh" else f" (!! {r['state']})"

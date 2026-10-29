@@ -154,9 +154,14 @@ def retire_concept(db: Database, manuscript_id: str, node: dict) -> int:
     """Retire a concept and every edge touching it. Nothing is deleted —
     retired knowledge stays historically accessible (Common Core §8.10).
     Returns the number of edges retired."""
+    from .db import now_iso
+
     meta = loads(node.get("metadata"), {}) or {}
+    # `at`: when — the text written after it is what a revival must recur
+    # in (docs/extraction-redesign.md §4.10).
     meta["retired_from"] = {"status": node.get("status"),
-                            "introduced_in": node.get("introduced_in")}
+                            "introduced_in": node.get("introduced_in"),
+                            "at": now_iso()}
     db.update("concept_nodes", node["id"],
               {"status": "retired", "metadata": json.dumps(meta)})
     edges = db.all(
@@ -182,6 +187,7 @@ def revive_concept(db: Database, manuscript_id: str, node: dict) -> dict:
     {status, introduced_in, edges_revived}."""
     meta = loads(node.get("metadata"), {}) or {}
     prior = meta.pop("retired_from", None) or {}
+    meta.pop("retired_for_good", None)  # the author's own revive reopens it
     status = prior.get("status") or "declared"
     introduced_in = prior.get("introduced_in") or node.get("introduced_in")
     if status == "retired":
@@ -234,13 +240,28 @@ def link_concepts(
     return row
 
 
+# ASCII, curly, and modifier letter apostrophes: Docs round-trips and LLM
+# extraction disagree on the mark. A name stored with one form must still
+# match text that uses another (2026-10-28: extract migrate's absent gate
+# retired confirmed concepts whose only "absence" was ' vs ’).
+_APOSTROPHE = "['\u2018\u2019\u02bc]"
+
+
+def _escape_name(name: str) -> str:
+    """`re.escape`, but any apostrophe in the name matches any apostrophe."""
+    folded = (name.replace("\u2018", "'").replace("\u2019", "'")
+              .replace("\u02bc", "'"))
+    return _APOSTROPHE.join(re.escape(part) for part in folded.split("'"))
+
+
 def concept_pattern(name: str) -> re.Pattern:
     """Word-boundary match tolerant of simple English plurals
-    (trajectory/trajectories, field/fields, class/classes)."""
+    (trajectory/trajectories, field/fields, class/classes) and of ASCII
+    vs curly apostrophes."""
     if name and name[-1].lower() == "y":
-        stem = re.escape(name[:-1])
+        stem = _escape_name(name[:-1])
         return re.compile(rf"\b{stem}(?:y|ies)\b", re.IGNORECASE)
-    return re.compile(rf"\b{re.escape(name)}(?:e?s)?\b", re.IGNORECASE)
+    return re.compile(rf"\b{_escape_name(name)}(?:e?s)?\b", re.IGNORECASE)
 
 
 def mention_pattern(name: str) -> re.Pattern:
@@ -254,9 +275,9 @@ def mention_pattern(name: str) -> re.Pattern:
     casing of 'the herdsman' is genuinely the concept."""
     if " " not in name.strip() and name[:1].isupper():
         if name[-1].lower() == "y":
-            stem = re.escape(name[:-1])
+            stem = _escape_name(name[:-1])
             return re.compile(rf"\b{stem}(?:y|ies)\b")
-        return re.compile(rf"\b{re.escape(name)}(?:e?s)?\b")
+        return re.compile(rf"\b{_escape_name(name)}(?:e?s)?\b")
     return concept_pattern(name)
 
 
