@@ -698,6 +698,12 @@ The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, �
 
 `findings.edit_entry` is the one gate every producer's `replacement` passes through before it is staged as a `<<old>>{{new}}` edit in the author's Doc tab.
 
+## `tests.test_footnote_prefixes_nested`
+
+`authorlm/tests/test_footnote_prefixes_nested.py`
+
+footnote_prefixes must stay injective when nested paths share a stem.
+
 ## `tests.test_gallery`
 
 `authorlm/tests/test_gallery.py`
