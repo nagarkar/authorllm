@@ -114,6 +114,14 @@ export function App() {
     catch (err) { setError((err as Error).message); }
   }, [stem, load]);
 
+  // An edited paragraph returns under a new id (the id hashes the text), so
+  // the one playing, if it was edited, is gone: stop there rather than
+  // jump to the top of the chapter.
+  const onEdited = useCallback(async (id: string) => {
+    setNow(cur => cur && cur.id === id ? null : cur);
+    await load(stem);
+  }, [stem, load]);
+
   // ------------------------------------------------------- playback
   const chapter = status?.chapter || null;
   const playable = useMemo(() => (chapter?.sections || []).filter(s => now ? (now.source === "preview" ? s.previewUrl : s.takeUrl) : false), [chapter, now]);
@@ -158,6 +166,9 @@ export function App() {
   const {book, doc, account, jobs} = status;
   const stale = status.export;
   const refreshing = [jobs.running, ...jobs.queued].some(j => j && j.kind === "refresh");
+  const pushing = [jobs.running, ...jobs.queued].some(j => j && j.kind === "push");
+  const pulling = [jobs.running, ...jobs.queued].some(j => j && j.kind === "pull");
+  const docBusy = pushing || pulling;
   const cur = book.chapters.find(c => c.stem === stem);
 
   return (
@@ -187,7 +198,15 @@ export function App() {
           <button className="chip" onClick={() => act("refresh", {stem})} title="Export and preview what changed on disk">↻ Refresh</button>
         </div>}
         <div className="doc">
-          exported {when(stale.exported) || when(book.exportedAt) || "?"} · Doc: {doc.state}
+          <span title="When this chapter's tab was last pushed to the Google Doc (recorded since 2026-10-26)">
+            {doc.at ? `pushed ${when(doc.at)}` : "no push recorded yet"}{doc.state ? ` · ${doc.state}` : ""}
+          </span>
+          {mode === "chapters" && stem && <span className="doc-actions">
+            <button className="chip" onClick={() => act("pull", {stem})} disabled={docBusy}
+              title="Bring this chapter's tab down from the Google Doc">{pulling ? "pulling…" : "⇩ Pull"}</button>
+            <button className="chip" onClick={() => act("push", {stem})} disabled={docBusy}
+              title="Push this chapter's file to its tab of the Google Doc">{pushing ? "pushing…" : "⇧ Push"}</button>
+          </span>}
         </div>
         {stale.stale && (
           <div className="stale" role="status">
@@ -222,7 +241,7 @@ export function App() {
         <Card key={sec.id} sec={sec} stem={stem}
           retail={chapter.inRetailSample.includes(sec.id)}
           playing={now?.id === sec.id ? now.source : null}
-          onPlay={play} onWord={openWord}
+          onPlay={play} onWord={openWord} onEdited={onEdited}
           onGenerate={() => act("generate", {stem, ids: [sec.id]})}
           onRetake={() => setConfirm({
             label: `Re-render ¶ ${sec.ordinal} — ${fmt(sec.characters)} characters? The current take is replaced.`,
@@ -281,11 +300,52 @@ function ChapterBar({chapter, onGenerateAll, onStitch}: {chapter: Chapter; onGen
   );
 }
 
-function Card({sec, retail, playing, onPlay, onWord, onGenerate, onRetake}: {
+interface SourceBlock { file: string; line: number; markdown: string; }
+
+function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate, onRetake}: {
   sec: Section; stem: string; retail: boolean; playing: Source | null;
-  onPlay: (s: Source, sec: Section) => void; onWord: (term: string) => void; onGenerate: () => void; onRetake: () => void;
+  onPlay: (s: Source, sec: Section) => void; onWord: (term: string) => void; onEdited: (id: string) => Promise<void>;
+  onGenerate: () => void; onRetake: () => void;
 }) {
   const badge = sec.kind === "heading" ? `H${sec.level ?? ""}` : "¶";
+  // Editing on the spot (2026-10-26): the box holds the paragraph's markdown
+  // as it is in the file; Save writes it back and the server re-exports, so
+  // the card comes back under a new id with nothing rendered.
+  const [edit, setEdit] = useState<null | {where: string; text: string}>(null);
+  const [saving, setSaving] = useState<"" | "opening" | "saving">("");
+  const [editError, setEditError] = useState("");
+  const openEdit = async () => {
+    setSaving("opening"); setEditError("");
+    try {
+      const src = await request<SourceBlock>("source", {stem, id: sec.id});
+      setEdit({where: `${src.file}:${src.line}`, text: src.markdown});
+    } catch (err) { setEditError((err as Error).message); }
+    setSaving("");
+  };
+  const save = async () => {
+    if (!edit) return;
+    setSaving("saving"); setEditError("");
+    try {
+      const r = await request<{changed: boolean}>("edit", {stem, id: sec.id, markdown: edit.text});
+      setEdit(null);
+      setSaving("");
+      // The card remounts under the paragraph's new id once the refresh
+      // lands; there is nothing to say on this one.
+      if (r.changed) await onEdited(sec.id);
+    } catch (err) { setEditError((err as Error).message); setSaving(""); }
+  };
+  const cancel = () => { setEdit(null); setEditError(""); };
+  // The overlay (2026-10-26, the author: the card "is jumping around quite
+  // a bit if I'm also playing some audio"): the box is fixed over the page,
+  // so the player can walk on and scroll beneath it. Closing it saves, as
+  // the in-place box did; Cancel is the one way out that writes nothing.
+  // Escape closes (and saves); a save that fails keeps the box open.
+  useEffect(() => {
+    if (!edit) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); void save(); } };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
   return (
     <article id={`card-${sec.id}`} className={`card${playing ? " playing" : ""}${sec.take ? " done" : ""}`}>
       <div className="card-head">
@@ -298,12 +358,31 @@ function Card({sec, retail, playing, onPlay, onWord, onGenerate, onRetake}: {
           {sec.take ? "rendered" : sec.preview ? "preview" : "no preview"}
         </span>
       </div>
-      <p className="text">{sec.text}</p>
+      <p className="text" onDoubleClick={openEdit} title="Double-tap to edit">{sec.text}</p>
+      {editError && !edit && <div className="moved bad-note">{editError}</div>}
+      {edit && <div className="overlay" onClick={e => { if (e.target === e.currentTarget) void save(); }}>
+        <div className="overlay-box" role="dialog" aria-modal="true" aria-label={`Edit ¶ ${sec.ordinal}`}>
+          <div className="overlay-head">
+            <span className="display">Edit ¶ {sec.ordinal}</span>
+            <span className="where">{edit.where}</span>
+            <button className="close" onClick={() => void save()} disabled={saving === "saving"} aria-label="Save and close">✕</button>
+          </div>
+          <textarea className="markdown" value={edit.text}
+            onChange={e => setEdit({...edit, text: e.target.value})} aria-label={`Markdown of ¶ ${sec.ordinal}`} autoFocus />
+          {editError && <div className="moved bad-note">{editError}</div>}
+          <div className="edit-row">
+            <span className="hint">Closing saves. Esc or ✕ too.</span>
+            <button className="btn plain" onClick={cancel} disabled={saving === "saving"}>Cancel</button>
+            <button className="btn gen" onClick={() => void save()} disabled={saving === "saving"}>{saving === "saving" ? "Saving…" : "Save & close"}</button>
+          </div>
+        </div>
+      </div>}
       {sec.pronunciations.length > 0 && <div className="alias">
         {sec.pronunciations.map(p => <button key={p.term} className="word" onClick={() => onWord(p.term)} title="Open in the pronunciation workbench">{p.term} → {p.say}</button>)}
       </div>}
       {sec.moved && <div className="moved">changed since {when(sec.moved.since) || "its take"}: {sec.moved.detail.join(", ")}</div>}
       <div className="actions seg">
+        {!edit && <button className="btn plain" onClick={openEdit} disabled={saving === "opening"}>{saving === "opening" ? "…" : "✎ Edit"}</button>}
         {sec.previewUrl && <button className={`btn preview${playing === "preview" ? " on" : ""}`} onClick={() => onPlay("preview", sec)}>{playing === "preview" ? "◼" : "▶"} Preview</button>}
         {sec.takeUrl && <button className={`btn take${playing === "take" ? " on" : ""}`} onClick={() => onPlay("take", sec)}>{playing === "take" ? "◼" : "▶"} Take</button>}
         {sec.take

@@ -460,14 +460,8 @@ PDF-level pagination check, verse lint rows; (4) poem grain + siblings target SH
 DB keeps registration only, `[gdocs]` out of config.toml into `.env`. Not
 improvement tasks: features, designed here, built when the author says.
 
-## Concept graph redo (extraction switched off meanwhile)
-Author ruling 2026-09-25: "We need to redo that whole feature because it is
-presently not user friendly." LLM extraction is OFF via `[extraction]
-enabled = false` in `authorlm/config.toml` (the switch guards init,
-`extract`, `write complete`, and analysed collects at the one seam,
-`extraction.extract_concepts`); the zero-token upkeep — realizations,
-introduced_in, PROTECTED TERMS — keeps running, and the graph grows only by
-`concept add`. The redo is a grilling session of its own, starting from
-what the author wants to own: a glossary they write, terms flagged when a
-passage uses them inconsistently, no queue of machine guesses to triage.
-Not designed yet.
+## Concept graph redo — DONE, ruling retired (2026-10-25)
+The 2026-09-25 ruling that switched extraction off pending a redo is
+retired: the redo is `docs/extraction-redesign.md`, built and merged, and
+`[extraction] enabled` is back on as a plain kill switch. Extraction is
+lazy (ruling §0.9): mined on request, never as a side effect.

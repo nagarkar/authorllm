@@ -69,9 +69,10 @@ BENCH_INTENT = "Test bench: exercise the write path against fixed text."
 
 # The bench's whole concept graph, seeded by hand at --setup (§15.22).
 #
-# The bench is registered `--no-extract` because an EXTRACTED graph over
-# it would add triage proposals and model calls to a step that must stay
-# free. A hand-seeded graph adds neither: `concept add` makes no model
+# The bench's graph is never EXTRACTED (extraction is lazy: init never
+# mines, and --setup never asks for it), because an extracted graph would
+# add triage proposals and model calls to a step that must stay free. A
+# hand-seeded graph adds neither: `concept add` makes no model
 # call, and a declared concept that never appears in the text raises no
 # proposal. What it buys is that `--check pronunciations` has a real
 # derivation to run against instead of an empty one.
@@ -348,11 +349,12 @@ def setup(workspace: Path, manuscript_dir: Path) -> int:
         done += 1
 
     if row is None:
-        # --no-extract: the bench is a fixture for the WRITE path, and a
+        # No extraction: the bench is a fixture for the WRITE path, and a
         # concept graph over it would only add proposals to triage and
         # LLM calls to a step that must stay free after the first run.
+        # (init never extracts; nothing here asks for it.)
         print(cli(workspace, "init", "--name", BENCH,
-                  "--path", str(manuscript_dir), "--no-extract").strip())
+                  "--path", str(manuscript_dir)).strip())
         db = _open(workspace)
         done += 1
     row = _guard(db, manuscript_dir)
@@ -1225,7 +1227,7 @@ def check_pronunciations(workspace: Path, manuscript_dir: Path, *,
     It runs against the BENCH graph, which `--setup` seeds by hand
     (BENCH_CONCEPTS), and it asserts the seeded names BY NAME. The first
     cut asserted only "the protected set is non-empty" against a bench
-    registered `--no-extract`, whose graph is empty by design — so it
+    whose graph is never extracted, so empty by design — so it
     could never pass on its own, and passed in the hermetic suite only
     because a `pronunciations.md` written moments earlier supplied a term
     through list 3. Its two siblings passed VACUOUSLY, over empty sets,

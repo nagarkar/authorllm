@@ -6,11 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "authorlm"
 version = "0.1.0"
 description = "An editorial collaborator for philosophy writing that learns your editorial practice from evidence"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
-llm = ["litellm"]
+# The model call is llmlm's (nagarkar/llmlm#1), a sibling checkout installed editable first:
+#   pip install -e ../../llmlm -e ".[all]"
+llm = ["llmlm[images]"]
 mcp = ["mcp<2"]
 gdocs = [
     "google-api-python-client",
@@ -22,7 +24,7 @@ dev = [
     "metalm-gendocs @ git+https://github.com/nagarkar/metalm@084ae47a45241c3a7517a3e31967b982609e859a",
 ]
 all = [
-    "litellm",
+    "llmlm[images]",
     "mcp<2",
     "google-api-python-client",
     "google-auth-httplib2",
