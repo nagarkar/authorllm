@@ -5772,7 +5772,7 @@ def check_critique_resolve_reembeds() -> None:
 
             def documents(self):
                 class _Documents:
-                    def get(self, documentId=None, includeTabsContent=None):
+                    def get(self, documentId=None, includeTabsContent=None, fields=None):
                         class _Req:
                             def execute(self):
                                 return {"tabs": [{
@@ -8018,7 +8018,7 @@ def main_test() -> None:
                 self.state = state
 
             def list(self, fileId=None, pageToken=None, includeDeleted=None,
-                     fields=None):
+                     fields=None, pageSize=None):
                 return FakeRequest({"comments": [
                     c for c in self.state["comments"].values()
                     if not c.get("resolved")]})

@@ -4617,7 +4617,7 @@ def scenario_transplant() -> None:
     class _TableTabDocs:
         def documents(self):
             class _Docs:
-                def get(self, documentId=None, includeTabsContent=None):
+                def get(self, documentId=None, includeTabsContent=None, fields=None):
                     return _Req({"tabs": [{
                         "tabProperties": {"tabId": "t.x",
                                           "title": "essay.md"},
@@ -7598,7 +7598,7 @@ class _PronDocsService:
 
         class Docs:
             @staticmethod
-            def get(documentId, includeTabsContent=False):
+            def get(documentId, includeTabsContent=False, fields=None):
                 class R:
                     @staticmethod
                     def execute():
