@@ -96,14 +96,22 @@ record their reaction (with their reasoning verbatim) as evidence.
 
 ## Narration on request ("narration for X")
 When the author says "narration for X", X names an essay. Print that essay's
-text so it reads as prose, not as markup:
+text so it reads as prose:
 1. Resolve X to its file (the manuscript's essay of that name), then read it.
-2. Strip the `[` and `]` tags (the directive brackets such as `[Footnote: …]`,
-   `[Explain: …]`, `[Suggestion: …]`) so the text reads cleanly. Keep the
-   words inside the brackets; drop only the brackets themselves.
-3. Print a few paragraphs at a time, not the whole essay. Then end with a
+2. Drop illustration blocks entirely: the `[Illustration: … ⇢ … | caption: …]`
+   line and the `![…](_illustrations/…)` image line after it. Their
+   description, file name and caption never appear in narration.
+3. Default view shows the text as if every pending form were accepted. No
+   tags, no brackets, no directive labels, no before/after comparison. Each
+   form reads in place as ordinary prose, so the author can check the flow.
+   Footnote markers print as plain numbers; footnote text does not print
+   inline.
+4. Unresolved view, only when the author asks for it (e.g. "narration for X
+   unresolved"): show the forms as they stand in the document, brackets and
+   directive labels included.
+5. Print a few paragraphs at a time, not the whole essay. Then end with a
    single line asking the author to type `next` for the following set.
-4. On `next`, continue from where the last set stopped. Do not repeat
+6. On `next`, continue from where the last set stopped. Do not repeat
    paragraphs already printed. When the essay ends, say so.
 Narration is read-only: never edit the file, never record evidence, never
 call the curation or filter tools while narrating.
