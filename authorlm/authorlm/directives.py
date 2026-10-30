@@ -65,6 +65,17 @@ _LABEL_OPT = re.compile(r"\s*\|\s*label:\s*(?P<label>[A-Za-z]+)\s*$", re.IGNOREC
 _DEFINITION = re.compile(r"^\[\^(?P<letters>[A-Za-z]+)(?P<n>\d+)\]:", re.MULTILINE)
 _PARAGRAPH = re.compile(r"[^\n]+(?:\n[^\n]+)*")
 _RESERVED = ("<<", ">>", "{{", "}}")
+# A standalone Suggestion evaluates authorial prose (design §1), never a
+# heading, footnote definition, directive/media tag, or close-tag unit
+# sitting between the prose and the note.
+_NON_PROSE_TARGET = re.compile(
+    r"^(?:"
+    r"#{1,6}\s|"
+    r"\[\^[^\]]+\]:|"
+    r"\[(?:/)?(?:Illustration|Footnote|Explain|Suggestion|Judgment|Voice|"
+    r"Clip|Collage|Montage)\b"
+    r")",
+    re.IGNORECASE)
 
 
 def _kind(kind: str) -> str:
@@ -84,6 +95,20 @@ def _standalone(text: str, start: int, end: int) -> bool:
     return not text[line_start:start].strip() and not text[end:line_end].strip()
 
 
+def _is_prose_suggestion_target(unit: str) -> bool:
+    """True when a blank-line unit is prose a Suggestion may replace."""
+    first = unit.strip().split("\n", 1)[0].strip()
+    return bool(first) and not _NON_PROSE_TARGET.match(first)
+
+
+def _prior_prose_target(paragraphs: list[tuple[int, int, str]], start: int
+                        ) -> tuple[int, int, str] | None:
+    """The nearest prose blank-line unit entirely before `start`, skipping
+    structural markup a margin note never evaluates."""
+    return next(((a, b, p) for a, b, p in reversed(paragraphs)
+                 if b <= start and _is_prose_suggestion_target(p)), None)
+
+
 def scan_text(text: str, kind: str) -> list[dict]:
     """Every open tag of one kind in one file's text, in document order:
     the ordinal `n` (1-based within the file — the `--tag` handle), the
@@ -92,7 +117,13 @@ def scan_text(text: str, kind: str) -> list[dict]:
     a suggestion acts on (`target`, `target_start`, `target_end`: the
     holding paragraph inline, the paragraph BEFORE a standalone tag,
     None when nothing precedes it), and — footnotes — the `| label:`
-    override when the author gave one."""
+    override when the author gave one.
+
+    A standalone suggestion's "paragraph before" is the nearest prior
+    *prose* unit (design §1: the note under what it comments on). An
+    intervening illustration, clip, heading, footnote definition, or
+    other directive line is not the target — taking it as one let apply
+    destroy that markup (or plant `<<tag>>{{prose}}` on the Doc road)."""
     pattern = _TAGS[_kind(kind)]
     paragraphs = [(m.start(), m.end(), m.group(0))
                   for m in _PARAGRAPH.finditer(text)]
@@ -110,8 +141,10 @@ def scan_text(text: str, kind: str) -> list[dict]:
                     (start, end, ""))
         standalone = _standalone(text, start, end)
         if standalone:
-            target = next(((a, b, p) for a, b, p in reversed(paragraphs)
-                           if b <= start), None)
+            target = (_prior_prose_target(paragraphs, start)
+                      if kind == "suggestion"
+                      else next(((a, b, p) for a, b, p in reversed(paragraphs)
+                                 if b <= start), None))
         else:
             target = here
         tags.append({
@@ -283,11 +316,15 @@ def _land_explain(text: str, tag: dict, draft: str) -> str:
 def _land_suggestion(text: str, tag: dict, draft: str) -> str:
     """The agreed text REPLACES the target paragraph. Inline, that
     paragraph holds the tag, so the tag goes with it; standalone, the
-    tag's own line goes too."""
+    tag's own line goes too — and any units BETWEEN the target and the
+    tag (an illustration, a clip, …) stay put."""
     if tag["standalone"]:
-        line_end = text.find("\n", tag["end"])
-        line_end = len(text) if line_end == -1 else line_end
-        return text[:tag["target_start"]] + draft + text[line_end:]
+        body = text[:tag["target_start"]] + draft + text[tag["target_end"]:]
+        shift = len(draft) - (tag["target_end"] - tag["target_start"])
+        moved = dict(tag)
+        moved["start"] = tag["start"] + shift
+        moved["end"] = tag["end"] + shift
+        return remove_tag(body, moved)
     return text[:tag["target_start"]] + draft + text[tag["target_end"]:]
 
 
@@ -688,16 +725,22 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
         old, anchor, definition = tag["raw"], paragraph_of(tag), None
         if kind == "suggestion":
             # The form wraps the TARGET paragraph — inline, tag and all;
-            # standalone, the paragraph before it, the tag line left
-            # standing until resolve consumes it on acceptance. A decline
-            # wraps the tag itself: the author sees it going and the
-            # paragraph staying.
+            # standalone, the prose unit before it (skipping intervening
+            # markup), the tag line left standing until resolve consumes
+            # it on acceptance. A decline wraps the tag itself: the
+            # author sees it going and the paragraph staying. Anchor from
+            # target_start so an intervening illustration/clip is not the
+            # planted unit (`anchor -= 1` only worked when the target was
+            # the immediate previous blank-line paragraph).
             if c["decline"]:
                 old = tag["raw"] if tag["standalone"] else tag["target"]
                 new = "" if tag["standalone"] else _target_without_tag(tag)
             else:
                 old, new = tag["target"], c["text"]
-                anchor -= 1 if tag["standalone"] else 0
+                if tag["target_start"] is not None:
+                    before = text[:tag["target_start"]]
+                    anchor = (len(_paragraphs(before + "x"))
+                              if before.strip() else 1)
         elif kind == "footnote":
             new, definition = f"[^{label}]", c["text"]
         else:
