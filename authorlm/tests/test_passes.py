@@ -164,7 +164,7 @@ class _RecordingDrive:
                 return self._result
 
         class _Documents:
-            def get(self, documentId=None, includeTabsContent=None):
+            def get(self, documentId=None, includeTabsContent=None, fields=None):
                 def tab(tid, title):
                     return {"tabProperties": {"tabId": tid,
                                               "title": title},
@@ -472,7 +472,7 @@ class _SurgicalDocFake:
                 return self._result
 
         class _Documents:
-            def get(self, documentId=None, includeTabsContent=None):
+            def get(self, documentId=None, includeTabsContent=None, fields=None):
                 if documentId in outer.temps:
                     return _Req({"body": {"content": outer._temp_content(
                         outer.temps[documentId])}})
@@ -752,7 +752,7 @@ def _local_transport_guards(root: Path) -> None:
 
         def documents(self):
             class _Documents:
-                def get(self, documentId=None, includeTabsContent=None):
+                def get(self, documentId=None, includeTabsContent=None, fields=None):
                     class _Req:
                         def execute(self):
                             return {"tabs": [
@@ -6378,7 +6378,7 @@ def main_test() -> None:
 
                 class _Documents:
                     def get(self, documentId=None,
-                           includeTabsContent=None):
+                           includeTabsContent=None, fields=None):
                         tabs = [{"tabProperties": {"tabId": t["id"],
                                                    "title": t["title"]},
                                 "childTabs": []} for t in outer.tabs]

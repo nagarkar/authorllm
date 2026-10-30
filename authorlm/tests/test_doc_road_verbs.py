@@ -10,6 +10,7 @@ Run: python3 tests/test_doc_road_verbs.py
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -848,7 +849,7 @@ class _TabTreeStub:
                 return self.fn()
 
         class _Documents:
-            def get(self, documentId=None, includeTabsContent=None):
+            def get(self, documentId=None, includeTabsContent=None, fields=None):
                 return _Req(lambda: {"tabs": [{
                     "tabProperties": {"tabId": "tab-c", "title": "book"},
                     "childTabs": [{"tabProperties": {
@@ -916,6 +917,420 @@ def toc_doc_only_tabs(root: Path) -> None:
           "also changed (conflict)" in both.get("skipped", ""), str(both))
 
 
+# ------------------------------------------------------------------ J
+
+
+def _mask_tree(fields: str) -> dict:
+    """A partial-response `fields` string as a tree: {name: subtree or
+    None (the whole value)}. `a/b` is `a(b)`, as Google reads it."""
+    def parse(s: str, i: int) -> tuple[dict, int]:
+        tree: dict = {}
+        name = ""
+        while i < len(s):
+            ch = s[i]
+            if ch == "(":
+                sub, i = parse(s, i + 1)
+                _put(tree, name, sub)
+                name = ""
+            elif ch == ")":
+                if name:
+                    _put(tree, name, None)
+                return tree, i + 1
+            elif ch == ",":
+                if name:
+                    _put(tree, name, None)
+                name = ""
+                i += 1
+            else:
+                name += ch
+                i += 1
+        if name:
+            _put(tree, name, None)
+        return tree, i
+
+    def _put(tree: dict, path: str, sub) -> None:
+        head, _, rest = path.strip().partition("/")
+        if rest:
+            node = tree.setdefault(head, {})
+            if node is not None:
+                _put(node, rest, sub)
+        else:
+            tree[head] = sub
+
+    return parse(fields, 0)[0]
+
+
+def _prune(value, tree):
+    """`value` as Google returns it under the mask `tree`."""
+    if tree is None:
+        return value
+    if isinstance(value, list):
+        return [_prune(v, tree) for v in value]
+    if isinstance(value, dict):
+        return {k: _prune(value[k], sub) for k, sub in tree.items()
+                if k in value}
+    return value
+
+
+class _CountingFake(_UnspacedJoinFake):
+    """The surgical double with what the read budget turns on: a
+    revisionId that moves on every change to the Doc (any tab, any
+    text, any spacing — computed from the state, so a test that edits
+    the tab by hand moves it too), `writeControl` checked and answered,
+    partial-response masks applied (a field the code reads but did not
+    ask for comes back missing, as from Google), paragraph spacing
+    visible in `paragraphStyle`, paged comments, and a log of every call
+    as (kind, revision): rev, get, temp, export, write, create, delete,
+    comments."""
+
+    def __init__(self, *a, comments=None, **k):
+        super().__init__(*a, **k)
+        self.calls: list[tuple[str, str]] = []
+        self.margin = list(comments or [])
+        self.hooks: dict = {}          # kind → callable run after the call
+        self.masks: list = []          # each master read's fields string
+
+    def rev(self) -> str:
+        state = json.dumps([[t["id"], t["title"], t["body"]]
+                            for t in self.tabs]
+                           + [sorted(self.unspaced)]
+                           + [sorted((r["tab"], r["start"], r["end"],
+                                      r["mark"]) for r in self.styled)])
+        return "rev-" + hashlib.sha256(state.encode()).hexdigest()[:10]
+
+    def log(self, kind: str) -> None:
+        self.calls.append((kind, self.rev()))
+        hook = self.hooks.pop(kind, None)
+        if hook is not None:
+            hook()
+
+    def count(self, kind: str) -> int:
+        return sum(1 for k, _ in self.calls if k == kind)
+
+    def reset(self) -> None:
+        self.calls = []
+
+    def _spaced(self, doc: dict) -> dict:
+        def walk(tabs):
+            for tab in tabs:
+                for item in tab.get("documentTab", {}).get("body", {}).get(
+                        "content", []):
+                    para = item.get("paragraph")
+                    if not para:
+                        continue
+                    text = "".join(e.get("textRun", {}).get("content", "")
+                                   for e in para.get("elements", []))
+                    style = para.setdefault("paragraphStyle", {})
+                    if text.rstrip("\n") not in self.unspaced:
+                        # Google leaves a zero magnitude out.
+                        style.update(lineSpacing=115,
+                                     spaceAbove={"unit": "PT"},
+                                     spaceBelow={"magnitude": 6,
+                                                 "unit": "PT"})
+                walk(tab.get("childTabs", []))
+        walk(doc.get("tabs", []))
+        return doc
+
+    def documents(self):
+        inner = super().documents()
+        outer = self
+
+        class _Req:
+            def __init__(self, result):
+                self._result = result
+
+            def execute(self):
+                return self._result
+
+        class _Documents:
+            def get(self, documentId=None, includeTabsContent=None,
+                    fields=None):
+                if documentId in outer.temps:
+                    outer.log("temp")
+                    return inner.get(documentId=documentId)
+                if fields == "revisionId":
+                    outer.log("rev")
+                    return _Req({"revisionId": outer.rev()})
+                outer.log("get")
+                outer.masks.append(fields)
+                doc = inner.get(documentId=documentId,
+                                includeTabsContent=includeTabsContent
+                                ).execute()
+                doc = outer._spaced(copy.deepcopy(doc))
+                doc["revisionId"] = outer.rev()
+                if fields:
+                    doc = _prune(doc, _mask_tree(fields))
+                return _Req(doc)
+
+            def batchUpdate(self, documentId=None, body=None):
+                required = ((body or {}).get("writeControl") or {}).get(
+                    "requiredRevisionId")
+                if required and required != outer.rev():
+                    import httplib2
+                    from googleapiclient.errors import HttpError
+                    raise HttpError(
+                        httplib2.Response({"status": 400}),
+                        b'{"error": {"message": "The required revision '
+                        b'ID does not match the latest revision."}}')
+                reply = inner.batchUpdate(documentId=documentId,
+                                          body=body).execute()
+                outer.log("write")
+                reply["writeControl"] = {"requiredRevisionId": outer.rev()}
+                return _Req(reply)
+        return _Documents()
+
+    def files(self):
+        inner = super().files()
+        outer = self
+
+        class _Files:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def export(self, fileId=None, mimeType=None):
+                got = inner.export(fileId=fileId, mimeType=mimeType)
+                outer.log("export")
+                return got
+
+            def create(self, **kw):
+                outer.log("create")
+                return inner.create(**kw)
+
+            def delete(self, **kw):
+                outer.log("delete")
+                return inner.delete(**kw)
+        return _Files()
+
+    def comments(self):
+        outer = self
+
+        class _Req:
+            def __init__(self, result):
+                self._result = result
+
+            def execute(self):
+                return self._result
+
+        class _Comments:
+            def list(self, fileId=None, pageToken=None, pageSize=None,
+                     includeDeleted=None, fields=None):
+                outer.log("comments")
+                size = min(pageSize or 20, 100)
+                at = int(pageToken or 0)
+                page = outer.margin[at: at + size]
+                got = {"comments": copy.deepcopy(page)}
+                if at + size < len(outer.margin):
+                    got["nextPageToken"] = str(at + size)
+                return _Req(got)
+        return _Comments()
+
+
+def _comment(cid: str, quoted: str) -> dict:
+    return {"id": cid, "content": "a note", "resolved": False,
+            "quotedFileContent": {"value": quoted},
+            "author": {"displayName": "author"},
+            "createdTime": f"2026-10-30T00:00:{cid[-2:]}Z", "replies": []}
+
+
+def _settled(db, manuscript, old: str, new: str) -> None:
+    """A filter form whose verdict is in the record ('cleaned'), its
+    markers already gone from the tab: what makes every push of a file
+    with history run the settle step (`form_news` is never empty)."""
+    from authorlm.db import ko_fields
+    thread = ko_fields("dt")
+    thread.update(
+        manuscript_id=manuscript["id"], origin_type="filter",
+        origin_id=f"fr-test:solo.md:{old}", file="solo.md",
+        anchor_quote=None, proposed_old=old, proposed_new=new, note="t",
+        state="cleaned", our_reply_ids="[]", last_author_reply_id=None,
+        scope_kind="file", scope_ref="solo.md",
+        metadata=json.dumps({"kind": "replace"}))
+    db.insert("doc_threads", thread)
+
+
+def _budget(fake, label: str) -> str:
+    kinds = ("rev", "get", "export", "comments", "write", "temp")
+    return f"{label}: " + ", ".join(f"{k}={fake.count(k)}" for k in kinds)
+
+
+def read_budget(root: Path) -> None:
+    """The Doc road's Google read budget (2026-10-30 profiles: a push
+    exported the whole Doc four times at one revision, a stage did 20
+    full reads). Each scenario checks the outcome first, then the
+    number of calls, so a cache that answers wrongly fails before a
+    count can pass."""
+    print("J. the Doc road reads each revision once:")
+    many = [_comment(f"c-{i:02d}", "Alpha one.") for i in range(25)]
+
+    # 1. A guarded push with history (the settle step runs and finds
+    #    nothing to take out) and a margin of 25 comments.
+    ws, db, manuscript, ms, fake = _fixture(root, "budget-push-ws",
+                                            fake_cls=_CountingFake)
+    fake.margin = many
+    _settled(db, manuscript, "Gamma old.", "Gamma three.")
+    (ms / "solo.md").write_text(BASE.replace("Beta two.", "Beta, mine."))
+    fake.reset()
+    out = gdocs.push_doc(db, manuscript, "solo.md", service=fake,
+                         docs_service=fake, guard=True)
+    check("the push lands the local edit", out.get("mode") == "diff"
+          and "Beta, mine." in fake.tab_text("solo.md")
+          and "Beta two." not in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+    print("   " + _budget(fake, "push"))
+    check("two exports: the guard's and the read-back after the write",
+          fake.count("export") == 2, _budget(fake, "push"))
+    check("one full read per revision the push meets (three: before "
+          "the edit, after it, after the spacing)",
+          fake.count("get") <= 3, _budget(fake, "push"))
+    check("one page of comments, read once", fake.count("comments") == 1,
+          _budget(fake, "push"))
+    check("every master read went out with a fields mask",
+          fake.masks and all(fake.masks), str(fake.masks))
+
+    # 2. The read-back is a fresh export after the write, and the spacing
+    #    write precedes it (the 2026-10-25 order, 746d8c84).
+    kinds = [k for k, _ in fake.calls]
+    last_write = max(i for i, k in enumerate(kinds) if k == "write")
+    last_export = max(i for i, k in enumerate(kinds) if k == "export")
+    revs = [r for k, r in fake.calls if k == "export"]
+    check("the read-back export comes after the last write, at a new "
+          "revision", last_export > last_write and revs[0] != revs[-1],
+          str(fake.calls))
+
+    # 3. Spacing writes only what lacks it.
+    fake.reset()
+    sent = gdocs.apply_tab_spacing(fake, "doc-fake", "tab-2",
+                                   gdocs.DOC_SPACING)
+    check("a tab already spaced takes no spacing write",
+          sent == 0 and fake.count("write") == 0, str(fake.calls))
+    fake.unspaced.add("Gamma three.")
+    fake.reset()
+    sent = gdocs.apply_tab_spacing(fake, "doc-fake", "tab-2",
+                                   gdocs.DOC_SPACING)
+    check("one unspaced paragraph: one range, one write",
+          sent == 1 and fake.count("write") == 1 and not fake.unspaced,
+          str(fake.calls))
+
+    # 4. A revision that moves between two reads is read again.
+    fake.reset()
+    first = gdocs.master_export(fake, fake, "doc-fake")
+    again = gdocs.master_export(fake, fake, "doc-fake")
+    check("the same revision is exported once",
+          first == again and fake.count("export") == 1, str(fake.calls))
+    fake.edit("tab-2", "Gamma three.", "Gamma, typed in the Doc.")
+    moved = gdocs.master_export(fake, fake, "doc-fake")
+    check("an edit in the Doc forces a fresh export",
+          fake.count("export") == 2 and "Gamma, typed in the Doc." in moved
+          and "Gamma, typed in the Doc." not in first, str(fake.calls))
+    doc = gdocs.master_doc(fake, "doc-fake")
+    fake.edit("tab-2", "Alpha one.", "Alpha, typed.")
+    doc2 = gdocs.master_doc(fake, "doc-fake")
+    check("...and a fresh full read",
+          doc2.get("revisionId") != doc.get("revisionId")
+          and "Alpha, typed." in json.dumps(doc2), "")
+
+    # 5. Pull, then push in a new process: the pull's export, kept on
+    #    disk by revision, stands in for the push guard's.
+    ws, db, manuscript, ms, fake = _fixture(root, "budget-disk-ws",
+                                            fake_cls=_CountingFake)
+    fake.edit("tab-2", "Gamma three.", "Gamma, from the Doc.")
+    gdocs.pull_doc(db, manuscript, query="solo.md", service=fake,
+                   docs_service=fake, with_comments=False)
+    check("the pull brought the Doc's edit home",
+          "Gamma, from the Doc." in (ms / "solo.md").read_text(), "")
+    links = gdocs._mapping(db, manuscript)
+    links["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, links)
+    (ms / "solo.md").write_text((ms / "solo.md").read_text().replace(
+        "Beta two.", "Beta, mine."))
+    gdocs._READS.clear()                         # a new process
+    fake.margin = [_comment("c-01", "Alpha one.")]
+    fake.reset()
+    gdocs.push_doc(db, manuscript, "solo.md", service=fake,
+                   docs_service=fake, guard=True)
+    print("   " + _budget(fake, "push after pull"))
+    check("the push after a pull exports once (the read-back)",
+          fake.count("export") == 1
+          and "Beta, mine." in fake.tab_text("solo.md"),
+          _budget(fake, "push after pull"))
+
+    # 6. A push whose edit meets a margin proposal stops before Google.
+    ws, db, manuscript, ms, fake = _fixture(root, "budget-overlap-ws",
+                                            fake_cls=_CountingFake)
+    from authorlm import threads as th
+    fake.edit("tab-2", "Beta two.", "<<Beta two.>>{{Beta, proposed.}}")
+    fake.margin = [_comment("c-01", "Beta two.")]
+    th.create_thread(db, manuscript["id"], "c-01", "solo.md", "Beta two.",
+                     "Beta two.", "Beta, proposed.", "n", None,
+                     scope_kind="file", scope_ref="solo.md")
+    before = fake.tab_text("solo.md")
+    (ms / "solo.md").write_text(BASE.replace("Beta two.", "Beta, mine."))
+    fake.reset()
+    try:
+        gdocs.push_doc(db, manuscript, "solo.md", service=fake,
+                       docs_service=fake, guard=True)
+        msg = ""
+    except LookupError as err:
+        msg = str(err)
+    check("the overlap is named, as the tab check names it",
+          "overlaps a pending margin thread" in msg, msg)
+    check("...and no Google call was made, nothing written",
+          fake.calls == [] and fake.tab_text("solo.md") == before,
+          str(fake.calls))
+    (ms / "solo.md").write_text(BASE.replace("Gamma three.",
+                                             "Gamma, mine."))
+    fake.reset()
+    gdocs.push_doc(db, manuscript, "solo.md", service=fake,
+                   docs_service=fake, guard=True)
+    check("an edit beside the proposal still pushes; the form stands",
+          "Gamma, mine." in fake.tab_text("solo.md")
+          and "<<Beta two.>>{{Beta, proposed.}}" in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+
+    # 7. revise stage, then resolve: outcomes, then the budget.
+    ws, db, manuscript, ms, fake = _fixture(root, "budget-revise-ws",
+                                            OUTSIDE, fake_cls=_CountingFake)
+    fake.margin = many
+    revisions = [
+        {"old": "Beta is to be replaced.", "new": "Beta, replaced.",
+         "note": "r-1"},
+        {"old": "Gamma is to be reworded.", "new": "Gamma, as proposed.",
+         "note": "r-2"},
+        {"old": "", "new": "Delta, added.", "note": "r-3",
+         "anchor_paragraph": 2},
+    ]
+    fake.reset()
+    staged = api.stage_revisions(db, manuscript, "solo.md", revisions,
+                                 "budget", fake, fake)
+    print("   " + _budget(fake, "stage, 3 forms"))
+    check("stage writes all three forms",
+          len(staged["written"]) == 3 and not staged["failed"]
+          and fake.tab_text("solo.md").count("{{") == 3,
+          str(staged["failed"]) + fake.tab_text("solo.md"))
+    check("stage: one export for the pull, one for the export proof at "
+          "most", fake.count("export") <= 2, _budget(fake, "stage"))
+    check("stage: one full read per form written, plus at most four",
+          fake.count("get") <= 3 + 4, _budget(fake, "stage"))
+    fake.edit("tab-2", "{{Gamma, as proposed.}}", "{{Gamma, my words.}}")
+    fake.reset()
+    with contextlib.redirect_stdout(io.StringIO()):
+        done = api.resolve_revisions(db, manuscript, "solo.md", "budget",
+                                     fake, fake)
+    print("   " + _budget(fake, "resolve, 3 forms"))
+    final = (ms / "solo.md").read_text()
+    check("resolve lands all three, the author's wording kept",
+          done["landed"] and "Beta, replaced." in final
+          and "Gamma, my words." in final and "Delta, added." in final
+          and not done["tab_still_marked"]
+          and "{{" not in fake.tab_text("solo.md"),
+          json.dumps(done, default=str) + fake.tab_text("solo.md"))
+    check("resolve: at most three exports (its read, the push's read "
+          "after the forms come out, the read-back)",
+          fake.count("export") <= 3, _budget(fake, "resolve"))
+    check("resolve: one page of comments per fetch, one fetch",
+          fake.count("comments") <= 1, _budget(fake, "resolve"))
+
+
 # ------------------------------------------------------------------ H
 
 
@@ -958,6 +1373,7 @@ def main_test() -> None:
         spacing_join(root)
         toc_conflict(root)
         toc_doc_only_tabs(root)
+        read_budget(root)
         run_tests_script(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)

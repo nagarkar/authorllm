@@ -5772,7 +5772,7 @@ def check_critique_resolve_reembeds() -> None:
 
             def documents(self):
                 class _Documents:
-                    def get(self, documentId=None, includeTabsContent=None):
+                    def get(self, documentId=None, includeTabsContent=None, fields=None):
                         class _Req:
                             def execute(self):
                                 return {"tabs": [{
