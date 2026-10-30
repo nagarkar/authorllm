@@ -7099,6 +7099,7 @@ def _rule_external_marked(marked: str, replaces: list[dict],
     Returns (marked, {thread id: (verdict, final)}) for the additions
     alone; the replacements are still forms, or plain old text, in the
     returned marked text."""
+    from . import lint
     from . import threads as th
 
     def flat(s: str) -> str:
@@ -7118,20 +7119,14 @@ def _rule_external_marked(marked: str, replaces: list[dict],
         if hit is not None:
             free.remove(hit)
             pairs[t["id"]] = hit
-    def likeness(a: str, b: str) -> float:
-        # autojunk off: past 200 characters it junks every common letter,
-        # and a paragraph-length rewording scored under 0.5 against its
-        # own proposal — a decline (it-9844aefae138).
-        return difflib.SequenceMatcher(None, flat(a), flat(b),
-                                       autojunk=False).ratio()
-
     for t in inserts:                       # then the closest rewording
         if t["id"] in pairs or not free:
             continue
-        best = max(free, key=lambda f: likeness(t["proposed_new"], f["new"]))
-        if likeness(t["proposed_new"], best["new"]) >= 0.5:
-            free.remove(best)
-            pairs[t["id"]] = best
+        k, _ = lint.closest_by_ratio(t["proposed_new"],
+                                     [f["new"] for f in free], flat,
+                                     floor=0.5)
+        if k is not None:
+            pairs[t["id"]] = free.pop(k)
     # Unwrap the paired forms and drop the emptied ones, last to first.
     edits = [(f["start"], f["end"], f["new"]) for f in pairs.values()]
     edits += [(f["start"], f["end"], "") for f in forms

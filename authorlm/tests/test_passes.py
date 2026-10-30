@@ -5399,6 +5399,51 @@ def _an_outside_caller_rewrites_its_green_half(root: Path) -> None:
           str(res) + local)
 
 
+def _similarity_has_no_autojunk() -> None:
+    """difflib's autojunk, on by default, junks every element seen in
+    more than 1% of a sequence once it passes 200 — every common letter
+    of a paragraph, every "the" of a long passage. Each reader that
+    scores or diffs prose turns it off; these pin that down."""
+    print("similarity: autojunk stays off:")
+    from authorlm import lint
+
+    flat = lambda s: " ".join(s.split())  # noqa: E731
+    short = "The hinge is a door."
+    k, ratio = lint.closest_by_ratio(_ADDED, [short, _ADDED_REWORDED],
+                                     flat, floor=0.5)
+    check("the shared helper scores a long rewording as its source's "
+          "closest, far above the floor (it fell under 0.5 with autojunk)",
+          k == 1 and ratio > 0.7, str((k, ratio)))
+    check("...returns no index below the floor, with the best ratio, and "
+          "a strict floor excludes a tie",
+          lint.closest_by_ratio("abc", ["xyz"], flat, floor=0.5)
+          == (None, 0.0)
+          and lint.closest_by_ratio("ab", ["ab", "ab"], flat, floor=1.0)
+          == (0, 1.0)
+          and lint.closest_by_ratio("ab", ["ab"], flat, floor=1.0,
+                                    strict=True) == (None, 1.0))
+
+    text = short + "\n\n" + _ADDED_REWORDED + "\n\nOmega closes."
+    check("_closest_paragraph picks a reworded paragraph over 200 "
+          "characters, not None and not the short one beside it",
+          passes._closest_paragraph(text, _ADDED) == _ADDED_REWORDED,
+          str(passes._closest_paragraph(text, _ADDED)))
+
+    base = ("the world is the field and the field is the place where the "
+            "person must choose what the next step is").split()
+    old = " ".join((base * 11)[:220])
+    words = old.split()
+    at = sum(len(w) + 1 for w in words[:110])
+    was = words[110]
+    words[110] = "CHANGED"
+    new = " ".join(words)
+    gone, came = gdocs._word_diff_spans(old, new)
+    check("a one-word change in a 220-word form highlights that one word "
+          "on each side, not a run of hundreds",
+          gone == [(at, at + len(was))]
+          and came == [(at, at + len("CHANGED"))], str((gone, came, at)))
+
+
 def _an_outside_caller_keeps_its_settings_and_withdraws(root: Path) -> None:
     """The two doors an outside caller lacked, so that it never writes
     AuthorLM's tables itself (nagarkar/ytlm#23): its own settings on a
@@ -6730,6 +6775,7 @@ def main_test() -> None:
         _footnotes_after_a_closing_illustration(root)
         _an_outside_caller_resolves_one_tab(root)
         _an_outside_caller_rewrites_its_green_half(root)
+        _similarity_has_no_autojunk()
         _a_resolve_keeps_math_a_form_cuts_through(root)
         _a_new_half_that_extends_its_old(root)
         _an_outside_caller_keeps_its_settings_and_withdraws(root)
