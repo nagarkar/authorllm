@@ -746,6 +746,12 @@ Retake must not destroy a good paragraph take when the write fails mid-flight.
 
 Interlocutor tests (docs/interlocutor-design.md).
 
+## `tests.test_is_tag_line`
+
+`authorlm/tests/test_is_tag_line.py`
+
+`media.is_tag_line` decides which lines `strip_for_book` drops from PDF/EPUB exports.
+
 ## `tests.test_live_llm`
 
 `authorlm/tests/test_live_llm.py`
@@ -770,6 +776,12 @@ Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and strippi
 
 `morph.targets` decides which paragraphs `morph run` sends to the model, and so which paragraphs it may stage edits against.
 
+## `tests.test_near_duplicate`
+
+`authorlm/tests/test_near_duplicate.py`
+
+`loop.similarity` / `loop.near_duplicate` are the deterministic proposal firewall (Common Core §8.9 / loop invariant “never re-ask”).
+
 ## `tests.test_normalize_fences`
 
 `authorlm/tests/test_normalize_fences.py`
@@ -781,6 +793,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 `authorlm/tests/test_normalize_thematic_break.py`
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
+
+## `tests.test_own_line_form`
+
+`authorlm/tests/test_own_line_form.py`
+
+`threads.own_line_form` / `math_spans` / `in_math` / `pending_forms` decide which bare `{{…}}` count as staged insertions on Doc-road resolve.
 
 ## `tests.test_paragraph_records`
 
@@ -811,6 +829,12 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 `authorlm/tests/test_pdf2md_text_layer_gate.py`
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
+
+## `tests.test_same_para`
+
+`authorlm/tests/test_same_para.py`
+
+`gdocs._norm_para` / `_same_para` / `first_divergence` / `divergence_note` align Doc paragraphs with the markdown export for diff-push.
 
 ## `tests.test_section_summaries`
 
@@ -853,6 +877,12 @@ toc.toml `outside`: Doc tabs that are not part of the book.
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_validate_reply`
+
+`authorlm/tests/test_validate_reply.py`
+
+`filtering.validate_reply` is §2.5's filter-reply door: every pasted or model reply for `filter record` / settle must pass here before any `<<old>>{{new}}` is staged.
 
 ## `tests.test_write_accept_idempotent`
 
