@@ -7099,6 +7099,7 @@ def _rule_external_marked(marked: str, replaces: list[dict],
     Returns (marked, {thread id: (verdict, final)}) for the additions
     alone; the replacements are still forms, or plain old text, in the
     returned marked text."""
+    from . import lint
     from . import threads as th
 
     def flat(s: str) -> str:
@@ -7107,7 +7108,7 @@ def _rule_external_marked(marked: str, replaces: list[dict],
     for t in replaces:
         old = re.escape(t["proposed_old"])
         marked = re.sub(
-            r"(?:~~)?<<" + old + r">>(?:~~)?(?:\{\{\s*\}\}|(?!~~|\{\{))",
+            r"(?:~~)*<<" + old + r">>(?:~~)*(?:\{\{\s*\}\}|(?!~~|\{\{))",
             lambda m, t=t: t["proposed_old"], marked, count=1)
 
     forms = [f for f in th.pending_forms(marked) if f["kind"] == "insert"]
@@ -7121,12 +7122,11 @@ def _rule_external_marked(marked: str, replaces: list[dict],
     for t in inserts:                       # then the closest rewording
         if t["id"] in pairs or not free:
             continue
-        best = max(free, key=lambda f: difflib.SequenceMatcher(
-            None, flat(t["proposed_new"]), flat(f["new"])).ratio())
-        if difflib.SequenceMatcher(None, flat(t["proposed_new"]),
-                                   flat(best["new"])).ratio() >= 0.5:
-            free.remove(best)
-            pairs[t["id"]] = best
+        k, _ = lint.closest_by_ratio(t["proposed_new"],
+                                     [f["new"] for f in free], flat,
+                                     floor=0.5)
+        if k is not None:
+            pairs[t["id"]] = free.pop(k)
     # Unwrap the paired forms and drop the emptied ones, last to first.
     edits = [(f["start"], f["end"], f["new"]) for f in pairs.values()]
     edits += [(f["start"], f["end"], "") for f in forms

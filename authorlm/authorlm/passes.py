@@ -869,22 +869,19 @@ def _closest_paragraph(text: str, probe: str,
     removed themselves. `exclude` holds paragraphs that cannot be the
     answer — the batch's other proposals' old and new halves, which a
     similar-looking probe would otherwise claim as its own."""
-    import difflib
+    from .lint import closest_by_ratio
 
-    probe_n = " ".join(probe.split())
-    best, best_ratio = None, 0.0
+    def flat(s: str) -> str:
+        return " ".join(s.split())
+
     # Units are paragraphs, and a paragraph is one line in this
     # pipeline's markdown — the Doc export separates them with single
     # newlines, the local file with blank lines. Splitting on newlines
     # serves both shapes.
-    for para in re.split(r"\n+", text):
-        p = " ".join(para.split())
-        if not p or p in exclude:
-            continue
-        ratio = difflib.SequenceMatcher(None, probe_n, p).ratio()
-        if ratio > best_ratio:
-            best, best_ratio = p, ratio
-    return best if best_ratio >= 0.5 else None
+    paras = [p for p in (flat(x) for x in re.split(r"\n+", text))
+             if p and p not in exclude]
+    k, _ = closest_by_ratio(probe, paras, flat, floor=0.5)
+    return paras[k] if k is not None else None
 
 
 def record_resolution(db: Database, manuscript_id: str, file: str,

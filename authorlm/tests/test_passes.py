@@ -5238,6 +5238,212 @@ def _an_outside_caller_resolves_one_tab(root: Path) -> None:
           str(res))
 
 
+REWRITE_ESSAY = (
+    "# Field\n\n"
+    "The world we stand in is not neutral ground, which the Sermons call "
+    "the Field of Choice.\n\n"
+    "Omega closes.\n")
+
+_ADDED = (
+    "Choice is the hinge of the whole account, and the Sermons insist on "
+    "it: every person stands where two roads part, and the parting is not "
+    "a metaphor but the shape of a life.[Footnote: Sermon 4] What looks "
+    "like fate is a long run of small choices, each one made in the dark.")
+_ADDED_REWORDED = (
+    "Every life turns on a hinge, and the Sermons will not let us forget "
+    "it: each person stands where two roads part, and the parting is not "
+    "a figure of speech but the very shape of a life.[Footnote: Sermon 5] "
+    "What we call fate is only a long run of small choices, each made "
+    "half in the dark.")
+_FIELD_OLD = "which the Sermons call the Field of Choice."
+_FIELD_NEW = (
+    _FIELD_OLD + " The Field is not a place but a condition: it is wherever "
+    "a person must answer for what they do next. No one enters it by "
+    "consent, and no one leaves it by declining to choose, since declining "
+    "is itself a choice. The Sermons call the declining sleep. They call "
+    "the answer waking. Between them lies the whole of the moral life. "
+    "The Field asks nothing of the sleeper. It asks everything of the one "
+    "who wakes. That is the hardness of the teaching.")
+_FIELD_PART1 = (
+    "which the Sermons name the Field of Choice. The Field is no place "
+    "at all but a condition: it is wherever a person has to answer for "
+    "what comes next. No one walks into it by consent, and no one walks "
+    "out of it by holding back, since holding back is a choice too.")
+_FIELD_PART2 = (
+    "The Sermons call that holding back sleep, and the answer waking. "
+    "Between the two lies the whole moral life: the Field asks nothing "
+    "of the sleeper and everything of the one who wakes.")
+
+
+def _an_outside_caller_rewrites_its_green_half(root: Path) -> None:
+    """it-9844aefae138: a green half the author rewrote is a MODIFIED
+    acceptance, with their words as the final text, however far they
+    took it — reworded past a character-ratio heuristic, split into two
+    paragraphs, or with the old half struck again by hand. Each was
+    recorded declined while the reworded text landed."""
+    print("outside callers: a rewritten green half is a modification:")
+    from authorlm import threads as th
+
+    # --- the marked text → the additions' verdicts ----------------------
+    marked = ("# Field\n\nThe world stands.\n\n{{" + _ADDED_REWORDED
+              + "}}\n\nOmega closes.\n")
+    thread = {"id": "dt-1", "proposed_old": "", "proposed_new": _ADDED}
+    landed, ruled = api._rule_external_marked(marked, [], [thread])
+    check("an addition whose long green paragraph the author rewrote "
+          "substantially is modified, with their text as final",
+          ruled["dt-1"] == ("modified", _ADDED_REWORDED)
+          and _ADDED_REWORDED in landed and "{{" not in landed,
+          f"{ruled}\n{landed}")
+    _, ruled = api._rule_external_marked(
+        "# Field\n\nThe world stands.\n\nOmega closes.\n", [], [thread])
+    check("...while an addition whose form is gone is still a decline",
+          ruled["dt-1"] == ("declined", None), str(ruled))
+    foreign = ("{{The river had no name in the old maps, only a line of "
+               "blue that the surveyors drew from memory, and the villagers "
+               "called it whatever their grandmothers had called it.}}")
+    _, ruled = api._rule_external_marked(
+        "# Field\n\nThe world stands.\n\n" + foreign + "\n\nOmega.\n",
+        [], [thread])
+    check("...and an unrelated insertion in the tab is not mistaken for "
+          "its rewording", ruled["dt-1"] == ("declined", None), str(ruled))
+
+    # --- the marked text → the replacement's form -----------------------
+    struck = ("A ~~~~<<" + _FIELD_OLD + ">>~~~~{{" + _FIELD_PART1
+              + "}} B.")
+    forms = th.pending_forms(struck)
+    check("an old half struck once by the writer and once more by hand "
+          "is still one form, its old half bare",
+          len(forms) == 1 and forms[0]["kind"] == "replace"
+          and forms[0]["old"] == _FIELD_OLD
+          and forms[0]["new"] == _FIELD_PART1
+          and th.strip_pending(struck)[0] == "A " + _FIELD_OLD + " B.",
+          str(forms))
+
+    # --- end to end: stage, the author rewrites, resolve ----------------
+    def staged(subdir: str, revisions: list[dict]):
+        db, manuscript, ms, fake = _outside_fixture(root, subdir,
+                                                    essay=REWRITE_ESSAY)
+        out = api.stage_revisions(db, manuscript, "solo.md", revisions,
+                                  "ytlm", fake, fake)
+        assert len(out["written"]) == len(revisions), out
+        return db, manuscript, ms, fake
+
+    def landed_clean(text: str) -> bool:
+        return not any(m in text for m in ("<<", ">>", "{{", "}}", "~~"))
+
+    # Case 1: the addition, rewritten.
+    db, manuscript, ms, fake = staged("rewrite-add-ws", [
+        {"old": "", "new": _ADDED, "anchor_paragraph": 2, "note": "c-1"}])
+    fake.edit("tab-2", "{{" + _ADDED + "}}", "{{" + _ADDED_REWORDED + "}}")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    row = res["revisions"][0]
+    check("a substantially rewritten addition resolves modified, its final "
+          "the author's paragraph, and lands as written",
+          row["verdict"] == "modified" and row["final"] == _ADDED_REWORDED
+          and (res["accepted"], res["modified"], res["declined"])
+          == (0, 1, 0)
+          and _ADDED_REWORDED in local and _ADDED not in local
+          and landed_clean(local), str(res) + local)
+
+    # Case 2: the replacement, rewritten and split in two.
+    db, manuscript, ms, fake = staged("rewrite-split-ws", [
+        {"old": _FIELD_OLD, "new": _FIELD_NEW, "note": "c-2"}])
+    fake.edit("tab-2", "{{" + _FIELD_NEW + "}}",
+              "{{" + _FIELD_PART1 + "\n" + _FIELD_PART2 + "}}")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    row = res["revisions"][0]
+    check("a replacement whose green half was rewritten and split into "
+          "two paragraphs resolves modified, both paragraphs its final",
+          row["verdict"] == "modified"
+          and _FIELD_PART1 in (row["final"] or "")
+          and _FIELD_PART2 in (row["final"] or "")
+          and _FIELD_PART1 in local and _FIELD_PART2 in local
+          and "is itself a choice" not in local and landed_clean(local),
+          str(res) + local)
+
+    # Case 3: the replacement, with the old half struck again by hand.
+    # The writer strikes `<<old>>`, so a real export reads `~~<<old>>~~`;
+    # tildes the author types round it come back as well (unescaped by
+    # normalize_markdown). The fake exports no strike, so the author's
+    # edit here carries both pairs.
+    db, manuscript, ms, fake = staged("rewrite-struck-ws", [
+        {"old": _FIELD_OLD, "new": _FIELD_NEW, "note": "c-3"}])
+    fake.edit("tab-2", "<<" + _FIELD_OLD + ">>{{" + _FIELD_NEW + "}}",
+              "~~~~<<" + _FIELD_OLD + ">>~~~~{{" + _FIELD_PART1 + "}}")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    row = res["revisions"][0]
+    check("a replacement with its old half struck again by hand and its "
+          "green half reworded resolves modified, and no marker lands",
+          row["verdict"] == "modified" and row["final"] == _FIELD_PART1
+          and _FIELD_PART1 in local and _FIELD_OLD not in local
+          and landed_clean(local), str(res) + local)
+
+    # A genuine decline in the same shape still reads as one.
+    db, manuscript, ms, fake = staged("rewrite-decline-ws", [
+        {"old": _FIELD_OLD, "new": _FIELD_NEW, "note": "c-4"}])
+    fake.edit("tab-2", "<<" + _FIELD_OLD + ">>{{" + _FIELD_NEW + "}}",
+              "~~~~<<" + _FIELD_OLD + ">>~~~~{{}}")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    check("...while a struck-by-hand form whose green half was emptied is "
+          "still a decline, the old text standing",
+          [r["verdict"] for r in res["revisions"]] == ["declined"]
+          and _FIELD_OLD in local and landed_clean(local),
+          str(res) + local)
+
+
+def _similarity_has_no_autojunk() -> None:
+    """difflib's autojunk, on by default, junks every element seen in
+    more than 1% of a sequence once it passes 200 — every common letter
+    of a paragraph, every "the" of a long passage. Each reader that
+    scores or diffs prose turns it off; these pin that down."""
+    print("similarity: autojunk stays off:")
+    from authorlm import lint
+
+    flat = lambda s: " ".join(s.split())  # noqa: E731
+    short = "The hinge is a door."
+    k, ratio = lint.closest_by_ratio(_ADDED, [short, _ADDED_REWORDED],
+                                     flat, floor=0.5)
+    check("the shared helper scores a long rewording as its source's "
+          "closest, far above the floor (it fell under 0.5 with autojunk)",
+          k == 1 and ratio > 0.7, str((k, ratio)))
+    check("...returns no index below the floor, with the best ratio, and "
+          "a strict floor excludes a tie",
+          lint.closest_by_ratio("abc", ["xyz"], flat, floor=0.5)
+          == (None, 0.0)
+          and lint.closest_by_ratio("ab", ["ab", "ab"], flat, floor=1.0)
+          == (0, 1.0)
+          and lint.closest_by_ratio("ab", ["ab"], flat, floor=1.0,
+                                    strict=True) == (None, 1.0))
+
+    text = short + "\n\n" + _ADDED_REWORDED + "\n\nOmega closes."
+    check("_closest_paragraph picks a reworded paragraph over 200 "
+          "characters, not None and not the short one beside it",
+          passes._closest_paragraph(text, _ADDED) == _ADDED_REWORDED,
+          str(passes._closest_paragraph(text, _ADDED)))
+
+    base = ("the world is the field and the field is the place where the "
+            "person must choose what the next step is").split()
+    old = " ".join((base * 11)[:220])
+    words = old.split()
+    at = sum(len(w) + 1 for w in words[:110])
+    was = words[110]
+    words[110] = "CHANGED"
+    new = " ".join(words)
+    gone, came = gdocs._word_diff_spans(old, new)
+    check("a one-word change in a 220-word form highlights that one word "
+          "on each side, not a run of hundreds",
+          gone == [(at, at + len(was))]
+          and came == [(at, at + len("CHANGED"))], str((gone, came, at)))
+
+
 def _an_outside_caller_keeps_its_settings_and_withdraws(root: Path) -> None:
     """The two doors an outside caller lacked, so that it never writes
     AuthorLM's tables itself (nagarkar/ytlm#23): its own settings on a
@@ -6568,6 +6774,8 @@ def main_test() -> None:
         _suggestions_on_the_doc_road(root)
         _footnotes_after_a_closing_illustration(root)
         _an_outside_caller_resolves_one_tab(root)
+        _an_outside_caller_rewrites_its_green_half(root)
+        _similarity_has_no_autojunk()
         _a_resolve_keeps_math_a_form_cuts_through(root)
         _a_new_half_that_extends_its_old(root)
         _an_outside_caller_keeps_its_settings_and_withdraws(root)
