@@ -8018,7 +8018,7 @@ def main_test() -> None:
                 self.state = state
 
             def list(self, fileId=None, pageToken=None, includeDeleted=None,
-                     fields=None):
+                     fields=None, pageSize=None):
                 return FakeRequest({"comments": [
                     c for c in self.state["comments"].values()
                     if not c.get("resolved")]})

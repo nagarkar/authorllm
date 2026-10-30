@@ -7598,7 +7598,7 @@ class _PronDocsService:
 
         class Docs:
             @staticmethod
-            def get(documentId, includeTabsContent=False):
+            def get(documentId, includeTabsContent=False, fields=None):
                 class R:
                     @staticmethod
                     def execute():

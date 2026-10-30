@@ -4822,10 +4822,12 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
     gdocs._save_mapping(db2, ms2, meta)
     real_locate = gdocs._locate_in_tab
 
-    def blind_to_the_tag(docs, master, tab_id, needle, occurrence=0):
+    def blind_to_the_tag(docs, master, tab_id, needle, occurrence=0,
+                         runs=None):
         if "Illustration" in needle and "<<" not in needle:
             return None
-        return real_locate(docs, master, tab_id, needle, occurrence)
+        return real_locate(docs, master, tab_id, needle, occurrence,
+                           runs=runs)
 
     gdocs._locate_in_tab = blind_to_the_tag
     try:

@@ -989,14 +989,22 @@ class _CountingFake(_UnspacedJoinFake):
         self.margin = list(comments or [])
         self.hooks: dict = {}          # kind → callable run after the call
         self.masks: list = []          # each master read's fields string
+        self.version = 0
+
+    def edit(self, tab_id: str, old: str, new: str) -> None:
+        super().edit(tab_id, old, new)
+        self.version += 1
 
     def rev(self) -> str:
+        """Google's revision ids never come back: a write counter, and
+        the state's hash for the hand edits that bypass `edit`."""
         state = json.dumps([[t["id"], t["title"], t["body"]]
                             for t in self.tabs]
                            + [sorted(self.unspaced)]
                            + [sorted((r["tab"], r["start"], r["end"],
                                       r["mark"]) for r in self.styled)])
-        return "rev-" + hashlib.sha256(state.encode()).hexdigest()[:10]
+        return (f"rev-{self.version}-"
+                + hashlib.sha256(state.encode()).hexdigest()[:10])
 
     def log(self, kind: str) -> None:
         self.calls.append((kind, self.rev()))
@@ -1074,6 +1082,8 @@ class _CountingFake(_UnspacedJoinFake):
                         b'ID does not match the latest revision."}}')
                 reply = inner.batchUpdate(documentId=documentId,
                                           body=body).execute()
+                if (body or {}).get("requests"):
+                    outer.version += 1
                 outer.log("write")
                 reply["writeControl"] = {"requiredRevisionId": outer.rev()}
                 return _Req(reply)
