@@ -1987,6 +1987,33 @@ a resolve overwrites the resolve:
    machinery, register with `doc propose`; a question → answer in chat.
    Verdicts the author already gave in the margin were executed by
    step 1; process the modified-acceptance diffs for the learnings duty.
+   **Triage the whole list first, then read once per tab (ruled
+   2026-10-29).** The pull prints, per comment, its paragraph and section
+   (`¶N §M`) with the section summary, and each tab's essay summary once,
+   or `(stale)` — a pull never builds a summary. Before drafting anything,
+   sort every comment by the context it needs: *local* (the anchor
+   paragraph: grammar, a word), *section* (the section, plus the essay
+   summary when the line is complex: "improve how this is worded"),
+   *whole* (the full essay: "find the best place for this line"), or
+   *research* (an outside source, then the essay: "use Sarvapriyananda's
+   moksha talk"). Then, per tab: read the full essay ONCE if any comment
+   is *whole* or *research*, and draft all of that tab's comments from that
+   one read; otherwise read only the sections the comments sit in (reading
+   is free; a stale summary is never a reason to rebuild). Never re-read
+   the essay per comment. Send each *research* comment to a subagent
+   (ytlm for talks and transcripts, the web for texts) that returns a
+   short brief with its sources and timestamped links; draft from the
+   brief against the essay you hold. Many local edits on one tab may also
+   go to a subagent to keep this session uncluttered. Stage all forms with
+   `doc propose`, one batch per tab.
+   **Refresh the section summary for free after the resolve:** for each
+   section you read in full and whose text the resolve changed, write its
+   summary yourself in the pipeline's format (POINT / MOVES with `[n]`
+   paragraph numbers / DEPENDS ON / LEAVES OPEN; see `summarize show
+   <file> --section N`) and store it: `authorlm summarize put <file>
+   --section N < summary.txt`. It is stamped with the section's current
+   text, so write it against the final text, never before the resolve.
+   Paragraph records and essay summaries stay with the pipeline.
 5. **Footnote and explain tags** (docs/footnote-directive-design.md,
    docs/explain-directive-design.md). Draft every open tag in chat per
    §3 of the footnote design, all at once, each from the claim before

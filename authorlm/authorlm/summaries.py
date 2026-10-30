@@ -845,6 +845,61 @@ def sections_of(text: str, *, verse_file: bool = False) -> list[dict]:
     return out
 
 
+def comment_context(db: Database, manuscript: dict, file: str, text: str,
+                    quote: str, flat) -> dict | None:
+    """Where a Doc comment's anchor sits, for the pull's comment list:
+    the paragraph and section numbers, the section's summary when a
+    current row matches the section's text, and the essay summary when
+    it is fresh. Read-only: a pull never builds a summary. `flat` is the
+    caller's anchor normalizer (gdocs._flat_prose). None when the quote
+    is not found in `text`."""
+    needle = flat(quote)
+    if not needle:
+        return None
+    secs = sections_of(text, verse_file=file in verse_files_of(manuscript))
+    paras = [p for sec in secs for p in sec["paragraphs"]]
+    hit = (next((p for p in paras if needle in flat(p["text"])), None)
+           or next((p for p in paras if needle[:40] in flat(p["text"])),
+                   None))
+    if hit is None:
+        return None
+    sec = secs[hit["section_ordinal"] - 1]
+    row = _current_section_rows(db, manuscript["id"], file).get(
+        sec["section_hash"])
+    essay_row = db.one(
+        "SELECT * FROM essay_summaries WHERE manuscript_id = ? AND file = ?",
+        (manuscript["id"], file))
+    essay = (essay_row["summary"] if essay_row
+             and _state(essay_row, text) == "fresh" else None)
+    return {"paragraph": hit["ordinal"], "section": sec["section_ordinal"],
+            "heading": sec["heading"],
+            "section_summary": row["summary"] if row else None,
+            "essay_summary": essay}
+
+
+def put_section_summary(db: Database, manuscript: dict, file: str,
+                        text: str, section_ordinal: int, summary: str,
+                        model: str = "session") -> dict:
+    """Store a section summary written outside the pipeline (a session
+    that has just read the section). Stamped with the section's current
+    hash, so it stays fresh until the section's text changes; the model
+    column says who wrote it. A summary missing any of the pipeline's
+    labels is not stored: the essay pass composes from these."""
+    secs = sections_of(text, verse_file=file in verse_files_of(manuscript))
+    if not 1 <= section_ordinal <= len(secs):
+        raise ValueError(f"{file} has sections 1-{len(secs)}, "
+                         f"not {section_ordinal}")
+    missing = [lab for lab in SECTION_LABELS
+               if not re.search(rf"^{lab}:", summary, re.M)]
+    if missing:
+        raise ValueError("summary lacks " + ", ".join(missing)
+                         + " (the section format: "
+                         + " / ".join(SECTION_LABELS) + ")")
+    row = store_section_summary(db, manuscript, file,
+                                secs[section_ordinal - 1], summary, model)
+    return row
+
+
 def paragraphs_of(text: str, *, verse_file: bool = False) -> list[dict]:
     """Every paragraph of the file in order, as `sections_of` lays them
     out."""

@@ -608,6 +608,12 @@ Issue #173: default voices are explicitly declared in audiobook.toml.
 
 Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
 
+## `tests.test_comment_context`
+
+`authorlm/tests/test_comment_context.py`
+
+Comment context on the pull (it adds where a Doc comment's anchor sits and the summaries already fresh there, never building one) and `summarize put` (a section summary written by the session, stamped with the section's hash, refused without the four labels). No LLM.
+
 ## `tests.test_context`
 
 `authorlm/tests/test_context.py`

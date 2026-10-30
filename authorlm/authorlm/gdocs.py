@@ -160,7 +160,7 @@ def map_math(text: str, fn) -> str:
 # READING — every form collapsed to its old half, then to its new — and
 # mapped back to the marked text.
 _FORM = re.compile(
-    r"(?:~~)?\\?<\\?<(?P<old>.*?)\\?>\\?>(?:~~)?\{\{(?P<new>.*?)\}\}",
+    r"(?:~~)*\\?<\\?<(?P<old>.*?)\\?>\\?>(?:~~)*\{\{(?P<new>.*?)\}\}",
     re.DOTALL)
 
 
@@ -858,12 +858,22 @@ def ingest_comments(db: Database, manuscript: dict, comments: list[dict],
             )
             db.insert("doc_comments", row)
             seen.add(c["id"])
-        out.append({
+        entry = {
             "comment_id": c["id"],
             "location": location or "(unattributed)",
             "quote": clamp(quoted),
             "content": c.get("content", ""),
-        })
+            "file": relpath,
+        }
+        if relpath:
+            from . import summaries as sums
+            try:
+                entry["context"] = sums.comment_context(
+                    db, manuscript, relpath, files[relpath], quoted,
+                    _flat_prose)
+            except Exception:  # context is a convenience; never break a pull
+                entry["context"] = None
+        out.append(entry)
     return out
 
 
@@ -3875,8 +3885,11 @@ def _word_diff_spans(old: str, new: str) -> tuple[list[tuple[int, int]],
     new_toks = list(_re.finditer(r"\S+", new))
     if not old_toks or not new_toks:
         return [], []
+    # autojunk off: past 200 words it junks every common word ("the",
+    # "and"), and a one-word change highlighted hundreds of words.
     sm = difflib.SequenceMatcher(None, [t.group() for t in old_toks],
-                                 [t.group() for t in new_toks])
+                                 [t.group() for t in new_toks],
+                                 autojunk=False)
     old_spans, new_spans = [], []
     old_changed = new_changed = 0
     for op, i1, i2, j1, j2 in sm.get_opcodes():

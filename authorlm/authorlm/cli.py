@@ -335,9 +335,19 @@ def _print_comment_harvest(result: dict) -> None:
     comments = result.get("comments") or []
     if comments:
         print(ui.bold(f"Comments to address ({len(comments)}):"))
+        essays_shown: set[str] = set()
         for c in comments:
+            ctx = c.get("context")
+            if ctx and c.get("file") not in essays_shown:
+                essays_shown.add(c["file"])
+                print(ui.dim(f"  {c['file']} essay summary: "
+                             + (ctx["essay_summary"] or "(stale)")))
             print(f"  • [{c['location']}] on \"{c['quote']}\"")
             print(f"    {c['content']}")
+            if ctx:
+                print(ui.dim(f"    ¶{ctx['paragraph']} §{ctx['section']} "
+                             "section summary: "
+                             + (ctx["section_summary"] or "(stale)")))
         print(ui.dim(
             "Ingested and left open in the Doc as margin threads. "
             "Address every comment above; when acting on one, "
@@ -1947,6 +1957,26 @@ def cmd_summarize(args):
             words = f"  {r['words']}w" if r["words"] else ""
             print(f"  {r['file']:<22} {color(r['state'])}{ui.dim(words)}")
         print(ui.dim("  " + ", ".join(f"{n} {s}" for s, n in counts.items())))
+        return
+    if args.action == "put":
+        if not args.file or not args.section:
+            sys.exit("usage: summarize put <file> --section N "
+                     "(stdin: POINT / MOVES / DEPENDS ON / LEAVES OPEN)")
+        texts, _unlisted, _flight = sums._context_units(db, manuscript)
+        if args.file not in texts:
+            sys.exit(f"error: '{args.file}' is not a unit of the manuscript")
+        summary = _stdin_text()
+        if not summary:
+            sys.exit("put reads the section summary from stdin")
+        try:
+            row = sums.put_section_summary(db, manuscript, args.file,
+                                           texts[args.file], args.section,
+                                           summary)
+        except ValueError as err:
+            sys.exit(f"error: {err}")
+        print(ui.green(f"Stored {args.file} §{args.section} "
+                       f"({row['heading'] or 'preamble'}), fresh until the "
+                       "section's text changes."))
         return
     if args.action in ("show", "outline"):
         if not args.file:
@@ -9221,7 +9251,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="the summary hierarchy — paragraph records, section summaries "
              "and the essay summaries that are the editor's working memory "
              "of the whole book (docs/summary-hierarchy-design.md)")
-    p.add_argument("action", choices=["status", "show", "rebuild", "outline"])
+    p.add_argument("action",
+                   choices=["status", "show", "rebuild", "outline", "put"])
     p.add_argument("file", nargs="?",
                    help="show/outline: the unit; rebuild: one unit only "
                         "(against current prior summaries; downstream "
@@ -9235,7 +9266,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "(default rebuilds only missing, stale and "
                         "upstream-stale rows)")
     p.add_argument("--section", type=int, metavar="N",
-                   help="show: section N's summary and its paragraph gists")
+                   help="show: section N's summary and its paragraph gists; "
+                        "put: the section whose summary is read from stdin")
     p.add_argument("--paragraph", type=int, metavar="N",
                    help="show: paragraph N's record")
     p.add_argument("--json", action="store_true",
