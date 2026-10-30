@@ -92,7 +92,15 @@ def scan_text(text: str, kind: str) -> list[dict]:
     a suggestion acts on (`target`, `target_start`, `target_end`: the
     holding paragraph inline, the paragraph BEFORE a standalone tag,
     None when nothing precedes it), and — footnotes — the `| label:`
-    override when the author gave one."""
+    override when the author gave one.
+
+    A standalone suggestion's "paragraph before" follows how the author
+    writes the note under what it comments on (design §1). Blank-line
+    units are the paragraph grammar elsewhere; when the tag shares a
+    unit with lines above it (the common `para\\n[Suggestion: …]` with
+    no blank line), those preceding lines ARE the target — never an
+    earlier unit. Taking the previous blank-line unit instead silently
+    destroyed every intervening paragraph on apply."""
     pattern = _TAGS[_kind(kind)]
     paragraphs = [(m.start(), m.end(), m.group(0))
                   for m in _PARAGRAPH.finditer(text)]
@@ -110,8 +118,17 @@ def scan_text(text: str, kind: str) -> list[dict]:
                     (start, end, ""))
         standalone = _standalone(text, start, end)
         if standalone:
-            target = next(((a, b, p) for a, b, p in reversed(paragraphs)
-                           if b <= start), None)
+            holding_start, _holding_end, _holding = here
+            line_start = text.rfind("\n", 0, start) + 1
+            if holding_start < line_start:
+                # Note on the next line of the same unit: the lines above
+                # the tag, not the previous blank-line paragraph.
+                chunk = text[holding_start:line_start].rstrip("\n")
+                target = ((holding_start, holding_start + len(chunk), chunk)
+                          if chunk.strip() else None)
+            else:
+                target = next(((a, b, p) for a, b, p in reversed(paragraphs)
+                               if b <= start), None)
         else:
             target = here
         tags.append({
@@ -691,13 +708,19 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
             # standalone, the paragraph before it, the tag line left
             # standing until resolve consumes it on acceptance. A decline
             # wraps the tag itself: the author sees it going and the
-            # paragraph staying.
+            # paragraph staying. The replace form's anchor is the TARGET's
+            # blank-line unit: a note on the next line shares the tag's
+            # unit, while a blank line between puts the target one unit
+            # earlier — `anchor -= 1` always was wrong for the first case.
             if c["decline"]:
                 old = tag["raw"] if tag["standalone"] else tag["target"]
                 new = "" if tag["standalone"] else _target_without_tag(tag)
             else:
                 old, new = tag["target"], c["text"]
-                anchor -= 1 if tag["standalone"] else 0
+                if tag["target_start"] is not None:
+                    before = text[:tag["target_start"]]
+                    anchor = (len(_paragraphs(before + "x"))
+                              if before.strip() else 1)
         elif kind == "footnote":
             new, definition = f"[^{label}]", c["text"]
         else:
