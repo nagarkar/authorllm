@@ -7107,7 +7107,7 @@ def _rule_external_marked(marked: str, replaces: list[dict],
     for t in replaces:
         old = re.escape(t["proposed_old"])
         marked = re.sub(
-            r"(?:~~)?<<" + old + r">>(?:~~)?(?:\{\{\s*\}\}|(?!~~|\{\{))",
+            r"(?:~~)*<<" + old + r">>(?:~~)*(?:\{\{\s*\}\}|(?!~~|\{\{))",
             lambda m, t=t: t["proposed_old"], marked, count=1)
 
     forms = [f for f in th.pending_forms(marked) if f["kind"] == "insert"]
@@ -7118,13 +7118,18 @@ def _rule_external_marked(marked: str, replaces: list[dict],
         if hit is not None:
             free.remove(hit)
             pairs[t["id"]] = hit
+    def likeness(a: str, b: str) -> float:
+        # autojunk off: past 200 characters it junks every common letter,
+        # and a paragraph-length rewording scored under 0.5 against its
+        # own proposal — a decline (it-9844aefae138).
+        return difflib.SequenceMatcher(None, flat(a), flat(b),
+                                       autojunk=False).ratio()
+
     for t in inserts:                       # then the closest rewording
         if t["id"] in pairs or not free:
             continue
-        best = max(free, key=lambda f: difflib.SequenceMatcher(
-            None, flat(t["proposed_new"]), flat(f["new"])).ratio())
-        if difflib.SequenceMatcher(None, flat(t["proposed_new"]),
-                                   flat(best["new"])).ratio() >= 0.5:
+        best = max(free, key=lambda f: likeness(t["proposed_new"], f["new"]))
+        if likeness(t["proposed_new"], best["new"]) >= 0.5:
             free.remove(best)
             pairs[t["id"]] = best
     # Unwrap the paired forms and drop the emptied ones, last to first.

@@ -41,8 +41,14 @@ DECLINE_KEYWORDS = {"no", "dont", "don't", "revert", "reject"}
 #                                 passes propose new paragraphs this way)
 # Both resolve the same way: the author may edit the {{new}} half; the
 # local file keeps the OLD text (nothing, for an insertion) until resolve.
+#
+# The old half's strike is any run of `~~`, not one pair: the writer
+# strikes `<<old>>`, and an author who strikes it again by hand (typed
+# tildes, which the export gives back) leaves `~~~~<<old>>~~~~{{new}}`.
+# Read with one optional pair, that was no form at all: the green half
+# landed with its markers and the thread was declined (it-9844aefae138).
 PENDING = re.compile(
-    r"(?:~~)?<<(?P<old>.*?)>>(?:~~)?\{\{(?P<new>.*?)\}\}",
+    r"(?:~~)*<<(?P<old>.*?)>>(?:~~)*\{\{(?P<new>.*?)\}\}",
     re.DOTALL)
 INSERTION = re.compile(r"(?<![>}])\{\{(?P<new>.*?)\}\}", re.DOTALL)
 _ANY_MARKER = re.compile(r"<<|>>|\{\{|\}\}")

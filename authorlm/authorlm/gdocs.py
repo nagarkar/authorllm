@@ -160,7 +160,7 @@ def map_math(text: str, fn) -> str:
 # READING — every form collapsed to its old half, then to its new — and
 # mapped back to the marked text.
 _FORM = re.compile(
-    r"(?:~~)?\\?<\\?<(?P<old>.*?)\\?>\\?>(?:~~)?\{\{(?P<new>.*?)\}\}",
+    r"(?:~~)*\\?<\\?<(?P<old>.*?)\\?>\\?>(?:~~)*\{\{(?P<new>.*?)\}\}",
     re.DOTALL)
 
 
