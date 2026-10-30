@@ -94,6 +94,20 @@ Present the draft as a suggestion for the author to place, edit, or
 reject — never write it into the manuscript unless explicitly asked, and
 record their reaction (with their reasoning verbatim) as evidence.
 
+## Narration on request ("narration for X")
+When the author says "narration for X", X names an essay. Print that essay's
+text so it reads as prose, not as markup:
+1. Resolve X to its file (the manuscript's essay of that name), then read it.
+2. Strip the `[` and `]` tags (the directive brackets such as `[Footnote: …]`,
+   `[Explain: …]`, `[Suggestion: …]`) so the text reads cleanly. Keep the
+   words inside the brackets; drop only the brackets themselves.
+3. Print a few paragraphs at a time, not the whole essay. Then end with a
+   single line asking the author to type `next` for the following set.
+4. On `next`, continue from where the last set stopped. Do not repeat
+   paragraphs already printed. When the essay ends, say so.
+Narration is read-only: never edit the file, never record evidence, never
+call the curation or filter tools while narrating.
+
 ## The beat loop (`authorlm write` — beat-by-beat co-writing)
 When the author wants a chapter written or rewritten beat by beat (design:
 `docs/autoregressive-writing-design.md`, §13 for the two use cases below),
