@@ -47,6 +47,48 @@ def test_short_anchor_does_not_steal_prior_tab() -> None:
           not out.get("b.md", "").startswith("Yes. This is still"), out)
 
 
+def test_ambiguous_short_exact_stays_missing() -> None:
+    # Two exact "Yes." lines in the remaining export: a mid-chapter
+    # dialogue in A and B's real opener. First-hit used to start B at
+    # the dialogue and pull-overwrite both local files with the wrong
+    # split; refuse instead so pull reports the tab missing (same
+    # loud path as any unmatched opener — never a silent wrong cut).
+    text = (
+        "Long opener of chapter one that is unique enough.\n\n"
+        "Body of chapter one continues here with dialogue.\n\n"
+        "Yes.\n\n"
+        "More of chapter one after the interjection about doubt.\n\n"
+        "Yes.\n\n"
+        "Body of chapter two after its short opener.\n"
+    )
+    out = _split_by_anchors(
+        text, ["a.md", "b.md"],
+        {"a.md": "Long opener of chapter one that is unique enough.",
+         "b.md": "Yes."},
+    )
+    check("ambiguous short exact does not invent a boundary",
+          "b.md" not in out, out)
+    check("first-hit theft did not truncate A before the dialogue",
+          "More of chapter one after the interjection about doubt."
+          in out.get("a.md", ""),
+          out.get("a.md"))
+
+
+def test_unique_short_exact_still_matches() -> None:
+    text = (
+        "Opening of A.\n\n"
+        "Body of A with no short twin.\n\n"
+        "Yes.\n\n"
+        "Real body of B.\n"
+    )
+    out = _split_by_anchors(text, ["a.md", "b.md"],
+                            {"a.md": "Opening of A.", "b.md": "Yes."})
+    check("unique short exact still finds the later tab",
+          out.get("b.md", "").startswith("Yes.\n")
+          and "Real body of B." in out.get("b.md", ""),
+          out)
+
+
 def test_long_anchor_prefix_still_matches() -> None:
     text = (
         "Opening of one.\n\nBody of one.\n\n"
@@ -92,6 +134,8 @@ def test_holds_settled_adjacent_edit() -> None:
 
 if __name__ == "__main__":
     test_short_anchor_does_not_steal_prior_tab()
+    test_ambiguous_short_exact_stays_missing()
+    test_unique_short_exact_still_matches()
     test_long_anchor_prefix_still_matches()
     test_holds_rejects_duplicate_line_false_positive()
     test_holds_settled_adjacent_edit()

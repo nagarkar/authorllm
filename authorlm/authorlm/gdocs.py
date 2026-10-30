@@ -1490,8 +1490,11 @@ def _plain(line: str) -> str:
 # Prefix match for `_split_by_anchors` only when the Docs-API first
 # paragraph is this long: a short needle like "Yes." is a prefix of any
 # longer line that opens with it ("Yes. This is still…") and pulled the
-# rest of the prior tab into the next one (2026-10-27). Exact match
-# always wins; below this length a missed soft-break join stays missing.
+# rest of the prior tab into the next one (2026-10-27). Below this
+# length an exact match is accepted only when unique in the remaining
+# export (a dialogue "Yes." mid prior chapter plus the next tab opening
+# on "Yes." stole via first-hit; 2026-10-30); a missed soft-break join
+# stays missing.
 _ANCHOR_PREFIX_MIN = 40
 
 
@@ -1508,7 +1511,10 @@ def _split_by_anchors(text: str, order: list[str],
     opener steal mid-chapter lines that only shared that prefix
     (2026-10-29). The length floor closes the same door for a short
     anchor like "Yes.", which is a prefix of any line that opens with it
-    (2026-10-27)."""
+    (2026-10-27). A short exact needle must also be unique in the
+    remaining export: first-hit on a mid-chapter dialogue line that
+    matched the next tab's short opener stole the rest of the prior tab
+    (2026-10-30); ambiguous short anchors stay missing (loud) instead."""
     lines = text.splitlines()
     plain = [_plain(l) for l in lines]
     starts: list[tuple[int, str]] = []
@@ -1519,10 +1525,22 @@ def _split_by_anchors(text: str, order: list[str],
         if not want:
             empty.append(title)
             continue
+        short = len(want) < _ANCHOR_PREFIX_MIN
         for i in range(pos, len(lines)):
             p = plain[i]
-            if p and (p == want or (len(want) >= _ANCHOR_PREFIX_MIN
-                                    and p.startswith(want))):
+            if not p:
+                continue
+            if p == want:
+                if short:
+                    hits = [j for j in range(pos, len(plain))
+                            if plain[j] == want]
+                    if len(hits) != 1:
+                        break  # ambiguous: missing, never first-hit guess
+                    i = hits[0]
+                starts.append((i, title))
+                pos = i + 1
+                break
+            if not short and p.startswith(want):
                 starts.append((i, title))
                 pos = i + 1
                 break
