@@ -231,10 +231,14 @@ def has_unterminated_form(text: str) -> bool:
     insertions (2026-10-31)."""
     if has_stray_replace_markers(text):
         return True
-    for m in re.finditer(r"(?m)^[ \t]*\{\{", text):
-        if in_math(text, m.start()):
+    # Match at the `{{`, not the line start: leading spaces on the form
+    # line made INSERTION.match fail and every indented `{{…}}` looked
+    # unterminated (false pull refusal on author braces / spaced forms).
+    for m in re.finditer(r"(?m)^[ \t]*(\{\{)", text):
+        at = m.start(1)
+        if in_math(text, at):
             continue
-        if INSERTION.match(text, m.start()) is None:
+        if INSERTION.match(text, at) is None:
             return True
     return False
 

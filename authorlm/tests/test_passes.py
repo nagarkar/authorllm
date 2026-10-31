@@ -4160,6 +4160,10 @@ def _braces_are_the_authors(root: Path) -> None:
           _th.has_unterminated_form(broken_stripped)
           and not _th.has_stray_replace_markers(broken_stripped),
           repr(broken_stripped))
+    indented_ok = "Lead.\n\n  {{title}}\n\nTail.\n"
+    check("has_unterminated_form does not refuse an indented complete "
+          "{{…}} (match at the braces, not the line start)",
+          not _th.has_unterminated_form(indented_ok), repr(indented_ok))
     # _form_owner: a settled short new half must not own unrelated markers
     # (diff_push would clear a live/hand form as an "orphan").
     from authorlm.gdocs import _form_flat, _form_owner
