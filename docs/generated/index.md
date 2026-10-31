@@ -650,6 +650,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 Regression (#152): Doc-road escapes the pull left in local files.
 
+## `tests.test_doc_road_failures`
+
+`authorlm/tests/test_doc_road_failures.py`
+
+The Doc-road failures of 2026-10-30 (discernment.md, SMSTTD), reproduced against the surgical double. Each scenario asserts the behaviour the author needs, so on a code base with the defect it FAILS; the runner reports every scenario and exits non-zero if any failed.
+
 ## `tests.test_doc_road_verbs`
 
 `authorlm/tests/test_doc_road_verbs.py`
