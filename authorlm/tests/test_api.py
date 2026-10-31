@@ -7913,9 +7913,19 @@ def main_test() -> None:
             def __init__(self, state):
                 self.state = state
 
+            def _rev(self):
+                # Google moves the revision on ANY change to the Doc, a
+                # test's hand edit of the state included: the read cache
+                # (gdocs.master_doc) reuses a read only at its revision.
+                import hashlib as _hl
+                import json as _js
+                return (f"rev-{self.state['rev']}-" + _hl.sha256(_js.dumps(
+                    self.state["docs"], sort_keys=True,
+                    default=str).encode()).hexdigest()[:8])
+
             def get(self, documentId=None, includeTabsContent=None,
                     fields=None):
-                rev = f"rev-{self.state['rev']}"
+                rev = self._rev()
                 if fields == "revisionId":
                     return FakeRequest({"revisionId": rev})
                 if documentId in self.state["uploads"]:
@@ -7956,7 +7966,7 @@ def main_test() -> None:
                 tabs = self.state["docs"][documentId]
                 required = ((body or {}).get("writeControl") or {}).get(
                     "requiredRevisionId")
-                if required and required != f"rev-{self.state['rev']}":
+                if required and required != self._rev():
                     raise LookupError("fake Docs: revision moved")
                 if (body or {}).get("requests"):
                     self.state["rev"] += 1
@@ -8011,7 +8021,7 @@ def main_test() -> None:
                         else:
                             target["text"] += req["insertText"]["text"]
                 return FakeRequest({"replies": replies, "writeControl": {
-                    "requiredRevisionId": f"rev-{self.state['rev']}"}})
+                    "requiredRevisionId": self._rev()}})
 
         class FakeComments:
             def __init__(self, state):
@@ -11273,7 +11283,7 @@ def main_test() -> None:
         rev_after = json.loads(orrery_entry())["gdocs"]["06-orrery.md"].get(
             "doc_rev")
         check("a surgical push records the revision it left the Doc at",
-              rev_after == f"rev-{stub.state['rev']}",
+              rev_after == stub.documents()._rev(),
               str((rev_after, stub.state["rev"])))
         (ms / "06-orrery.md").write_text(
             "# Orrery\n\nBrass planets on brass rails, oiled.\n\n"
@@ -11284,13 +11294,14 @@ def main_test() -> None:
         orrery_tab = next(t["text"] for t in stub.state["docs"]["doc-2"]
                           if t["title"] == "06-orrery.md")
         # The fake's paragraph edit lands on the second attempt (its
-        # deleteContentRange clears the tab), so the read-backs and the
-        # retry's read are three exports; the guard and the first read
-        # are none.
+        # deleteContentRange clears the tab): the first read-back and the
+        # retry's read meet one revision, so they share one export (the
+        # read cache, #325), and the second read-back is the other; the
+        # guard and the first read are none.
         check("a guarded push on an untouched Doc reads no export before "
               "it writes",
               quick.get("mode") == "diff"
-              and stub.state["exports"] - exports == 3
+              and stub.state["exports"] - exports == 2
               and "oiled" in orrery_tab,
               str((quick, stub.state["exports"] - exports, orrery_tab)))
         exports = stub.state["exports"]

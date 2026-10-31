@@ -548,6 +548,12 @@ Dependency-free local HTTP shell for the compiled pronunciation workbench.
 
 The drafting payload seam — stored state in, four blocks out.
 
+## `tests._doc_freshness`
+
+`authorlm/tests/_doc_freshness.py`
+
+How old the Doc-road recordings are, and what to do about it.
+
 ## `tests._extraction_fixture`
 
 `authorlm/tests/_extraction_fixture.py`
@@ -565,6 +571,12 @@ Pins llmlm's price cache to an empty one that never reaches the network.
 `authorlm/tests/_summary_stubs.py`
 
 Canned replies for the three summary-hierarchy prompts, shared by the hermetic suites that stand in for the provider over HTTP (test_e2e's StubLLMHandler, test_summaries' EchoSummarizer). Each stub reads the user message the real builder sends and answers in the shape the builder parses, so a `summarize rebuild --all` runs all three levels offline.
+
+## `tests.doc_road_live`
+
+`authorlm/tests/doc_road_live.py`
+
+Drive the Doc-road failure scenarios (test_doc_road_failures.py) against the LIVE Google API on the one fixture Doc, "AuthorLM test fixture: Doc road", and record every call into tests/doc_cache/.
 
 ## `tests.test_anchor_prefix_truncation`
 
@@ -644,11 +656,29 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 `doc bind`: adopt an existing master Doc for a manuscript that has none (a fresh workspace, a cloud session), so `doc pull` fills the folder from its tabs instead of `doc push` creating a new Doc.
 
+## `tests.test_doc_fakes_vs_google`
+
+`authorlm/tests/test_doc_fakes_vs_google.py`
+
+The Doc-road fake checked against Google: every snapshot recorded live by tests/doc_road_live.py (a full documents.get and the markdown export of the same revision) is rebuilt in `_GoogleFake` from the recorded tab content, exported by the fake, and compared, tab by tab, with what Google exported. A difference means the fake no longer renders the way Google does: re-record (`python3 tests/doc_road_live.py --record`) and bring `_GoogleFake` back in line.
+
+## `tests.test_doc_freshness`
+
+`authorlm/tests/test_doc_freshness.py`
+
+The recordings' freshness rule (tests/_doc_freshness.py), with a fake clock, log and Doc: no Google call, no file touched. Run: python3 tests/test_doc_freshness.py
+
 ## `tests.test_doc_road_escapes`
 
 `authorlm/tests/test_doc_road_escapes.py`
 
 Regression (#152): Doc-road escapes the pull left in local files.
+
+## `tests.test_doc_road_failures`
+
+`authorlm/tests/test_doc_road_failures.py`
+
+The Doc-road failures of 2026-10-30 (discernment.md, SMSTTD), reproduced against the surgical double. Each scenario asserts the behaviour the author needs, so on a code base with the defect it FAILS; the runner reports every scenario and exits non-zero if any failed.
 
 ## `tests.test_doc_road_verbs`
 
