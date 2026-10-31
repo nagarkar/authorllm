@@ -3214,11 +3214,12 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         if marker_warns:
             report.setdefault("marker_warnings", {})[relpath] = marker_warns
         # A form in the tab that lost a marker (`<<old>>{{new` with no
-        # closing `}}`) collapses to nothing a reader can trust: writing it
-        # put the markers into the manuscript. The file is left as it is
-        # and named, until the form is mended or removed in the Doc
-        # (2026-10-30, discernment.md).
-        if threads_mod.has_stray_replace_markers(text):
+        # closing `}}`, or an own-line `{{new` that never closes) collapses
+        # to nothing a reader can trust: writing it put the markers into
+        # the manuscript — and before `_INSERTION_PARA` stopped at the
+        # next form, an unterminated insertion deleted the prose between
+        # two forms on pull (2026-10-30 replace; 2026-10-31 insertion).
+        if threads_mod.has_unterminated_form(text):
             report.setdefault("unterminated", []).append(relpath)
             continue
         path = bridge.root / relpath
@@ -5582,11 +5583,31 @@ def _form_owner(paragraph: str, known: list[dict]) -> dict | None:
     """The thread whose form is in this export paragraph: a live one
     first (a paragraph with a live form is never overwritten), else the
     newest settled one, else None (markers nobody recorded, which still
-    block: they may be the author's own)."""
-    flat = _form_flat(paragraph)
-    owners = [k for k in known
-              if (k["new"] and k["new"] in flat)
-              or (k["old"] and k["old"] in flat)]
+    block: they may be the author's own).
+
+    Match on the form halves `pending_forms` reads, not a bare substring
+    of the paragraph: a settled thread whose new half was "." (or any
+    short common token) otherwise owned every marked paragraph that
+    merely contained that token, and diff_push cleared a live or
+    hand-written form as an "orphan" (2026-10-31)."""
+    owners: list[dict] = []
+    seen: set[int] = set()
+    for form in threads_mod.pending_forms(paragraph):
+        fo, fn = _form_flat(form["old"]), _form_flat(form["new"])
+        for i, k in enumerate(known):
+            if i in seen:
+                continue
+            # Replace: the old half is what the record planted and the
+            # author does not edit; a rewritten green half still owns.
+            # Insert: only the new half exists — exact match, or the
+            # push blocks (None) rather than clearing a rewritten live
+            # form under a short settled token.
+            if fo and fo == k["old"]:
+                owners.append(k)
+                seen.add(i)
+            elif not fo and not k["old"] and fn and fn == k["new"]:
+                owners.append(k)
+                seen.add(i)
     live = [k for k in owners if k["live"]]
     if live:
         return live[0]
