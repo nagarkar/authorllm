@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime as dt
 import gzip
 import io
 import json
@@ -38,6 +39,7 @@ from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 
 import test_doc_road_failures as F  # noqa: E402
+from _doc_freshness import DOC_PREFIX, DOC_TAB, LOG  # noqa: E402
 
 CACHE = HERE / "doc_cache"
 FIXTURE = CACHE / "fixture_doc.json"
@@ -130,6 +132,36 @@ def fixture_doc(svc) -> str:
                                    "url": gdocs.tab_url(got["id"])},
                                   indent=1) + "\n")
     return got["id"]
+
+
+def stamp(docs, doc_id: str, when: str) -> None:
+    """The recording time on one line, `Last recorded: <when>`, in the
+    fixture Doc's own `fake-log` tab (created at the root once). No
+    scenario reads that tab: it is not a manuscript file."""
+    got = docs.documents().get(documentId=doc_id,
+                               includeTabsContent=True).execute()
+    tab = next((t for t in got.get("tabs", [])
+                if t["tabProperties"].get("title") == DOC_TAB), None)
+    if tab is None:
+        reply = docs.documents().batchUpdate(documentId=doc_id, body={
+            "requests": [{"addDocumentTab": {
+                "tabProperties": {"title": DOC_TAB}}}]}).execute()
+        tab_id = reply["replies"][0]["addDocumentTab"]["tabProperties"][
+            "tabId"]
+        end = 2
+    else:
+        tab_id = tab["tabProperties"]["tabId"]
+        content = tab.get("documentTab", {}).get("body", {}).get(
+            "content", [])
+        end = content[-1]["endIndex"] if content else 2
+    reqs = []
+    if end > 2:
+        reqs.append({"deleteContentRange": {"range": {
+            "tabId": tab_id, "startIndex": 1, "endIndex": end - 1}}})
+    reqs.append({"insertText": {"location": {"tabId": tab_id, "index": 1},
+                                "text": DOC_PREFIX + when}})
+    docs.documents().batchUpdate(documentId=doc_id,
+                                 body={"requests": reqs}).execute()
 
 
 def resolve_all_comments(svc, doc_id: str) -> None:
@@ -490,6 +522,7 @@ def main() -> int:
     ALLOWED.add(doc_id)
     print(f"fixture Doc: {gdocs.tab_url(doc_id)}")
     root = Path(tempfile.mkdtemp(prefix="authorlm-live-"))
+    finished = False
     try:
         ws, db, manuscript, ms = build(root, svc, docs, doc_id)
         snapshot(svc, docs, doc_id, "after setup")
@@ -502,20 +535,31 @@ def main() -> int:
             run(name, fn, env)
             print(("pass  " if RESULTS[-1][1] else "FAIL  ") + name,
                   flush=True)
+        finished = True
     finally:
         shutil.rmtree(root, ignore_errors=True)
-        if args.record:
-            CACHE.mkdir(exist_ok=True)
-            by: dict[str, list] = {}
-            for c in CALLS:
-                by.setdefault(c["scenario"].split(":")[0], []).append(c)
-            for old in CACHE.glob("*.json.gz"):
+    if args.record and not finished:
+        print("not recorded: the run stopped before every scenario ran")
+    elif args.record:
+        # A scenario that fails is still a recording: the failures are
+        # what the recordings exist to show (the fixes wait on the owner).
+        by: dict[str, list] = {}
+        for c in CALLS:
+            by.setdefault(c["scenario"].split(":")[0], []).append(c)
+        for old in CACHE.glob("*.json.gz"):
+            if not args.only or old.name.split(".")[0] in by:
                 old.unlink()
-            for name, calls in by.items():
-                with gzip.open(CACHE / f"{name}.json.gz", "wt",
-                               encoding="utf-8") as out:
-                    json.dump(calls, out, indent=1, ensure_ascii=False)
-            print(f"recorded {len(CALLS)} calls into {CACHE}")
+        for name, calls in by.items():
+            with gzip.open(CACHE / f"{name}.json.gz", "wt",
+                           encoding="utf-8") as out:
+                json.dump(calls, out, indent=1, ensure_ascii=False)
+        when = dt.datetime.now(dt.timezone.utc).astimezone().isoformat(
+            timespec="seconds")
+        SCENARIO[0] = "stamp"
+        stamp(docs, doc_id, when)
+        LOG.write_text(when + "\n")
+        print(f"recorded {len(CALLS)} calls into {CACHE}; fake.log and the "
+              f"fixture Doc's '{DOC_TAB}' tab say {when}")
     for name, ok, why in RESULTS:
         if not ok:
             print(f"--- {name}\n" + why.strip()[:1500])

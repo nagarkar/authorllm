@@ -548,6 +548,12 @@ Dependency-free local HTTP shell for the compiled pronunciation workbench.
 
 The drafting payload seam — stored state in, four blocks out.
 
+## `tests._doc_freshness`
+
+`authorlm/tests/_doc_freshness.py`
+
+How old the Doc-road recordings are, and what to do about it.
+
 ## `tests._extraction_fixture`
 
 `authorlm/tests/_extraction_fixture.py`
@@ -655,6 +661,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 `authorlm/tests/test_doc_fakes_vs_google.py`
 
 The Doc-road fake checked against Google: every snapshot recorded live by tests/doc_road_live.py (a full documents.get and the markdown export of the same revision) is rebuilt in `_GoogleFake` from the recorded tab content, exported by the fake, and compared, tab by tab, with what Google exported. A difference means the fake no longer renders the way Google does: re-record (`python3 tests/doc_road_live.py --record`) and bring `_GoogleFake` back in line.
+
+## `tests.test_doc_freshness`
+
+`authorlm/tests/test_doc_freshness.py`
+
+The recordings' freshness rule (tests/_doc_freshness.py), with a fake clock, log and Doc: no Google call, no file touched. Run: python3 tests/test_doc_freshness.py
 
 ## `tests.test_doc_road_escapes`
 

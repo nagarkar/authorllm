@@ -9,7 +9,8 @@ the way Google does: re-record (`python3 tests/doc_road_live.py
 Also checks the recorded masked reads carry every field the code reads,
 and that every recorded write came back with a new revision.
 
-Hermetic: reads tests/doc_cache/ only.
+Reads tests/doc_cache/ only while tests/doc_cache/fake.log is under 7
+days old; otherwise it re-records live first (see _doc_freshness.py).
 Run: python3 tests/test_doc_fakes_vs_google.py
 """
 from __future__ import annotations
@@ -24,6 +25,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 
+from _doc_freshness import ensure_fresh  # noqa: E402
 from test_doc_road_verbs import _GoogleFake  # noqa: E402
 
 from authorlm import gdocs  # noqa: E402
@@ -217,6 +219,11 @@ def sections(export: str, doc: dict, titles: list[str]) -> dict[str, str]:
 
 
 def main_test() -> None:
+    # First, how old the recordings are (tests/_doc_freshness.py): a log
+    # under 7 days old costs nothing; an old or missing one re-records
+    # live, or fails if the fixture Doc shows a recent recording.
+    print("0. the recordings are fresh:")
+    print(f"   {ensure_fresh()}")
     recs = recordings()
     check("there are recordings to check against", bool(recs),
           "run: python3 tests/doc_road_live.py --record")
