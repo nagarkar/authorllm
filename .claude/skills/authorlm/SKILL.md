@@ -2361,7 +2361,18 @@ feature ideas go through the normal design workflow. Never file without
 the author's confirmation. **If the defect is about to be fixed
 immediately, file FIRST, fix SECOND** — filing stamps the git commit and
 manuscript version, and an urgent fix applied before filing destroys the
-before-state the task exists to preserve. Mention the filed task once and move on; the
+before-state the task exists to preserve. **Then open its GitHub issue
+on `nagarkar/authorllm` (ruled 2026-10-31): the record is local and has
+no link, so the issue is the visible, shared handle.** `gh issue create
+--label bug`, titled like the record. The body names the record
+(`AuthorLM improvement it-…; details: authorlm improve show it-…`) and
+says, in general terms, what the code does wrong and where (file:line,
+the function), with the expected behavior. **The issue carries no
+private information:** no manuscript prose, no quotes from the author,
+margin comments or replies, no comment or thread ids, no file names of
+essays. The agent that fixes it reads the repro from the record, and its
+PR closes the issue. When the record is closed or dismissed, close the issue with the same outcome (no private text in
+the closing comment either). Mention the filed task and its issue link once and move on; the
 queue lives in `list_improvements` / `authorlm improve list`, and must
 never bleed into briefings or guidance about the writing. To settle:
 `resolve_improvement` — `propose` is for the fixing agent (fix summary +
