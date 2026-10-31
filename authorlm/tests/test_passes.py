@@ -4142,6 +4142,59 @@ def _braces_are_the_authors(root: Path) -> None:
           and "A real insertion" not in math_stripped
           and math_warns == [], repr((math_stripped, math_warns)))
 
+    # Unterminated insertion must not reach the next form's closer
+    # (89ec4ff fixed PENDING/INSERTION; _collapse still used unbounded
+    # _INSERTION_PARA and deleted the prose between on every pull).
+    broken_ins = (
+        "Lead.\n\n{{broken insertion without closer\n\n"
+        "Middle paragraph that must survive.\n\n"
+        "{{good addition}}\n\nTail.\n")
+    broken_stripped, _ = _th.strip_pending(broken_ins)
+    check("strip_pending keeps the paragraph between an unterminated "
+          "insertion and the next complete one",
+          "Middle paragraph that must survive." in broken_stripped
+          and "Lead." in broken_stripped and "Tail." in broken_stripped,
+          repr(broken_stripped))
+    check("...and has_unterminated_form names it so pull will not write "
+          "the leftover markers into the manuscript",
+          _th.has_unterminated_form(broken_stripped)
+          and not _th.has_stray_replace_markers(broken_stripped),
+          repr(broken_stripped))
+    # _form_owner: a settled short new half must not own unrelated markers
+    # (diff_push would clear a live/hand form as an "orphan").
+    from authorlm.gdocs import _form_flat, _form_owner
+    hand = "<<hand authored old>>{{hand authored new.}}"
+    settled_dot = [{"old": _form_flat("totally different"),
+                    "new": _form_flat("."), "live": False, "comment": None}]
+    check("_form_owner does not let a settled '.' claim hand-written "
+          "markers by substring",
+          _form_owner(hand, settled_dot) is None, str(_form_owner(hand, settled_dot)))
+    real = "<<The answer is 42.>>{{The answer is forty-two.}}"
+    real_known = [{"old": _form_flat("The answer is 42."),
+                   "new": _form_flat("The answer is forty-two."),
+                   "live": False, "comment": "c1"}]
+    check("...while still recognising the thread whose halves match",
+          _form_owner(real, real_known) is real_known[0])
+    rewritten = "<<alpha beta gamma>>{{rewritten by author in doc.}}"
+    live_plus_dot = [
+        {"old": _form_flat("alpha beta gamma"),
+         "new": _form_flat("original proposal text"),
+         "live": True, "comment": None},
+        {"old": _form_flat("x"), "new": _form_flat("."),
+         "live": False, "comment": None}]
+    check("a live replace still owns after the green half was rewritten "
+          "(matched on old), not the settled '.'",
+          _form_owner(rewritten, live_plus_dot) is live_plus_dot[0])
+    live_ins = "{{completely rewritten by author.}}"
+    ins_known = [
+        {"old": "", "new": _form_flat("original proposal text"),
+         "live": True, "comment": None},
+        {"old": _form_flat("other"), "new": _form_flat("."),
+         "live": False, "comment": None}]
+    check("a rewritten live insertion matches nobody — block, do not "
+          "clear under a settled short token",
+          _form_owner(live_ins, ins_known) is None)
+
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
