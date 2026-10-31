@@ -770,6 +770,12 @@ docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generat
 
 Retake must not destroy a good paragraph take when the write fails mid-flight.
 
+## `tests.test_hard_terms`
+
+`authorlm/tests/test_hard_terms.py`
+
+`filtering.is_hard_to_say` / `hard_terms` / `candidate_terms` are the harness-computed pronunciation prelude signals (F1 / F2).
+
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`
@@ -787,6 +793,12 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 `authorlm/tests/test_loop.py`
 
 Proposal learning loop — firewall, screen, distillation, retraction.
+
+## `tests.test_margin`
+
+`authorlm/tests/test_margin.py`
+
+`gdocs.Margin` / `_open_comments` — one comments read per push verb.
 
 ## `tests.test_media`
 
@@ -818,6 +830,12 @@ Regression: spaced CommonMark thematic breaks must survive normalize.
 
 Summary hierarchy, step 2 (docs/summary-hierarchy-design.md §3.2, §3.5, §4.5, §11.2): the paragraph-records pass. One call per heading section, headings with no call, the span check counted in the build report, the 24,000-character split, lazy rebuild of dirty rows only, and the one cost line. A fake LLM throughout; the live recording is tests/test_live_llm.py's `paragraph-records` section.
 
+## `tests.test_parse_distiller`
+
+`authorlm/tests/test_parse_distiller.py`
+
+`beliefs.parse_distiller` + `belief_labels` — the grammar that turns a distiller reply into a seed / match / decline.
+
 ## `tests.test_passes`
 
 `authorlm/tests/test_passes.py`
@@ -830,6 +848,12 @@ The critique pass (design §5–§7): preflight gate, context package, output co
 
 The critique editor's output contract holds against wrong SHAPES, not only wrong values: a list element that is not a JSON object, or an `insertions`/`suggestions` field that is not a list, is a ContractError (so run_editor retries with the violation named), never an AttributeError that aborts the run.
 
+## `tests.test_paths_env`
+
+`authorlm/tests/test_paths_env.py`
+
+.env parse and rewrite (`paths.load_env` / `paths.set_env_value`).
+
 ## `tests.test_pdf2md_furniture`
 
 `authorlm/tests/test_pdf2md_furniture.py`
@@ -841,6 +865,18 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 `authorlm/tests/test_pdf2md_text_layer_gate.py`
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
+
+## `tests.test_peel_embed_suffix`
+
+`authorlm/tests/test_peel_embed_suffix.py`
+
+`revisions.peel_embed_suffix` keeps illustration settle from raising false "text drifted" when an embed line is glued under its `[Illustration: …]` tag.
+
+## `tests.test_refuse_sidecar`
+
+`authorlm/tests/test_refuse_sidecar.py`
+
+`structure.refuse_sidecar` is the named door every filter / lens / intent verb shares for `pronunciations.md`.
 
 ## `tests.test_section_summaries`
 
@@ -860,6 +896,12 @@ Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5,
 
 The [Signature: uri] tag: plain text in the files, a signature block (image, author's name, export date) in every reader output, dropped from the audio-clean build. Run: python3 tests/test_signature_tag.py
 
+## `tests.test_split_tabbed_export`
+
+`authorlm/tests/test_split_tabbed_export.py`
+
+`gdocs.split_tabbed_export` cuts a whole-master markdown export into per-tab bodies.
+
 ## `tests.test_summaries`
 
 `authorlm/tests/test_summaries.py`
@@ -871,6 +913,12 @@ Essay summaries (critique-pass design §4; summary-hierarchy design §3.4): read
 `authorlm/tests/test_summary_hierarchy.py`
 
 Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): paragraph kinds, content hashes, section hashes, the two new tables, freshness derived at read time, and the read API over current rows. No model call anywhere in this suite.
+
+## `tests.test_tab_is_empty`
+
+`authorlm/tests/test_tab_is_empty.py`
+
+`gdocs._tab_is_empty` chooses full rewrite vs surgical Doc push.
 
 ## `tests.test_toc_outside`
 
