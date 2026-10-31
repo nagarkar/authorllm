@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1133,6 +1134,180 @@ class _CountingFake(_UnspacedJoinFake):
                     got["nextPageToken"] = str(at + size)
                 return _Req(got)
         return _Comments()
+
+
+class _GoogleFake(_CountingFake):
+    """`_CountingFake` with what the live API did on 2026-10-30 (the
+    recordings in tests/doc_cache/, checked by
+    test_doc_fakes_vs_google.py):
+
+    - Paragraph spacing lives with the paragraph: text inserted into a
+      paragraph takes its spacing, and `updateParagraphStyle` naming
+      `namedStyleType` alone resets the paragraph to NORMAL_TEXT's own,
+      unspaced (the writer's insertions do exactly that).
+    - The export joins an unspaced NORMAL_TEXT paragraph to the next
+      with a hard break (`  \\n`), carries no tab-title headings, strikes
+      struck runs with `~~`, escapes `<<`, `>>`, `[`, `]` and a `#` that
+      does not open a line, and bolds a Heading 1's text.
+    - Struck runs are kept in the style map (mark `~~`), set and cleared
+      by `updateTextStyle` the way the writer and the settle send them.
+    """
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.sp: dict[str, list[bool]] = {t["id"]: [True] * len(t["body"])
+                                          for t in self.tabs}
+
+    def _flags(self, tab: dict) -> list[bool]:
+        flags = self.sp.setdefault(tab["id"], [])
+        if len(flags) != len(tab["body"]):          # a hand-set body
+            flags[:] = [True] * len(tab["body"])
+        return flags
+
+    def _para_flag(self, tab: dict, pos: int) -> bool:
+        body, flags = tab["body"], self._flags(tab)
+        nl = body.find("\n", pos)
+        return flags[nl] if 0 <= nl < len(flags) else True
+
+    def edit(self, tab_id: str, old: str, new: str) -> None:
+        tab = self._tab(tab_id)
+        at = tab["body"].find(old)
+        flags = self._flags(tab)
+        keep = self._para_flag(tab, at)
+        super().edit(tab_id, old, new)
+        flags[at:at + len(old)] = [keep] * len(new)
+
+    def _apply(self, req: dict) -> dict:
+        if "insertText" in req:
+            spec = req["insertText"]
+            tab = self._tab(spec["location"].get("tabId"))
+            if tab is not None:
+                at = spec["location"]["index"] - 1
+                keep = self._para_flag(tab, at)
+                self._flags(tab)[at:at] = [keep] * len(spec["text"])
+            return _SurgicalDocFake._apply(self, req)
+        if "deleteContentRange" in req:
+            rng = req["deleteContentRange"]["range"]
+            tab = self._tab(rng.get("tabId"))
+            if tab is not None:
+                del self._flags(tab)[rng["startIndex"] - 1:
+                                     rng["endIndex"] - 1]
+            return _SurgicalDocFake._apply(self, req)
+        if "updateParagraphStyle" in req:
+            spec = req["updateParagraphStyle"]
+            tab = self._tab(spec["range"].get("tabId"))
+            fields = spec.get("fields", "")
+            if tab is not None:
+                below = (spec.get("paragraphStyle", {}).get("spaceBelow")
+                         or {}).get("magnitude", 0)
+                flag = bool(below) if "spaceBelow" in fields else (
+                    False if "namedStyleType" in fields else None)
+                if flag is not None:
+                    a = spec["range"]["startIndex"] - 1
+                    b = spec["range"]["endIndex"] - 1
+                    body, flags = tab["body"], self._flags(tab)
+                    start = 0
+                    for n, ch in enumerate(body):
+                        if ch == "\n":
+                            if start < b and n >= a:
+                                flags[n] = flag
+                            start = n + 1
+            return {}
+        if "updateTextStyle" in req:
+            spec = req["updateTextStyle"]
+            rng = spec.get("range", {})
+            tab_id = rng.get("tabId")
+            if self._tab(tab_id) is not None and "strikethrough" in spec.get(
+                    "fields", ""):
+                a, b = rng["startIndex"], rng["endIndex"]
+                self.styled = [r for r in self.styled
+                               if not (r["tab"] == tab_id and r["mark"] == "~~"
+                                       and a <= r["start"] and r["end"] <= b)]
+                if spec.get("textStyle", {}).get("strikethrough"):
+                    self.styled.append({"tab": tab_id, "start": a, "end": b,
+                                        "mark": "~~"})
+            return _SurgicalDocFake._apply(self, req)
+        return _SurgicalDocFake._apply(self, req)
+
+    def _spaced(self, doc: dict) -> dict:
+        def walk(tabs):
+            for t in tabs:
+                tab = self._tab(t.get("tabProperties", {}).get("tabId"))
+                for item in t.get("documentTab", {}).get("body", {}).get(
+                        "content", []):
+                    para = item.get("paragraph")
+                    if not para or tab is None:
+                        continue
+                    end = item.get("endIndex", 1) - 2
+                    flags = self._flags(tab)
+                    style = para.setdefault("paragraphStyle", {})
+                    if 0 <= end < len(flags) and flags[end]:
+                        style.update(lineSpacing=115,
+                                     spaceAbove={"unit": "PT"},
+                                     spaceBelow={"magnitude": 6,
+                                                 "unit": "PT"})
+                walk(t.get("childTabs", []))
+        walk(doc.get("tabs", []))
+        return doc
+
+    @staticmethod
+    def _escape(line: str) -> str:
+        head = re.match(r"#+ ", line)
+        lead, rest = (line[:head.end()], line[head.end():]) if head else (
+            "", line)
+        rest = (rest.replace("<<", "\\<\\<").replace(">>", "\\>\\>")
+                .replace("[", "\\[").replace("]", "\\]")
+                .replace("#", "\\#"))
+        if lead == "# " and not rest.startswith("**"):
+            rest = f"**{rest}**"
+        return lead + rest
+
+    def export_text(self) -> str:
+        chunks = []
+        for t in self.tabs:
+            md = self._markdown_of_tab(t)
+            body, flags = t["body"], self._flags(t)
+            paras, ends = [], []
+            for n, ch in enumerate(body):
+                if ch == "\n":
+                    ends.append(n)
+            lines = md.split("\n")
+            blocks: list[str] = []
+            glue = False
+            for i, line in enumerate(lines):
+                if not line.strip():
+                    glue = False
+                    continue
+                shown = self._escape(line)
+                if glue and blocks:
+                    blocks[-1] += "  \n" + shown
+                else:
+                    blocks.append(shown)
+                unspaced = i < len(ends) and not flags[ends[i]]
+                glue = unspaced and not line.startswith("#")
+            if blocks:
+                chunks.append("\n\n".join(blocks))
+        return "\n\n".join(chunks) + "\n"
+
+    def files(self):
+        inner = super().files()
+        outer = self
+
+        class _Req:
+            def __init__(self, data):
+                self._data = data
+
+            def execute(self):
+                return self._data
+
+        class _Files:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def export(self, fileId=None, mimeType=None):
+                outer.log("export")
+                return _Req(outer.export_text().encode("utf-8"))
+        return _Files()
 
 
 def _comment(cid: str, quoted: str) -> dict:

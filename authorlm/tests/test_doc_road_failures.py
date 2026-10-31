@@ -10,7 +10,8 @@ the runner reports every scenario and exits non-zero if any failed.
 4. doc merge drops the image lines under illustration tags
 5. a push after a stale or approved margin thread
 
-Hermetic: Google is `_SurgicalDocFake` / `_CountingFake`.
+Hermetic: Google is `_GoogleFake`, the fake checked against the live
+recordings in tests/doc_cache/ (test_doc_fakes_vs_google.py).
 Run: python3 tests/test_doc_road_failures.py
 """
 from __future__ import annotations
@@ -29,7 +30,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 
 from test_doc_road_verbs import (  # noqa: E402
-    _CountingFake, _comment, _fixture, _google, _run)
+    _GoogleFake, _comment, _fixture, _google, _run)
 
 from authorlm import api, gdocs  # noqa: E402
 from authorlm import threads as th  # noqa: E402
@@ -63,7 +64,7 @@ def scenario(name: str):
     return wrap
 
 
-ESSAY = ("# Discernment\n\n"
+ESSAY = ("# **Discernment**\n\n"
          "They are two tendencies of one reality, defined together.\n\n"
          "We must be watchful. Habit carries discernment forward.\n\n"
          "Now consider the other side. Where discernment deepens, "
@@ -116,7 +117,7 @@ def _old_thread(db, manuscript, new: str, old: str = "x, y",
 
 def _stage_resolve(root: Path, name: str, before=None, between=None):
     ws, db, manuscript, ms, fake = _fixture(root, name, ESSAY,
-                                            fake_cls=_CountingFake)
+                                            fake_cls=_GoogleFake)
     # An open comment elsewhere in the tab, as discernment.md had: it
     # sends every push of this tab down the surgical (diff) path.
     fake.margin = [_comment("c-09", "The question is always the same.")]
@@ -190,7 +191,7 @@ def modified_declined(root: Path) -> None:
 @scenario("2 a held paragraph survives the next resolve")
 def held_then_resolve(root: Path) -> None:
     ws, db, manuscript, ms, fake = _fixture(root, "s2", ESSAY,
-                                            fake_cls=_CountingFake)
+                                            fake_cls=_GoogleFake)
     fake.margin = [_comment("c-01", "Habit carries discernment forward.")]
     mine = ESSAY.replace("Habit carries discernment forward.",
                          "Habit carries discernment forward. A new line "
@@ -225,7 +226,7 @@ def _unterminated(root: Path, name: str):
         "We must be watchful. Habit carries discernment forward.",
         UNTERMINATED)
     ws, db, manuscript, ms, fake = _fixture(root, name, essay,
-                                            fake_cls=_CountingFake)
+                                            fake_cls=_GoogleFake)
     # Two margin proposals; the first lost its closing braces in the Doc.
     fake.margin = [_comment("c-01", "We must be watchful."),
                    _comment("c-02", "Now consider the other side.")]
@@ -299,7 +300,7 @@ ILLUS = (ESSAY + "\n[Illustration: a lone tracker ⇢ lone.md]\n"
 @scenario("4 doc merge keeps the image lines")
 def merge_images(root: Path) -> None:
     ws, db, manuscript, ms, fake = _fixture(
-        root, "s4", gdocs.strip_embed_lines(ILLUS), fake_cls=_CountingFake)
+        root, "s4", gdocs.strip_embed_lines(ILLUS), fake_cls=_GoogleFake)
     (ms / "_illustrations").mkdir(exist_ok=True)
     (ms / "_illustrations" / "lone-0a1b2c3d-01.png").write_bytes(b"\x89PNG")
     (ms / "solo.md").write_text(ILLUS.replace("Now consider",
@@ -319,7 +320,7 @@ def merge_images(root: Path) -> None:
 
 def _leftover(root: Path, name: str, state: str):
     ws, db, manuscript, ms, fake = _fixture(root, name, ESSAY,
-                                            fake_cls=_CountingFake)
+                                            fake_cls=_GoogleFake)
     fake.margin = [_comment("c-01", "We must be watchful.")]
     fake.edit("tab-2", "We must be watchful.",
               "<<We must be watchful.>>{{We must keep watch.}}")
