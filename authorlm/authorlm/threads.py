@@ -128,13 +128,18 @@ def render_insertion(new: str) -> str:
 # Critique insertions are paragraph forms (compose joins with blank
 # lines; head inserts sit at the start of the marked text). Inline
 # `{{…}}` is author prose once a manuscript has been pushed into a tab.
-_INSERTION_PARA = re.compile(r"\n\s*\n(?<![>}])\{\{(?P<new>.*?)\}\}(?=\s*\n|\Z)",
-                             re.DOTALL)
+# Same `_IN_FORM` stop as INSERTION: an unterminated `{{` must not
+# reach the next form's closer and delete the prose between
+# (2026-10-31: strip_pending wiped Middle + the good form on pull).
+_INSERTION_PARA = re.compile(
+    r"\n\s*\n(?<![>}])\{\{(?P<new>" + _IN_FORM + r")\}\}(?=\s*\n|\Z)",
+    re.DOTALL)
 # Start-of-text insertions include the following blank-line separator
 # so dropping them leaves no leading `\n\n` residue (compose may stack
 # several head inserts before the first live paragraph).
 _INSERTION_START = re.compile(
-    r"\A\s*\{\{(?P<new>.*?)\}\}(?:(?:\s*\n)+|\Z)", re.DOTALL)
+    r"\A\s*\{\{(?P<new>" + _IN_FORM + r")\}\}(?:(?:\s*\n)+|\Z)",
+    re.DOTALL)
 # TeX math spans: `$$…$$` display (own line or not) and `$…$` inline.
 # Set notation inside them (`{{-q,+q},{-q-p,+q+p}}`) is the author's and
 # is never a form, whatever line it sits on. Display first so `$$` is
@@ -214,6 +219,28 @@ def has_stray_replace_markers(text: str) -> bool:
     """True when `text` (already through `strip_pending`) still holds a
     `<<` or `>>`: a replace form that lost a marker."""
     return bool(_REPLACE_MARKER.search(text))
+
+
+def has_unterminated_form(text: str) -> bool:
+    """True when `text` (already through `strip_pending`) still holds a
+    form that lost a marker: a replace `<<` / `>>`, or an own-line `{{`
+    that never closes (an insertion that lost its `}}`). Pull must not
+    write either into the manuscript — the replace-only stray check
+    left the insertion case free to land markers, or, before
+    `_INSERTION_PARA` grew `_IN_FORM`, to delete the prose between two
+    insertions (2026-10-31)."""
+    if has_stray_replace_markers(text):
+        return True
+    # Match at the `{{`, not the line start: leading spaces on the form
+    # line made INSERTION.match fail and every indented `{{…}}` looked
+    # unterminated (false pull refusal on author braces / spaced forms).
+    for m in re.finditer(r"(?m)^[ \t]*(\{\{)", text):
+        at = m.start(1)
+        if in_math(text, at):
+            continue
+        if INSERTION.match(text, at) is None:
+            return True
+    return False
 
 
 def form_remnants(text: str, news) -> list[tuple[int, str]]:

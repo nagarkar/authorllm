@@ -300,6 +300,37 @@ def unterminated_merge(root: Path) -> None:
            and "Now consider the other side" in merged, merged)
 
 
+@scenario("3d unterminated INSERTION: pull keeps the text between forms")
+def unterminated_insertion_pull(root: Path) -> None:
+    """Same shape as 3a, but critique/findings insertions (`{{new}}`) —
+    strip_pending used an unbounded paragraph regex and deleted Middle
+    on every pull; the replace-only unterminated guard did not fire."""
+    essay = ESSAY.replace(
+        "We must be watchful. Habit carries discernment forward.",
+        "We must be watchful. Habit carries discernment forward.\n\n"
+        "Middle paragraph that must survive.")
+    ws, db, manuscript, ms, fake = _fixture(root, "s3d", essay,
+                                            fake_cls=_GoogleFake)
+    # First insertion lost its closing braces; second is complete.
+    fake.edit("tab-2", "We must be watchful. Habit carries discernment "
+              "forward.",
+              "{{We must keep watch. Habit carries discernment forward.")
+    fake.edit("tab-2", "Middle paragraph that must survive.",
+              "Middle paragraph that must survive.\n\n"
+              "{{A complete addition.}}")
+    before = (ms / "solo.md").read_text()
+    rep = gdocs.pull_doc(db, manuscript, query="solo.md", service=fake,
+                         docs_service=fake, with_comments=False)
+    text = (ms / "solo.md").read_text()
+    expect("the local file is unchanged", text == before, text)
+    expect("the pull names the file whose tab holds the broken form",
+           "solo.md" in rep.get("unterminated", []),
+           json.dumps(rep, default=str))
+    expect("Middle was not deleted from what strip_pending returned "
+           "(the pull refused before writing)",
+           "Middle paragraph that must survive." in before, before)
+
+
 # ----------------------------------------------------------------- 4
 
 
@@ -378,8 +409,8 @@ def main() -> int:
     try:
         for fn in (all_accepted, dot_thread, modified_declined,
                    held_then_resolve, unterminated_pull, unterminated_decide,
-                   unterminated_merge, merge_images, push_after_cleaned,
-                   push_after_stale):
+                   unterminated_merge, unterminated_insertion_pull,
+                   merge_images, push_after_cleaned, push_after_stale):
             fn(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
