@@ -151,6 +151,11 @@ def all_accepted(root: Path) -> None:
     expect("eight accepted", done["accepted"] == 8, json.dumps(done,
                                                                default=str))
     expect("the tab holds no form", _tab_clean(fake), fake.tab_text("solo.md"))
+    exported = fake.export_text()
+    expect("the accepted heading addition is a heading in the tab, not "
+           "'## ' typed into a paragraph",
+           "## **Momentum and Alignment**" in exported
+           and "\\#\\#" not in exported, exported)
     expect("the local file holds every new half",
            all(r["new"].replace("**", "") in final.replace("**", "")
                for r in MIXED), final)
@@ -255,9 +260,14 @@ def unterminated_pull(root: Path) -> None:
     text = (ms / "solo.md").read_text()
     expect("no conflict is reported", not rep["conflicts"],
            json.dumps(rep, default=str))
-    expect("the local file keeps every paragraph and footnote tag",
+    expect("the local file keeps every paragraph and footnote tag, and "
+           "takes no marker",
            "Habit carries discernment forward.[^D2]" in text
-           and "Now consider the other side." in text, text)
+           and "Now consider the other side." in text
+           and "<<" not in text and "{{" not in text, text)
+    expect("the pull names the file whose tab holds the broken form",
+           "solo.md" in rep.get("unterminated", []),
+           json.dumps(rep, default=str))
 
 
 @scenario("3b unterminated form: decide --approve writes no garbled text")

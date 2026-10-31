@@ -2824,6 +2824,14 @@ def doc_merge(db: Database, manuscript: dict, query: str, service,
             f"hand: authorlm doc diff {relpath}")
     merged, conflicts = merge3(view["local"], view["base"], view["doc"],
                                relpath)
+    # The three sides are embed-free (the Doc never holds image lines);
+    # put the file's own picks back under their tags, as a pull does.
+    # Without this the draft dropped every ![](_illustrations/…) line,
+    # and copying it over the file lost them (2026-10-30).
+    _, path = _resolve(bridge, relpath)
+    if path.exists():
+        merged = reembed(merged, bridge.root,
+                         capture_embeds(path.read_text(encoding="utf-8")))
     target = (Path(out) if out else
               bridge.root / "_drafts" / f"{Path(relpath).stem}.merged.md")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -3205,6 +3213,14 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
                 f"delete it in the Doc" for n in remnant]
         if marker_warns:
             report.setdefault("marker_warnings", {})[relpath] = marker_warns
+        # A form in the tab that lost a marker (`<<old>>{{new` with no
+        # closing `}}`) collapses to nothing a reader can trust: writing it
+        # put the markers into the manuscript. The file is left as it is
+        # and named, until the form is mended or removed in the Doc
+        # (2026-10-30, discernment.md).
+        if threads_mod.has_stray_replace_markers(text):
+            report.setdefault("unterminated", []).append(relpath)
+            continue
         path = bridge.root / relpath
         current_raw = path.read_text(encoding="utf-8") if path.exists() else ""
         # A marked local file is MID-SETTLE: its bytes carry staged
@@ -4394,6 +4410,8 @@ _LEVEL_HOLDS = (
                 "gone"),
     ("marked", "carries pending forms on disk (mid-settle)"),
     ("sidecar_unparsable", "came back from the Doc unparsable"),
+    ("unterminated", "has a form in its tab that lost a marker (<<, >>, "
+                     "{{ or }}); mend or remove it in the Doc first"),
 )
 
 
@@ -4446,8 +4464,8 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     from .revisions import _paragraphs
 
     bridge = bridge or manuscript_bridge(manuscript)
-    push_doc(db, manuscript, file, service=service,
-             docs_service=docs_service, bridge=bridge)
+    level = push_doc(db, manuscript, file, service=service,
+                     docs_service=docs_service, bridge=bridge)
     meta = _mapping(db, manuscript)
     links = meta.get(bridge.meta_key, {})
     master_id = links.get("_master_id")
@@ -4516,6 +4534,19 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     # per push, only when it is needed; a form the export cannot
     # reproduce is taken back out, exactly, and reported — never left in
     # the tab for a resolve to mis-read.
+    # Inserted paragraphs carry no spacing of their own (the writer sets
+    # NORMAL_TEXT, which resets it), and Google's markdown export joins
+    # an unspaced paragraph to the next with a hard break: an addition
+    # read in that state is no own-line form, and the export proof below
+    # took a heading addition back out (2026-10-30, live). Space first,
+    # then prove (found 2026-10-02: a tab built from its title down by
+    # additions only, which no resolve could read either).
+    if any(not t["proposed_old"] for t in written):
+        try:
+            apply_tab_spacing(docs_service, master_id, tab_id,
+                              doc_spacing(manuscript))
+        except Exception:  # noqa: BLE001 — spacing is re-applied by resolve
+            pass
     rendered = [t for t in written
                 if tab_old_of.get(t["id"], t["proposed_old"]) != t["proposed_old"]
                 or rendered_text(t["proposed_new"]) != t["proposed_new"]]
@@ -4560,17 +4591,6 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
                            if forms is not None else
                            f"export proof unavailable ({err_text}) — form "
                            "taken back out"))
-    # Inserted paragraphs carry no spacing of their own, and Google's
-    # markdown export joins neighbouring paragraphs that have none into
-    # ONE paragraph with hard line breaks, which no resolve can read back
-    # as separate forms (found 2026-10-02: a tab built from its title down
-    # by additions only). Re-apply the standard, as every content write does.
-    if any(not t["proposed_old"] for t in written):
-        try:
-            apply_tab_spacing(docs_service, master_id, tab_id,
-                              doc_spacing(manuscript))
-        except Exception:  # noqa: BLE001 — spacing is re-applied by resolve
-            pass
     if atomic and failed:
         # A form failed AFTER writing (read-back, export proof): take
         # every form this call planted back out IN PLACE — markers and
@@ -4597,7 +4617,7 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
                    for t in ordered[:1]]
         written = []
     return {"written": written, "failed": failed,
-            "url": tab_url(master_id, tab_id)}
+            "url": tab_url(master_id, tab_id), "level": level}
 
 
 def settled_form_outcomes(db: Database, manuscript_id: str,
@@ -4612,7 +4632,7 @@ def settled_form_outcomes(db: Database, manuscript_id: str,
     rows = db.all(
         "SELECT state, proposed_old, proposed_new FROM doc_threads "
         "WHERE manuscript_id = ? AND file = ? "
-        "AND state IN ('cleaned', 'declined', 'written') "
+        "AND state IN ('cleaned', 'declined', 'stale', 'written') "
         "ORDER BY created_at, id", (manuscript_id, relpath))
 
     def key(r) -> tuple[str, str]:
@@ -4634,6 +4654,19 @@ def form_news(db: Database, manuscript_id: str, relpath: str) -> list[str]:
         "SELECT proposed_new FROM doc_threads WHERE manuscript_id = ? "
         "AND file = ? AND COALESCE(proposed_new, '') != ''",
         (manuscript_id, relpath))]
+
+
+def _half_form(full: str, outcome: dict) -> bool:
+    """True when a marker of this outcome's form is still in the tab
+    text without its partner: `<<old` or `old>>` for a replacement,
+    `{{new` or `new}}` for any form."""
+    olds = ({outcome["old"], rendered_text(outcome["old"])}
+            if outcome.get("old") else set())
+    news = ({outcome["new"], rendered_text(outcome["new"])}
+            if outcome.get("new") else set())
+    return (any(f"<<{o}" in full or f"{o}>>" in full for o in olds if o)
+            or any(f"{{{{{n}" in full or f"{n}}}}}" in full
+                   for n in news if n))
 
 
 def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
@@ -4702,7 +4735,12 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
                 if not full.startswith("{{", after):
                     return "<<", tab_old, ">>"      # green half deleted
                 close = full.find("}}", after + 2)
-                if close < 0:
+                # The closer must be this form's own: a form that lost
+                # its `}}` otherwise borrowed the next form's, and the cut
+                # took both (2026-10-30). Another form opening first means
+                # this one has none.
+                if close < 0 or "<<" in full[after + 2:close] \
+                        or "{{" in full[after + 2:close]:
                     return None
                 return "<<", tab_old, full[after - 2: close + 2]
             return None
@@ -4775,14 +4813,35 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
                 "range": {"tabId": tab_id, "startIndex": kept[0],
                           "endIndex": kept[1]},
                 "textStyle": {}, "fields": "strikethrough,foregroundColor"}})
+        heading = (re.match(r"(#{1,6}) ", tail) if not outcome["old"]
+                   and outcome["keep"] == "new" else None)
+        if heading and kept:
+            # An accepted heading addition becomes a heading: the writer
+            # planted `{{## Title}}` as text in a NORMAL_TEXT paragraph,
+            # and unwrapping it left a paragraph reading "## Title"
+            # (2026-10-30, discernment.md).
+            marks = heading.end()
+            requests += [
+                cut(kept[0], kept[0] + marks),
+                {"updateParagraphStyle": {
+                    "range": {"tabId": tab_id, "startIndex": kept[0],
+                              "endIndex": kept[0] + 1},
+                    "paragraphStyle": {
+                        "namedStyleType": f"HEADING_{len(heading.group(1))}"},
+                    "fields": "namedStyleType"}}]
         docs_service.documents().batchUpdate(
             documentId=master_id, body={"requests": requests}).execute()
-    # Read-back: none of these forms may still be in the tab.
+    # Read-back: none of these forms may still be in the tab, whole or
+    # in part. A form with a marker gone is not "settled": it was left
+    # half removed, and the resolve said the tab was clean (2026-10-30).
     full = tab_text()
     for outcome in outcomes:
         if find_form(full, outcome) is not None:
             faults.append(f"a form on «{clamp(outcome['old'] or outcome['new'])}» "
                           "is still in the tab")
+        elif _half_form(full, outcome):
+            faults.append(f"a form on «{clamp(outcome['old'] or outcome['new'])}» "
+                          "is still in the tab, half removed")
     if not faults and record_base:
         path = bridge.root / file
         local = strip_embed_lines(normalize_markdown(
@@ -4871,7 +4930,11 @@ def _replace_pending(db: Database, manuscript: dict, thread: dict,
     if at < 0 or not full[at + len(prefix):].startswith("{{"):
         return False
     close = full.find("}}", at + len(prefix) + 2)
-    if close < 0:
+    # This form's own closer, or there is no form: an unterminated one
+    # reached the next form's closer, and the approval wrote both forms'
+    # text over the paragraph (2026-10-30).
+    between = full[at + len(prefix) + 2:close]
+    if close < 0 or "<<" in between or "{{" in between:
         return False
     actual_new = full[at + len(prefix) + 2: close]
     # The tab holds the new half RENDERED (its emphasis as formatting), so
@@ -5487,6 +5550,49 @@ def _hold_commented(canonical: list[str], local: list[str],
     return target, held
 
 
+_LIVE_FORM_STATES = ("written", "proposed", "conversation", "applied")
+
+
+def _known_forms(db: Database, manuscript_id: str, relpath: str
+                 ) -> list[dict]:
+    """Every thread of this file that ever put a form in the tab, as
+    {old, new, live, comment}: `live` while its form is still owed a
+    verdict, `comment` the margin comment it answers (author comments)."""
+    out = []
+    for r in db.all(
+            "SELECT origin_type, origin_id, state, proposed_old, "
+            "proposed_new FROM doc_threads WHERE manuscript_id = ? "
+            "AND file = ? ORDER BY created_at, id", (manuscript_id, relpath)):
+        out.append({
+            "old": _form_flat(r["proposed_old"] or ""),
+            "new": _form_flat(r["proposed_new"] or ""),
+            "live": r["state"] in _LIVE_FORM_STATES,
+            "comment": (r["origin_id"] if r["origin_type"] == "author_comment"
+                        else None)})
+    return out
+
+
+def _form_flat(text: str) -> str:
+    """Text as a form's halves read in the export: no strike, emphasis
+    or escapes, whitespace collapsed."""
+    return _flat(re.sub(r"[*_~\\]", "", rendered_text(text)))
+
+
+def _form_owner(paragraph: str, known: list[dict]) -> dict | None:
+    """The thread whose form is in this export paragraph: a live one
+    first (a paragraph with a live form is never overwritten), else the
+    newest settled one, else None (markers nobody recorded, which still
+    block: they may be the author's own)."""
+    flat = _form_flat(paragraph)
+    owners = [k for k in known
+              if (k["new"] and k["new"] in flat)
+              or (k["old"] and k["old"] in flat)]
+    live = [k for k in owners if k["live"]]
+    if live:
+        return live[0]
+    return owners[-1] if owners else None
+
+
 def diff_push(db: Database, manuscript: dict, relpath: str,
               service, docs_service,
               bridge: DocBridge | None = None,
@@ -5663,7 +5769,18 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             entry.pop("doc_rev", None)
 
     anchors: list[dict] | None = None
+    forms_known = _known_forms(db, mid, relpath)
+    orphan_holds: dict[int, str] = {}
+
+    def open_ids() -> set[str]:
+        nonlocal anchors
+        if anchors is None:
+            anchors = _open_comment_anchors(db, manuscript, service,
+                                            master_id, margin)
+        return {c["comment_id"] for c in anchors}
+
     for attempt in (1, 2):
+        orphan_holds.clear()
         tab_md, doc_paras, tab_paras, healed = read_tab_healed(
             healed, reuse if attempt == 1 else None)
         canonical = [threads_mod.strip_pending(p)[0].strip("\n")
@@ -5694,11 +5811,28 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             # `clearing` names withdrawn forms' keys (a supersede): a
             # paragraph whose markers belong only to them may be
             # overwritten with the local text, which never held them.
-            if tag != "equal" and any(
-                    ("<<" in tab_paras[i] or "{{" in tab_paras[i])
-                    and not (clearing and any(k in tab_paras[i]
-                                              for k in clearing))
-                    for i in range(i1, i2)):
+            if tag == "equal":
+                continue
+            # A form no live thread owns (its thread went stale, was
+            # approved or declined, while its markers stayed in the tab)
+            # does not block the push: the local file never held it, so
+            # the paragraph takes the local text (2026-10-30: the only way
+            # out was hand surgery or a rebuild, which orphans comments).
+            # One whose thread's own comment is still open is held, with
+            # that comment, rather than written over its anchor.
+            blocked = False
+            for i in range(i1, i2):
+                if not ("<<" in tab_paras[i] or "{{" in tab_paras[i]):
+                    continue
+                if clearing and any(k in tab_paras[i] for k in clearing):
+                    continue
+                owner = _form_owner(tab_paras[i], forms_known)
+                if owner is None or owner["live"]:
+                    blocked = True
+                    break
+                if owner["comment"] and owner["comment"] in open_ids():
+                    orphan_holds.setdefault(i, owner["comment"])
+            if blocked:
                 raise LookupError(
                     "diff push: the edit overlaps a pending margin "
                     "thread — settle the thread first "
@@ -5710,9 +5844,12 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         if anchors is None:
             anchors = _open_comment_anchors(db, manuscript, service,
                                             master_id, margin)
-        target, held = _hold_commented(
-            canonical, local_paras,
-            _anchored_paragraphs([d["text"] for d in doc_paras], anchors))
+        marks = _anchored_paragraphs([d["text"] for d in doc_paras], anchors)
+        for i, cid in orphan_holds.items():
+            hit = next((c for c in anchors if c["comment_id"] == cid), None)
+            if hit is not None and hit not in marks.get(i, []):
+                marks.setdefault(i, []).append(hit)
+        target, held = _hold_commented(canonical, local_paras, marks)
         if held and target == canonical:
             entry["pushed_hash"] = _hashlib.sha256(threads_mod.strip_pending(
                 tab_md)[0].encode()).hexdigest()[:16]

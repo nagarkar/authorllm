@@ -328,9 +328,17 @@ def s1(env, rel: str, before=None, between=None, origin="ending-r1"):
 
 
 def s1a(env):
+    svc, docs, doc_id, db, manuscript, ms = env
     done, tab, final = s1(env, "s1a.md")
     F.expect("eight accepted, tab clean",
              done["accepted"] == 8 and clean(tab), tab)
+    exported = svc.files().export(fileId=doc_id,
+                                  mimeType=gdocs.MARKDOWN_MIME).execute()
+    exported = exported.decode() if isinstance(exported, bytes) else exported
+    F.expect("the heading addition landed as a heading",
+             "## **Momentum and Alignment**" in exported
+             and "\\#\\# **Momentum and Alignment**" not in exported,
+             exported[:3000])
 
 
 def s1b(env):
@@ -421,9 +429,12 @@ def s3a(env):
     rep = _quiet(gdocs.pull_doc, db, manuscript, query="s3a.md",
                  service=svc, docs_service=docs, with_comments=False)
     text = (ms / "s3a.md").read_text()
-    F.expect("no conflict, text kept", not rep["conflicts"]
+    F.expect("no conflict, text kept, no marker, the file named",
+             not rep["conflicts"]
              and "forward (s3a).[^D1]" in text
-             and "Now consider the other side." in text,
+             and "Now consider the other side." in text
+             and "<<" not in text and "{{" not in text
+             and "s3a.md" in rep.get("unterminated", []),
              json.dumps(rep.get("conflicts")) + "\n" + text)
 
 

@@ -47,10 +47,21 @@ DECLINE_KEYWORDS = {"no", "dont", "don't", "revert", "reject"}
 # tildes, which the export gives back) leaves `~~~~<<old>>~~~~{{new}}`.
 # Read with one optional pair, that was no form at all: the green half
 # landed with its markers and the thread was declined (it-9844aefae138).
+#
+# Neither half may run into another form: a new half never holds `<<`
+# or `{{`, an old half never `<<`. Unbounded, a form that lost its closing `}}` in the Doc reached
+# the NEXT form's closer, and everything between collapsed out of the
+# pull (2026-10-30, discernment.md: a paragraph between two footnotes
+# vanished and the pull reported a false conflict). A new half may still
+# span a blank line (a replacement that splits a paragraph in two, F21).
+_IN_FORM = r"(?:(?!<<|\{\{).)*?"
+_IN_OLD = r"(?:(?!<<).)*?"      # an old half may quote author braces
 PENDING = re.compile(
-    r"(?:~~)*<<(?P<old>.*?)>>(?:~~)*\{\{(?P<new>.*?)\}\}",
+    r"(?:~~)*<<(?P<old>" + _IN_OLD + r")>>(?:~~)*"
+    r"\{\{(?P<new>" + _IN_FORM + r")\}\}",
     re.DOTALL)
-INSERTION = re.compile(r"(?<![>}])\{\{(?P<new>.*?)\}\}", re.DOTALL)
+INSERTION = re.compile(r"(?<![>}])\{\{(?P<new>" + _IN_FORM
+                       + r")\}\}", re.DOTALL)
 _ANY_MARKER = re.compile(r"<<|>>|\{\{|\}\}")
 # The markdown export closes and reopens strikethrough at every hard line
 # break inside a struck span, so a verse stanza's old half comes back as
@@ -199,6 +210,12 @@ def strip_pending(text: str) -> tuple[str, list[str]]:
     return stripped, warnings
 
 
+def has_stray_replace_markers(text: str) -> bool:
+    """True when `text` (already through `strip_pending`) still holds a
+    `<<` or `>>`: a replace form that lost a marker."""
+    return bool(_REPLACE_MARKER.search(text))
+
+
 def form_remnants(text: str, news) -> list[tuple[int, str]]:
     """Where `text` carries the `}}` a hand-resolved form left behind:
     the author deleted `<<old>>{{` in the Doc and kept the new half with
@@ -212,7 +229,15 @@ def form_remnants(text: str, news) -> list[tuple[int, str]]:
         at = text.find(new + "}}")
         while at >= 0:
             close = at + len(new)
-            if text[max(0, at - 2):at] != "{{" and close not in found:
+            # A `}}` that closes an open `{{` (one opened after the last
+            # `}}` before it) is a form's closer, not a remnant, whatever
+            # new half happens to end just before it: an old thread's new
+            # half of "." took the closer off every form ending in a full
+            # stop (2026-10-30, discernment.md).
+            opened = text.rfind("{{", 0, close) > text.rfind(
+                "}}", 0, close)
+            if (text[max(0, at - 2):at] != "{{" and not opened
+                    and close not in found):
                 found[close] = new
             at = text.find(new + "}}", at + 1)
     return sorted(found.items())

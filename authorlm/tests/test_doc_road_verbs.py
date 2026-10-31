@@ -1141,41 +1141,107 @@ class _GoogleFake(_CountingFake):
     recordings in tests/doc_cache/, checked by
     test_doc_fakes_vs_google.py):
 
-    - Paragraph spacing lives with the paragraph: text inserted into a
-      paragraph takes its spacing, and `updateParagraphStyle` naming
-      `namedStyleType` alone resets the paragraph to NORMAL_TEXT's own,
-      unspaced (the writer's insertions do exactly that).
-    - The export joins an unspaced NORMAL_TEXT paragraph to the next
-      with a hard break (`  \\n`), carries no tab-title headings, strikes
-      struck runs with `~~`, escapes `<<`, `>>`, `[`, `]` and a `#` that
-      does not open a line, and bolds a Heading 1's text.
+    - A heading is a paragraph STYLE (HEADING_n), not `#` text: an import
+      turns `## Title` into a Heading 2 reading "Title"; the export writes
+      it back bolded (`## **Title**`, any level), and a `#` that is only
+      text in a NORMAL_TEXT paragraph comes back escaped (`\\#`).
+    - Paragraph spacing lives with the paragraph: inserted text takes its
+      paragraph's spacing and style, and an `updateParagraphStyle` naming
+      `namedStyleType` resets the paragraph to that style's own, which for
+      NORMAL_TEXT is unspaced (the writer's insertions do exactly that).
+    - The export joins an unspaced NORMAL_TEXT paragraph to the next with
+      a hard break (`  \\n`), carries no tab-title headings, strikes
+      struck runs with `~~`, and escapes `<<`, `>>`, `[`, `]` and `#`.
     - Struck runs are kept in the style map (mark `~~`), set and cleared
       by `updateTextStyle` the way the writer and the settle send them.
     """
 
+    _HEAD = re.compile(r"(#{1,6}) (.*)")
+
     def __init__(self, *a, **k):
+        self.hd: dict[str, list[int]] = {}
         super().__init__(*a, **k)
         self.sp: dict[str, list[bool]] = {t["id"]: [True] * len(t["body"])
                                           for t in self.tabs}
 
-    def _flags(self, tab: dict) -> list[bool]:
-        flags = self.sp.setdefault(tab["id"], [])
-        if len(flags) != len(tab["body"]):          # a hand-set body
-            flags[:] = [True] * len(tab["body"])
-        return flags
+    # -- import: headings become a style ---------------------------------
+    def _as_body(self, markdown: str, tab_id: str | None = None) -> str:
+        body, levels = "", []
+        for p in self._paras(markdown):
+            head = self._HEAD.match(p)
+            level, p = (len(head.group(1)), head.group(2)) if head else (0, p)
+            start = len(body) + 1
+            if self.render:
+                shown, spans = gdocs.render_emphasis(p)
+                if tab_id is not None:
+                    for s, e, style in spans:
+                        self.styled.append({
+                            "tab": tab_id, "start": start + s,
+                            "end": start + e,
+                            "mark": "**" if style.get("bold") else "*"})
+            else:
+                shown = p
+            body += shown + "\n"
+            levels += [level] * (len(shown) + 1)
+        if tab_id is not None:
+            self.hd[tab_id] = levels
+        return body
 
-    def _para_flag(self, tab: dict, pos: int) -> bool:
-        body, flags = tab["body"], self._flags(tab)
+    def _temp_content(self, markdown: str) -> list[dict]:
+        out, index = [], 1
+        for p in self._paras(markdown):
+            head = self._HEAD.match(p)
+            level, p = (len(head.group(1)), head.group(2)) if head else (0, p)
+            shown, spans = (gdocs.render_emphasis(p) if self.render
+                            else (p, []))
+            seg = shown + "\n"
+            cuts = sorted({0, len(seg)} | {s for s, _, _ in spans}
+                          | {e for _, e, _ in spans})
+            elements = []
+            for a, b in zip(cuts, cuts[1:]):
+                style = {}
+                for s, e, st in spans:
+                    if s <= a and b <= e:
+                        style.update(st)
+                elements.append({"startIndex": index + a,
+                                 "endIndex": index + b,
+                                 "textRun": {"content": seg[a:b],
+                                             "textStyle": style}})
+            out.append({"startIndex": index, "endIndex": index + len(seg),
+                        "paragraph": {
+                            "paragraphStyle": {"namedStyleType":
+                                               f"HEADING_{level}" if level
+                                               else "NORMAL_TEXT"},
+                            "elements": elements}})
+            index += len(seg)
+        return out
+
+    # -- per-paragraph state --------------------------------------------
+    def _arr(self, store: dict, tab: dict, fill):
+        arr = store.setdefault(tab["id"], [])
+        if len(arr) != len(tab["body"]):            # a hand-set body
+            arr[:] = [fill] * len(tab["body"])
+        return arr
+
+    def _flags(self, tab: dict) -> list[bool]:
+        return self._arr(self.sp, tab, True)
+
+    def _levels(self, tab: dict) -> list[int]:
+        return self._arr(self.hd, tab, 0)
+
+    def _at(self, arr: list, body: str, pos: int, default):
         nl = body.find("\n", pos)
-        return flags[nl] if 0 <= nl < len(flags) else True
+        return arr[nl] if 0 <= nl < len(arr) else default
 
     def edit(self, tab_id: str, old: str, new: str) -> None:
         tab = self._tab(tab_id)
         at = tab["body"].find(old)
-        flags = self._flags(tab)
-        keep = self._para_flag(tab, at)
+        flags, levels = self._flags(tab), self._levels(tab)
+        keep_f = self._at(flags, tab["body"], at, True)
+        keep_l = self._at(levels, tab["body"], at, 0)
         super().edit(tab_id, old, new)
-        flags[at:at + len(old)] = [keep] * len(new)
+        flags[at:at + len(old)] = [keep_f] * len(new)
+        levels[at:at + len(old)] = [keep_l] * len(new)
 
     def _apply(self, req: dict) -> dict:
         if "insertText" in req:
@@ -1183,35 +1249,49 @@ class _GoogleFake(_CountingFake):
             tab = self._tab(spec["location"].get("tabId"))
             if tab is not None:
                 at = spec["location"]["index"] - 1
-                keep = self._para_flag(tab, at)
-                self._flags(tab)[at:at] = [keep] * len(spec["text"])
+                flags, levels = self._flags(tab), self._levels(tab)
+                keep_f = self._at(flags, tab["body"], at, True)
+                keep_l = self._at(levels, tab["body"], at, 0)
+                n = len(spec["text"])
+                flags[at:at] = [keep_f] * n
+                levels[at:at] = [keep_l] * n
             return _SurgicalDocFake._apply(self, req)
         if "deleteContentRange" in req:
             rng = req["deleteContentRange"]["range"]
             tab = self._tab(rng.get("tabId"))
             if tab is not None:
-                del self._flags(tab)[rng["startIndex"] - 1:
-                                     rng["endIndex"] - 1]
+                a, b = rng["startIndex"] - 1, rng["endIndex"] - 1
+                del self._flags(tab)[a:b]
+                del self._levels(tab)[a:b]
             return _SurgicalDocFake._apply(self, req)
         if "updateParagraphStyle" in req:
             spec = req["updateParagraphStyle"]
             tab = self._tab(spec["range"].get("tabId"))
             fields = spec.get("fields", "")
+            style = spec.get("paragraphStyle", {})
             if tab is not None:
-                below = (spec.get("paragraphStyle", {}).get("spaceBelow")
-                         or {}).get("magnitude", 0)
-                flag = bool(below) if "spaceBelow" in fields else (
-                    False if "namedStyleType" in fields else None)
-                if flag is not None:
-                    a = spec["range"]["startIndex"] - 1
-                    b = spec["range"]["endIndex"] - 1
-                    body, flags = tab["body"], self._flags(tab)
-                    start = 0
-                    for n, ch in enumerate(body):
-                        if ch == "\n":
-                            if start < b and n >= a:
-                                flags[n] = flag
-                            start = n + 1
+                a = spec["range"]["startIndex"] - 1
+                b = spec["range"]["endIndex"] - 1
+                body = tab["body"]
+                flags, levels = self._flags(tab), self._levels(tab)
+                named = style.get("namedStyleType") \
+                    if "namedStyleType" in fields else None
+                level = (int(named[-1]) if named and named.startswith(
+                    "HEADING_") else 0)
+                below = (style.get("spaceBelow") or {}).get("magnitude", 0)
+                start = 0
+                for n, ch in enumerate(body):
+                    if ch != "\n":
+                        continue
+                    if start < b and n >= a:
+                        if named is not None:
+                            for k in range(start, n + 1):
+                                levels[k] = level
+                                flags[k] = False
+                        if "spaceBelow" in fields:
+                            for k in range(start, n + 1):
+                                flags[k] = bool(below)
+                    start = n + 1
             return {}
         if "updateTextStyle" in req:
             spec = req["updateTextStyle"]
@@ -1239,9 +1319,11 @@ class _GoogleFake(_CountingFake):
                     if not para or tab is None:
                         continue
                     end = item.get("endIndex", 1) - 2
-                    flags = self._flags(tab)
+                    flags, levels = self._flags(tab), self._levels(tab)
                     style = para.setdefault("paragraphStyle", {})
-                    if 0 <= end < len(flags) and flags[end]:
+                    if 0 <= end < len(levels) and levels[end]:
+                        style["namedStyleType"] = f"HEADING_{levels[end]}"
+                    elif 0 <= end < len(flags) and flags[end]:
                         style.update(lineSpacing=115,
                                      spaceAbove={"unit": "PT"},
                                      spaceBelow={"magnitude": 6,
@@ -1250,32 +1332,32 @@ class _GoogleFake(_CountingFake):
         walk(doc.get("tabs", []))
         return doc
 
+    # -- the export -----------------------------------------------------
     @staticmethod
     def _escape(line: str) -> str:
-        head = re.match(r"#+ ", line)
-        lead, rest = (line[:head.end()], line[head.end():]) if head else (
-            "", line)
-        rest = (rest.replace("<<", "\\<\\<").replace(">>", "\\>\\>")
+        return (line.replace("<<", "\\<\\<").replace(">>", "\\>\\>")
                 .replace("[", "\\[").replace("]", "\\]")
                 .replace("#", "\\#"))
-        if lead == "# " and not rest.startswith("**"):
-            rest = f"**{rest}**"
-        return lead + rest
 
     def export_text(self) -> str:
         chunks = []
         for t in self.tabs:
             md = self._markdown_of_tab(t)
-            body, flags = t["body"], self._flags(t)
-            paras, ends = [], []
-            for n, ch in enumerate(body):
-                if ch == "\n":
-                    ends.append(n)
-            lines = md.split("\n")
+            body = t["body"]
+            flags, levels = self._flags(t), self._levels(t)
+            ends = [n for n, ch in enumerate(body) if ch == "\n"]
             blocks: list[str] = []
             glue = False
-            for i, line in enumerate(lines):
+            for i, line in enumerate(md.split("\n")):
                 if not line.strip():
+                    glue = False
+                    continue
+                level = levels[ends[i]] if i < len(ends) else 0
+                if level:
+                    text = self._escape(line)
+                    if not text.startswith("**"):
+                        text = f"**{text}**"
+                    blocks.append("#" * level + " " + text)
                     glue = False
                     continue
                 shown = self._escape(line)
@@ -1283,8 +1365,7 @@ class _GoogleFake(_CountingFake):
                     blocks[-1] += "  \n" + shown
                 else:
                     blocks.append(shown)
-                unspaced = i < len(ends) and not flags[ends[i]]
-                glue = unspaced and not line.startswith("#")
+                glue = i < len(ends) and not flags[ends[i]]
             if blocks:
                 chunks.append("\n\n".join(blocks))
         return "\n\n".join(chunks) + "\n"

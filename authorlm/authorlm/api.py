@@ -7076,7 +7076,17 @@ def stage_revisions(db: Database, manuscript: dict, file: str,
             result["failed"].append(
                 (rev, reasons.get(t["id"], "not written")))
     result["url"] = wrote["url"]
+    result["warnings"] += _held_warnings(rel, wrote.get("level") or {})
     return result
+
+
+def _held_warnings(rel: str, pushed: dict) -> list[str]:
+    """A push's held paragraphs, said: a push inside a verb used to drop
+    them, so a held local edit went unreported (2026-10-30)."""
+    return [f"{rel}: a paragraph was held back from the tab because an "
+            f"open comment is anchored in it; the local edit stays in the "
+            f"file and pushes once the comment is addressed: "
+            f"«{h['paragraph'][:70]}»" for h in (pushed.get("held") or [])]
 
 
 def _rule_external_marked(marked: str, replaces: list[dict],
@@ -7247,9 +7257,9 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
     result["warnings"] += list(fetched["marker_warnings"])
     if fetched["state"] == "local_ahead":
         result["warnings"].append(
-            f"'{rel}' was edited locally while its forms were out; the "
-            f"tab's text is what landed, and the local edit is in the "
-            f"version history (source 'pre-external-resolve').")
+            f"'{rel}' was edited locally while its forms were out (or a "
+            f"push held a paragraph for an open comment); that local edit "
+            f"is kept beside what landed.")
 
     replaces = [t for t in written if t["proposed_old"]]
     inserts = [t for t in written if not t["proposed_old"]]
@@ -7262,6 +7272,18 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
     # of its own is dropped the way a pull drops it, and braces the
     # author wrote inside a sentence stay.
     final = th.strip_pending(final)[0]
+    # A local edit the tab has not seen (a paragraph a push held for an
+    # open comment, or an edit made while the forms were out) is kept
+    # beside the resolved text, as the doors' resolves keep it: writing
+    # the tab's text over the file reverted it, with only a warning to
+    # show (2026-10-30, discernment.md).
+    try:
+        final = _door_final_text(rel, fetched, final,
+                                 Path(manuscript["path"]) / rel,
+                                 "revise resolve")
+    except ValueError as err:
+        result["warnings"].append(str(err))
+        return result
 
     # Snapshot whatever is on disk before it is overwritten (ambient:
     # an uncollected local edit predates this verb and is the author's).
@@ -7335,9 +7357,10 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
     pushed = None
     if not others:
         try:
-            gdocs.push_doc(db, manuscript, rel, service=service,
-                           docs_service=docs_service)
+            out = gdocs.push_doc(db, manuscript, rel, service=service,
+                                 docs_service=docs_service)
             pushed = True
+            result["warnings"] += _held_warnings(rel, out)
         except Exception as err:                        # noqa: BLE001
             pushed = str(err)
     if pushed is True:

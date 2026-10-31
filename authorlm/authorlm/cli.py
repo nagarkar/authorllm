@@ -7678,6 +7678,10 @@ def cmd_doc(args):
                 for relpath in result.get("adopted", []):
                     print(ui.green(f"New essay imported from Doc tab: "
                                    f"{relpath} — add it to toc.toml."))
+                for relpath in result.get("unterminated", []):
+                    print(ui.yellow(f"warning: {relpath} was not pulled: a form in "
+                                    "its tab lost a marker (<<, >>, {{ or }}). Mend "
+                                    "or remove that form in the Doc, then pull again."))
                 for relpath in result.get("readopted", []):
                     print(f"Relinked Doc tab for {relpath} (tab was "
                           f"recreated or the mapping was lost).")

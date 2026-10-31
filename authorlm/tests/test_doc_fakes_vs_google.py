@@ -80,7 +80,7 @@ def rebuild(doc: dict) -> _GoogleFake:
     fake = _GoogleFake([(t["tabProperties"]["title"], "") for t in tabs])
     fake.styled = []
     for mine, live in zip(fake.tabs, tabs):
-        body, flags = "", []
+        body, flags, levels = "", [], []
         for item in live.get("documentTab", {}).get("body", {}).get(
                 "content", []):
             para = item.get("paragraph")
@@ -88,9 +88,7 @@ def rebuild(doc: dict) -> _GoogleFake:
                 continue
             style = para.get("paragraphStyle", {})
             named = style.get("namedStyleType", "NORMAL_TEXT")
-            if named.startswith("HEADING_"):
-                body += "#" * int(named[-1]) + " "
-                flags += [True] * (int(named[-1]) + 1)
+            level = int(named[-1]) if named.startswith("HEADING_") else 0
             spaced = gdocs._spaced(style, gdocs.DOC_SPACING)
             for e in para.get("elements", []):
                 run = e.get("textRun")
@@ -118,8 +116,10 @@ def rebuild(doc: dict) -> _GoogleFake:
                                             "mark": mark})
                 body += text
                 flags += [spaced or named != "NORMAL_TEXT"] * len(text)
+                levels += [level] * len(text)
         mine["body"] = body
         fake.sp[mine["id"]] = flags
+        fake.hd[mine["id"]] = levels
     return fake, tabs
 
 
@@ -173,6 +173,7 @@ def replay(recs) -> tuple[int, list[str]]:
             state = plain_state(prior)
             fake = _GoogleFake([("x", "")])
             fake.tabs, fake.sp, fake.styled = [], {}, []
+            fake.hd = {}
             for tid, (body, flags) in state.items():
                 fake.tabs.append({"id": tid, "title": tid, "body": body})
                 fake.sp[tid] = list(flags)
