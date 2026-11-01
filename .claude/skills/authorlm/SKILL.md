@@ -469,8 +469,8 @@ not re-ask at each beat.
    - author reworded → `authorlm write accept` with their text on stdin
      (recorded as `modified`; the draft→final diff is the evidence)
    - author asked for changes you wrote out yourself → assemble again
-     (`write draft --dry-run`), run the changed text through the critic
-     (steps d and e), and only then `write accept` with it on stdin. Your
+     to a file (step a, `write draft --dry-run --out`), run the changed
+     text through the critic (steps d and e), and only then `write accept` with it on stdin. Your
      own wording of their note is not their dictation. Their dictated words
      stay exempt, and a sentence they approved stands against the critic.
    - reject → `authorlm write reject --reason "<their why, verbatim>"` —
