@@ -2155,12 +2155,27 @@ def _holds_doc_edits(local: str, base: str, doc: str) -> bool:
     removed does not still appear more often locally than in the Doc.
     Blank lines are not counted. Counts matter — a repeated line the
     Doc added (or deleted) once is not "held" just because another copy
-    remains elsewhere (2026-10-27). A push of such a file loses nothing
-    of the Doc's."""
+    remains elsewhere (2026-10-27). Order matters too: a Doc-only
+    paragraph reorder leaves the bag of lines unchanged, and a push that
+    treated that as held wrote the local order back over the tab
+    (2026-11-01). Shared lines must keep the Doc's relative order in
+    the local file. A push of such a file loses nothing of the Doc's."""
     from collections import Counter
 
     def counts(text: str) -> Counter:
         return Counter(line for line in text.splitlines() if line.strip())
+
+    def nonblank(text: str) -> list[str]:
+        return [line for line in text.splitlines() if line.strip()]
+
+    def projection(seq: list[str], bag: Counter) -> list[str]:
+        have = Counter(bag)
+        out: list[str] = []
+        for line in seq:
+            if have[line] > 0:
+                out.append(line)
+                have[line] -= 1
+        return out
 
     base_c, doc_c, local_c = counts(base), counts(doc), counts(local)
     for line in set(base_c) | set(doc_c):
@@ -2169,7 +2184,11 @@ def _holds_doc_edits(local: str, base: str, doc: str) -> bool:
             return False
         if d < b and loc > d:
             return False
-    return True
+    # Same bag of shared lines in a different order is a Doc edit the
+    # counts above do not see (paragraph reorder in the tab).
+    common = doc_c & local_c
+    return projection(nonblank(doc), common) == projection(
+        nonblank(local), common)
 
 
 def unchanged_since_push(db: Database, manuscript: dict, query: str,
