@@ -3213,12 +3213,12 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
                 f"delete it in the Doc" for n in remnant]
         if marker_warns:
             report.setdefault("marker_warnings", {})[relpath] = marker_warns
-        # A form in the tab that lost a marker (`<<old>>{{new` with no
-        # closing `}}`) collapses to nothing a reader can trust: writing it
+        # A form in the tab that lost a marker (`<<old>>{{new` or a
+        # paragraph `{{new` with no closing `}}`) collapses to nothing a reader can trust: writing it
         # put the markers into the manuscript. The file is left as it is
         # and named, until the form is mended or removed in the Doc
         # (2026-10-30, discernment.md).
-        if threads_mod.has_stray_replace_markers(text):
+        if threads_mod.has_broken_forms(text):
             report.setdefault("unterminated", []).append(relpath)
             continue
         path = bridge.root / relpath

@@ -128,13 +128,23 @@ def render_insertion(new: str) -> str:
 # Critique insertions are paragraph forms (compose joins with blank
 # lines; head inserts sit at the start of the marked text). Inline
 # `{{…}}` is author prose once a manuscript has been pushed into a tab.
-_INSERTION_PARA = re.compile(r"\n\s*\n(?<![>}])\{\{(?P<new>.*?)\}\}(?=\s*\n|\Z)",
-                             re.DOTALL)
+# Their new half is bounded like every form's (`_IN_FORM`): one that lost
+# its `}}` stops short of the next form and stays in the text, where
+# `_UNCLOSED_INSERTION` finds it (#331).
+_INSERTION_PARA = re.compile(
+    r"\n\s*\n(?<![>}])\{\{(?P<new>" + _IN_FORM + r")\}\}(?=\s*\n|\Z)",
+    re.DOTALL)
 # Start-of-text insertions include the following blank-line separator
 # so dropping them leaves no leading `\n\n` residue (compose may stack
 # several head inserts before the first live paragraph).
 _INSERTION_START = re.compile(
-    r"\A\s*\{\{(?P<new>.*?)\}\}(?:(?:\s*\n)+|\Z)", re.DOTALL)
+    r"\A\s*\{\{(?P<new>" + _IN_FORM + r")\}\}(?:(?:\s*\n)+|\Z)",
+    re.DOTALL)
+# A paragraph-opening `{{` with no `}}` before the next form or the end:
+# an insertion that lost its closer. Author braces close.
+_UNCLOSED_INSERTION = re.compile(
+    r"(?:\A|\n\s*\n)\s*\{\{(?:(?!<<|\{\{|\}\}).)*(?:\Z|(?=<<|\{\{))",
+    re.DOTALL)
 # TeX math spans: `$$…$$` display (own line or not) and `$…$` inline.
 # Set notation inside them (`{{-q,+q},{-q-p,+q+p}}`) is the author's and
 # is never a form, whatever line it sits on. Display first so `$$` is
@@ -210,10 +220,15 @@ def strip_pending(text: str) -> tuple[str, list[str]]:
     return stripped, warnings
 
 
-def has_stray_replace_markers(text: str) -> bool:
+def has_broken_forms(text: str) -> bool:
     """True when `text` (already through `strip_pending`) still holds a
-    `<<` or `>>`: a replace form that lost a marker."""
-    return bool(_REPLACE_MARKER.search(text))
+    form that lost a marker: a stray `<<` or `>>`, or a paragraph
+    insertion whose `{{` never closes. Math is never a form."""
+    if _REPLACE_MARKER.search(text):
+        return True
+    spans = math_spans(text)
+    return any(not in_math(text, text.index("{{", m.start()), spans)
+               for m in _UNCLOSED_INSERTION.finditer(text))
 
 
 def form_remnants(text: str, news) -> list[tuple[int, str]]:

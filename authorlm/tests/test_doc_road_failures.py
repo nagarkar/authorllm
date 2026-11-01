@@ -290,6 +290,31 @@ def unterminated_decide(root: Path) -> None:
            and "Habit carries discernment forward.[^D2]" in text, text)
 
 
+@scenario("3d unterminated insertion: pull keeps the text between forms")
+def unterminated_insertion_pull(root: Path) -> None:
+    # PR #326 review (#331): a paragraph insertion that lost its `}}`
+    # reached the next insertion's closer, and the author's paragraph
+    # between them collapsed out of the pull with no warning.
+    ws, db, manuscript, ms, fake = _fixture(
+        root, "s3d", ESSAY, fake_cls=_GoogleFake)
+    fake.edit("tab-2", "Now consider the other side.",
+              "{{A new paragraph that lost its closer.\n\n"
+              "Now consider the other side.")
+    fake.edit("tab-2", "The question is always the same.",
+              "{{A second new paragraph.}}\n\n"
+              "The question is always the same.")
+    rep = gdocs.pull_doc(db, manuscript, query="solo.md", service=fake,
+                         docs_service=fake, with_comments=False)
+    text = (ms / "solo.md").read_text()
+    expect("the local file keeps the paragraph between the insertions "
+           "and takes no marker",
+           "Now consider the other side." in text
+           and "{{" not in text and "}}" not in text, text)
+    expect("the pull names the file whose tab holds the broken insertion",
+           "solo.md" in rep.get("unterminated", []),
+           json.dumps(rep, default=str))
+
+
 @scenario("3c unterminated form: doc merge keeps the text")
 def unterminated_merge(root: Path) -> None:
     ws, db, manuscript, ms, fake, essay = _unterminated(root, "s3c")
@@ -378,6 +403,7 @@ def main() -> int:
     try:
         for fn in (all_accepted, dot_thread, modified_declined,
                    held_then_resolve, unterminated_pull, unterminated_decide,
+                   unterminated_insertion_pull,
                    unterminated_merge, merge_images, push_after_cleaned,
                    push_after_stale):
             fn(root)
