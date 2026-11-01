@@ -608,6 +608,12 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
 Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
 
+## `tests.test_audio_section_ids`
+
+`authorlm/tests/test_audio_section_ids.py`
+
+`audio.section_id` / `silence_id` / `applicable_rules` are the paid audio cache keys.
+
 ## `tests.test_audio_voice_config`
 
 `authorlm/tests/test_audio_voice_config.py`
@@ -662,6 +668,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 The Doc-road fake checked against Google: every snapshot recorded live by tests/doc_road_live.py (a full documents.get and the markdown export of the same revision) is rebuilt in `_GoogleFake` from the recorded tab content, exported by the fake, and compared, tab by tab, with what Google exported. A difference means the fake no longer renders the way Google does: re-record (`python3 tests/doc_road_live.py --record`) and bring `_GoogleFake` back in line.
 
+## `tests.test_doc_filename`
+
+`authorlm/tests/test_doc_filename.py`
+
+`docs.doc_filename` is the only sanitizer `add_doc` uses for new chapter paths. Unsafe characters become hyphens, whitespace collapses, empty names refuse, and a missing extension becomes `.md`. Existing suites only call `add_doc` with already-safe names, so a regression here would land files with `/` or `#` in the path (or accept a blank title).
+
 ## `tests.test_doc_freshness`
 
 `authorlm/tests/test_doc_freshness.py`
@@ -692,11 +704,29 @@ Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, 
 
 End-to-end test of every MVP use case, driven through the real CLI.
 
+## `tests.test_effective_style`
+
+`authorlm/tests/test_effective_style.py`
+
+`styles.effective_style` (and `guide_chain`) compose ratified law into drafting prompts with no model in the loop. Wrong override / retire / chain math injects or drops binding law.
+
 ## `tests.test_essay_summaries`
 
 `authorlm/tests/test_essay_summaries.py`
 
 Summary hierarchy, step 4 (docs/summary-hierarchy-design.md §3.4, §4.5, §6.6, §11.4): the essay-summary pass. The essay is composed from its section summaries (never the text) and the prior essay summaries; the model writes FLOW, MOVES, MOTIFS, DOES NOT and code derives INTRODUCES, ASSUMES, PROMISES, DEBTS from the paragraph records and renders them under those labels; `sections_hash` tells "my sections changed"; `ensure(level="essay")` rebuilds the two lower levels first and prints one cost line per level; the structural coverage check replaces the paragraph citation parser. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `essay-summary` section.
+
+## `tests.test_export_escapes`
+
+`authorlm/tests/test_export_escapes.py`
+
+PDF running heads and settings.toml round-trips depend on two tiny escapers in `export.py`. Neither had a direct test: a title with `%` or `_` would break LaTeX mid-build, and a setting value with `"` or `\` would corrupt `_exports/settings.toml` on the next `export set`.
+
+## `tests.test_export_filename`
+
+`authorlm/tests/test_export_filename.py`
+
+`export.export_filename` sanitizes the combined-export basename.
 
 ## `tests.test_export_upload`
 
@@ -740,6 +770,12 @@ The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, �
 
 `filtering.reply_json` is the first parser every pasted filter reply goes through (registry prelude, pronunciation prelude, filter record).
 
+## `tests.test_filtered_prefix`
+
+`authorlm/tests/test_filtered_prefix.py`
+
+`filtering.filtered_prefix` is the autoregressive conditioning block for sequential filter runs: later windows must see THIS RUN's rewrites of earlier units, not the original manuscript text.
+
 ## `tests.test_findings_edit_entry`
 
 `authorlm/tests/test_findings_edit_entry.py`
@@ -770,11 +806,23 @@ docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generat
 
 Retake must not destroy a good paragraph take when the write fails mid-flight.
 
+## `tests.test_has_broken_forms`
+
+`authorlm/tests/test_has_broken_forms.py`
+
+`threads.has_broken_forms` is the pull/skip gate for marker corruption.
+
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`
 
 Interlocutor tests (docs/interlocutor-design.md).
+
+## `tests.test_is_heading`
+
+`authorlm/tests/test_is_heading.py`
+
+`filtering.is_heading` labels markdown heading units in the filter prompt so the model can leave titles alone.
 
 ## `tests.test_live_llm`
 
@@ -793,6 +841,12 @@ Proposal learning loop — firewall, screen, distillation, retraction.
 `authorlm/tests/test_media.py`
 
 Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
+
+## `tests.test_mint_name`
+
+`authorlm/tests/test_mint_name.py`
+
+`media.parse_sections` / `brief_terms` / `_mint_name` turn clip tag bodies into stable keys and search terms.
 
 ## `tests.test_morph_targets`
 
@@ -817,6 +871,12 @@ Regression: spaced CommonMark thematic breaks must survive normalize.
 `authorlm/tests/test_paragraph_records.py`
 
 Summary hierarchy, step 2 (docs/summary-hierarchy-design.md §3.2, §3.5, §4.5, §11.2): the paragraph-records pass. One call per heading section, headings with no call, the span check counted in the build report, the 24,000-character split, lazy rebuild of dirty rows only, and the one cost line. A fake LLM throughout; the live recording is tests/test_live_llm.py's `paragraph-records` section.
+
+## `tests.test_parse_prelude`
+
+`authorlm/tests/test_parse_prelude.py`
+
+`filtering.parse_prelude` freezes the motif registry for a global filter run. Every later unit is judged against that opaque string.
 
 ## `tests.test_passes`
 
@@ -848,6 +908,12 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
 Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5, §11.3): the section-summary pass. One call per section with the text as authority and the paragraph records as skeleton, conditioned on the earlier sections' POINT lines; MOVES coverage as set equality on the body paragraphs, misses reported; heading-only sections stored with no call; `ensure(level="section")` rebuilds the paragraph level first and prints one cost line per level. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `section-summary` section.
 
+## `tests.test_select_chapters`
+
+`authorlm/tests/test_select_chapters.py`
+
+`structure.select_chapters` is the part-build / interlocutor door that turns a named parent into that part plus its TOC descendants.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
@@ -872,6 +938,12 @@ Essay summaries (critique-pass design §4; summary-hierarchy design §3.4): read
 
 Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): paragraph kinds, content hashes, section hashes, the two new tables, freshness derived at read time, and the read API over current rows. No model call anywhere in this suite.
 
+## `tests.test_threads_reply_unstrike`
+
+`authorlm/tests/test_threads_reply_unstrike.py`
+
+Margin-thread reply law and Doc-export strike peel.
+
 ## `tests.test_toc_outside`
 
 `authorlm/tests/test_toc_outside.py`
@@ -889,6 +961,12 @@ _No docstring._
 `authorlm/tests/test_write_accept_idempotent.py`
 
 write_accept must not duplicate a beat after a crash mid-accept.
+
+## `tests.test_writing_parse_reply`
+
+`authorlm/tests/test_writing_parse_reply.py`
+
+`writing.parse_reply` is the beat-draft door. It accepts exactly two shapes: ordered WHY / SELF-CHECK / DRAFT, or a leading BLOCKED (optional QUESTION). Mis-ordered labels and a reply in neither shape must refuse; a bare BLOCKED line AFTER DRAFT must stay manuscript prose.
 
 ## `tools.bootstrap_beliefs`
 
