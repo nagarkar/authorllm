@@ -292,7 +292,8 @@ not re-ask at each beat.
    that matters, because those ride along with every future writeup.
 
 2. **Plan.** Expand the outline into beat specs conversationally
-   (`{"role", "concepts", "budget", "notes"}` each); after the author
+   (`{"role", "concepts", "budget", "notes"}` each; the budget counts prose
+   only, never footnotes); after the author
    RATIFIES, persist: `authorlm write plan` with the JSON array on stdin.
    **PRESENT the plan as a numbered READING, and say plainly what you are
    asking for.** The author's words on the old presentation: *"This is
