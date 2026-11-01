@@ -159,17 +159,40 @@ class Session:
         chapter = gen.load_chapter(self.root, gen.load_book(self.root), stem)
         return chapter, [chapter["file"], *chapter.get("continuations", [])]
 
+    def _locate(self, stem: str, section_id: str) -> tuple[dict, dict, dict | None]:
+        """Resolve a card to its raw markdown block. Match is by section
+        id (voice + pronunciations + text), not spoken text alone — two
+        identical lines under different `[Voice:]` tags are different
+        cards (2026-11-01)."""
+        chapter, names = self._chapter_files(stem)
+        speech = next((s for s in gen.speech_of(chapter) if s["id"] == section_id),
+                      None)
+        if speech is None:
+            raise LookupError(f"no paragraph {section_id} in {stem}")
+        root = Path(self.manuscript["path"])
+        config = audio.load_config(root)
+        cast, _ = audio.load_cast(root, config)
+        text_default = config["text"]["voice"]
+        chapter_voices = {c["file"]: c["voice"]
+                          for c in config.get("chapter", [])}
+        defaults = {
+            chapter["file"]: chapter.get("voiceDefault") or text_default,
+            **{n: chapter_voices.get(n, text_default)
+               for n in chapter.get("continuations", [])},
+        }
+        pron_path = root / audio.pron.FILENAME
+        rules = audio.pronunciation_rules(
+            pron_path.read_text(encoding="utf-8") if pron_path.exists() else "")
+        found = audio.locate_block(
+            root, names, config, speech["text"], speech.get("kind", "paragraph"),
+            want_id=section_id, cast=cast, default_keys=defaults, rules=rules)
+        return chapter, speech, found
+
     def source(self, stem: str, section_id: str) -> dict:
         """The raw markdown behind one card, for the edit box: `{file,
         line, markdown}`. Refuses by name when no block of the chapter's
         files says the section whole (then the file is the place to edit)."""
-        chapter, names = self._chapter_files(stem)
-        speech = next((s for s in gen.speech_of(chapter) if s["id"] == section_id), None)
-        if speech is None:
-            raise LookupError(f"no paragraph {section_id} in {stem}")
-        root = Path(self.manuscript["path"])
-        found = audio.locate_block(root, names, audio.load_config(root),
-                                   speech["text"], speech.get("kind", "paragraph"))
+        chapter, _speech, found = self._locate(stem, section_id)
         if found is None:
             raise LookupError(f"¶ {gen.ordinal_of(chapter, section_id)} of {stem} is "
                               "not one block of the file (a tag the audio strips, "
@@ -183,16 +206,11 @@ class Session:
         on the next play, and its take waits for a Generate tap. The
         paragraph is relocated now, not when the box opened: a save after
         the file moved underneath is refused, never written blind."""
-        chapter, names = self._chapter_files(stem)
-        speech = next((s for s in gen.speech_of(chapter) if s["id"] == section_id), None)
-        if speech is None:
-            raise LookupError(f"no paragraph {section_id} in {stem}")
-        root = Path(self.manuscript["path"])
-        found = audio.locate_block(root, names, audio.load_config(root),
-                                   speech["text"], speech.get("kind", "paragraph"))
+        chapter, _speech, found = self._locate(stem, section_id)
         if found is None:
             raise LookupError(f"¶ {gen.ordinal_of(chapter, section_id)} of {stem} "
                               "has changed on disk — reload and edit again")
+        root = Path(self.manuscript["path"])
         if markdown.replace("\r\n", "\n").strip("\n") == found["markdown"]:
             return {"file": found["file"], "line": found["line"], "changed": False,
                     "job": None}

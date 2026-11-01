@@ -848,27 +848,62 @@ def chapter_sections(name: str, source: str, config: dict,
 # ---------------------------------------------------- editing on the page
 
 def locate_block(root: Path, names: list[str], config: dict, spoken: str,
-                 kind: str) -> dict | None:
+                 kind: str, *, want_id: str | None = None,
+                 cast: dict[str, dict] | None = None,
+                 default_keys: dict[str, str] | None = None,
+                 rules: list[dict] | None = None) -> dict | None:
     """The raw markdown block behind one speech section, for the page's
     on-the-spot edit (author's ask 2026-10-26: "fix problems while I'm
     listening"). The export's line numbers count the pre-passed text
-    (regions resolved, tag lines gone), so a section is found by what it
-    says: the first block of `names` (the chapter file and its
-    continuations) whose spoken form is `spoken`. Returns
-    `{file, line, lines, markdown}` or None when no block says it whole
-    — a paragraph carrying an inline tag the audio strips, a list read
-    one item at a time."""
+    (regions resolved, tag lines gone), so a section is found by walking
+    `names` (the chapter file and its continuations) the way
+    `chapter_sections` does.
+
+    When `want_id` is set (the card's section id), the match is on that
+    id — spoken text alone is not enough: two paragraphs that say the
+    same words under different `[Voice:]` tags are different cards, and
+    a first-spoken hit used to rewrite the earlier one (2026-11-01).
+    `cast`, `default_keys` (file → cast key; each file starts fresh, as
+    build does), and `rules` are required for the id walk.
+
+    Without `want_id`, the first block whose spoken form is `spoken`
+    wins (legacy). Returns `{file, line, lines, markdown}` or None when
+    no block says it whole — a paragraph carrying an inline tag the
+    audio strips, or (without `want_id`) a list read one item at a time.
+    """
     from .export import _REGION_CLOSE, _REGION_OPEN
 
     def is_tag(line: str) -> bool:
         return bool(_REGION_OPEN.match(line) or _REGION_CLOSE.match(line))
+
+    by_id = want_id is not None
+    if by_id and (cast is None or default_keys is None):
+        raise AudioError("locate_block(want_id=…) needs cast and default_keys")
+    rules = rules or []
+    heading_policy = config["headings"]["voice"]
+    one_per_item = config["text"]["lists"] == "one-per-item"
 
     for name in names:
         path = root / name
         if not path.exists():
             continue
         raw_lines = path.read_text(encoding="utf-8").split("\n")
+        # Each file starts on its own default voice (build → chapter_sections),
+        # never carrying a prior file's [Voice:] across a continuation.
+        current_key = (default_keys.get(name) or config["text"]["voice"]
+                       if by_id else "")
+        current_over: dict = {}
         for block in blocks_of("\n".join(raw_lines)):
+            if by_id and block["kind"] == "voice":
+                tag = parse_voice_tag(block["text"].strip())
+                if block["text"].count("\n"):
+                    continue
+                try:
+                    _resolve_voice(cast, tag["key"], {}, f"{name}:{block['line']}")
+                except AudioError:
+                    continue
+                current_key, current_over = tag["key"], tag["overrides"]
+                continue
             if block["kind"] in ("voice", "footnote", "illustration", "rule"):
                 continue
             count = block["text"].count("\n") + 1
@@ -880,11 +915,66 @@ def locate_block(root: Path, names: list[str], config: dict, spoken: str,
             if not prose.strip():
                 continue
             inner_kind, extra = _block_kind(prose)
-            inner = {"kind": inner_kind, "line": block["line"], "text": prose, **extra}
-            if (inner["kind"] == "heading") != (kind == "heading"):
-                continue
+            inner = {"kind": inner_kind, "line": block["line"], "text": prose,
+                     **extra}
             if inner["kind"] == "heading":
                 inner["text_heading"] = inner["text"]
+
+            if by_id:
+                where = f"{name}:{block['line']}"
+                if inner["kind"] == "heading":
+                    # Headings reset the cast to the file default (§5.3).
+                    current_key, current_over = (
+                        default_keys.get(name) or config["text"]["voice"], {})
+                    key = (current_key if heading_policy == "essay-default"
+                           else heading_policy)
+                    try:
+                        voice = _resolve_voice(cast, key, {}, where)
+                        said, _w = _spoken(inner, config)
+                    except AudioError:
+                        continue
+                    if (kind == "heading" and said and section_id(
+                            said, voice, applicable_rules(said, rules)
+                    ) == want_id):
+                        return {"file": name, "line": block["line"],
+                                "lines": count, "markdown": "\n".join(raw)}
+                    continue
+                if kind == "heading":
+                    continue
+                try:
+                    voice = _resolve_voice(cast, current_key, current_over,
+                                           where)
+                except AudioError:
+                    continue
+                if inner["kind"] == "list" and one_per_item:
+                    items = [_LIST_ITEM.sub("", ln).strip()
+                             for ln in prose.split("\n") if ln.strip()]
+                    for i, item in enumerate(items):
+                        try:
+                            said, _w = speech_text(item, config)
+                        except AudioError:
+                            continue
+                        if said and section_id(
+                                said, voice, applicable_rules(said, rules)
+                        ) == want_id:
+                            # One list line is the card; rewrite only it.
+                            line = block["line"] + i
+                            return {"file": name, "line": line, "lines": 1,
+                                    "markdown": raw_lines[line - 1]}
+                    continue
+                try:
+                    said, _w = _spoken(inner, config)
+                except AudioError:
+                    continue
+                if said and section_id(
+                        said, voice, applicable_rules(said, rules)
+                ) == want_id:
+                    return {"file": name, "line": block["line"],
+                            "lines": count, "markdown": "\n".join(raw)}
+                continue
+
+            if (inner["kind"] == "heading") != (kind == "heading"):
+                continue
             try:
                 said, _w = _spoken(inner, config)
             except AudioError:
