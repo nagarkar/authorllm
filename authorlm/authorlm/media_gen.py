@@ -29,6 +29,7 @@ clip's current ones is stale (`takes`). Nothing regenerates by itself.
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -187,12 +188,27 @@ def _chosen_map(root: Path) -> dict:
 
 
 def _set_chosen(root: Path, key: str, name: str) -> None:
+    """Record the chosen take for `key` in `_clips/chosen.json`.
+
+    The map is one file for every clip. A plain read-modify-write lost
+    concurrent picks/auto-chooses for other keys (two polls finishing
+    together, or pick beside an auto-choose). Lock, re-read, then
+    sibling `.tmp` + replace so one writer cannot drop another's entry
+    or leave a half-written JSON."""
     path = Path(root) / media.CLIPS_DIR / CHOSEN_FILE
-    data = _chosen_map(root)
-    data[key] = name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n",
-                    encoding="utf-8")
+    lock_path = path.with_name(CHOSEN_FILE + ".lock")
+    with open(lock_path, "a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            data = _chosen_map(root)
+            data[key] = name
+            tmp = path.with_name(CHOSEN_FILE + ".tmp")
+            tmp.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n",
+                           encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def chosen(root: Path, key: str) -> str | None:
