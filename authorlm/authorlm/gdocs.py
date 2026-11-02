@@ -1520,8 +1520,15 @@ def _plain(line: str) -> str:
 # Prefix match for `_split_by_anchors` only when the Docs-API first
 # paragraph is this long: a short needle like "Yes." is a prefix of any
 # longer line that opens with it ("Yes. This is still…") and pulled the
-# rest of the prior tab into the next one (2026-10-27). Exact match
-# always wins; below this length a missed soft-break join stays missing.
+# rest of the prior tab into the next one (2026-10-27). Below this
+# length an exact match is accepted only when unique in the remaining
+# export (a dialogue "Yes." mid prior chapter plus the next tab opening
+# on "Yes." stole via first-hit; 2026-10-30); a missed soft-break join
+# stays missing. Long exact and long prefix hits use the same
+# uniqueness gate: a restated thesis of 40+ chars mid prior chapter
+# plus the next tab opening on that same sentence (or a soft-joined
+# line that only shares the Docs-API opener as a prefix) also stole
+# via first-hit (2026-11-02).
 _ANCHOR_PREFIX_MIN = 40
 
 
@@ -1538,7 +1545,12 @@ def _split_by_anchors(text: str, order: list[str],
     opener steal mid-chapter lines that only shared that prefix
     (2026-10-29). The length floor closes the same door for a short
     anchor like "Yes.", which is a prefix of any line that opens with it
-    (2026-10-27)."""
+    (2026-10-27). An exact or long-prefix needle must also be unique in
+    the remaining export: first-hit on a mid-chapter line that matched
+    the next tab's opener (short dialogue, restated long thesis, or a
+    soft-joined line sharing only the Docs-API prefix) stole the rest
+    of the prior tab (2026-10-30 / 2026-11-02); ambiguous anchors stay
+    missing (loud) instead."""
     lines = text.splitlines()
     plain = [_plain(l) for l in lines]
     starts: list[tuple[int, str]] = []
@@ -1549,13 +1561,18 @@ def _split_by_anchors(text: str, order: list[str],
         if not want:
             empty.append(title)
             continue
-        for i in range(pos, len(lines)):
-            p = plain[i]
-            if p and (p == want or (len(want) >= _ANCHOR_PREFIX_MIN
-                                    and p.startswith(want))):
-                starts.append((i, title))
-                pos = i + 1
-                break
+        hit: int | None = None
+        exact = [j for j in range(pos, len(plain)) if plain[j] == want]
+        if len(exact) == 1:
+            hit = exact[0]
+        elif not exact and len(want) >= _ANCHOR_PREFIX_MIN:
+            prefixed = [j for j in range(pos, len(plain))
+                        if plain[j] and plain[j].startswith(want)]
+            if len(prefixed) == 1:
+                hit = prefixed[0]
+        if hit is not None:
+            starts.append((hit, title))
+            pos = hit + 1
     out = {t: "\n" for t in empty}
     for k, (i, title) in enumerate(starts):
         end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
@@ -3567,6 +3584,22 @@ def reconcile(db: Database, manuscript: dict, service,
             # Pending margin-thread spans are review state, not content:
             # canonical comparison uses the old half on the Doc side too.
             doc_text, _ = threads_mod.strip_pending(doc_text)
+            # Same remnant + broken-form gate as pull_doc: a `}}` left
+            # from a hand-resolved form of this file is not prose, and a
+            # form that lost a marker must not auto-pull into the local
+            # file (2026-11-02: session-start reconcile wrote
+            # `{{unterminated…` into the manuscript after #331 taught
+            # pull_doc to refuse the same tab).
+            doc_text, _ = threads_mod.strip_form_remnants(
+                doc_text, form_news(db, manuscript["id"], relpath))
+            if threads_mod.has_broken_forms(doc_text):
+                report["errors"].append({
+                    "file": relpath,
+                    "error": "tab has a form that lost a marker "
+                             "(<<, >>, {{ or }}); local file left "
+                             "untouched — mend or remove it in the Doc, "
+                             "then pull"})
+                continue
             path = Path(manuscript["path"]) / relpath
             local_raw = (path.read_text(encoding="utf-8")
                          if path.exists() else "")

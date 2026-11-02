@@ -65,6 +65,98 @@ def test_long_anchor_prefix_still_matches() -> None:
           out)
 
 
+def test_ambiguous_long_exact_stays_missing() -> None:
+    # A restated thesis (≥40 plain chars) mid chapter A equals B's
+    # opener. First-hit used to start B at the restatement and
+    # pull-overwrite both local files; refuse instead (loud missing).
+    thesis = (
+        "When the will chooses under full information, the act is free."
+    )
+    assert len(thesis) >= 40, thesis
+    text = (
+        "Opening of chapter one about agency.\n\n"
+        "Body of chapter one continues with careful argument.\n\n"
+        f"{thesis}\n\n"
+        "More of chapter one after restating the claim.\n\n"
+        f"{thesis}\n\n"
+        "Body of chapter two develops the claim further.\n"
+    )
+    out = _split_by_anchors(
+        text, ["a.md", "b.md"],
+        {"a.md": "Opening of chapter one about agency.",
+         "b.md": thesis},
+    )
+    check("ambiguous long exact does not invent a boundary",
+          "b.md" not in out, out)
+    check("first-hit theft did not truncate A before the restatement",
+          "More of chapter one after restating the claim."
+          in out.get("a.md", ""),
+          out.get("a.md"))
+
+
+def test_ambiguous_long_prefix_stays_missing() -> None:
+    # Docs-API opener is a proper prefix of both a mid-A line and B's
+    # soft-joined export line. First startswith hit stole A's body.
+    prefix = "Opening of two with a long first paragraph that is distinctive"
+    assert len(prefix) >= 40, prefix
+    text = (
+        "Opening of one.\n\n"
+        f"{prefix} continues inside chapter one mid-body.\n\n"
+        "Rest of one.\n\n"
+        f"{prefix} that continues.\n\n"
+        "Body of two.\n"
+    )
+    out = _split_by_anchors(
+        text, ["one.md", "two.md"],
+        {"one.md": "Opening of one.", "two.md": prefix},
+    )
+    check("ambiguous long prefix does not invent a boundary",
+          "two.md" not in out, out)
+    check("mid-chapter prefixed line stays in one",
+          "continues inside chapter one mid-body." in out.get("one.md", ""),
+          out.get("one.md"))
+
+
+def test_ambiguous_short_exact_stays_missing() -> None:
+    # Two exact "Yes." lines in the remaining export: a mid-chapter
+    # dialogue in A and B's real opener. First-hit used to start B at
+    # the dialogue; refuse instead so pull reports the tab missing.
+    text = (
+        "Long opener of chapter one that is unique enough.\n\n"
+        "Body of chapter one continues here with dialogue.\n\n"
+        "Yes.\n\n"
+        "More of chapter one after the interjection about doubt.\n\n"
+        "Yes.\n\n"
+        "Body of chapter two after its short opener.\n"
+    )
+    out = _split_by_anchors(
+        text, ["a.md", "b.md"],
+        {"a.md": "Long opener of chapter one that is unique enough.",
+         "b.md": "Yes."},
+    )
+    check("ambiguous short exact does not invent a boundary",
+          "b.md" not in out, out)
+    check("first-hit theft did not truncate A before the dialogue",
+          "More of chapter one after the interjection about doubt."
+          in out.get("a.md", ""),
+          out.get("a.md"))
+
+
+def test_unique_short_exact_still_matches() -> None:
+    text = (
+        "Opening of A.\n\n"
+        "Body of A with no short twin.\n\n"
+        "Yes.\n\n"
+        "Real body of B.\n"
+    )
+    out = _split_by_anchors(text, ["a.md", "b.md"],
+                            {"a.md": "Opening of A.", "b.md": "Yes."})
+    check("unique short exact still finds the later tab",
+          out.get("b.md", "").startswith("Yes.\n")
+          and "Real body of B." in out.get("b.md", ""),
+          out.get("b.md"))
+
+
 def test_holds_rejects_duplicate_line_false_positive() -> None:
     base = "Alpha.\n\nBeta.\n\nGamma.\n"
     doc_add = "Alpha.\n\nBeta.\n\nBeta.\n\nGamma.\n"
@@ -93,6 +185,10 @@ def test_holds_settled_adjacent_edit() -> None:
 if __name__ == "__main__":
     test_short_anchor_does_not_steal_prior_tab()
     test_long_anchor_prefix_still_matches()
+    test_ambiguous_long_exact_stays_missing()
+    test_ambiguous_long_prefix_stays_missing()
+    test_ambiguous_short_exact_stays_missing()
+    test_unique_short_exact_still_matches()
     test_holds_rejects_duplicate_line_false_positive()
     test_holds_settled_adjacent_edit()
     print("ok")
