@@ -578,6 +578,12 @@ Canned replies for the three summary-hierarchy prompts, shared by the hermetic s
 
 Drive the Doc-road failure scenarios (test_doc_road_failures.py) against the LIVE Google API on the one fixture Doc, "AuthorLM test fixture: Doc road", and record every call into tests/doc_cache/.
 
+## `tests.test_alias_canonical_conflict`
+
+`authorlm/tests/test_alias_canonical_conflict.py`
+
+`proposals._content_hash` / `_alias_canonical_conflict` gate alias proposals before they reach the author's queue.
+
 ## `tests.test_anchor_prefix_truncation`
 
 `authorlm/tests/test_anchor_prefix_truncation.py`
@@ -595,6 +601,12 @@ Doc sync doors that silently corrupt when wrong.
 `authorlm/tests/test_api.py`
 
 API-layer tests + CLI/MCP parity checklist (P11).
+
+## `tests.test_apply_accepted`
+
+`authorlm/tests/test_apply_accepted.py`
+
+`staging.apply_accepted` is the local-road compose that turns accepted filter/critique threads into finished essay bytes.
 
 ## `tests.test_audio`
 
@@ -620,6 +632,12 @@ Issue #173: default voices are explicitly declared in audiobook.toml.
 
 Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
 
+## `tests.test_clamped_delta`
+
+`authorlm/tests/test_clamped_delta.py`
+
+`clients._clamped_delta` / `_scale_models` sit on the chat-usage discontinuity path: when a transcript file is replaced or truncated, the ledger must never invent negative spend and must never guess a per-model split of a clamped total.
+
 ## `tests.test_comment_context`
 
 `authorlm/tests/test_comment_context.py`
@@ -643,6 +661,12 @@ Continuation files: export setting `continuation_level`.
 `authorlm/tests/test_critique.py`
 
 Critique-pass tests (docs/critique-pass-design.md).
+
+## `tests.test_critique_dedupe_key`
+
+`authorlm/tests/test_critique_dedupe_key.py`
+
+`critique._dedupe_key` is the cross-source idempotency normalizer for critique import.
 
 ## `tests.test_doc_add_toc`
 
@@ -691,6 +715,12 @@ Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, 
 `authorlm/tests/test_e2e.py`
 
 End-to-end test of every MVP use case, driven through the real CLI.
+
+## `tests.test_episode_for_intent`
+
+`authorlm/tests/test_episode_for_intent.py`
+
+`sessions.episode_for_intent` must find an intent's open episode in ANY session, not only the current one.
 
 ## `tests.test_essay_summaries`
 
@@ -788,11 +818,41 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 
 Proposal learning loop — firewall, screen, distillation, retraction.
 
+## `tests.test_manuscript_metadata`
+
+`authorlm/tests/test_manuscript_metadata.py`
+
+Manuscript identity parsers for catalog / audiobook / export doors.
+
+## `tests.test_marker_liveness`
+
+`authorlm/tests/test_marker_liveness.py`
+
+Client session markers: liveness, host-id extraction, and clear.
+
 ## `tests.test_media`
 
 `authorlm/tests/test_media.py`
 
 Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
+
+## `tests.test_media_clip_keys`
+
+`authorlm/tests/test_media_clip_keys.py`
+
+Clip key minting rests on three pure helpers in `media.py`.
+
+## `tests.test_media_gen_desc_hash`
+
+`authorlm/tests/test_media_gen_desc_hash.py`
+
+`media_gen.desc_hash` names what shapes a Veo take on disk.
+
+## `tests.test_mentioned_in`
+
+`authorlm/tests/test_mentioned_in.py`
+
+`hygiene.mentioned_in` is the groundedness gate for concepts and edges.
 
 ## `tests.test_morph_targets`
 
@@ -806,6 +866,12 @@ Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and strippi
 
 Fenced code must survive normalize_markdown byte-for-byte.
 
+## `tests.test_normalize_isbn13`
+
+`authorlm/tests/test_normalize_isbn13.py`
+
+`api._normalize_isbn13` / `_validate_format_isbns` are the catalog identity door for every paperback/hardcover ISBN the CLI and MCP accept.
+
 ## `tests.test_normalize_thematic_break`
 
 `authorlm/tests/test_normalize_thematic_break.py`
@@ -817,6 +883,12 @@ Regression: spaced CommonMark thematic breaks must survive normalize.
 `authorlm/tests/test_paragraph_records.py`
 
 Summary hierarchy, step 2 (docs/summary-hierarchy-design.md §3.2, §3.5, §4.5, §11.2): the paragraph-records pass. One call per heading section, headings with no call, the span check counted in the build report, the 24,000-character split, lazy rebuild of dirty rows only, and the one cost line. A fake LLM throughout; the live recording is tests/test_live_llm.py's `paragraph-records` section.
+
+## `tests.test_parse_ts_sweep_markers`
+
+`authorlm/tests/test_parse_ts_sweep_markers.py`
+
+`clients._parse_ts` and `clients.sweep_markers` bound marker lifetime.
 
 ## `tests.test_passes`
 
@@ -842,6 +914,18 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_preview_voice_stamp`
+
+`authorlm/tests/test_preview_voice_stamp.py`
+
+Lazy-preview stamp and orphan sweep (#227).
+
+## `tests.test_resolve_pointers`
+
+`authorlm/tests/test_resolve_pointers.py`
+
+`lenses.resolve_pointers` decides which other chapters a lens INPUTS payload may pull in as pointed-to essays.
+
 ## `tests.test_section_summaries`
 
 `authorlm/tests/test_section_summaries.py`
@@ -860,6 +944,18 @@ Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5,
 
 The [Signature: uri] tag: plain text in the files, a signature block (image, author's name, export date) in every reader output, dropped from the audio-clean build. Run: python3 tests/test_signature_tag.py
 
+## `tests.test_stale_suggestions`
+
+`authorlm/tests/test_stale_suggestions.py`
+
+`hygiene.stale_suggestions` marks pending bridge / prerequisite guidance moot when collect later realizes the concept or closes the gap.
+
+## `tests.test_style_aspect_firewall`
+
+`authorlm/tests/test_style_aspect_firewall.py`
+
+Figure / illustration / illustration-placement must never cross prompts.
+
 ## `tests.test_summaries`
 
 `authorlm/tests/test_summaries.py`
@@ -872,6 +968,18 @@ Essay summaries (critique-pass design §4; summary-hierarchy design §3.4): read
 
 Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): paragraph kinds, content hashes, section hashes, the two new tables, freshness derived at read time, and the read API over current rows. No model call anywhere in this suite.
 
+## `tests.test_summary_of`
+
+`authorlm/tests/test_summary_of.py`
+
+`filters.summary_of` and `lenses.summary_of` are what `filter list` and `lens list` print for each artifact.
+
+## `tests.test_support_evidence_type`
+
+`authorlm/tests/test_support_evidence_type.py`
+
+`beliefs._support_evidence_type` is the INV-2 door between machine inference and author-originated evidence.
+
 ## `tests.test_toc_outside`
 
 `authorlm/tests/test_toc_outside.py`
@@ -883,6 +991,24 @@ toc.toml `outside`: Doc tabs that are not part of the book.
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_usage_four`
+
+`authorlm/tests/test_usage_four.py`
+
+`clients._four` coerces every JSONL usage object into the four counters the chat-usage sweep bills against.
+
+## `tests.test_usage_money`
+
+`authorlm/tests/test_usage_money.py`
+
+`usage._money` formats the cost column on every usage report row.
+
+## `tests.test_verse_poem_level`
+
+`authorlm/tests/test_verse_poem_level.py`
+
+`verse.poem_level` and `verse.heading_levels` decide where poems sit in a verse file and what the collect report warns about.
 
 ## `tests.test_write_accept_idempotent`
 
