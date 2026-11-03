@@ -8,6 +8,7 @@ Rules that span modules, from each package's `Decisions:`. Owner rules end with 
 
 - `authorlm.audio`: Export resolves explicitly configured per-paragraph voices from the manuscript's `_audio/audiobook.toml` and cast into the shared manifest; both consumers use those resolved parameters. Enforced by: tests/test_audio_voice_config.py::VoiceConfigTests::test_required_voice_fields_are_not_filled_in and tests/test_audio_voice_config.py::VoiceConfigTests::test_chapter_override_is_exact_file_without_inheritance. (owner)
 - `authorlm.audio`: Mac say previews and export do not require an ElevenLabs Voice ID; paid synthesis does. Explicit cast roles remain required. Enforced by tests/test_audio_preview_without_paid_voice.py. (owner)
+- `authorlm.gdocs`: A tab's anchor in the whole-Doc export is its opening heading (level and text), the split backs up over any epigraph paragraphs before it, and opening headings must be unique across tabs; the pull stops and names the pair otherwise. Why: first-paragraph anchors let a short dialogue line ("Yes.") steal the prior chapter's tail; a uniqueness gate over the whole export dropped tabs whose opener is echoed later. Enforced by: tests/test_anchor_split_and_holds.py::test_dialogue_line_is_not_an_anchor, tests/test_anchor_split_and_holds.py::test_epigraph_lands_in_its_own_tab, tests/test_anchor_split_and_holds.py::test_duplicate_opening_heading_stops_the_pull, tests/test_anchor_split_and_holds.py::test_tab_without_heading_stops_the_pull. (owner)
 
 ## Agent-drafted
 

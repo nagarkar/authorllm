@@ -3423,21 +3423,25 @@ def scenario_doc_comments(root: Path) -> None:
           and db.one("SELECT COUNT(*) AS n FROM doc_comments")["n"] == 2, "")
 
     # Google's export without tab titles (2026-10-26): split by each
-    # tab's first paragraph, in tab order.
+    # tab's opening heading, in tab order; a later echo of tab one's
+    # heading inside tab two is not a boundary.
     import authorlm.gdocs as gd0
     export = ("# **Part One**\n\nAlpha text.\n\n# **Part Two**\n\nBeta, with *italic*.\n\n"
               "# **Part One**\n\nA later heading that repeats tab one's.\n")
+    h1 = {"namedStyleType": "HEADING_1"}
     doc = {"tabs": [
         {"tabProperties": {"title": "one.md"}, "documentTab": {"body": {"content": [
             {"paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
-            {"paragraph": {"elements": [{"textRun": {"content": "Part One\n"}}]}}]}}},
+            {"paragraph": {"paragraphStyle": h1,
+                           "elements": [{"textRun": {"content": "Part One\n"}}]}}]}}},
         {"tabProperties": {"title": "two.md"}, "documentTab": {"body": {"content": [
-            {"paragraph": {"elements": [{"textRun": {"content": "Part Two\n"}}]}}]}}},
+            {"paragraph": {"paragraphStyle": h1,
+                           "elements": [{"textRun": {"content": "Part Two\n"}}]}}]}}},
         {"tabProperties": {"title": "empty.md"}, "documentTab": {"body": {"content": []}}}]}
     secs = gd0.split_tabbed_export(export, {"one.md", "two.md", "empty.md"},
                                    order=["one.md", "two.md", "empty.md"],
                                    anchors=gd0.tab_anchors(doc))
-    check("an export without tab titles splits by each tab's first paragraph",
+    check("an export without tab titles splits by each tab's opening heading",
           secs.get("one.md") == "# **Part One**\n\nAlpha text.\n"
           and secs.get("two.md", "").startswith("# **Part Two**")
           and "A later heading" in secs.get("two.md", "")
