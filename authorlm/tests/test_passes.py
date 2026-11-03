@@ -3885,21 +3885,18 @@ def _awkward_new_halves_through_the_doc(root: Path) -> None:
           "stripped",
           settle2["forms"] == 1 and "as the ledger records.[^3]" in final2
           and "\\[^3]" not in final2, final2)
-    print("  SKIPPED (live probe, no OAuth in this suite): whether "
-          "GOOGLE's markdown exporter re-emits a surgically INSERTED "
-          "`[^3]` unchanged. `normalize_markdown`'s _ESCAPE is what "
-          "makes the PUSHED round trip byte-clean; the inserted case is "
-          "outside that proof (design §4, RISK-2). Run it by hand: "
-          "`filter push` an essay whose new half carries [^3], then "
-          "`filter resolve`, and compare. If it fails, the disposition is "
-          "a per-thread refusal at push naming the local road — NOT an "
-          "escape, which would re-create §15.22's pipe-escape failure in "
-          "a new place.")
-    print("  SKIPPED (live probe, same reason): whether a blank line "
-          "inside a {{new}} half survives Docs' own paragraph handling "
-          "(RISK-3). The read-back proof is the arbiter either way, and "
-          "the disjunction above is what holds regardless of which side "
-          "the real Doc falls on.")
+    # `normalize_markdown`'s _ESCAPE is what makes the PUSHED round trip
+    # byte-clean; a surgically inserted `[^3]` is outside that proof (design
+    # §4, RISK-2). By hand: `filter push` an essay whose new half carries
+    # [^3], then `filter resolve`, and compare. If it fails, the push declines
+    # that thread and names the local road, NOT an escape, which would
+    # re-create §15.22's pipe-escape failure in a new place. For the blank
+    # line (RISK-3) the read-back proof is the arbiter either way, and the
+    # disjunction above holds whichever side the real Doc falls on.
+    print("  SKIP: live probe RISK-2, whether Google's markdown exporter "
+          "re-emits an inserted `[^3]` unchanged, no OAuth in this suite")
+    print("  SKIP: live probe RISK-3, whether a blank line inside a {{new}} "
+          "half survives Docs' paragraph handling, no OAuth in this suite")
 
 
 def _the_doc_road_through_the_cli(root: Path) -> None:

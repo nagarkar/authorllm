@@ -89,7 +89,7 @@ def main_test() -> None:
     check("a time without a timezone, or no time, is no date at all",
           parse("2026-10-30T17:40:00") is None and parse("") is None
           and parse("garbage") is None)
-    # The wiring: no token, so ensure_fresh skips with a one-line notice
+    # The wiring: no token, so ensure_fresh skips with one SKIP line
     # and reads neither the Doc nor the network.
     import contextlib
     import io
@@ -107,8 +107,10 @@ def main_test() -> None:
             action = fr.ensure_fresh()
     finally:
         fr.LOG, fr.TOKEN, fr.read_doc_time = saved
-    check("ensure_fresh with no token: 'skip' and one notice line",
+    check("ensure_fresh with no token: 'skip' and one SKIP line, which "
+          "tests/run_all.py reports",
           action == "skip" and out.getvalue().count("\n") == 1
+          and out.getvalue().strip().startswith("SKIP: ")
           and "no Google token" in out.getvalue(), out.getvalue())
     print(f"\nall checks passed ({PASSED})")
 

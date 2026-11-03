@@ -516,11 +516,13 @@ and the test suites report totals the same way.
 ## Testing
 
 ```bash
-# Hermetic (skip the live-billed LLM suite):
-for f in tests/test_*.py; do
-  [ "$f" = tests/test_live_llm.py ] || python3 "$f" || break
-done
+python3 tests/run_all.py        # every test file, a table per file, every skip named
+python3 tests/run_all.py --live # the same plus test_live_llm.py (bills for missing recordings)
+```
 
+One file at a time:
+
+```bash
 python3 tests/test_api.py       # API layer + CLI/MCP parity, hermetic
 python3 tests/test_e2e.py       # hermetic: stub LLM server, no network/keys
 python3 tests/test_loop.py      # proposal learning loop, hermetic (scripted LLM)

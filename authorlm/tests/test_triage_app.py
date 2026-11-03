@@ -66,6 +66,8 @@ from authorlm import (  # noqa: E402
 )
 from authorlm.db import Database, ko_fields  # noqa: E402
 
+BUILD_PAGES = "cd authorlm && python3 -c 'import setup; setup.build_pages()'"
+
 
 def manuscript_fixture(root: Path):
     manuscript_path = root / "book"
@@ -745,10 +747,18 @@ class HelpTabTest(unittest.TestCase):
 
     def _need_dist(self):
         """The dist is build output, not tracked in git: `pip install`
-        builds it (setup.py), and a fresh checkout has none until then."""
+        builds it (setup.py), and a fresh checkout has none until then.
+        Absent, it is a failure that names the fix, never a skip: the repo
+        can build it, so a run without it has not proved these checks."""
         if not self.DIST.is_file():
-            self.skipTest(f"{self.DIST} not built "
-                          "(cd web/triage-app && npm ci && npm run build)")
+            self.fail(f"{self.DIST} not built: run `{BUILD_PAGES}` "
+                      "(tests/run_all.py builds missing pages itself)")
+
+    def test_an_absent_dist_fails_and_names_the_command(self):
+        self.DIST = self.DIST.with_name("no-such-page.html")
+        with self.assertRaises(self.failureException) as caught:
+            self._need_dist()
+        self.assertIn(BUILD_PAGES, str(caught.exception))
 
     def test_canonical_tutorial_exists_and_is_substantial(self):
         self.assertTrue(self.DOC.is_file(), f"missing {self.DOC}")
