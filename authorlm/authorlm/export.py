@@ -745,11 +745,20 @@ def _latex_escape(text: str) -> str:
     return "".join(table.get(ch, ch) for ch in text)
 
 
+# KDP's standard paperback trim sizes, inches (width, height). A custom
+# size inside the accepted range still builds; the export only warns
+# that it is off the standard list, because a standard size is what
+# keeps the print run cheapest and the cover template available.
+KDP_TRIM_SIZES = (
+    (5, 8), (5.06, 7.81), (5.25, 8), (5.5, 8.5), (6, 9), (6.14, 9.21),
+    (6.69, 9.61), (7, 10), (7.44, 9.69), (7.5, 9.25), (8, 10),
+    (8.25, 6), (8.25, 8.25), (8.5, 8.5), (8.5, 11), (8.27, 11.69),
+)
+
+
 def kdp_checks(manuscript: dict, pages: int | None) -> list[str]:
     """What KDP will ask for that the build cannot supply on its own.
     Warnings, never refusals: the book still builds."""
-    from .api import KDP_TRIM_SIZES
-
     notes: list[str] = []
     trim = (float(manuscript.get("trim_width") or 0),
             float(manuscript.get("trim_height") or 0))
