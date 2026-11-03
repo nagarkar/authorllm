@@ -4206,7 +4206,7 @@ def scenario_shell_watch_obsidian(root: Path) -> None:
           and not (fake_home / ".authorlm" / "authorlm.db").exists(),
           home_result.stdout + home_result.stderr)
     setup_result = subprocess.run(
-        [sys.executable, "main.py", "setup", "--workspace", str(fake_home), "--yes"],
+        [sys.executable, "main.py", "setup", "--workspace", str(fake_home), "--no-questions"],
         env=home_env, capture_output=True, text=True, timeout=60,
         cwd=Path(__file__).resolve().parent.parent,
     )

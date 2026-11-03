@@ -87,8 +87,8 @@ once from the checkout:
 
 ```bash
 authorlm setup                                          # asks where
-authorlm setup --workspace ~/writing --yes              # no questions
-authorlm setup --workspace "/Volumes/Crucial X6/authorlm" --yes
+authorlm setup --workspace ~/writing --no-questions     # no questions
+authorlm setup --workspace "/Volumes/Crucial X6/authorlm" --no-questions
 ```
 
 This records `AUTHORLM_WORKSPACE=<dir>` in the checkout's gitignored
@@ -194,15 +194,15 @@ outstanding questions.
 | `shell` | Interactive authoring session: briefing, prefix-free commands, auto-collect watcher (`--no-watch`, `--debounce N`) |
 | `watch` | Standalone auto-collect on manuscript changes (Ctrl-C to stop) |
 | `export-obsidian` | Export the Concept Graph as wikilinked stub notes for Obsidian's graph view (`--dir` to override `_concepts/`) |
-| `setup [--workspace DIR] [--yes]` | Point this checkout at a workspace (recorded as `AUTHORLM_WORKSPACE` in `.env`) and create its database; asks where when `--workspace` is omitted |
+| `setup [--workspace DIR] [--no-questions]` | Point this checkout at a workspace (recorded as `AUTHORLM_WORKSPACE` in `.env`) and create its database; asks where when `--workspace` is omitted |
 | `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`. Never mines the Concept Graph; run `extract --native` when you want a fresh one. `--extraction off` registers a machine-kept manuscript with extraction switched off for good (`manuscript set --extraction on` later) |
 | `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, ISBN-13 fields, `--extraction on\|off`); the CLI and MCP tools share this record |
 | `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
 | `export <fmt> … --upload [--as-doc] [--drive-id ID]` | Also put the written file on Google Drive (the manuscript's folder); re-exporting replaces the same Drive file in place. `--as-doc` converts a DOCX to a Google Doc; `--drive-id` adopts a file already on Drive |
 | `export teleprompter --file F` | The passages the author reads on camera (clips marked `voice: author`) as a large-type `_exports/<stem>.teleprompter.docx` and `.txt`, labelled Intro / Outro |
 | `audio init/export/check` | The audiobook (docs/audiobook-pipeline-design.md): seed `_audio/audiobook.toml` and `cast.md` once; compile `audiobook.json` and `chapters/*.json` for the audiostation app (only what changed is rewritten; section ids hash text, voice and pronunciations so a change regenerates exactly what it touched); the readiness report from sources to generated state |
-| `audio voices/audition/cast set` | Free voice discovery with preview clips into an audition gallery (`--library` for the shared library); paid auditions on the book's own words (`--file F --paragraphs N-M`, cost confirmed first); write one row of `cast.md` |
-| `audio dictionary push` | `pronunciations.md` → the ElevenLabs dictionary named in `audiobook.toml`, append-only with replacement, after showing the plan |
+| `audio voices/audition/cast set` | Free voice discovery with preview clips into an audition gallery (`--library` for the shared library); paid auditions on the book's own words (`--file F --paragraphs N-M`; states the cost, and `--live` spends it); write one row of `cast.md` |
+| `audio dictionary push [--dry-run \| --live]` | Shows the plan from `pronunciations.md` to the ElevenLabs dictionary named in `audiobook.toml`; `--live` applies it, append-only with replacement |
 | `audio say <term> [--say S,S] [--cast K] [--dictionary] [--settle]` | The fast pronunciation loop from the terminal: the word's own sentence, in the voice that says it, with each respelling substituted inline as the alias rule would (no push); plays the clips; `--settle` writes the row |
 | `workbench [--port N] [--no-open]` | Serve the pronunciation workbench on a local port and open it, like `triage-app`: every word in the table (or a new one from the book), every voice that says it, a respelling box, Regenerate and listen per voice (the respelling, the voice's default with no rule, or via the pushed dictionary), Save to `pronunciations.md`, Remove a row (and its one remote rule) when the default sounds better, Push to ElevenLabs, Export. Built from `web/workbench/` into `authorlm/workbench_dist/` |
 | `audiostation [--dry-run]` | Open the audiostation studio on the manuscript's `_audio/` folder: a built `.app` bundle if there is one, else the dev server (`AUDIOSTATION_APP` overrides) |

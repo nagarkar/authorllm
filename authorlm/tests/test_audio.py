@@ -41,6 +41,7 @@ def _assert_offline() -> None:
         "test isolation broken: an ElevenLabs key is in the environment")
 
 
+import builtins
 import contextlib
 import io
 import json
@@ -709,6 +710,72 @@ def check_elevenlabs() -> None:
         check("the export carries the dictionary locator by name",
               built["book"]["pronunciationDictionary"]["versionId"] == "V7")
     finally:
+        shutil.rmtree(book, ignore_errors=True)
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+def check_live_is_the_go_ahead() -> None:
+    """Outbound and billed audio verbs preview by default and go ahead only
+    with --live; no terminal answer stands in for it (metalm guidelines/cli.md)."""
+    book = _book_copy()
+    ws, _out = _workspace(book)
+    log: list = []
+    real_client = audio.ElevenLabs
+
+    def fake_client(_key: str) -> audio.ElevenLabs:
+        return real_client("k", opener=_opener(log, {
+            "/pronunciation-dictionaries?": ({"pronunciation_dictionaries": []}, {}),
+            "/add-from-rules": ({"id": "D9", "version_id": "V9"}, {}),
+            "/text-to-speech/": (b"mp3-bytes", {"request-id": "R1"}),
+        }))
+
+    def no_question(_prompt: str = "") -> str:
+        raise AssertionError("a preview must not ask a question")
+
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    def writes() -> list:
+        return [entry for entry in log if entry[0] != "GET"]
+
+    real = audio.ElevenLabs, audio.api_key, sys.stdin, builtins.input
+    audio.ElevenLabs, audio.api_key = fake_client, lambda required=True: "k"
+    sys.stdin, builtins.input = Terminal(), no_question
+    base = ("-w", str(ws), "audio")
+    audition = (*base, "audition", "--cast", "the_dead", "--text", "Hear this.")
+    push = (*base, "dictionary", "push")
+    try:
+        for label, extra in (("by default", ()), ("with --dry-run", ("--dry-run",))):
+            out, code = run_cli(*push, *extra)
+            check(f"dictionary push {label} shows the plan and names --live",
+                  code == 0 and "Nothing pushed" in out and "--live" in out
+                  and "Dictionary" in out, out)
+            check(f"dictionary push {label} changes nothing remote",
+                  not writes(), str(log))
+            out, code = run_cli(*audition, *extra)
+            check(f"audition {label} states the cost and names --live",
+                  code == 0 and "ElevenLabs characters" in out
+                  and "Nothing rendered" in out and "--live" in out, out)
+            check(f"audition {label} bills nothing", not writes(), str(log))
+        for argv in (push, audition):
+            log.clear()
+            out, code = run_cli(*argv, "--live", "--dry-run")
+            check(f"--live with --dry-run is a usage error on {argv[3]}",
+                  code == 1 and "--live" in out and "--dry-run" in out
+                  and not log, out)
+        log.clear()
+        out, code = run_cli(*push, "--live")
+        check("dictionary push --live applies the plan",
+              code == 0 and "(created)" in out
+              and any(u.endswith("/add-from-rules") for _m, u, _b in writes()), out)
+        log.clear()
+        out, code = run_cli(*audition, "--live")
+        check("audition --live renders",
+              code == 0 and "the_dead:" in out
+              and any("/text-to-speech/" in u for _m, u, _b in writes()), out)
+    finally:
+        audio.ElevenLabs, audio.api_key, sys.stdin, builtins.input = real
         shutil.rmtree(book, ignore_errors=True)
         shutil.rmtree(ws, ignore_errors=True)
 
@@ -2032,6 +2099,7 @@ def main_test() -> None:
     check_fixture_and_hash()
     check_cli_and_refusals()
     check_elevenlabs()
+    check_live_is_the_go_ahead()
     check_dictionary_by_default()
     check_say()
     check_workbench()
