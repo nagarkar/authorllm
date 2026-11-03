@@ -695,6 +695,37 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(
             (clips / f"{key}-{desc}-{law}-99.mp4").read_bytes(), b"GOOD-99")
 
+    def test_set_chosen_keeps_sibling_keys_under_concurrent_writers(self):
+        """Two polls/picks for different keys must not drop each other's
+        chosen entry (chosen.json is one map for the whole manuscript)."""
+        import threading
+
+        (self.root / "_clips").mkdir(parents=True, exist_ok=True)
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def write(key: str, name: str) -> None:
+            try:
+                barrier.wait(timeout=2)
+                media_gen._set_chosen(self.root, key, name)
+            except BaseException as err:  # noqa: BLE001 — collect for assert
+                errors.append(err)
+
+        for _ in range(40):
+            chosen = self.root / "_clips" / "chosen.json"
+            if chosen.exists():
+                chosen.unlink()
+            t1 = threading.Thread(target=write, args=("alpha", "alpha-01.mp4"))
+            t2 = threading.Thread(target=write, args=("beta", "beta-01.mp4"))
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+            self.assertEqual(errors, [])
+            data = json.loads(chosen.read_text(encoding="utf-8"))
+            self.assertEqual(data.get("alpha"), "alpha-01.mp4", data)
+            self.assertEqual(data.get("beta"), "beta-01.mp4", data)
+
     # -- exports
 
     def test_strip_for_book(self):

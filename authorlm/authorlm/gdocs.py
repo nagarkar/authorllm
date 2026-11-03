@@ -3288,6 +3288,22 @@ def reconcile(db: Database, manuscript: dict, service,
             # Pending margin-thread spans are review state, not content:
             # canonical comparison uses the old half on the Doc side too.
             doc_text, _ = form_grammar.strip_pending(doc_text)
+            # Same remnant + broken-form gate as pull_doc: a `}}` left
+            # from a hand-resolved form of this file is not prose, and a
+            # form that lost a marker must not auto-pull into the local
+            # file (2026-11-02: session-start reconcile wrote
+            # `{{unterminated…` into the manuscript after #331 taught
+            # pull_doc to refuse the same tab).
+            doc_text, _ = form_grammar.strip_form_remnants(
+                doc_text, form_news(db, manuscript["id"], relpath))
+            if form_grammar.has_broken_forms(doc_text):
+                report["errors"].append({
+                    "file": relpath,
+                    "error": "tab has a form that lost a marker "
+                             "(<<, >>, {{ or }}); local file left "
+                             "untouched — mend or remove it in the Doc, "
+                             "then pull"})
+                continue
             path = Path(manuscript["path"]) / relpath
             local_raw = (path.read_text(encoding="utf-8")
                          if path.exists() else "")
