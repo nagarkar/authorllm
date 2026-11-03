@@ -1,5 +1,5 @@
 """Declared inputs (summary-hierarchy-design.md ruling 10, §6.7, step 5):
-the `Input` enum, `context.supply`, the critique pass's OUTLINE and
+the `Input` enum, `input_blocks.supply`, the critique pass's OUTLINE and
 REFERENCED SECTIONS blocks, and the reader load derived from paragraph
 records. No model call anywhere in this suite: records and section
 summaries are stored directly.
@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401
 
-from authorlm import api, context, manifest, passes, summaries as sums  # noqa: E402
+from authorlm import api, input_blocks, manifest, passes, summaries as sums  # noqa: E402
 from authorlm.context import Input  # noqa: E402
 
 PASSED = 0
@@ -103,7 +103,7 @@ def main_test() -> None:
               manifest.INPUTS == (Input.PARAGRAPH_RECORDS,))
 
         print("before any record exists:")
-        got = context.supply(db, manuscript, "doors.md",
+        got = input_blocks.supply(db, manuscript, "doors.md",
                              [Input.SECTION_OUTLINE, Input.REFERENCED_SECTIONS,
                               Input.READING_ORDER, Input.ESSAY_TEXT,
                               Input.VALIDATED_BELIEFS])
@@ -119,7 +119,7 @@ def main_test() -> None:
         check("ESSAY TEXT is the unit whole",
               got[Input.ESSAY_TEXT].strip() == DOORS.strip())
         try:
-            context.supply(db, manuscript, "doors.md", [Input.PRIOR_RUNS])
+            input_blocks.supply(db, manuscript, "doors.md", [Input.PRIOR_RUNS])
             honest = False
         except NotImplementedError as err:
             honest = "filtering.prior_runs" in str(err)
@@ -171,7 +171,7 @@ def main_test() -> None:
             "MOVES: [3] states the opening; [4] names the key.\n"
             "DEPENDS ON: none\nLEAVES OPEN: what a key would be.", "fake")
 
-        got = context.supply(db, manuscript, "doors.md",
+        got = input_blocks.supply(db, manuscript, "doors.md",
                              [Input.SECTION_OUTLINE, Input.REFERENCED_SECTIONS,
                               Input.PARAGRAPH_RECORDS])
         outline = got[Input.SECTION_OUTLINE]
@@ -182,7 +182,7 @@ def main_test() -> None:
               "!! no section summary" in outline.split("[§2]")[0], outline)
         check("a section with a summary shows it",
               "POINT: The hall's doors" in outline, outline)
-        refd = context.referenced_sections(
+        refd = input_blocks.referenced_sections(
             db, manuscript, "doors.md", sums.capture(db, manuscript)[0])
         check("a backward reference resolves to the section of ANOTHER essay "
               "where the term was first defined",
@@ -204,7 +204,7 @@ def main_test() -> None:
         ctx = {"file": "doors.md", "paragraphs": ["# The Doors", "## The hall"],
                "style": "", "intents": [], "beliefs": [], "concepts": {},
                "learnings": [], "before": [], "after": [],
-               "blocks": context.supply(db, manuscript, "doors.md",
+               "blocks": input_blocks.supply(db, manuscript, "doors.md",
                                         list(passes.SUPPLIED))}
         msg = passes.render_user_message(ctx)
         check("OUTLINE and REFERENCED SECTIONS sit between BOOK CONTEXT and "
