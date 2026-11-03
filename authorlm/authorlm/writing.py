@@ -40,6 +40,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .concepts import show_concept
 from .db import Database, loads
 from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
 from .revisions import is_placeholder
@@ -169,12 +170,10 @@ def _plan_concepts(plan: list) -> list[str]:
 
 
 def _concept_notes(db: Database, manuscript: dict, plan: list) -> str:
-    from . import api
-
     lines: list[str] = []
     for name in _plan_concepts(plan):
         try:
-            shown = api.show_concept(db, manuscript, name)
+            shown = show_concept(db, manuscript, name)
         except LookupError:
             # NOT skipped. A beat that names a concept the graph does not
             # have is information the drafter must see — silently dropping
