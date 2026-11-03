@@ -4370,17 +4370,29 @@ def scenario_watcher_guard(root: Path) -> None:
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, cwd=str(pkg_root),
     )
+    lines: list[str] = []
+    reader = threading.Thread(
+        target=lambda: [lines.append(line) for line in proc.stdout],
+        daemon=True)
+    reader.start()
     try:
-        # The shell's watch_loop polls on a fixed 1s cadence
-        # (`stop.wait(1.0)`); give it margin to tick at least once and
-        # hit the monkeypatched poll() before driving the REPL.
-        time_mod.sleep(2.0)
-        proc.stdin.write("status\n")
-        proc.stdin.flush()
-        proc.stdin.write("exit\n")
-        proc.stdin.close()
-        shell_output = proc.stdout.read()
-        proc.wait(timeout=10)
+        # The watch_loop's first poll comes a full `stop.wait(1.0)` after the
+        # shell has imported, briefed and collected, however long that took.
+        # "exit" sent before then ends the process and its daemon thread with
+        # nothing reported, so wait for the report itself. A deadline, not a
+        # fixed wait: it only costs its length when the report never comes.
+        deadline = time_mod.monotonic() + 120.0
+        while (time_mod.monotonic() < deadline and proc.poll() is None
+               and not any("watcher stopped" in line for line in lines)):
+            time_mod.sleep(0.05)
+        if proc.poll() is None:  # a shell already gone fails the checks below
+            proc.stdin.write("status\n")
+            proc.stdin.flush()
+            proc.stdin.write("exit\n")
+            proc.stdin.close()
+        reader.join(timeout=60)
+        shell_output = "".join(lines)
+        proc.wait(timeout=60)
     finally:
         if proc.poll() is None:
             proc.kill()
