@@ -1549,9 +1549,11 @@ the stitched file, counted in samples. Prints the path; `--json` prints
 `{path, duration_s, sections, rendered}`. Run `audio export` first so
 the manifest matches the text.
 
-**The page — the author's surface, on the Mac and the phone.** Run
-`authorlm audio serve -m <ms> --no-open` in the background from Bash
-(fixed port 8792 by default; verify `curl -s http://127.0.0.1:8792/health`)
+**The page — the author's surface, on the Mac and the phone.** The launch
+agent `com.nagarkar.authorlm.serve` keeps it running (`scripts/install-launch-agent.sh`;
+restart only with `launchctl kickstart -k gui/$(id -u)/com.nagarkar.authorlm.serve`,
+never `nohup`; if the agent is not loaded, ask the author to load it). Verify
+`curl -s http://127.0.0.1:8792/health`
 and show `http://127.0.0.1:8792/#<stem>` in the in-app Browser pane. The
 page is one chapter at a time with a dropdown, under a manuscript
 dropdown listing every manuscript with an audio export (`-m` is only
