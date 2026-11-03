@@ -2,11 +2,11 @@
 
 `doc create-manuscript` combines every content file (reading order per
 toc.toml) into `_exports/<Manuscript Name>.md` and mirrors it to one Google
-Doc named after the manuscript. Both artifacts are disposable: neither is
-ever observed (the underscore directory is invisible to collection; the
-Doc is push-only, never reconciled or pulled), and every export overwrites
-them in place — the same local file, the same Doc id. Delete either
-freely; the next export recreates it.
+Doc named after the manuscript (`drive_upload` holds the Drive half). Both
+artifacts are disposable: neither is ever observed (the underscore directory
+is invisible to collection; the Doc is push-only, never reconciled or
+pulled), and every export overwrites them in place — the same local file,
+the same Doc id. Delete either freely; the next export recreates it.
 """
 
 from __future__ import annotations
@@ -18,14 +18,12 @@ from pathlib import Path
 
 from . import directive_tags
 from .db import Database
-from .gdocs import GDOC_MIME, _ensure_folder, _mapping, _save_mapping
 from .normalize import normalize_markdown
 from .media_tags import scan_text as media_scan, strip_for_book
 from .revisions import is_placeholder, read_manuscript_files
 from .structure import is_continuation, reading_order, select_chapters
 
 EXPORT_DIR = "_exports"
-EXPORT_KEY = "_export"  # metadata.gdocs key; '_' keeps reconcile/pull away
 PUBLICATION_DIR = Path(__file__).with_name("publication")
 _UNSAFE = re.compile(r'[\\/:*?"<>|#]')
 
@@ -321,10 +319,6 @@ def combined_markdown(manuscript: dict) -> tuple[str, list[str], list[str]]:
     return (text + "\n" if text else ""), order, unlisted
 
 
-def _doc_gone(err: Exception) -> bool:
-    return getattr(getattr(err, "resp", None), "status", None) == 404
-
-
 DOCX_MIME = ("application/vnd.openxmlformats-officedocument"
              ".wordprocessingml.document")
 
@@ -354,16 +348,14 @@ def build_docx(manuscript: dict, md_path: Path, out_path: Path,
         raise RuntimeError(f"pandoc failed: {proc.stderr.strip()[:400]}")
 
 
-def export_manuscript(db: Database, manuscript: dict, service=None,
-                      title: str | None = None) -> dict:
+def write_combined_export(manuscript: dict, title: str | None = None,
+                          stale: str | None = None) -> dict:
     """Write the publishable markdown (illustrations embedded per the
     export settings, regions resolved for the `doc` output) to _exports/
-    and, given a Drive service, build it to DOCX with pandoc and
-    create-or-update the manuscript's single export Doc from that.
-    Drive turns Word equations, footnotes, and images into native Doc
-    objects — none of which the markdown importer carries
-    (docs/doc-bridge-markdown-vs-docx.md). A Doc the author deleted by
-    hand is recreated (transient artifacts carry no history)."""
+    under `title`, the manuscript's name by default. `stale` is the file
+    name the last export left: when the name changed, that file and its
+    DOCX go. Remembering the name is the caller's
+    (`drive_upload.export_manuscript`)."""
     settings = load_settings(manuscript)
     text, order, warnings = publish_markdown(
         manuscript, settings["variant"] or "images", fmt="doc")
@@ -375,51 +367,12 @@ def export_manuscript(db: Database, manuscript: dict, service=None,
     export_dir.mkdir(exist_ok=True)
     path = export_dir / export_filename(doc_title)
 
-    meta = _mapping(db, manuscript)
-    entry = meta.setdefault("gdocs", {}).setdefault(EXPORT_KEY, {})
-    stale = entry.get("local_file")
     if stale and stale != path.name:
         (export_dir / stale).unlink(missing_ok=True)
         (export_dir / stale).with_suffix(".docx").unlink(missing_ok=True)
-    entry["local_file"] = path.name
     path.write_text(text, encoding="utf-8")
-
-    result = {
-        "path": str(path), "files": order, "unlisted": unlisted,
-        "warnings": warnings, "doc_title": doc_title, "doc_id": None,
-        "url": None, "created": False,
-    }
-    if service is not None:
-        import shutil
-
-        from googleapiclient.http import MediaFileUpload
-
-        if shutil.which("pandoc") is None:
-            raise RuntimeError("pandoc is required to build the export Doc "
-                               "— brew install pandoc")
-        docx_path = path.with_suffix(".docx")
-        build_docx(manuscript, path, docx_path, settings)
-        media = MediaFileUpload(str(docx_path), mimetype=DOCX_MIME)
-        if entry.get("doc_id"):
-            try:
-                service.files().update(fileId=entry["doc_id"],
-                                       media_body=media).execute()
-            except Exception as err:
-                if not _doc_gone(err):
-                    raise
-                entry["doc_id"] = None  # deleted in Drive — recreate below
-        if not entry.get("doc_id"):
-            created = service.files().create(
-                body={"name": doc_title, "mimeType": GDOC_MIME,
-                      "parents": [_ensure_folder(manuscript, meta, service)]},
-                media_body=media, fields="id",
-            ).execute()
-            entry["doc_id"] = created["id"]
-            result["created"] = True
-        result["doc_id"] = entry["doc_id"]
-        result["url"] = f"https://docs.google.com/document/d/{entry['doc_id']}/edit"
-    _save_mapping(db, manuscript, meta)
-    return result
+    return {"path": str(path), "files": order, "unlisted": unlisted,
+            "warnings": warnings, "doc_title": doc_title}
 
 
 # ------------------------------------------------ publishing (docx / epub / pdf)
@@ -983,62 +936,3 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     result["trim"] = f"{trim[0]:g}x{trim[1]:g}" + (" +bleed" if bleed else "")
     warnings.extend(kdp_checks(manuscript, pages))
     return result
-
-
-# ------------------------------------------------ upload to Drive
-
-UPLOADS_KEY = "_uploads"    # metadata.gdocs key: output name → Drive file
-UPLOAD_MIME = {".pdf": "application/pdf", ".epub": "application/epub+zip",
-               ".md": "text/markdown", ".docx": DOCX_MIME,
-               ".txt": "text/plain"}
-
-
-def upload_export(db: Database, manuscript: dict, path: Path, service,
-                  as_doc: bool = False, drive_id: str | None = None) -> dict:
-    """Put one export file on the author's Drive, in the manuscript's
-    folder, and remember its id per output (`metadata.gdocs._uploads`,
-    beside the export Doc's `_export`): the next upload of the same file
-    replaces it in place — same id, same link. A file deleted in Drive is
-    created anew. `as_doc` converts a DOCX to a Google Doc (a separate
-    Drive file from the plain .docx); `drive_id` adopts a file already on
-    Drive (one uploaded by hand) as this output's target."""
-    from googleapiclient.http import MediaFileUpload
-
-    path = Path(path)
-    if as_doc and path.suffix != ".docx":
-        raise ValueError("--as-doc converts a DOCX to a Google Doc; this "
-                         f"export is {path.suffix.lstrip('.')}")
-    mime = UPLOAD_MIME.get(path.suffix, "application/octet-stream")
-    key = path.name + (" (Google Doc)" if as_doc else "")
-    meta = _mapping(db, manuscript)
-    uploads = meta.setdefault("gdocs", {}).setdefault(UPLOADS_KEY, {})
-    entry = uploads.setdefault(key, {})
-    if drive_id:
-        entry["file_id"] = drive_id
-    media = MediaFileUpload(str(path), mimetype=mime, resumable=False)
-    created, info = False, None
-    if entry.get("file_id"):
-        try:
-            info = service.files().update(
-                fileId=entry["file_id"], media_body=media,
-                fields="id,webViewLink").execute()
-        except Exception as err:
-            if not _doc_gone(err):
-                raise
-            entry["file_id"] = None  # deleted in Drive — create below
-    if not entry.get("file_id"):
-        body = {"name": path.stem if as_doc else path.name,
-                "parents": [_ensure_folder(manuscript, meta, service)]}
-        if as_doc:
-            body["mimeType"] = GDOC_MIME
-        info = service.files().create(body=body, media_body=media,
-                                      fields="id,webViewLink").execute()
-        entry["file_id"] = info["id"]
-        created = True
-    entry["as_doc"] = as_doc
-    _save_mapping(db, manuscript, meta)
-    fid = entry["file_id"]
-    url = (f"https://docs.google.com/document/d/{fid}/edit" if as_doc
-           else (info or {}).get("webViewLink")
-           or f"https://drive.google.com/file/d/{fid}/view")
-    return {"file_id": fid, "url": url, "created": created, "name": key}

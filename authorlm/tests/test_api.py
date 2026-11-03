@@ -9067,7 +9067,8 @@ def main_test() -> None:
         (ms / "07-critique-write.md").unlink()
 
         # --- single-manuscript export (doc create-manuscript) ---
-        from authorlm.export import combined_markdown, export_manuscript
+        from authorlm.drive_upload import export_manuscript
+        from authorlm.export import combined_markdown
 
         (ms / "00-intro.md").write_text("# Intro\n\nWelcome.\n")
         (ms / "toc.toml").write_text(

@@ -230,6 +230,12 @@ Inline directives: `[Footnote: …]`, `[Explain: …]` and `[Suggestion: …]` �
 
 Mechanical document management (RFC §16.1 Level 3).
 
+## `authorlm.drive_upload`
+
+`authorlm/authorlm/drive_upload.py`
+
+Export files on the author's Drive: the export Doc and per-output uploads.
+
 ## `authorlm.export`
 
 `authorlm/authorlm/export.py`
