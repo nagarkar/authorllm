@@ -5410,9 +5410,11 @@ def cmd_export(args):
             raise SystemExit(ui.yellow(
                 "export teleprompter needs --file <file> — the monologue "
                 "whose on-camera passages to collect"))
+        from . import teleprompter
+
         try:
-            result = ex.export_teleprompter(manuscript, args.file,
-                                            whole=args.whole)
+            result = teleprompter.export_teleprompter(
+                manuscript, args.file, whole=args.whole)
         except (LookupError, ValueError) as err:
             raise SystemExit(ui.yellow(f"export failed: {err}"))
         print(f"Wrote {result['docx']} ({', '.join(result['passages'])}).")
@@ -5453,7 +5455,7 @@ def _export_upload(args, db, manuscript: dict, path: str) -> None:
     place on every later upload of the same output."""
     if not args.upload:
         return
-    from . import export as ex
+    from . import drive_upload
     from . import gdocs
 
     try:
@@ -5465,8 +5467,9 @@ def _export_upload(args, db, manuscript: dict, path: str) -> None:
             "Google token (it opens a consent page); the export itself "
             "is written"))
     try:
-        up = ex.upload_export(db, manuscript, Path(path), service,
-                              as_doc=args.as_doc, drive_id=args.drive_id)
+        up = drive_upload.upload_export(db, manuscript, Path(path), service,
+                                        as_doc=args.as_doc,
+                                        drive_id=args.drive_id)
     except ValueError as err:
         raise SystemExit(ui.yellow(f"upload failed: {err}"))
     verb = "Uploaded" if up["created"] else "Replaced"
@@ -7803,7 +7806,7 @@ def cmd_doc(args):
         return
 
     if args.action == "create-manuscript":
-        from . import export as mexport
+        from . import drive_upload
         from . import gdocs
 
         service = None
@@ -7813,8 +7816,8 @@ def cmd_doc(args):
         except ValueError:
             pass
         try:
-            result = mexport.export_manuscript(db, manuscript, service=service,
-                                               title=args.title)
+            result = drive_upload.export_manuscript(
+                db, manuscript, service=service, title=args.title)
         except LookupError as err:
             sys.exit(f"error: {err}")
         print(f"Combined {len(result['files'])} file(s) → {result['path']}")
