@@ -72,6 +72,7 @@ os.environ["AUTHORLM_ENV"] = os.path.join(
 import contextlib
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -188,10 +189,13 @@ def section_extraction(ctx: dict) -> None:
     also where the incident that motivated this file happened (a weak
     live reply recorded into the cache, then failing its own assertion)."""
     ws, ms = ctx["ws"], ctx["ms"]
-    out = run(ws, "init", "--name", "sample", "--path", str(ms))
-    if "Extraction produced nothing" in out:
-        raise AssertionError(f"extraction produced nothing:\n{out}")
-    extracted = int(out.split("Extracted ")[1].split(" new concept")[0])
+    run(ws, "init", "--name", "sample", "--path", str(ms))
+    # init does not extract; `extract --native` is the one road. The
+    # adjudicator is chosen per run, and with no terminal only the flag can
+    # choose it.
+    out = run(ws, "extract", "--native", "--full", "--adjudicator", MODEL)
+    extracted = sum(int(n) for n in
+                    re.findall(r"reached triage: (\d+) concept", out))
     check("extraction finds a philosophical vocabulary (≥3 concepts)",
           extracted >= 3, out)
     out = run(ws, "concept", "list")
