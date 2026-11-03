@@ -221,21 +221,39 @@ def pick(root: Path, key: str, n: str) -> dict:
 
 def attach(root: Path, key: str, source: Path, desc: str = "0" * 8,
            law: str = "0000") -> dict:
-    """Bring an outside file in as take `iNN` of a clip. Returns its path."""
-    import shutil
+    """Bring an outside file in as take `iNN` of a clip. Returns its path.
 
+    Exclusive create so two overlapping attaches of the same clip cannot
+    both compute the same next N and destroy each other's import (the
+    same race `_save_take` already closes for generated takes)."""
     clip = media.find_clip(root, key)
     source = Path(source)
     ext = source.suffix.lower().lstrip(".")
     if ext not in ("mp4", "mov", "m4v", "webm"):
         raise ValueError(f"{source.name} is not a video (mp4, mov, m4v, webm)")
-    name = (f"{clip['ref'][:-3]}-{desc}-{law}-"
-            f"{_next_n(root, clip['ref'][:-3], "i")}.{ext}")
-    dest = Path(root) / media.CLIPS_DIR / name
-    shutil.copyfile(source, dest)
-    if not chosen(root, clip["ref"][:-3]):
-        _set_chosen(root, clip["ref"][:-3], name)
-    return {"key": clip["ref"][:-3], "path": f"{media.CLIPS_DIR}/{name}"}
+    ckey = clip["ref"][:-3]
+    clips = Path(root) / media.CLIPS_DIR
+    clips.mkdir(parents=True, exist_ok=True)
+    while True:
+        name = f"{ckey}-{desc}-{law}-{_next_n(root, ckey, 'i')}.{ext}"
+        dest = clips / name
+        try:
+            fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        try:
+            with open(source, "rb") as src:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    os.write(fd, chunk)
+        finally:
+            os.close(fd)
+        break
+    if not chosen(root, ckey):
+        _set_chosen(root, ckey, name)
+    return {"key": ckey, "path": f"{media.CLIPS_DIR}/{name}"}
 
 
 # ------------------------------------------------------------------ plan
