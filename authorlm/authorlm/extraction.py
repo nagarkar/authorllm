@@ -855,14 +855,14 @@ def assemble_essay(db: Database, manuscript: dict, file: str,
                    knob: dict | None = None) -> list[ExtractionPayload]:
     """Every section payload of one essay (or the `section` it names, or
     the given `units`), with S, G, P and M rendered once and shared."""
-    from .lenses import _resolve, _title_of
+    from .structure import find_file, title_of
     from .structure import refuse_sidecar
     from .summaries import verse_files_of
 
     refuse_sidecar(Path(file).name)
     if files is None:
         files = read_manuscript_files(Path(manuscript["path"]))
-    rel = _resolve(files, file)
+    rel = find_file(files, file)
     text = files[rel]
     if is_in_flight(text):
         raise ValueError(f"{rel} is held by an active writeup (its text on "
@@ -884,7 +884,7 @@ def assemble_essay(db: Database, manuscript: dict, file: str,
     precedents = _precedent_block(prec, rel)
     summaries_text, summary_unit = _summary_block(db, manuscript, rel, text,
                                                   knob["summaries"])
-    title = _title_of(text) or rel
+    title = title_of(text) or rel
     return [ExtractionPayload(
         law=law, glossary=glossary, precedents=precedents,
         summaries=summaries_text, section=_section_block(rel, title, unit),

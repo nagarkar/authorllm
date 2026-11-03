@@ -418,7 +418,7 @@ def prepare(db: Database, manuscript: dict, knob: dict,
 
     from .extraction import (_glossary_block, _precedent_block,
                              glossary_nodes, precedent_rows, screen)
-    from .lenses import _title_of
+    from .structure import title_of
     from .revisions import read_manuscript_files
 
     from .extraction import eligible_files, gate_context
@@ -449,7 +449,7 @@ def prepare(db: Database, manuscript: dict, knob: dict,
         prec = precedent_rows(db, manuscript, essay, text,
                               int(knob["precedents_nearest"]), exclude=own)
         payloads[essay] = SimpleNamespace(
-            file=essay, title=_title_of(text) or essay,
+            file=essay, title=title_of(text) or essay,
             glossary=_glossary_block(nodes, edges),
             precedents=_precedent_block(prec, essay), summary_unit=None)
     return Replay(groups=groups, essay_payloads=payloads, knob=knob,

@@ -6702,7 +6702,7 @@ def _extract_scope(db: Database, manuscript: dict, args, knob: dict
     the sections changed since the extraction watermark (everything when
     there is none). `units` None means every unit of the file."""
     from . import extraction as ex
-    from .lenses import _resolve
+    from .structure import find_file
     from .revisions import read_manuscript_files
 
     files = read_manuscript_files(Path(manuscript["path"]))
@@ -6711,7 +6711,7 @@ def _extract_scope(db: Database, manuscript: dict, args, knob: dict
                  "extract <file> --section <n|heading>")
     if args.target:
         try:
-            return [(_resolve(files, f), None) for f in args.target]
+            return [(find_file(files, f), None) for f in args.target]
         except LookupError as err:
             sys.exit(f"error: {err}")
     if args.full:
@@ -6793,14 +6793,14 @@ def _extract_choose(config: dict, knob: dict, essays: list, llm, args,
 
 def _extract_screened(db: Database, manuscript: dict, args) -> None:
     from . import extraction as ex
-    from .lenses import _resolve
+    from .structure import find_file
     from .revisions import read_manuscript_files
 
     if len(args.target) != 2:
         sys.exit("usage: authorlm extract screened <file>")
     files = read_manuscript_files(Path(manuscript["path"]))
     try:
-        rel = _resolve(files, args.target[1])
+        rel = find_file(files, args.target[1])
     except LookupError as err:
         sys.exit(f"error: {err}")
     rows = ex.screened(db, manuscript, rel)
@@ -6825,7 +6825,7 @@ def _extract_calibrate(db: Database, manuscript: dict, args,
     from . import extraction as ex
     from . import extraction_adjudicator as adj
     from . import extraction_calibration as cal
-    from .lenses import _resolve
+    from .structure import find_file
     from .revisions import read_manuscript_files
 
     try:
@@ -6840,7 +6840,7 @@ def _extract_calibrate(db: Database, manuscript: dict, args,
     if named:
         files = read_manuscript_files(Path(manuscript["path"]))
         try:
-            only = [_resolve(files, f) for f in named]
+            only = [find_file(files, f) for f in named]
         except LookupError as err:
             sys.exit(f"error: {err}")
     replay = cal.prepare(db, manuscript, knob, only=only)

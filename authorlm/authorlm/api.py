@@ -4145,14 +4145,14 @@ def extraction_scope(db: Database, manuscript: dict, knob: dict,
     when there is none). Mirrors `cli._extract_scope` without its exits:
     an unknown file is a LookupError for the caller to report."""
     from . import extraction as ex
-    from .lenses import _resolve
+    from .structure import find_file
     from .revisions import read_manuscript_files
 
     on_disk = read_manuscript_files(Path(manuscript["path"]))
     if files:
         # A named file held by an active writeup (its text on disk is the
         # placeholder) has nothing to mine: dropped, never sent.
-        scope = [(rel, None) for rel in (_resolve(on_disk, f) for f in files)
+        scope = [(rel, None) for rel in (find_file(on_disk, f) for f in files)
                  if not ex.is_in_flight(on_disk.get(rel, ""))]
     elif full:
         scope = [(name, None) for name in ex.eligible_files(on_disk)]
