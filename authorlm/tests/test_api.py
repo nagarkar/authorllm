@@ -911,8 +911,18 @@ def check_extraction_switch() -> None:
             never["n"] += 1
             raise RuntimeError("extraction ran as a side effect")
 
-        prev = _api.run_extraction
-        _api.run_extraction = must_not_run
+        # `collect` lives below `api` now and cannot reach `api.run_extraction`,
+        # so the mining functions are patched where they live too. A stale
+        # `from .extraction import run` still lands on `run_essay` and
+        # `call_sections`. The counter is what the check reads, so a caller
+        # that swallows the RuntimeError is still caught.
+        from authorlm import extraction as _extraction
+
+        gates = [(_api, "run_extraction"), (_extraction, "run"),
+                 (_extraction, "run_essay"), (_extraction, "call_sections")]
+        saved = [(owner, name, getattr(owner, name)) for owner, name in gates]
+        for owner, name in gates:
+            setattr(owner, name, must_not_run)
         try:
             (ms / "01-draft.md").write_text("# Draft\n\nChanged text.\n")
             report = _api.collect(db, manuscript, config)
@@ -925,7 +935,8 @@ def check_extraction_switch() -> None:
             (ms / "01-draft.md").write_text("# Draft\n\nThe rewritten draft.\n")
             result = _api.write_complete(db, manuscript, config)
         finally:
-            _api.run_extraction = prev
+            for owner, name, real in saved:
+                setattr(owner, name, real)
         check("a collect (plain or --auto) and a writeup close make NO "
               "extraction call, with the switch on and an LLM configured: "
               "the graph is mined on request only",
@@ -2031,7 +2042,7 @@ def check_summary_deprecation() -> None:
     enums)." essay_summaries.status ('current' | 'deprecated') follows
     the codebase's existing status-enum idiom (concept_nodes,
     knowledge_proposals, doc_threads). Additive schema only (db.py); the
-    transition is triggered from collect() (api.py) — summaries.py
+    transition is triggered from collect() (collect.py) — summaries.py
     itself is untouched, since sums.status()/before_after() are already
     driven off the CURRENT toc reading order and so structurally never
     see a departed file's row (verified: the live '22 stale' figure was
@@ -3142,20 +3153,22 @@ def check_placeholder_reader_paths() -> None:
         # --- F6: the prerequisite-gap walk reads the same case-insensitive
         # concept patterns over the same texts as the concept scans, so it
         # takes the same blinding.
+        from authorlm import collect as collect_module
+
         seen = []
-        real_gaps = api.compute_prerequisite_gaps
+        real_gaps = collect_module.compute_prerequisite_gaps
 
         def recording(db_, mid_, files):
             seen.append(dict(files))
             return real_gaps(db_, mid_, files)
 
-        api.compute_prerequisite_gaps = recording
+        collect_module.compute_prerequisite_gaps = recording
         try:
             (ms / "02-second.md").write_text("# Second\n\nA new essay.\n")
             with contextlib.redirect_stdout(io.StringIO()):
                 api.collect(db, manuscript, {}, source="test")
         finally:
-            api.compute_prerequisite_gaps = real_gaps
+            collect_module.compute_prerequisite_gaps = real_gaps
         # BOTH calls, not just the second. A collect during a writeup has
         # a before-version that already holds the placeholder — the
         # writeup's own start collect put it there — so blinding one side
@@ -5444,7 +5457,7 @@ def check_directives() -> None:
               and db.one("SELECT COUNT(*) AS n FROM manuscript_versions "
                          "WHERE manuscript_id = ?", (ms["id"],))["n"] == v0 + 3)
         check("nothing open remains; a file with no tag was never touched",
-              dv.open_report(ms_dir) == []
+              directive_tags.open_report(ms_dir) == []
               and (ms_dir / "quiet.md").read_text() == "# Quiet\n\nNo request here.\n")
 
         # it-816cd7998fec: an essay that ENDS on an illustration tag and
@@ -5725,7 +5738,7 @@ def check_suggestions() -> None:
               == "the hedges carry the argument's modesty",
               str([dict(r) for r in ev]))
         check("one open tag remains, renumbered from 1",
-              [(r["n"], r["gist"]) for r in dv.open_report(ms_dir)]
+              [(r["n"], r["gist"]) for r in directive_tags.open_report(ms_dir)]
               == [(1, "reconsider the claim")])
 
         # Refusals.

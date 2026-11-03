@@ -142,7 +142,8 @@ def resolve_specs(db, manuscript: dict, config: dict, file: str,
     every spec form, land the accepted specs in their files, record the
     evidence, collect under no episode, push the tab. Returns {file,
     forms, landed: [{key, words}], declined, version_no, url, warnings}."""
-    from . import api, gdocs, passes
+    from . import gdocs, passes
+    from .collect import collect
 
     mid = manuscript["id"]
     written = passes.staged_threads(db, mid, file, states=("written",),
@@ -167,14 +168,14 @@ def resolve_specs(db, manuscript: dict, config: dict, file: str,
                                                  written=written)
     root = Path(manuscript["path"])
     with contextlib.redirect_stdout(io.StringIO()):
-        api.collect(db, manuscript, config, source="pre-clip-resolve")
+        collect(db, manuscript, config, source="pre-clip-resolve")
     passes.record_resolution(db, mid, file, forms, origin_type=ORIGIN,
                              evidence_type="clip_spec_edit", final_text=final)
     final, landed = media.absorb_specs(root, final, keys)
     gdocs._write_resolved_text(root / file, root, final)
     with contextlib.redirect_stdout(io.StringIO()):
-        after = api.collect(db, manuscript, config, source="clip-resolve",
-                            episode=NO_EPISODE)
+        after = collect(db, manuscript, config, source="clip-resolve",
+                        episode=NO_EPISODE)
     states = [db.one("SELECT state FROM doc_threads WHERE id = ?",
                      (t["id"],))["state"] for t in written]
     url = None

@@ -46,57 +46,13 @@ import json
 import re
 from pathlib import Path
 
-from .directive_tags import (KINDS, TAGS, check_kind, is_standalone,
+from .directive_tags import (TAGS, _read, check_kind, is_standalone,
                              remove_tag, scan_text)
 from .docs import _resolve_relpath
-from .revisions import is_placeholder, iter_manuscript_paths
 from .sessions import NO_EPISODE
 
 _DEFINITION = re.compile(r"^\[\^(?P<letters>[A-Za-z]+)(?P<n>\d+)\]:", re.MULTILINE)
 _RESERVED = ("<<", ">>", "{{", "}}")
-
-
-def _read(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return path.read_text(encoding="utf-8", errors="replace")
-
-
-def scan(root: Path, kind: str, files: list[str] | None = None
-         ) -> dict[str, list[dict]]:
-    """Open tags of one kind by file (or the named files only). Files
-    with no tag are absent. The TOC and a file holding only the
-    mid-rewrite placeholder are never scanned."""
-    from .structure import TOC_FILENAME
-
-    check_kind(kind)
-    root = Path(root)
-    wanted = set(files or [])
-    found: dict[str, list[dict]] = {}
-    for rel, path in iter_manuscript_paths(root).items():
-        if path.name == TOC_FILENAME or (wanted and rel not in wanted):
-            continue
-        text = _read(path)
-        if is_placeholder(text):
-            continue
-        tags = scan_text(text, kind)
-        if tags:
-            found[rel] = tags
-    return found
-
-
-def open_report(root: Path, kinds: tuple[str, ...] = KINDS,
-                files: list[str] | None = None) -> list[dict]:
-    """What a collect and `get_status` surface: every open tag, one row
-    each — kind, file, ordinal, line, gist, label."""
-    rows = []
-    for kind in kinds:
-        for rel, tags in scan(root, kind, files).items():
-            rows.extend({"kind": kind, "file": rel, "n": t["n"],
-                         "line": t["line"], "gist": t["gist"],
-                         "label": t["label"]} for t in tags)
-    return rows
 
 
 def find_tag(tags: list[dict], handle) -> dict:
@@ -426,7 +382,7 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
 
     Returns {kind, file, mode: applied|marked, landed, version_no,
     url, failed}."""
-    from . import api
+    from .collect import collect
 
     check_kind(kind)
     if kind == "judgment":
@@ -516,8 +472,8 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
     import io
 
     with contextlib.redirect_stdout(io.StringIO()):
-        after = api.collect(db, manuscript, config, source=f"{kind}-apply",
-                            episode=NO_EPISODE)
+        after = collect(db, manuscript, config, source=f"{kind}-apply",
+                        episode=NO_EPISODE)
     return {"kind": kind, "file": file, "mode": "applied", "landed": landed,
             "version_no": after.get("version_no"), "url": None, "failed": []}
 
@@ -747,7 +703,8 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
 
     Returns {kind, file, forms, accepted, declined, diffs, version_no,
     url, warnings}."""
-    from . import api, gdocs, passes
+    from . import gdocs, passes
+    from .collect import collect
 
     check_kind(kind)
     mid = manuscript["id"]
@@ -786,7 +743,7 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
 
     path = Path(manuscript["path"]) / file
     with contextlib.redirect_stdout(io.StringIO()):
-        api.collect(db, manuscript, config, source=f"pre-{kind}-resolve")
+        collect(db, manuscript, config, source=f"pre-{kind}-resolve")
     diffs = passes.record_resolution(db, mid, file, forms, origin_type=kind,
                                      evidence_type=f"{kind}_edit",
                                      final_text=final, threads=to_resolve)
@@ -795,8 +752,8 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
         final = _consume_standalone_tags(db, final, written)
     gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
-        after = api.collect(db, manuscript, config, source=f"{kind}-resolve",
-                            episode=NO_EPISODE)
+        after = collect(db, manuscript, config, source=f"{kind}-resolve",
+                        episode=NO_EPISODE)
     states = [db.one("SELECT state FROM doc_threads WHERE id = ?",
                      (t["id"],))["state"] for t in written]
     url = None

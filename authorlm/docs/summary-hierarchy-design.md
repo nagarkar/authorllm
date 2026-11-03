@@ -120,10 +120,10 @@ words, the shortest recap-sermon-five.md at 72. The book's reading order has
 
 Mark, never cascade (module docstring, `:1-15`). `_state` (`:248-281`)
 decides, in order: `unwritten` (a writeup created the file) → `missing` →
-`deprecated` (file left the toc, `api._deprecate_departed_summaries`, `:860`)
+`deprecated` (file left the toc, `collect._deprecate_departed_summaries`, `collect.py:46`)
 → `stale` (source_hash mismatch) → `rewriting` (in flight, pinned text
 matches) → `upstream_stale` → `fresh`. `mark_changed` (`:756-775`) runs after
-every collect (`api.py:982`) and flags the rows after the first changed unit.
+every collect (`collect.py:168`) and flags the rows after the first changed unit.
 
 ### 1.4 Cost, measured
 
@@ -150,7 +150,7 @@ the PRIOR SUMMARIES block, which grows to ~12 K words by the last unit.
 | lenses | nothing | by ruling: the assembler does not import `_neighbour_summaries`, the prompt says "no summary of any chapter exists here" | n/a | `lenses.py:19-23`, `:270-273` |
 | briefing | nothing | its "summary" is `proposals.describe`, unrelated | n/a | `briefing.py:77` |
 | critique.py | nothing directly | the pass reads through `passes.build_context` | | |
-| `write collect`, `critique resolve` | write only | `mark_changed`; rebuild-at-gate | | `api.py:982`, `cli.py:1593-1617` |
+| `write collect`, `critique resolve` | write only | `mark_changed`; rebuild-at-gate | | `collect.py:168`, `cli.py:1593-1617` |
 
 There is no MCP verb for summaries at all (`mcp_server.py` has no summarize
 tool); the CLI has `summarize status | show <file> | rebuild [file] [--all]`

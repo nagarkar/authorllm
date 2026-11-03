@@ -2,14 +2,20 @@
 `[Suggestion: …]` and `[Judgment: …]`, how to find them in a file's text and
 how to take them out.
 
-Invariant: text in, text out. Nothing here reads a file or the database or
-imports from this package, so any layer may use it. Landing a tag, its
-evidence and its Doc road are `directives`.
+Invariant: reading only. The text functions take text and return text, and
+`scan` and `open_report` read a manuscript's files to report the open tags;
+nothing here writes a file or touches the database. It reads files through
+`revisions`, so it sits in the manuscript area and only that area or a higher
+one may import it. Landing a tag, its evidence and its Doc road are
+`directives`.
 """
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
+
+from .revisions import is_placeholder, iter_manuscript_paths
 
 KINDS = ("footnote", "explain", "suggestion", "judgment")
 TAGS = {
@@ -168,3 +174,46 @@ def remove_tag(text: str, tag: dict) -> str:
     if before == " " and (after == " " or after in ".,;:!?)"):
         start -= 1
     return text[:start] + text[end:]
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="utf-8", errors="replace")
+
+
+def scan(root: Path, kind: str, files: list[str] | None = None
+         ) -> dict[str, list[dict]]:
+    """Open tags of one kind by file (or the named files only). Files
+    with no tag are absent. The TOC and a file holding only the
+    mid-rewrite placeholder are never scanned."""
+    from .structure import TOC_FILENAME
+
+    check_kind(kind)
+    root = Path(root)
+    wanted = set(files or [])
+    found: dict[str, list[dict]] = {}
+    for rel, path in iter_manuscript_paths(root).items():
+        if path.name == TOC_FILENAME or (wanted and rel not in wanted):
+            continue
+        text = _read(path)
+        if is_placeholder(text):
+            continue
+        tags = scan_text(text, kind)
+        if tags:
+            found[rel] = tags
+    return found
+
+
+def open_report(root: Path, kinds: tuple[str, ...] = KINDS,
+                files: list[str] | None = None) -> list[dict]:
+    """What a collect and `get_status` surface: every open tag, one row
+    each — kind, file, ordinal, line, gist, label."""
+    rows = []
+    for kind in kinds:
+        for rel, tags in scan(root, kind, files).items():
+            rows.extend({"kind": kind, "file": rel, "n": t["n"],
+                         "line": t["line"], "gist": t["gist"],
+                         "label": t["label"]} for t in tags)
+    return rows
