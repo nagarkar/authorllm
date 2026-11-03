@@ -69,7 +69,7 @@ def _unwrap_emphasis(cell: str) -> str:
 def _cells(line: str) -> list[str]:
     """The normalized cells of one pipe-table line, or [] when the line
     is not a table row."""
-    # NBSP → space before anything else. `gdocs.normalize_markdown` does
+    # NBSP → space before anything else. `normalize.normalize_markdown` does
     # this on the Doc path, but the parser also reads the file straight
     # off disk (Obsidian, a hand paste), and an interior NBSP that
     # survived there would make the same row two different rows.
@@ -101,7 +101,7 @@ def _unreadable_row(cells: list[str]) -> str | None:
     """Why this line cannot be read as ONE three-column row, or None.
 
     A pipe is the table's own column separator and it does not survive
-    the Doc bridge in any form: `gdocs.normalize_markdown`'s `_ESCAPE`
+    the Doc bridge in any form: `normalize.normalize_markdown`'s `_ESCAPE`
     strips exactly the backslash an escape would write, and `push_doc`
     normalizes and WRITES BACK, so an escaped pipe is unescaped on the
     author's disk and the row reparses with its cells shifted one to the

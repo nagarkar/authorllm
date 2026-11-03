@@ -392,6 +392,12 @@ The podcast media tags as text: `[Clip: …]`, `[Collage: …]` and `[Montage: �
 
 Morph — combined-call paragraph-defect detection and correction (design: docs/morph-design.md).
 
+## `authorlm.normalize`
+
+`authorlm/authorlm/normalize.py`
+
+Canonical markdown: the normalizer that makes a no-op round trip through the Doc byte-stable, whichever editor (local, Obsidian, a Docs export) last wrote the text, with its fence and math lifters and the whitespace helpers that go with it.
+
 ## `authorlm.obsidian`
 
 `authorlm/authorlm/obsidian.py`

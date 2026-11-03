@@ -676,7 +676,7 @@ def _edit_evidence(db: Database, manuscript_id: str, thread: dict,
     caller changes. Explained rejections still reach belief learning
     either way: that path runs off the evidence stream and the author's
     words, never off an episode."""
-    from .gdocs import clamp
+    from .normalize import clamp
 
     target = f"{thread['file']}: «{clamp(thread['proposed_old'] or '(insertion)')}»"
     if signal == "revised":

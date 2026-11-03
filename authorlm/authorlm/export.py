@@ -18,8 +18,8 @@ from pathlib import Path
 
 from . import directive_tags
 from .db import Database
-from .gdocs import (GDOC_MIME, _ensure_folder, _mapping, _save_mapping,
-                    normalize_markdown)
+from .gdocs import GDOC_MIME, _ensure_folder, _mapping, _save_mapping
+from .normalize import normalize_markdown
 from .media_tags import scan_text as media_scan, strip_for_book
 from .revisions import is_placeholder, read_manuscript_files
 from .structure import is_continuation, reading_order, select_chapters

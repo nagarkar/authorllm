@@ -14,6 +14,7 @@ import json
 import string
 
 from .db import Database, ko_fields, loads
+from .normalize import clamp
 
 PREFIX = "AuthorLM: "
 
@@ -125,8 +126,6 @@ def record_margin_verdict(db: Database, manuscript_id: str, thread: dict,
     """Terminal margin verdicts are the third evidence channel: always
     recorded as evidence; candidate beliefs only through the scoped,
     decline-capable distiller (never by force of habit)."""
-    from .gdocs import clamp
-
     target = f"{thread['file']}: «{clamp(thread['proposed_old'] or '')}»"
     if signal == "modified":
         original = (loads(thread.get("metadata"), {}) or {}).get(

@@ -48,11 +48,6 @@ MAX_CAST = 3
 _CANDIDATE = re.compile(
     r"^(?P<key>.+)-(?P<desc>[0-9a-f]{8})-(?P<style>[0-9a-f]{4})"
     r"-(?P<src>i?)(?P<n>\d{2})\.(?P<ext>png|jpe?g)$")
-# Google Docs markdown export renders pasted images as reference-style
-# links (`![][image1]`) plus, sometimes, a base64 definition line — both
-# useless outside the Doc and silently corrupting once pulled.
-_DANGLING_REF = re.compile(r"!\[\]\[image\d+\]")
-_DANGLING_DEF = re.compile(r"^\[image\d+\]:\s.*$\n?", re.MULTILINE)
 
 
 _REF = re.compile(r"\s*⇢\s*(?P<ref>[\w.-]+\.md)\s*$")
@@ -673,16 +668,6 @@ def slot_report(root: Path) -> dict:
     ]
     return {"unrendered": unrendered, "orphaned": orphaned,
             "malformed_refs": malformed_refs, "cast_problems": cast_problems}
-
-
-def strip_dangling(text: str) -> tuple[str, list[str]]:
-    """Remove Doc-export image artifacts; returns (clean text, refs
-    removed). Idempotent, and safe on text that has none."""
-    refs = _DANGLING_REF.findall(text) + [
-        m.split(":", 1)[0].strip() for m in _DANGLING_DEF.findall(text)]
-    text = _DANGLING_DEF.sub("", text)
-    text = _DANGLING_REF.sub("", text)
-    return text, refs
 
 
 # ------------------------------------------------- figure law + rendering

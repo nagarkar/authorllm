@@ -71,6 +71,7 @@ from authorlm import api, critique, gdocs, passes, summaries as sums  # noqa: E4
 from authorlm import form_grammar  # noqa: E402
 from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
+from authorlm.normalize import _TABLE_DELIM, normalize_markdown  # noqa: E402
 from authorlm.db import loads  # noqa: E402
 
 PASSED = 0
@@ -579,7 +580,7 @@ def _local_transport_guards(root: Path) -> None:
 
     # A mapping, so push_doc gets past the no-tab refusal and reaches
     # the guards rather than failing for an unrelated reason.
-    normalized = gdocs.normalize_markdown(MARKED_ESSAY)
+    normalized = normalize_markdown(MARKED_ESSAY)
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
@@ -1756,7 +1757,7 @@ def _the_push_says_what_it_did_to_the_file(root: Path) -> None:
     before = (ms / "solo.md").read_text()
     check("the fixture really is non-canonical — otherwise this whole "
           "test is asserting nothing (§14.8)",
-          gdocs.normalize_markdown(before) != before, repr(before))
+          normalize_markdown(before) != before, repr(before))
 
     saved = (_gd.get_service, _gd.get_docs_service)
     _gd.get_service = lambda *a, **k: fake
@@ -1772,7 +1773,7 @@ def _the_push_says_what_it_did_to_the_file(root: Path) -> None:
     after = (ms / "solo.md").read_text()
     check("P2b the push DID rewrite the file — this is the case the old "
           "message lied about",
-          after != before and after == gdocs.normalize_markdown(before),
+          after != before and after == normalize_markdown(before),
           repr(after))
     check("P2b ...and the verb says so instead of claiming the file is "
           "as it was: it names what moved (markers, spacing) and what "
@@ -2232,7 +2233,7 @@ def _md_table_rows(block: str) -> list[list[str]] | None:
     if not all(line.strip().startswith("|") for line in lines):
         return None
     return [[c.strip() for c in line.strip().strip("|").split("|")]
-            for line in lines if not gdocs._TABLE_DELIM.match(line.strip())]
+            for line in lines if not _TABLE_DELIM.match(line.strip())]
 
 
 def _table_str(rows: list[list[str]]) -> str:
@@ -2437,7 +2438,7 @@ def _table_fixture(root: Path, name: str, fake_of, text: str = _TBL_DOC):
 
 
 def _tab_md(fake, title: str = "agency.md") -> str:
-    return gdocs.normalize_markdown(fake.export_tab(
+    return normalize_markdown(fake.export_tab(
         next(t for t in fake.tabs if t["title"] == title)))
 
 
@@ -2471,7 +2472,7 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
     check("the table is untouched and the tab matches the file",
           tab.split(_TS)[1].split(_TE)[0] == table_before
           and len(fake.temps) == temps + 1
-          and _tab_md(fake) == gdocs.normalize_markdown(
+          and _tab_md(fake) == normalize_markdown(
               (ms / "agency.md").read_text()), _tab_md(fake))
 
     # 2. A table edit, the comment on prose: the table alone is replaced.
@@ -2481,7 +2482,7 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
                           docs_service=fake)
     check("a table edit replaces the table as one unit, surgically",
           push.get("mode") == "diff" and push.get("ops") == 1
-          and _tab_md(fake) == gdocs.normalize_markdown(
+          and _tab_md(fake) == normalize_markdown(
               (ms / "agency.md").read_text()), f"{push}\n{_tab_md(fake)}")
     check("and the prose comment survives it",
           not fake.orphaned and fake.anchored_text() == _TBL_C)
@@ -2494,7 +2495,7 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
                           docs_service=fake)
     check("a paragraph inserted before a kept table lands before it",
           push.get("mode") == "diff" and _tab_md(fake)
-          == gdocs.normalize_markdown(grown) and not fake.orphaned,
+          == normalize_markdown(grown) and not fake.orphaned,
           _tab_md(fake))
     ends = "# Agency\n\n" + _TBL_C + "\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
     _, db4, man4, ms4, fake4 = _table_fixture(
@@ -2504,7 +2505,7 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
                           docs_service=fake4)
     check("a paragraph appended after a closing table lands after it",
           push.get("mode") == "diff" and _tab_md(fake4)
-          == gdocs.normalize_markdown(ends + "\nA closing line.\n")
+          == normalize_markdown(ends + "\nA closing line.\n")
           and not fake4.orphaned, _tab_md(fake4))
 
     # 4. A comment INSIDE the table: the changed table is held at its
@@ -2544,7 +2545,7 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
                           docs_service=fake3)
     check("a table tab with no comments still pushes (rebuild)",
           push.get("mode") is None
-          and _tab_md(fake3) == gdocs.normalize_markdown(changed),
+          and _tab_md(fake3) == normalize_markdown(changed),
           f"{push}\n{_tab_md(fake3)}")
 
     # 6. The CLI: --rebuild reaches push_doc for the named file only, and
@@ -2654,7 +2655,7 @@ def _a_commented_paragraph_is_held(root: Path) -> None:
     check("after the comment is resolved the next push lands the held "
           "paragraph",
           not done.get("held") and _tab_md(fake)
-          == gdocs.normalize_markdown(_HOLD_LOCAL), _tab_md(fake))
+          == normalize_markdown(_HOLD_LOCAL), _tab_md(fake))
 
     # 5. An unlocatable comment holds nothing.
     _, db2, man2, ms2, fake2 = _table_fixture(
@@ -2665,7 +2666,7 @@ def _a_commented_paragraph_is_held(root: Path) -> None:
                           docs_service=fake2)
     check("a comment whose anchor is not in the tab holds nothing",
           push.get("mode") == "diff" and not push.get("held")
-          and _tab_md(fake2) == gdocs.normalize_markdown(_HOLD_LOCAL),
+          and _tab_md(fake2) == normalize_markdown(_HOLD_LOCAL),
           f"{push}\n{_tab_md(fake2)}")
 
     # 6. --rebuild no longer overrides the hold: it is refused while the
@@ -3972,7 +3973,6 @@ def _braces_are_the_authors(root: Path) -> None:
 
     from authorlm import revisions as _rev
     from authorlm import staging as _staging
-    from authorlm.gdocs import normalize_markdown
 
     print("AQ/FU-A: a brace the AUTHOR wrote is not this grammar's:")
 
@@ -4291,7 +4291,6 @@ def pronunciation_purity() -> None:
     import unicodedata
 
     from authorlm import pronunciations as pron
-    from authorlm.gdocs import normalize_markdown
 
     print("\npronunciation dictionary — the pure layer:")
 
@@ -4592,7 +4591,7 @@ def _directives_pull_first(root: Path) -> None:
         meta = gdocs._mapping(db, manuscript)
         meta["gdocs"]["solo.md"]["checked_out"] = True
         meta["gdocs"]["solo.md"]["pushed_hash"] = gdocs.text_hash(
-            gdocs.normalize_markdown(DIRECTIVE_ESSAY))
+            normalize_markdown(DIRECTIVE_ESSAY))
         gdocs._save_mapping(db, manuscript, meta)
         # The author edits one paragraph in the tab only.
         fake.edit("tab-2", "Beta holds the line.",
@@ -4914,7 +4913,7 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
     # apply pulls first (level_from_doc), and against this base the pull
     # reads local as ahead and keeps the author's edit.
     meta["gdocs"]["solo.md"]["pushed_hash"] = gdocs.text_hash(
-        gdocs.normalize_markdown(hold_doc))
+        normalize_markdown(hold_doc))
     gdocs._save_mapping(db4, ms4, meta)
     fake4 = _CommentedDocFake([("book", ""), ("solo.md", hold_doc)],
                               "Beta holds.", "solo.md", render=True)
@@ -4931,7 +4930,7 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
     finally:
         gdocs.form_grammar.render_insertion = real_insertion
     links = gdocs._mapping(db4, ms4).get("gdocs", {})
-    local = gdocs.strip_embed_lines(gdocs.normalize_markdown(
+    local = gdocs.strip_embed_lines(normalize_markdown(
         (msdir4 / "solo.md").read_text(encoding="utf-8")))
     # pushed_hash is the export's markdown (fetch_tab_markdown), not the
     # Docs body runs — same side pull/three_way read.

@@ -72,6 +72,7 @@ import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 from authorlm import api, concepts, directive_tags, docs, form_grammar, guidance as guidance_module  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 from authorlm.db import ko_fields, loads  # noqa: E402
+from authorlm.manifest import chapter_stats  # noqa: E402
 
 PASSED = 0
 
@@ -3026,11 +3027,11 @@ def check_placeholder_reader_paths() -> None:
         check("F5 — chapter_stats returns {} for a placeholder, as it "
               "already does for an empty file: a Flesch score for a "
               "mid-rewrite marker is noise in the manifest",
-              _gdocs.chapter_stats(api.PLACEHOLDER) == {},
-              str(_gdocs.chapter_stats(api.PLACEHOLDER)))
+              chapter_stats(api.PLACEHOLDER) == {},
+              str(chapter_stats(api.PLACEHOLDER)))
         check("...and it still scores real prose (the guard did not "
               "swallow the function)",
-              _gdocs.chapter_stats("# H\n\nA sentence of real prose "
+              chapter_stats("# H\n\nA sentence of real prose "
                                    "stands here.\n").get("fre") is not None)
 
         # --- change 24: neither push path may make the Doc the working
@@ -7204,7 +7205,8 @@ def main_test() -> None:
         api.close_session(db, manuscript)
 
         # --- Google Docs bridge: normalizer + stub-service round trip ---
-        from authorlm.gdocs import normalize_markdown, pull_doc, push_doc
+        from authorlm.gdocs import pull_doc, push_doc
+        from authorlm.normalize import normalize_markdown
 
         messy = ("# Title\r\n\r\n\r\n\r\nSome \\-escaped \\. text here.   \n"
                  "*  a bullet\n\nEnds with nbsp.")
@@ -7360,8 +7362,8 @@ def main_test() -> None:
               repr(normalize_markdown(empty_heading)))
 
         # --- illustration slots: tag grammar + scan-derived registry ---
-        from authorlm.illus import (desc_hash, parse_tag, slot_report,
-                                    strip_dangling)
+        from authorlm.illus import desc_hash, parse_tag, slot_report
+        from authorlm.normalize import strip_dangling
 
         tag = parse_tag(
             "[Illustration: a tracker kneeling | caption: The tracker]")

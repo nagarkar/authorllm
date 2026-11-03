@@ -59,7 +59,7 @@ from . import directive_tags
 from . import pronunciations as pron
 from .export import (VOICE_LINE, load_settings, resolve_regions,
                      strip_display_math)
-from .gdocs import normalize_markdown
+from .normalize import normalize_markdown
 from .illus import parse_tag as parse_illustration_tag
 from .revisions import is_placeholder, read_manuscript_files
 from .structure import is_continuation, reading_order, toc_attrs

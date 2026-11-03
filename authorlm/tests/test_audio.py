@@ -56,6 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from authorlm import api, audio, filtering, filters, passes  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
+from authorlm.normalize import normalize_markdown  # noqa: E402
 from authorlm.export import strip_voice_lines, VOICE_LINE  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "audiobook"
@@ -1927,7 +1928,7 @@ def check_audiobook_continuation_edit() -> None:
         # was last pushed is skipped, without a call to Google.
         pushed.clear()
         import hashlib as _h
-        main_text = gdocs.strip_embed_lines(gdocs.normalize_markdown(
+        main_text = gdocs.strip_embed_lines(normalize_markdown(
             (book / "kindness.md").read_text(encoding="utf-8")))
         meta = gdocs._mapping(s.db, s.manuscript)
         meta.setdefault("gdocs", {})["kindness.md"] = {
@@ -1940,7 +1941,7 @@ def check_audiobook_continuation_edit() -> None:
         pushed.clear()
         meta = gdocs._mapping(s.db, s.manuscript)
         meta["gdocs"]["kindness-2.md"] = {"tab_id": "t2", "pushed_hash": _h.sha256(
-            gdocs.strip_embed_lines(gdocs.normalize_markdown(cont.read_text(encoding="utf-8")))
+            gdocs.strip_embed_lines(normalize_markdown(cont.read_text(encoding="utf-8")))
             .encode()).hexdigest()[:16]}
         gdocs._save_mapping(s.db, s.manuscript, meta)
         job = s.enqueue("push", stem="kindness")

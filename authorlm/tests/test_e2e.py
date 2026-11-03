@@ -3612,7 +3612,7 @@ def scenario_doc_comments(root: Path) -> None:
           and not hasattr(mf, "refresh") and not hasattr(mf, "FILENAME"),
           str(structure.SIDECAR_FILES))
 
-    from authorlm.gdocs import chapter_stats
+    from authorlm.manifest import chapter_stats
     sample = ("# Heading\n\nThe cat sat on the mat. It was warm. "
               "Everything considered, the philosophical implications "
               "remained extraordinarily complicated.\n")
@@ -7404,7 +7404,7 @@ def scenario_pronunciations(root: Path) -> None:
         # a second writer of anything normalize_markdown is not a no-op
         # on. Driven at the seam — what is under test is the write-back,
         # not Drive.
-        from authorlm.gdocs import normalize_markdown as _norm
+        from authorlm.normalize import normalize_markdown as _norm
         pushed = _norm(dict_path.read_text(encoding="utf-8"))
         check("E3 `doc push` normalizes and writes back, so its "
               "normalizer must be a NO-OP on the dictionary — otherwise "

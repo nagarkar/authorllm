@@ -7,7 +7,7 @@ it *checked out*: you're editing in Docs now. `doc pull <file>` exports the
 Doc as markdown, runs the normalizer, writes the file, clears the checkout,
 and collects — so transitions reflect real prose changes, not export churn.
 
-The normalizer is the load-bearing piece: it makes a no-op round trip
+The normalizer (`normalize.py`) is the load-bearing piece: it makes a no-op round trip
 byte-stable (collect says "No changes"), which keeps observation noise and
 the proposal attention gate quiet. It runs on push (canonicalizing the
 local file first) and on pull (canonicalizing Google's export quirks:
@@ -32,7 +32,9 @@ from . import form_grammar
 from . import threads as threads_mod
 from .illus import (ILLUS_DIR, PROMPTS_SUBDIR, capture_embeds,
                     join_prompt_embeds, reembed, snapshot_prompts,
-                    split_prompt_embeds, strip_dangling)
+                    split_prompt_embeds)
+from .normalize import (DISPLAY_MATH, INLINE_MATH, clamp, flatten_whitespace,
+                        math_positions, normalize_markdown, strip_dangling)
 from .revisions import is_placeholder, iter_manuscript_paths, strip_embed_lines
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
@@ -40,104 +42,22 @@ GDOC_MIME = "application/vnd.google-apps.document"
 MARKDOWN_MIME = "text/markdown"
 
 
-# ------------------------------------------------------------- normalizer
+# ------------------------------------------------- Doc import and export text
 
-# The colon: the exporter writes a URL typed or inserted as plain text as
-# `https\://…` so it will not auto-link (seen 2026-10-02 on footnote lines
-# an outside caller staged).
-_ESCAPE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!<>~|=:])")
-_BULLET = re.compile(r"^(\s*)\*\s+", re.MULTILINE)
-# CommonMark thematic break: ≥3 of *, -, or _ with optional spaces
-# between, ≤3 leading spaces. Must run BEFORE _BULLET — a spaced
-# `* * *` break would otherwise become `- * *` (the bullet rule eats
-# the first `* `) and push_doc would write that corruption to disk.
-_THEMATIC_BREAK = re.compile(
-    r"^[ \t]{0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$",
-    re.MULTILINE)
-_HEADING = re.compile(r"^(#{1,6})[ \t]+", re.MULTILINE)
-_TABLE_DELIM = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+\s*$", re.M)
-_EMPTY_HEADING = re.compile(r"^#{1,6}$\n?", re.MULTILINE)
-_HARD_BREAK = re.compile(r"(?<=\S) {2,}\n(?=[^\s#>|*\-\[])(?!\d+[.)]\s)")
 _FOOTNOTE_SYNTAX = re.compile(r"\[\^")
 
 
-# ------------------------------------------------------------- code fences
-#
-# Fenced code blocks (``` / ~~~) are opaque to the normalizer for the
-# same reason math is: their bytes are intentional examples, not prose
-# the Doc bridge is free to canonicalize. Without lifting them, the
-# prose rules rewrite the fence body in place — `*` bullets become `-`,
-# `\*` loses its backslash, `| :--- |` alignment colons vanish — and
-# `push_doc` writes that corruption back to the local manuscript
-# whenever normalize differs from disk. Lifted before math so a fence
-# that *shows* TeX is preserved byte-for-byte too.
-_FENCE_OPEN = re.compile(r"^([`~]{3,})")
-_FENCE_SENTINEL = "\x00F%d\x00"
-_FENCE_SENTINEL_RE = re.compile(r"\x00F(\d+)\x00")
-
-
-def _lift_fences(text: str) -> tuple[str, list[str]]:
-    """Replace each fenced code block with a sentinel; return (text, spans).
-    Unclosed fences consume through EOF (CommonMark)."""
-    lines = text.split("\n")
-    out: list[str] = []
-    spans: list[str] = []
-    i = 0
-    while i < len(lines):
-        m = _FENCE_OPEN.match(lines[i])
-        if not m:
-            out.append(lines[i])
-            i += 1
-            continue
-        marker = m.group(1)
-        ch, n = marker[0], len(marker)
-        block = [lines[i]]
-        i += 1
-        while i < len(lines):
-            block.append(lines[i])
-            close = _FENCE_OPEN.match(lines[i])
-            # Closing fence: same char, at least as long, no info string.
-            if (close and close.group(1)[0] == ch
-                    and len(close.group(1)) >= n
-                    and lines[i].strip() == close.group(1)):
-                i += 1
-                break
-            i += 1
-        spans.append("\n".join(block))
-        out.append(_FENCE_SENTINEL % (len(spans) - 1))
-    return "\n".join(out), spans
-
-
-def _restore_fences(text: str, spans: list[str]) -> str:
-    return _FENCE_SENTINEL_RE.sub(lambda m: spans[int(m.group(1))], text)
-
-
-# ------------------------------------------------------------- math spans
-#
-# TeX math — $…$ inline, $$…$$ display (docs/math-and-physics-guidelines.md)
-# — is opaque to the normalizer: every backslash inside it is content,
-# so the Docs-export escape strip that is right for prose would gut a
-# `\\` row break or a `\{` brace. Spans are lifted out before the prose
-# rules run and put back after; only display layout is canonicalized
-# (one physical line — the Doc reflows a block to that anyway).
-_DISPLAY_MATH = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
-_INLINE_MATH = re.compile(
-    r"(?<![\\$])\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<![\s\\])\$(?![\d$])")
 # The same spans as Google's exporter writes them since (at least)
 # 2026-10: the `$` delimiters arrive backslash-escaped, which hides the
-# span from the two patterns above (#152). A price (`\$5 and \$10`) has
+# span from DISPLAY_MATH and INLINE_MATH (#152). A price (`\$5 and \$10`) has
 # no closing delimiter after a non-space and stays escaped.
 _EXPORT_DISPLAY_MATH = re.compile(r"\\\$\\\$(.+?)\\\$\\\$", re.DOTALL)
 _EXPORT_INLINE_MATH = re.compile(
     r"(?<![\\$])\\\$(?![\s$])((?:\\.|[^$\\\n])+?)(?<!\s)\\\$(?![\d$])")
-_MATH_SENTINEL = "\x00M%d\x00"
-_SENTINEL_RE = re.compile(r"\x00M(\d+)\x00")
-_ANY_MATH = re.compile(
-    f"(?s:{_DISPLAY_MATH.pattern})|{_INLINE_MATH.pattern}")
 _ANY_EXPORT_MATH = re.compile(
-    f"(?s:{_EXPORT_DISPLAY_MATH.pattern})|(?s:{_DISPLAY_MATH.pattern})"
-    f"|{_EXPORT_INLINE_MATH.pattern}|{_INLINE_MATH.pattern}")
-# Inside math the exporter's escapes are all undone — _ESCAPE's set and
+    f"(?s:{_EXPORT_DISPLAY_MATH.pattern})|(?s:{DISPLAY_MATH.pattern})"
+    f"|{_EXPORT_INLINE_MATH.pattern}|{INLINE_MATH.pattern}")
+# Inside math the exporter's escapes are all undone — normalize._ESCAPE's set and
 # the `$` of an escaped delimiter or a TeX `\$`.
 _EXPORT_ESCAPE_IN_MATH = re.compile(r"\\(.)", re.DOTALL)
 _MATH_ESCAPED = set("\\`*_{}[]()#+-.!<>~|=:$")
@@ -145,111 +65,8 @@ _MATH_ESCAPED = set("\\`*_{}[]()#+-.!<>~|=:$")
 
 def map_math(text: str, fn) -> str:
     """fn over the inside of every math span, delimiters excluded."""
-    text = _DISPLAY_MATH.sub(lambda m: "$$" + fn(m.group(1)) + "$$", text)
-    return _INLINE_MATH.sub(lambda m: "$" + fn(m.group(1)) + "$", text)
-
-
-# A pending form, as the tab and its export hold it: `<<old>>{{new}}`,
-# the old half struck (`~~`) and its markers escaped (`\<\<`) by the
-# exporter. A form whose halves each carry a `$` — a revision that moves
-# a span's opening delimiter, `<<by element:$\neg>>{{by element: $\neg}}`
-# — leaves the marked text with three delimiters where each reading has
-# two, and pairing them on the marked text pairs the wrong ones: the new
-# half kept its `\$` on pull, the resolve landed it, and the next push
-# and normalize took the span for prose and stripped its `\{` `\}`
-# (2026-10-18, SMSTTD recapitulation.md R10). So math is found on each
-# READING — every form collapsed to its old half, then to its new — and
-# mapped back to the marked text.
-_FORM = re.compile(
-    r"(?:~~)*\\?<\\?<(?P<old>.*?)\\?>\\?>(?:~~)*\{\{(?P<new>.*?)\}\}",
-    re.DOTALL)
-
-
-def _math_positions(text: str, pattern: re.Pattern) -> list[list[int]]:
-    """Each math span `pattern` finds, as the positions in `text` it
-    covers. Without forms that is the match itself; with forms, every
-    span of either reading, each mapped back through its reading."""
-    forms = list(_FORM.finditer(text))
-    if not forms:
-        return [list(range(*m.span())) for m in pattern.finditer(text)]
-    spans: list[list[int]] = []
-    for keep in ("old", "new"):
-        idx: list[int] = []
-        pos = 0
-        for f in forms:
-            idx += range(pos, f.start())
-            idx += range(f.start(keep), f.end(keep))
-            pos = f.end()
-        idx += range(pos, len(text))
-        reading = "".join(text[i] for i in idx)
-        spans += [idx[m.start():m.end()] for m in pattern.finditer(reading)
-                  if m.end() > m.start()]
-    return spans
-
-
-def _lift_math(text: str) -> tuple[str, list[str]]:
-    spans: list[str] = []
-
-    def display(m: re.Match) -> str:
-        spans.append("$$ " + " ".join(m.group(1).split()) + " $$")
-        return _MATH_SENTINEL % (len(spans) - 1)
-
-    def inline(m: re.Match) -> str:
-        spans.append(m.group(0))
-        return _MATH_SENTINEL % (len(spans) - 1)
-
-    if _FORM.search(text):
-        text = _lift_marked_math(text, spans)
-    else:
-        text = _DISPLAY_MATH.sub(display, text)
-    # An unclosed $$ leaves TeX in the prose stream. _ESCAPE would then
-    # gut row breaks (\\ → \) and \{ \| \= — and push_doc writes the
-    # normalized bytes back to disk, so the damage is permanent. Keep
-    # the remnant opaque (byte-identical aside from the file's trailing
-    # newline, which normalize re-adds) until a closer exists.
-    if "$$" in text:
-        at = text.index("$$")
-        head, tail = text[:at], text[at:]
-        head = _INLINE_MATH.sub(inline, head)
-        spans.append(tail.rstrip("\n"))
-        return head + (_MATH_SENTINEL % (len(spans) - 1)), spans
-    return _INLINE_MATH.sub(inline, text), spans
-
-
-def _lift_marked_math(text: str, spans: list[str]) -> str:
-    r"""_lift_math for text carrying pending forms: every stretch that is
-    math in either reading goes opaque, so no prose rule reaches a `\{`
-    inside it. A span a form cuts through is lifted piece by piece —
-    the form markers between the pieces stay prose, for the rules that
-    unescape them. Display layout is canonicalized only for a piece
-    that is one whole display span."""
-    runs: list[list[int]] = []
-    for span in _math_positions(text, _ANY_MATH):
-        start = span[0]
-        for prev, at in zip(span, span[1:] + [None]):
-            if at != prev + 1:
-                runs.append([start, prev + 1])
-                start = at
-    ranges: list[list[int]] = []
-    for a, b in sorted(runs):
-        if ranges and a < ranges[-1][1]:
-            ranges[-1][1] = max(ranges[-1][1], b)
-        else:
-            ranges.append([a, b])
-    out, pos = [], 0
-    for a, b in ranges:
-        chunk = text[a:b]
-        m = _DISPLAY_MATH.fullmatch(chunk)
-        if m:
-            chunk = "$$ " + " ".join(m.group(1).split()) + " $$"
-        spans.append(chunk)
-        out.append(text[pos:a] + _MATH_SENTINEL % (len(spans) - 1))
-        pos = b
-    return "".join(out) + text[pos:]
-
-
-def _restore_math(text: str, spans: list[str]) -> str:
-    return _SENTINEL_RE.sub(lambda m: spans[int(m.group(1))], text)
+    text = DISPLAY_MATH.sub(lambda m: "$$" + fn(m.group(1)) + "$$", text)
+    return INLINE_MATH.sub(lambda m: "$" + fn(m.group(1)) + "$", text)
 
 
 _MATH_ACTIVE = set("*_<>~|#[]`")
@@ -316,7 +133,7 @@ def render_emphasis(markdown: str) -> tuple[str, list[tuple[int, int, dict]]]:
         emit(text[pos:])
 
     pos = 0
-    for m in re.finditer(_DISPLAY_MATH.pattern + "|" + _INLINE_MATH.pattern,
+    for m in re.finditer(DISPLAY_MATH.pattern + "|" + INLINE_MATH.pattern,
                          markdown, re.DOTALL):
         walk(markdown[pos:m.start()])
         emit(m.group(0))
@@ -379,9 +196,9 @@ def unescape_export_math(markdown: str) -> str:
     normalize_markdown leaves math alone because on a local file every
     backslash is TeX. Escaped delimiters (`\$…\$`, `\$\$…\$\$`) are
     unescaped with the rest so the spans are found at all (#152), and
-    spans are found per reading of any pending form (see _FORM)."""
+    spans are found per reading of any pending form (see normalize._FORM)."""
     inside: set[int] = set()
-    for span in _math_positions(markdown, _ANY_EXPORT_MATH):
+    for span in math_positions(markdown, _ANY_EXPORT_MATH):
         inside.update(span)
 
     def one(m: re.Match) -> str:
@@ -420,54 +237,6 @@ def escape_footnotes(markdown: str) -> str:
     Apply ONLY to bytes handed to a markdown import, never to the text
     that is hashed or written locally."""
     return _FOOTNOTE_SYNTAX.sub(r"\\[^", markdown)
-
-
-def normalize_markdown(text: str) -> str:
-    """Canonical markdown so identical prose is byte-identical regardless
-    of which editor (local, Obsidian, Google Docs export) produced it.
-    Idempotent: normalize(normalize(x)) == normalize(x)."""
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = text.replace(" ", " ")           # NBSP → space
-    # Fences before math: a code example of TeX must stay verbatim, and
-    # the prose rules below must never rewrite inside a fence (push_doc
-    # persists normalize to disk whenever the bytes move).
-    text, fences = _lift_fences(text)
-    text, math = _lift_math(text)                # TeX is opaque from here
-    text = _ESCAPE.sub(r"\1", text)              # Docs-export backslash escapes
-    text = _THEMATIC_BREAK.sub("---", text)      # before bullets (see above)
-    text = _BULLET.sub(r"\1- ", text)            # '*' bullets → '-'
-    text = _HEADING.sub(lambda m: m.group(1) + " ", text)
-    # A Docs-exported table carries an aligned delimiter row (| :---- |);
-    # the canonical form is | --- | per column, so a table that round-trips
-    # through a tab is byte-identical to the one that was pushed.
-    text = _TABLE_DELIM.sub(
-        lambda m: "|" + "|".join(" --- " for _ in m.group(0).strip().split("|")[1:-1]) + "|",
-        text)
-    # Doc-pasted images export as dangling ![][imageN] refs — churn, not
-    # content. Stripping here (not just in pull) keeps push, pull, and
-    # session-start reconciliation agreeing on the canonical text.
-    text, _ = strip_dangling(text)
-    # A hard line break inside a paragraph (a stanza line; a Doc-side
-    # shift-enter) exports as two trailing spaces. The canonical form is
-    # the backslash break, which Google imports correctly, pandoc renders
-    # in every output, and no whitespace pass can eat — so it is rewritten
-    # BEFORE trailing whitespace is stripped. Only a break followed by a
-    # continuation line counts: spaces before a blank line or a block
-    # opener (heading, list, table, quote, tag) are churn, as before.
-    # (verse-and-cast-design.md §2)
-    text = _HARD_BREAK.sub("\\\\\n", text)
-    text = "\n".join(line.rstrip() for line in text.split("\n"))
-    # Empty heading paragraphs (a Doc styling artifact, e.g. a blank
-    # Subtitle line) are dropped, never merged into a neighbor.
-    text = _EMPTY_HEADING.sub("", text)
-    # Horizontal rules get uniform blank-line padding (tab exports emit
-    # them flush against neighbors; local files usually pad them).
-    text = re.sub(r"\n*^(---|\*\*\*|___)$\n*", r"\n\n---\n\n", text,
-                  flags=re.MULTILINE)
-    text = re.sub(r"\n{3,}", "\n\n", text)       # collapse blank-line runs
-    text = _restore_math(text.strip("\n"), math)
-    text = _restore_fences(text, fences)
-    return text + "\n" if text else ""
 
 
 # ------------------------------------------------------------------- auth
@@ -782,21 +551,12 @@ def _open_comments(service, doc_id: str, margin: "Margin | None"
     return fetch_open_comments(service, doc_id)
 
 
-def _flat(text: str) -> str:
-    return " ".join(text.split())
-
-
 def _flat_prose(text: str) -> str:
-    """`_flat` with the emphasis markers gone: a Doc comment quotes the
+    """`flatten_whitespace` with the emphasis markers gone: a Doc comment quotes the
     rendered text (*religare* comes back as religare), so the anchor is
     matched on the words alone (2026-10-26, a comment on read-again.md
     that went unattributed for one pair of asterisks)."""
-    return _flat(re.sub(r"[*_]", "", text))
-
-
-def clamp(text: str, limit: int = 60) -> str:
-    flat = _flat(text)
-    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+    return flatten_whitespace(re.sub(r"[*_]", "", text))
 
 
 def locate_quote(files: dict[str, str],
@@ -1309,41 +1069,6 @@ def build_manifest_inventory(root: Path) -> list[tuple[str, int, int]]:
             for n in order if n in prose]
 
 
-_VOWEL_GROUPS = re.compile(r"[aeiouy]+", re.I)
-
-
-def _syllables(word: str) -> int:
-    w = word.lower().strip(".,;:!?\"'()[]—–")
-    if not w:
-        return 0
-    groups = len(_VOWEL_GROUPS.findall(w))
-    if w.endswith("e") and groups > 1:
-        groups -= 1
-    return max(groups, 1)
-
-
-def chapter_stats(text: str) -> dict:
-    """Deterministic readability signals for one chapter. ASL = average
-    sentence length in words; AWL = average word length in characters;
-    FRE = Flesch Reading Ease with a heuristic syllable count (treat as
-    approximate; higher is easier, 60–70 is plain English)."""
-    if is_placeholder(text):
-        # As for an empty file: a readability score for a mid-rewrite
-        # marker is noise in the manifest.
-        return {}
-    prose = re.sub(r"^#.*$", "", text, flags=re.M)   # headings aren't prose
-    words = re.findall(r"[A-Za-z'’]+", prose)
-    if not words:
-        return {}
-    sentences = max(len(re.findall(r"[.!?]+(?:[\s\"'’”)]|$)", prose)), 1)
-    syllables = sum(_syllables(w) for w in words)
-    asl = len(words) / sentences
-    fre = 206.835 - 1.015 * asl - 84.6 * (syllables / len(words))
-    return {"asl": asl,
-            "awl": sum(len(w) for w in words) / len(words),
-            "fre": max(0.0, min(100.0, fre))}
-
-
 def manifest_text(manuscript_name: str, doc_version: int,
                   inventory: list[tuple[str, int, int]] | None = None,
                   stats: dict[str, dict] | None = None,
@@ -1410,6 +1135,7 @@ def manifest_text(manuscript_name: str, doc_version: int,
 
 def build_manifest_stats(root: Path) -> dict[str, dict]:
     """Per-chapter readability signals for the manifest, from local files."""
+    from .manifest import chapter_stats
     from .revisions import read_manuscript_files
     from .structure import content_files
 
@@ -5426,7 +5152,7 @@ def _refuse_table_orphans(service, master_id: str, relpath: str,
     comment anchors (it-cd0fb0ad59fb). A comment counts when its quoted
     text sits inside the table's cells; an unreadable margin counts as
     bearing, because the safe path is the one that cannot destroy it."""
-    flat = [_flat(t.get("text", "")) for t in tables]
+    flat = [flatten_whitespace(t.get("text", "")) for t in tables]
     try:
         comments = _open_comments(service, master_id, margin)
     except Exception:
@@ -5434,7 +5160,7 @@ def _refuse_table_orphans(service, master_id: str, relpath: str,
     else:
         held = 0
         for c in comments:
-            quote = _flat((c.get("quotedFileContent") or {}).get("value", ""))
+            quote = flatten_whitespace((c.get("quotedFileContent") or {}).get("value", ""))
             if quote and any(quote in f for f in flat):
                 held += 1
         count = str(held)
@@ -5567,7 +5293,7 @@ def _known_forms(db: Database, manuscript_id: str, relpath: str
 def _form_flat(text: str) -> str:
     """Text as a form's halves read in the export: no strike, emphasis
     or escapes, whitespace collapsed."""
-    return _flat(re.sub(r"[*_~\\]", "", rendered_text(text)))
+    return flatten_whitespace(re.sub(r"[*_~\\]", "", rendered_text(text)))
 
 
 def _form_owner(paragraph: str, known: list[dict]) -> dict | None:

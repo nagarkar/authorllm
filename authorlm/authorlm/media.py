@@ -100,7 +100,7 @@ def _spoken(text: str) -> str:
     markers and display math removed; whitespace collapsed."""
     from . import directive_tags
     from .export import strip_display_math, strip_voice_lines
-    from .gdocs import normalize_markdown
+    from .normalize import normalize_markdown
     from .illus import parse_tag
 
     text, _ = directive_tags.strip_tags(normalize_markdown(text))

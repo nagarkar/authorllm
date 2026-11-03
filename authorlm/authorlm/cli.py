@@ -32,6 +32,7 @@ from . import paths as paths_mod
 from .db import Database, ko_fields, loads
 from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
+from .normalize import clamp
 from .revisions import collect_revision, detect_transitions
 
 
@@ -1523,8 +1524,8 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
           + (ui.dim(f", {len(diffs)} modified acceptance(s) recorded")
              if diffs else ""))
     for d in diffs:
-        print(ui.dim(f"  «{gdocs.clamp(d['proposal'])}» → "
-                     f"«{gdocs.clamp(d['final'])}»"))
+        print(ui.dim(f"  «{clamp(d['proposal'])}» → "
+                     f"«{clamp(d['final'])}»"))
     # Collect, then rebuild this essay's summary at the gate.
     #
     # NO_EPISODE, not ambient (AQ; §15.17's disposition table, the
@@ -4635,8 +4636,6 @@ def _lens_autopush(db, manuscript, args, target: str, staged: int) -> None:
 
 
 def gdocs_clamp(text: str, limit: int = 90) -> str:
-    from .gdocs import clamp
-
     return clamp(text or "", limit)
 
 
@@ -7259,8 +7258,6 @@ def cmd_belief(args):
 def _print_held(result: dict) -> None:
     """Name each paragraph a push held back because an open comment is
     anchored in it (it-e26a44f924be), with the comment, and the road."""
-    from .gdocs import clamp
-
     held = result.get("held") or []
     if not held:
         return

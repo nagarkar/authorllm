@@ -32,6 +32,7 @@ from test_passes import _SurgicalDocFake  # noqa: E402
 
 from authorlm import api, gdocs  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
+from authorlm.normalize import normalize_markdown  # noqa: E402
 
 PASSED = 0
 
@@ -111,7 +112,7 @@ def _fixture(root: Path, name: str, essay: str = BASE,
     links["_container_tab"] = "tab-1"
     links["solo.md"] = {
         "tab_id": "tab-2", "checked_out": True,
-        "pushed_hash": (_h(gdocs.normalize_markdown(essay))
+        "pushed_hash": (_h(normalize_markdown(essay))
                         if pushed == "base" else pushed)}
     gdocs._save_mapping(db, manuscript, meta)
     return ws, db, manuscript, ms, fake

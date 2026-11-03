@@ -42,6 +42,7 @@ from . import hygiene
 from . import triage as triage_service
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
+from .normalize import clamp, normalize_markdown
 from .sessions import NO_EPISODE
 from .summaries import drafting_context_for_write_status, drafting_context_for_writeup
 from .revisions import (
@@ -5227,7 +5228,7 @@ def _twin_warning(accepted: list[dict]) -> str | None:
         where = " and ".join(str(u) for u in units)
         lines.append(
             f"{len(units)} of these changes replace the same paragraph "
-            f"text, word for word: «{gdocs.clamp(old)}» (units {where}). "
+            f"text, word for word: «{clamp(old)}» (units {where}). "
             f"They settle by position — the first form in the Doc is the "
             f"first change — so reword either freely. The one thing to "
             f"avoid is DELETING one of them outright: your manuscript "
@@ -6178,10 +6179,10 @@ def _door_final_text(rel: str, fetched: dict, final: str, path: Path,
 
     if fetched["state"] != "local_ahead":
         return final
-    local = gdocs.normalize_markdown(strip_embed_lines(
+    local = normalize_markdown(strip_embed_lines(
         path.read_text(encoding="utf-8")))
     merged = _merge_local_edits(fetched["collapsed"], local,
-                                gdocs.normalize_markdown(final))
+                                normalize_markdown(final))
     if merged is None:
         raise ValueError(
             f"'{rel}' was edited locally since the last push, on a line "
