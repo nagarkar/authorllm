@@ -26,7 +26,7 @@ from pathlib import Path
 from . import proposals
 from .concepts import (primary_location, NODE_KINDS, add_concept, concept_pattern, get_concept,
                        link_concepts, mention_pattern, node_names,
-                       scan_realizations)
+                       scan_realizations, scoped_concepts)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
 from .db import Database, ko_fields
 from .llm import LLMClient
@@ -551,14 +551,13 @@ def _law_block(db: Database, mid: str, rel: str, proposable) -> str:
 def glossary_nodes(db: Database, manuscript: dict, rel: str, text: str,
                    exclude: set[str] | None = None) -> tuple[list[dict], list[dict]]:
     """(nodes, settled edges) of the graph's slice for this file — the
-    `api.scoped_concepts(file=)` selection, with the FULL notes (the
+    `scoped_concepts(file=)` selection, with the FULL notes (the
     compact projection previews them). `exclude` drops node ids (the
     replay leaves an essay's own candidates out of its glossary)."""
-    from . import api
     from .db import loads
 
     try:
-        sliced = api.scoped_concepts(db, manuscript, file=rel, text=text)
+        sliced = scoped_concepts(db, manuscript, file=rel, text=text)
     except LookupError:
         return [], []
     names = {n["name"] for n in sliced.get("nodes", [])}

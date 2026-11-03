@@ -47,6 +47,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .concepts import scoped_concepts
 from .db import Database, loads
 from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
 
@@ -274,9 +275,7 @@ def _scoped(db: Database, manuscript: dict, file: str,
     it is what makes CONCEPT NOTES and PROTECTED TERMS obey the
     one-capture rule: without it a parallel session's edit between window
     N and window N+1 changes block A and forfeits the cached prefix."""
-    from . import api
-
-    return api.scoped_concepts(db, manuscript, file=file, text=text)
+    return scoped_concepts(db, manuscript, file=file, text=text)
 
 
 def _concept_notes(db: Database, manuscript: dict, file: str,

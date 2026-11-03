@@ -27,6 +27,7 @@ import json
 import re
 from pathlib import Path
 
+from .concepts import scoped_concepts
 from .db import Database, ko_fields, loads
 from .llm import LLMClient, resolve_temperature
 
@@ -575,10 +576,8 @@ def drafting_context_for_write_status(db: Database, manuscript: dict,
 
 def _concept_slice(db: Database, manuscript: dict, file: str) -> str:
     """The graph's file= slice as prompt text: name — notes."""
-    from . import api
-
     try:
-        sliced = api.scoped_concepts(db, manuscript, file=file)
+        sliced = scoped_concepts(db, manuscript, file=file)
     except LookupError:
         return "(none recorded)"
     lines = []

@@ -42,7 +42,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .concepts import concept_pattern, node_names
+from .concepts import concept_pattern, node_names, scoped_concepts
 from .db import Database, ko_fields, loads, new_id
 from .findings import flag_rules  # re-exported: lenses.flag_rules is public
                                    # API (tests call it directly); the
@@ -425,9 +425,8 @@ def _glossary(db: Database, manuscript: dict, rel: str, text: str) -> str:
     """GLOSSARY: the concepts this essay names or introduced — name,
     aliases, notes, and WHERE INTRODUCED (the fact that makes the ramp
     check a lookup rather than a summary read)."""
-    from . import api
     try:
-        graph = api.scoped_concepts(db, manuscript, file=rel, text=text)
+        graph = scoped_concepts(db, manuscript, file=rel, text=text)
     except LookupError:
         return ""
     lines = []
