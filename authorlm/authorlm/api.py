@@ -26,6 +26,7 @@ from typing import Any
 
 from . import clients
 from . import concepts as cg
+from .concepts import _compact_concept, _compact_edge, _preview
 from . import beliefs as bel
 from . import proposals as prop
 from . import sessions as ses
@@ -3932,34 +3933,6 @@ def convert_belief(db: Database, manuscript: dict, prefix: str, aspect: str,
 # follow-up tools need (proposal / edge resolution). Full rows remain one
 # verbose=True away.
 
-_NOTE_PREVIEW = 160
-
-
-def _preview(text: str | None) -> str | None:
-    if not text:
-        return None
-    return text if len(text) <= _NOTE_PREVIEW else text[:_NOTE_PREVIEW - 1] + "…"
-
-
-def _compact_concept(row: dict) -> dict:
-    out = {"name": row["name"], "kind": row["kind"], "status": row["status"]}
-    if row.get("introduced_in"):
-        out["introduced_in"] = row["introduced_in"]
-    notes = _preview(row.get("notes"))
-    if notes:
-        out["notes"] = notes
-    aliases = loads(row.get("aliases"), [])
-    if aliases:
-        out["aliases"] = aliases
-    return out
-
-
-def _compact_edge(edge: dict) -> dict:
-    return {"id": edge["id"],
-            "edge": f"{edge['from_name']} —{edge['relation']}→ {edge['to_name']}",
-            "status": edge["status"]}
-
-
 def _compact_gap(gap: dict) -> dict:
     return {"edge_id": gap["edge_id"], "text": gap["text"],
             "status": gap["status"]}
@@ -4061,16 +4034,6 @@ def compact_briefing(briefing: dict) -> dict:
     return out
 
 
-def compact_concepts(result: dict) -> dict:
-    """Compact projection of the whole-graph listing."""
-    return {
-        "node_count": len(result["nodes"]),
-        "nodes": [_compact_concept(dict(n)) for n in result["nodes"]],
-        "edge_count": len(result["edges"]),
-        "edges": [_compact_edge(e) for e in result["edges"]],
-    }
-
-
 def concept_overview(db: Database, manuscript: dict) -> dict:
     """The graph at a glance — counts by kind and status, edge count,
     recently added names — never the rows themselves. This is what an
@@ -4110,58 +4073,7 @@ def scoped_concepts(db: Database, manuscript: dict,
                     file: str | None = None,
                     query: str | None = None,
                     text: str | None = None) -> dict:
-    """The relevant slice of the graph, compact. `query` matches name,
-    notes, or aliases (case-insensitive substring). `file` selects
-    concepts realized in that essay: introduced there, or whose name or
-    alias appears in its text. Edges are restricted to the selected
-    nodes.
-
-    `text` is the CAPTURE OVERRIDE, and it closes a pre-existing
-    one-capture violation rather than adding a feature. With `file` and
-    no `text` this re-reads the disk through `read_manuscript_files` —
-    a SECOND read inside a verb that already took exactly one capture.
-    `filtering._concept_notes` did precisely that, so `filter run`'s
-    CONCEPT NOTES could differ between window N and window N+1 if a
-    parallel session edited the file, silently forfeiting the cached
-    prefix that block A exists to hold. Supplying the caller's own
-    captured text replaces the disk read for the file-scoping match, and
-    the file is still RESOLVED against the manuscript so an unknown name
-    is still a LookupError. Defaults to today's behaviour."""
-    mid = manuscript["id"]
-    nodes = [dict(n) for n in db.all(
-        "SELECT * FROM concept_nodes WHERE manuscript_id = ? "
-        "AND status != 'retired'", (mid,))]
-    if query:
-        q = query.lower()
-        nodes = [n for n in nodes
-                 if q in n["name"].lower()
-                 or q in (n.get("notes") or "").lower()
-                 or any(q in a.lower()
-                        for a in loads(n.get("aliases"), []))]
-    if file:
-        from .revisions import read_manuscript_files
-        files = read_manuscript_files(Path(manuscript["path"]))
-        rel = next((r for r in files
-                    if r == file or r.endswith("/" + file)
-                    or Path(r).name == file), None)
-        if rel is None:
-            raise LookupError(f"no manuscript file matching '{file}'")
-        haystack = (files[rel] if text is None else text).lower()
-        nodes = [n for n in nodes
-                 if n.get("introduced_in") == rel
-                 or n["name"].lower() in haystack
-                 or any(a.lower() in haystack
-                        for a in loads(n.get("aliases"), []))]
-    ids = {n["id"] for n in nodes}
-    edges = [
-        {**dict(e),
-         "from_name": cg.node_name(db, e["from_node"]),
-         "to_name": cg.node_name(db, e["to_node"])}
-        for e in db.all(
-            "SELECT * FROM concept_edges WHERE manuscript_id = ? "
-            "AND status NOT IN ('rejected', 'retired')", (mid,))
-        if e["from_node"] in ids and e["to_node"] in ids]
-    return compact_concepts({"nodes": nodes, "edges": edges})
+    return cg.scoped_concepts(db, manuscript, file=file, query=query, text=text)
 
 
 def curate_concepts(db: Database, manuscript: dict,
