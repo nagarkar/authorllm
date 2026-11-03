@@ -16,6 +16,7 @@ import json
 import re
 from pathlib import Path
 
+from .concepts import scoped_concepts
 from .db import Database, ko_fields, loads
 from .llm import LLMClient, resolve_temperature
 from . import summaries as sums
@@ -354,7 +355,7 @@ def build_context(db: Database, manuscript: dict, file: str,
     stored rows are judged as they are and a stale one still blocks, as
     the pass has always done."""
     from .styles import render as render_style
-    from . import api, context
+    from . import context
 
     gate = preflight(db, manuscript, file, pass_row)
     if not gate["clear"] and not force:
@@ -397,7 +398,7 @@ def build_context(db: Database, manuscript: dict, file: str,
         "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? AND "
         "status = 'validated' ORDER BY confidence DESC", (manuscript["id"],))]
     try:
-        concepts = api.scoped_concepts(db, manuscript, file=file)
+        concepts = scoped_concepts(db, manuscript, file=file)
     except LookupError:
         concepts = {"nodes": [], "edges": []}
     return {

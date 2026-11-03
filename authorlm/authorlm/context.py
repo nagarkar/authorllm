@@ -43,7 +43,7 @@ class Input(str, Enum):
     STYLE_LAW = "style-law"                  # styles.render
     VALIDATED_BELIEFS = "beliefs"            # editorial_beliefs, validated
     INTENTS = "intents"                      # passes.intents_in_scope
-    CONCEPT_SLICE = "concepts"               # api.scoped_concepts(file=)
+    CONCEPT_SLICE = "concepts"               # concepts.scoped_concepts(file=)
     PROTECTED_TERMS = "protected"            # filtering.protected_terms
     DICTIONARY = "dictionary"                # the pronunciation dictionary
     CAST = "cast"                            # _profiles/cast

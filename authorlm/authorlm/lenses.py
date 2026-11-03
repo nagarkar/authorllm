@@ -42,7 +42,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .concepts import concept_pattern, node_names
+from .concepts import concept_pattern, node_names, scoped_concepts
 from .db import Database, ko_fields, loads, new_id
 from .findings import flag_rules  # re-exported: lenses.flag_rules is public
                                    # API (tests call it directly); the
@@ -425,9 +425,8 @@ def _glossary(db: Database, manuscript: dict, rel: str, text: str) -> str:
     """GLOSSARY: the concepts this essay names or introduced — name,
     aliases, notes, and WHERE INTRODUCED (the fact that makes the ramp
     check a lookup rather than a summary read)."""
-    from . import api
     try:
-        graph = api.scoped_concepts(db, manuscript, file=rel, text=text)
+        graph = scoped_concepts(db, manuscript, file=rel, text=text)
     except LookupError:
         return ""
     lines = []
@@ -1135,7 +1134,7 @@ def record_repairs(db: Database, manuscript: dict, session: dict, file: str,
     intents are declared scoped to the essay and their tag removal is
     staged. A `new` that still carries the tag, carries reserved
     markers, or is empty is refused by id."""
-    from . import api, staging
+    from . import sessions, staging
     if payload is None:
         payload = assemble_repair(db, manuscript, file)
     files = read_manuscript_files(Path(manuscript["path"]))
@@ -1174,12 +1173,13 @@ def record_repairs(db: Database, manuscript: dict, session: dict, file: str,
             if not statement:
                 refused.append({"id": fid, "reason": "intent without a statement"})
                 continue
-            declared = api.declare_intent(db, manuscript, statement, scope=rel)
-            intents.append({"id": fid, "intent": declared["intent"]["id"],
+            declared = sessions.declare_intent(db, manuscript["id"], statement,
+                                               scope=rel)
+            intents.append({"id": fid, "intent": declared["id"],
                             "text": statement})
             entries.append({"n": tag["n"], "new": _remove_tag(tag["unit"], tag["raw"]),
                             "why": f"{fid} filed as intent "
-                                   f"{declared['intent']['id']}: {statement}"})
+                                   f"{declared['id']}: {statement}"})
         else:
             refused.append({"id": fid, "reason": f"unknown action {action!r}"})
     staged = []

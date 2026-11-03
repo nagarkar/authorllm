@@ -531,7 +531,8 @@ def scenario_editorial_loop(root: Path) -> None:
           str(ccollect))
     check("compact collect passes non-version reports through",
           _capi.compact_collect({"unchanged": True}) == {"unchanged": True})
-    cgraph = _capi.compact_concepts(_capi.list_concepts(_cdb, _cms))
+    from authorlm import concepts as _cconcepts
+    cgraph = _cconcepts.compact_concepts(_capi.list_concepts(_cdb, _cms))
     check("compact concept listing projects to name/kind/status",
           cgraph["node_count"] == len(cgraph["nodes"])
           and all(set(n) <= {"name", "kind", "status", "introduced_in",
