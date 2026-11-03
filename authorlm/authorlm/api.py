@@ -5677,26 +5677,6 @@ def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
                             warnings, direct=True)
 
 
-def _write_resolved_text(path: Path, root: Path, final: str) -> str:
-    """Write a resolve's final text back to disk WITH its illustration
-    embed lines. The Doc never carries embed lines (push strips them),
-    so the text a filter, lens, or critique resolve reads back from a
-    tab is embed-free — and writing it as-is silently unlinked every
-    rendered illustration in the essay (the tag stayed, the picture
-    under it vanished from Obsidian; 15 slots across SMSTTD,
-    2026-09-02). The ordinary pull re-inserts them; this is the same
-    step, the prior pick winning while its file exists."""
-    from . import gdocs
-    from .illus import capture_embeds, reembed
-
-    prior = path.read_text(encoding="utf-8") if path.exists() else ""
-    normalized = gdocs.normalize_markdown(final)
-    normalized = reembed(normalized, root, capture_embeds(prior))
-    path.write_text(normalized if normalized.endswith("\n")
-                    else normalized + "\n", encoding="utf-8")
-    return normalized
-
-
 def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                      rel: str, path: Path, warnings: list[str],
                      direct: bool = False,
@@ -5742,7 +5722,7 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                                          origin_type=FILTER_ORIGIN,
                                          evidence_type=FILTER_EVIDENCE,
                                          final_text=final)
-    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
+    normalized = gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
 
     # NO episode (§1.8). Hygiene work has no goal to be filed under, and
     # `episode=None` would file it against whatever the author happens to
@@ -6136,7 +6116,7 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
                                      origin_type=_morph.MORPH_ORIGIN,
                                      evidence_type=_morph.MORPH_EVIDENCE,
                                      final_text=landed)
-    _write_resolved_text(path, Path(manuscript["path"]), landed)
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), landed)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="morph-settle",
                 episode=NO_EPISODE)
@@ -6397,7 +6377,7 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
                                      origin_type=LENS_ORIGIN,
                                      evidence_type=LENS_EVIDENCE,
                                      final_text=landed)
-    _write_resolved_text(path, Path(manuscript["path"]), landed)
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), landed)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="lens-settle",
                 episode=NO_EPISODE)
@@ -7174,7 +7154,7 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
                              origin_type=EXTERNAL_ORIGIN,
                              evidence_type=EXTERNAL_EVIDENCE,
                              final_text=final, threads=replaces)
-    _write_resolved_text(path, Path(manuscript["path"]), final)
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
     # NO episode: landing staged revisions is not work toward whatever
     # goal the author happens to have open (filter-pass design §1.8).
     with contextlib.redirect_stdout(io.StringIO()):

@@ -6088,3 +6088,19 @@ def decide_thread(db: Database, manuscript: dict, comment_id: str,
     except Exception:
         pass
     return {"comment_id": comment_id, "state": state, "signal": signal}
+
+
+def _write_resolved_text(path: Path, root: Path, final: str) -> str:
+    """Write a resolve's final text back to disk WITH its illustration
+    embed lines. The Doc never carries embed lines (push strips them),
+    so the text a filter, lens, or critique resolve reads back from a
+    tab is embed-free — and writing it as-is silently unlinked every
+    rendered illustration in the essay (the tag stayed, the picture
+    under it vanished from Obsidian; 15 slots across SMSTTD). The ordinary pull re-inserts them; this is the same
+    step, the prior pick winning while its file exists."""
+    prior = path.read_text(encoding="utf-8") if path.exists() else ""
+    normalized = normalize_markdown(final)
+    normalized = reembed(normalized, root, capture_embeds(prior))
+    path.write_text(normalized if normalized.endswith("\n")
+                    else normalized + "\n", encoding="utf-8")
+    return normalized

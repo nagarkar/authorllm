@@ -171,7 +171,7 @@ def resolve_specs(db, manuscript: dict, config: dict, file: str,
     passes.record_resolution(db, mid, file, forms, origin_type=ORIGIN,
                              evidence_type="clip_spec_edit", final_text=final)
     final, landed = media.absorb_specs(root, final, keys)
-    api._write_resolved_text(root / file, root, final)
+    gdocs._write_resolved_text(root / file, root, final)
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source="clip-resolve",
                             episode=NO_EPISODE)

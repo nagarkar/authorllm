@@ -892,7 +892,7 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
     n_forms = len(forms) + settled
     if kind == "suggestion":
         final = _consume_standalone_tags(db, final, written)
-    api._write_resolved_text(path, Path(manuscript["path"]), final)
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source=f"{kind}-resolve",
                             episode=NO_EPISODE)
