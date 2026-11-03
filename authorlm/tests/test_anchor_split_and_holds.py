@@ -7,7 +7,9 @@ tab into the next; pull then overwrote local files with the wrong text.
 
 `_holds_doc_edits` — the push guard for a hand-settled conflict. Set
 membership treated a Doc add/delete of a repeated line as held whenever
-another copy remained, so push restored (or wiped) the Doc's edit.
+another copy remained, so push restored (or wiped) the Doc's edit. A
+bag-of-lines check also treated a Doc-only paragraph reorder as held,
+so a guarded push wrote the local order back over the tab.
 """
 
 from __future__ import annotations
@@ -90,9 +92,22 @@ def test_holds_settled_adjacent_edit() -> None:
           _holds_doc_edits(lost, base, doc) is False)
 
 
+def test_holds_rejects_doc_only_reorder() -> None:
+    base = ("Alpha paragraph.\n\nBeta paragraph.\n\n"
+            "Gamma paragraph.\n")
+    doc = ("Beta paragraph.\n\nAlpha paragraph.\n\n"
+           "Gamma paragraph.\n")
+    check("Doc-only paragraph reorder is not held by bag equality",
+          _holds_doc_edits(base, base, doc) is False)
+    local = base + "\nLocal only.\n"
+    check("reorder plus an unrelated local line still refuses",
+          _holds_doc_edits(local, base, doc) is False)
+
+
 if __name__ == "__main__":
     test_short_anchor_does_not_steal_prior_tab()
     test_long_anchor_prefix_still_matches()
     test_holds_rejects_duplicate_line_false_positive()
     test_holds_settled_adjacent_edit()
+    test_holds_rejects_doc_only_reorder()
     print("ok")

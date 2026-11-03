@@ -824,6 +824,12 @@ Interlocutor tests (docs/interlocutor-design.md).
 
 Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 
+## `tests.test_locate_block_voice`
+
+`authorlm/tests/test_locate_block_voice.py`
+
+locate_block must match a card by section id, not spoken text alone.
+
 ## `tests.test_loop`
 
 `authorlm/tests/test_loop.py`
