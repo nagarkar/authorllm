@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from authorlm import audio, paths
+from authorlm import audio, paths, pronunciations
 
 CONFIG = '''schema = 1
 [text]
@@ -113,7 +113,7 @@ class VoiceConfigTests(unittest.TestCase):
         cast_path.unlink()
         audio.init(self.manuscript)
         self.assertEqual(self.config.read_bytes(), original_config)
-        rows, _warnings = audio.parse_cast(cast_path.read_text(encoding="utf-8"))
+        rows, _warnings = pronunciations.parse_cast(cast_path.read_text(encoding="utf-8"))
         self.assertEqual([row["key"] for row in rows], ["narrator"])
 
     def test_init_refuses_when_both_files_exist_without_changing_either(self) -> None:

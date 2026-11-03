@@ -390,27 +390,16 @@ def caching_available(model: str, provider: str) -> bool:
     provider request, which is the only surface where attaching
     breakpoints does anything.
 
-    A model with no row keeps the pre-registry answer exactly — the
-    vendor-prefix gate plus litellm's own cost map — so adding the table
-    changed no model's caching behavior, only where the answer is
-    written down for the ones we have verified."""
+    A model with no row gets no breakpoints (llmlm's exact-row rule): the
+    table is the only place a caching answer is written down, and there is
+    no probe of a vendor map behind it. A vendor that caches server-side
+    still does; this only decides whether authorlm marks blocks."""
     if provider != "litellm":
         return False
     profile = model_profile(model)
     if profile is not UNKNOWN_PROFILE:
         return profile.prompt_cache == "anthropic"
-    if vendor_of(model) != "anthropic":
-        return False
-    try:
-        import litellm
-        from litellm.utils import supports_prompt_caching
-
-        litellm.suppress_debug_info = True
-        return bool(supports_prompt_caching(model=model))
-    except Exception:
-        # An unknown model, or no litellm at all. Not an error: it means
-        # "no caching here", and drafting works without it.
-        return False
+    return False
 
 
 
@@ -671,7 +660,8 @@ class LLMClient:
         return llm_cfg.get("api_key_env") or vendor_var
 
     def _call(self, messages: list[dict], *, temperature, thinking_budget=None,
-              max_tokens=None, effort=None, gate=False) -> shared.Reply:
+              max_tokens=None, effort=None, gate=False,
+              response_format=None) -> shared.Reply:
         """One request through llmlm, counted. Raises llmlm's own errors
         (`VendorError`, `TruncatedReply`, `Refused`, `SpendCapReached`) for
         the caller to degrade or raise.
@@ -707,7 +697,8 @@ class LLMClient:
             tag=(path.stem[:12] if path else
                  messages_sha256(self.model, None, messages)[:12]),
             max_tokens=max_tokens, reasoning_effort=effort,
-            thinking_budget=thinking_budget, **self._knobs(temperature))
+            thinking_budget=thinking_budget, response_format=response_format,
+            **self._knobs(temperature))
         from . import usage
 
         if reply.cached:
@@ -722,7 +713,8 @@ class LLMClient:
         return reply
 
     def complete(self, system: str, user: str,
-                 thinking_budget: int | None = None) -> str | None:
+                 thinking_budget: int | None = None,
+                 response_format: dict | None = None) -> str | None:
         """Return the model's reply, or None if the LLM is disabled or
         unreachable — callers must treat None as 'reason without the LLM'.
 
@@ -753,7 +745,8 @@ class LLMClient:
         temperature = self.temperature if self.send_temperature() else None
         try:
             return self._call(messages, temperature=temperature,
-                              thinking_budget=thinking_budget).raw
+                              thinking_budget=thinking_budget,
+                              response_format=response_format).raw
         except ReplayMiss:
             raise
         except (shared.NotConfigured, shared.VendorError, shared.TruncatedReply,
@@ -763,11 +756,21 @@ class LLMClient:
             return None
 
     def complete_json(self, system: str, user: str,
-                      thinking_budget: int | None = None):
+                      thinking_budget: int | None = None,
+                      schema: tuple[str, dict] | None = None):
         """Like complete(), but parse the reply as JSON (tolerating markdown
-        code fences). Returns the parsed value, or None on any failure."""
+        code fences). Returns the parsed value, or None on any failure.
+
+        `schema` is (name, JSON schema): sent as `response_format`
+        json_schema, so a model whose profile honours it is constrained to
+        that shape; llmlm steps it down to json_object elsewhere. Without
+        it the model has only the prose instruction."""
+        fmt = ({"type": "json_schema",
+                "json_schema": {"name": schema[0], "schema": schema[1],
+                                "strict": True}} if schema else None)
         reply = self.complete(system + " Reply with JSON only, no prose.", user,
-                              thinking_budget=thinking_budget)
+                              thinking_budget=thinking_budget,
+                              response_format=fmt)
         if reply is None:
             return None
         return _parse_json_reply(reply)

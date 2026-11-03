@@ -43,6 +43,26 @@ def _match(candidates: dict[str, Path], query: str) -> Path:
     return hits[0]
 
 
+def _resolve_relpath(manuscript: dict, query: str) -> str:
+    """Map a file argument to the manuscript-relative path used as the
+    Doc-mapping key and the on-disk name. Absolute paths that sit under
+    the manuscript root (and relative paths that resolve there) are
+    accepted; anything outside is refused. Bare names still go through
+    `_match`'s exact-then-unique-substring forgiveness."""
+    root = Path(manuscript["path"])
+    candidates = iter_manuscript_paths(root)
+    probe = Path(query).expanduser()
+    try:
+        resolved = (probe if probe.is_absolute() else root / probe).resolve()
+        rel = str(resolved.relative_to(root.resolve()))
+    except (ValueError, OSError):
+        rel = None
+    if rel is not None and rel in candidates:
+        return rel
+    path = _match(candidates, query)
+    return str(path.relative_to(root))
+
+
 def list_docs(db: Database, manuscript: dict) -> dict:
     root = Path(manuscript["path"])
     concepts_by_file: dict[str, list[str]] = {}
@@ -66,7 +86,31 @@ def list_docs(db: Database, manuscript: dict) -> dict:
     return {"active": active, "retired": retired}
 
 
-def add_doc(manuscript: dict, name: str, title: str | None = None) -> Path:
+ABOUT_THE_BOOK_WORDS = ("synopsis", "pitch", "market", "audience",
+                        "perspective", "charter")
+
+
+def about_the_book_hint(name: str) -> str | None:
+    """A one-line hint when NAME looks like a file about the book rather
+    than part of it; such content belongs in a profile, not a tab."""
+    stem = Path(name).stem.lower()
+    for word in ABOUT_THE_BOOK_WORDS:
+        if word in stem:
+            return (f"'{name}' looks like a file about the book ({word}): "
+                    "consider 'authorlm profile set <key>' and a registry "
+                    "entry instead of a chapter tab.")
+    return None
+
+
+def add_doc(manuscript: dict, name: str, title: str | None = None,
+            after: str | None = None) -> Path:
+    """Scaffold a new essay file and, when the manuscript has a toc.toml,
+    register it there: after `after` (a listed file, or 'start' for the
+    head), else at the end. Without the toc entry the next Doc push adds
+    a tab that toc.toml does not list, and the pull reads that as a TOC
+    order conflict. An `after` that names no listed file writes nothing."""
+    from .structure import TOC_FILENAME, _toc_chapters, insert_toc_entry
+
     root = Path(manuscript["path"])
     filename = doc_filename(name)
     target = root / filename
@@ -76,8 +120,22 @@ def add_doc(manuscript: dict, name: str, title: str | None = None) -> Path:
         raise FileExistsError(
             f"{filename} exists in {RETIRED_DIR}/ — revive it instead: doc revive {filename}"
         )
+    toc_path = root / TOC_FILENAME
+    new_toc = None
+    if toc_path.exists():
+        toc_text = toc_path.read_text(encoding="utf-8")
+        if after is None:
+            listed = [c["file"] for c in _toc_chapters(toc_text)
+                      if c.get("file")]
+            after = listed[-1] if listed else None
+        outcome = insert_toc_entry(toc_text, filename, after)
+        if outcome is None:
+            raise LookupError(f"--after {after}: not a file in {TOC_FILENAME}")
+        new_toc = outcome[0]
     heading = title or target.stem.replace("-", " ").replace("_", " ").strip()
     target.write_text(f"# {heading}\n\n", encoding="utf-8")
+    if new_toc is not None:
+        toc_path.write_text(new_toc, encoding="utf-8")
     return target
 
 

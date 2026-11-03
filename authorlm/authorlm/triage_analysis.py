@@ -119,7 +119,7 @@ def start_run(db: Database, manuscript: dict, config: dict[str, Any],
         raise ValueError("there are no rows to analyze")
     from . import api
 
-    api.collect(db, manuscript, config, analyze=False)
+    api.collect(db, manuscript, config)
     version = _latest_version(db, manuscript["id"])
     rows = {r["id"]: r for r in triage.list_rows(db, manuscript, triage_type)}
     missing = [object_id for object_id in object_ids if object_id not in rows]

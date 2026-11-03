@@ -10,6 +10,11 @@ repos:
       - id: no-commit-to-branch   # branch for every change (guidelines/index.md)
         args: [--branch, main]
   - repo: https://github.com/nagarkar/metalm
-    rev: 084ae47a45241c3a7517a3e31967b982609e859a   # update with: pre-commit autoupdate --bleeding-edge --repo https://github.com/nagarkar/metalm
+    rev: c6980f86d45928a2f547e58f8b16251162e18808   # update with: pre-commit autoupdate --bleeding-edge --repo https://github.com/nagarkar/metalm
     hooks:
       - id: metalm-gendocs   # regenerates docs/generated/; stops the commit when it changed files
+      - id: no-env-files     # no .env* path ever enters git (metalm guidelines/coding.md#security-and-secrets)
+  - repo: https://github.com/gitleaks/gitleaks   # secret scan of staged changes
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

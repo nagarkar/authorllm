@@ -30,3 +30,5 @@ authorlm/authorlm/audiobook_dist/
 authorlm/authorlm/triage_dist/
 authorlm/authorlm/workbench_dist/
 .venv/
+# No .env* path ever enters git (metalm guidelines/coding.md#security-and-secrets).
+.env*

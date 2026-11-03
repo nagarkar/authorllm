@@ -1,5 +1,6 @@
-"""Essay summaries (critique-pass design §4): reading order, autoregressive
-conditioning, mark-don't-cascade staleness, rebuild semantics.
+"""Essay summaries (critique-pass design §4; summary-hierarchy design
+§3.4): reading order, autoregressive conditioning, composition from the
+section summaries, mark-don't-cascade staleness, rebuild semantics.
 
 Run: python3 tests/test_summaries.py
 """
@@ -59,6 +60,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
+import _summary_stubs  # noqa: E402
 
 from authorlm import api, summaries as sums  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
@@ -74,14 +76,24 @@ def check(label: str, condition: bool, context: str = "") -> None:
 
 
 class EchoSummarizer(http.server.BaseHTTPRequestHandler):
-    """Canned summarizer: replies with the unit name plus how many prior
-    summaries it saw, so conditioning is observable."""
+    """Canned summarizer: the essay reply names the unit plus how many
+    prior summaries it saw, so conditioning is observable; it cites
+    section [1] and writes no FLOW, so the structural coverage check has
+    something to report. The paragraph and section prompts get the shared
+    stubs (`_summary_stubs`); `lower_calls` keeps their user messages."""
     calls: list[dict] = []
+    lower_calls: list[str] = []
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
         if "THE UNIT: " not in user:
+            stub = _summary_stubs.reply(system, user)
+            if stub is not None:
+                EchoSummarizer.lower_calls.append(user)
+                self._reply(stub)
+                return
             # Any other LLM step (init's extraction, etc.): empty JSON reply.
             self._reply(json.dumps({"concepts": [], "links": [], "aliases": []}))
             return
@@ -93,7 +105,8 @@ class EchoSummarizer(http.server.BaseHTTPRequestHandler):
                             if line.startswith("[") and line.endswith("]")))
         EchoSummarizer.calls.append({"unit": unit, "n_prior": n_prior,
                                      "model": body.get("model"), "user": user})
-        self._reply(f"MOVES: summary of {unit} conditioned on {n_prior} prior.")
+        self._reply(f"MOVES: [1] summary of {unit} conditioned on {n_prior} "
+                    "prior.\nMOTIFS: none\nDOES NOT: none")
 
     def _reply(self, content: str) -> None:
         payload = json.dumps({
@@ -164,12 +177,19 @@ def main_test() -> None:
         print("full rebuild:")
         import tomllib
         config = tomllib.loads((ws / ".authorlm" / "config.toml").read_text())
-        llm = sums.summarizer_llm(config)
+        llms = sums.clients(config)
+        llm = llms["essay"]
         check("[critique] summarizer_model overrides the general model",
               llm.model == "cheap-model")
-        result = sums.rebuild(db, manuscript, llm)
+        result = sums.rebuild(db, manuscript, llms)
         check("rebuild summarizes every unit in order",
-              result["built"] == order and result["reused"] == [])
+              result["built"] == order, str(result))
+        check("…after bringing the paragraph and section levels up to date "
+              "first (one section per fixture file), each report nested in "
+              "the one above",
+              result["section"]["sections"] == 5
+              and result["section"]["paragraph"]["records"] == 5
+              and len(EchoSummarizer.lower_calls) == 10, str(result))
         check("the summarizer call used the cheap model",
               all(c["model"] == "cheap-model" for c in EchoSummarizer.calls))
         n_priors = [c["n_prior"] for c in EchoSummarizer.calls]
@@ -200,86 +220,66 @@ def main_test() -> None:
                   for c in EchoSummarizer.calls),
               "\n".join(c["user"][:200] for c in EchoSummarizer.calls))
 
-        print("paragraph coverage (Task 1 — no paragraph silently dropped):")
-        check("every built unit's prompt numbers THE UNIT's paragraphs and "
-              "states the count, so MOVES can be required to cite each one",
-              all("PARAGRAPH COUNT: 2" in c["user"] and "[1] #" in c["user"]
-                  and "[2] Text of" in c["user"] for c in EchoSummarizer.calls),
+        print("composition from sections (summary-hierarchy §3.4):")
+        check("every essay call carries the unit's SECTION SUMMARIES, "
+              "numbered, with COVER THESE — and never the unit's text",
+              all("COVER THESE: 1" in c["user"]
+                  and "SECTIONS (1, in order):" in c["user"]
+                  and f"[1] # {c['unit'][:-3]}" in c["user"]
+                  and "POINT: The stub's point of" in c["user"]
+                  and f"\n\nText of {c['unit'][:-3]}." not in c["user"]
+                  for c in EchoSummarizer.calls),
               "\n".join(c["user"] for c in EchoSummarizer.calls[:1]))
+        check("the stored block carries the eight labels in order, the "
+              "derived four rendered by code ('none' here: the stub's "
+              "records mention only 'Choice' as used, so ASSUMES has it)",
+              all([r["summary"].index(lb + ":") for lb in sums.ESSAY_LABELS]
+                  == sorted(r["summary"].index(lb + ":")
+                            for lb in sums.ESSAY_LABELS)
+                  and "ASSUMES: Choice" in r["summary"]
+                  and "INTRODUCES: none" in r["summary"]
+                  for r in sums.all_summaries(db, manuscript["id"]).values()),
+              next(iter(sums.all_summaries(db, manuscript["id"]).values()))
+              ["summary"])
 
-        print("paragraph coverage is VERIFIED, not just requested "
-              "(sponsor addendum):")
-        full = sums.paragraph_coverage(
-            "MOVES: [1] states the claim; [2]-[3] develop it by example.", 3)
-        check("a summary citing every paragraph reports full coverage",
-              full == {"paragraph_count": 3, "cited": [1, 2, 3],
-                       "missing": [], "out_of_range": [], "complete": True},
+        print("section coverage is VERIFIED, not just requested — the "
+              "structural check (§3.3, §3.4):")
+        two = sums.sections_of("# Top\n\nBody.\n\n## Second Part\n\nMore.\n")
+        full = sums.section_coverage(
+            "FLOW: 'Top' opens; 'Second Part' closes.\nMOVES: [1] states; "
+            "[2] closes.", two)
+        check("MOVES citing every section and FLOW naming every heading is "
+              "complete", full["complete"] and full["section_count"] == 2,
               str(full))
-        gappy = sums.paragraph_coverage(
-            "MOVES: [1] states the claim. [3] closes it.", 3)
-        check("a summary omitting a paragraph reports exactly which one",
-              gappy["missing"] == [2] and gappy["out_of_range"] == []
-              and not gappy["complete"], str(gappy))
-        # Z-M1: the form the REAL summarizer writes is a cross-bracket
-        # range, "[1]-[11]", not the in-bracket "[2-3]" the prompt's
-        # example shows. Parsing only the latter counted every interior
-        # paragraph as missing — the live rebuild reported 350+ missing
-        # across 18 of 24 essays where the truth is 11 of 1,138.
-        cross = sums.paragraph_coverage(
-            "MOVES: [1]-[4] set up the problem; [6] closes it.", 6)
-        check("a CROSS-BRACKET range counts every paragraph it spans, not "
-              "just its two endpoints",
-              cross["cited"] == [1, 2, 3, 4, 6] and cross["missing"] == [5]
-              and cross["out_of_range"] == [], str(cross))
-        check("an en-dash cross-bracket range, whitespace and all, parses too",
-              sums._cited_paragraphs("[2] – [5]") == {2, 3, 4, 5},
-              str(sums._cited_paragraphs("[2] – [5]")))
-        check("the in-bracket range form still parses (unchanged)",
-              sums._cited_paragraphs("[2-3]") == {2, 3})
-        check("a bare hyphenated number in prose is NOT a citation — the "
-              "brackets are what make it one",
-              sums._cited_paragraphs("the argument of 3-4 pages") == set(),
-              str(sums._cited_paragraphs("the argument of 3-4 pages")))
-        check("a range consumes both its brackets, so a citation right "
-              "after it is still read on its own",
-              sums._cited_paragraphs("[1]-[3], then [7]") == {1, 2, 3, 7},
-              str(sums._cited_paragraphs("[1]-[3], then [7]")))
-        # The flip side of parsing ranges: one malformed blanket range can
-        # now put ~100 out-of-range numbers into a coverage note, and that
-        # note goes verbatim into the drafting payload.
-        six_paras = "\n\n".join(f"Paragraph {i}." for i in range(1, 7))
+        gappy = sums.section_coverage(
+            "FLOW: 'Top' opens.\nMOVES: [1] states; [2]-[4] everything.", two)
+        check("a section no move cites, a cited section the essay lacks and "
+              "a heading FLOW skips are each named; a range cites only its "
+              "ends",
+              not gappy["complete"] and gappy["missing"] == []
+              and gappy["unknown"] == [4]
+              and gappy["flow_missing"] == ["## Second Part"], str(gappy))
+        heading_only = sums.sections_of("# Top\n\n## Empty\n\n## Full\n\nBody.\n")
+        cov = sums.section_coverage("FLOW: 'Top', 'Empty', 'Full'.\nMOVES: [3] x.",
+                                    heading_only)
+        check("a heading-only section need not be cited in MOVES (ruling 8) "
+              "but FLOW still names it", cov["complete"], str(cov))
+        many = "# Top\n\n" + "\n\n".join(f"## S{i}\n\nBody {i}."
+                                         for i in range(1, 11))
         blanket = sums._coverage_note(
-            {"summary": "MOVES: [1]-[100] covers the lot.", "state": "fresh"},
-            six_paras)
-        check("a malformed blanket range does not dump 94 numbers into the "
-              "drafting payload — the list is capped and says how many "
-              "more it is hiding",
-              blanket.count("¶") == sums.COVERAGE_LIST_CAP
-              and "…and 86 more" in blanket
-              and "the essay has 6 paragraph(s)" in blanket, blanket)
-        short = sums._coverage_note(
-            {"summary": "MOVES: [1] only.", "state": "fresh"}, six_paras)
-        check("a short list is NOT capped — no '…and N more' noise when "
-              "every number already fits",
-              "…and" not in short and short.count("¶") == 5, short)
-        invented = sums.paragraph_coverage(
-            "MOVES: [1] states the claim. [7] invents a paragraph.", 2)
-        check("a citation past PARAGRAPH COUNT is reported as out-of-range "
-              "(the model invented a paragraph), not silently accepted",
-              invented["out_of_range"] == [7] and invented["missing"] == [2]
-              and not invented["complete"], str(invented))
-        # The canned EchoSummarizer reply ("MOVES: summary of X conditioned
-        # on N prior.") cites no paragraph numbers at all — so a real
-        # rebuild against it must show every built unit as incomplete.
-        # This is the live plumbing (summarize_unit -> rebuild), not just
-        # the pure function above.
+            {"summary": "FLOW: none.\nMOVES: none.", "state": "fresh"}, many)
+        check("a note over many misses is capped and says how many more it "
+              "is hiding — it goes verbatim into the drafting payload",
+              blanket.count("§") == sums.COVERAGE_LIST_CAP
+              and "…and 2 more" in blanket and "not cited in MOVES" in blanket
+              and "FLOW names no clause for" in blanket, blanket)
         check("rebuild() surfaces incomplete coverage per file — reported, "
-              "never silently dropped and never blocking the rebuild",
-              set(result.get("incomplete_coverage", {})) == set(order)
-              and all(not cov["complete"] and cov["out_of_range"] == []
-                      and cov["missing"] == [1, 2]
-                      for cov in result["incomplete_coverage"].values()),
-              str(result.get("incomplete_coverage")))
+              "never silently dropped and never blocking the rebuild (the "
+              "echo stub writes no FLOW)",
+              {f for f, _cov in result["misses"]} == set(order)
+              and all(cov["missing"] == [] and len(cov["flow_missing"]) == 1
+                      for _f, cov in result["misses"]),
+              str(result["misses"]))
         check("coverage is reported, never enforced: an incomplete summary "
               "is still stored and the unit still reads fresh",
               all(r["state"] == "fresh" for r in sums.status(db, manuscript)))
@@ -313,10 +313,10 @@ def main_test() -> None:
               "forfeits the cache economics) — two renders of unchanged "
               "state are byte-identical, no timestamps, no run ids",
               ctx == sums.drafting_context(db, manuscript, "alpha.md"), ctx)
-        check("incomplete paragraph coverage is reported LOUDLY per entry "
-              "(the echo stub cites no paragraph number at all)",
+        check("incomplete section coverage is reported LOUDLY per entry "
+              "(the echo stub writes no FLOW)",
               ctx.count("coverage INCOMPLETE") == 4
-              and ctx.count("¶1, ¶2 uncited") == 4, ctx)
+              and ctx.count("FLOW names no clause for") == 4, ctx)
         check("...and it never blocks: the context still renders every "
               "summary in full (item 4's default is informational)",
               all(f"[{f}]" in ctx for f in
@@ -365,7 +365,13 @@ def main_test() -> None:
 
         print("rebuild_one (the confirmation-gate rebuild):")
         EchoSummarizer.calls.clear()
-        sums.rebuild_one(db, manuscript, "alpha.md", llm)
+        EchoSummarizer.lower_calls.clear()
+        sums.rebuild_one(db, manuscript, "alpha.md", llms)
+        check("the edited essay's paragraph records and section summary "
+              "were rebuilt first (one call each), lazily, on use",
+              len(EchoSummarizer.lower_calls) == 2
+              and "revised" in EchoSummarizer.lower_calls[0],
+              str(EchoSummarizer.lower_calls))
         states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
         check("only the one unit was re-summarized",
               [c["unit"] for c in EchoSummarizer.calls] == ["alpha.md"])
@@ -395,13 +401,18 @@ def main_test() -> None:
         check("status() agrees: gamma itself is upstream_stale mid-cascade",
               gamma_status["state"] == "upstream_stale")
 
-        print("incremental rebuild (default) cascades only from the first "
-              "non-fresh unit:")
+        print("the deliberate rebuild (default) also refreshes the units "
+              "whose conditioning moved; the lazy on-use path tolerates them:")
         EchoSummarizer.calls.clear()
-        result = sums.rebuild(db, manuscript, llm, only_missing_or_stale=True)
-        check("fresh prefix reused, rest rebuilt in order",
-              result["reused"] == ["title.md", "part1.md", "alpha.md"]
-              and result["built"] == ["beta.md", "gamma.md"], str(result))
+        lazy = sums.ensure(db, manuscript, llms, level="essay",
+                           echo=lambda _line: None)
+        check("ensure(level=essay) rebuilds nothing: the text of every unit "
+              "matches its row (upstream_stale is tolerated, ruling 3)",
+              lazy["built"] == [] and EchoSummarizer.calls == [], str(lazy))
+        result = sums.rebuild(db, manuscript, llms)
+        check("rebuild leaves the fresh prefix alone and rebuilds the "
+              "upstream_stale rest in order",
+              result["built"] == ["beta.md", "gamma.md"], str(result))
         check("everything fresh again",
               all(r["state"] == "fresh" for r in sums.status(db, manuscript)))
 
@@ -436,12 +447,43 @@ def main_test() -> None:
                 os.environ["AUTHORLM_CONFIG"] = prev_config
         check("summarize rebuild <file> reports the one-unit rebuild",
               "rebuilt gamma.md" in buf.getvalue())
-        check("summarize rebuild <file> also surfaces incomplete paragraph "
-              "coverage on the CLI (the echo stub cites no paragraph, so "
-              "this must fire)",
-              "paragraph coverage incomplete" in buf.getvalue()
-              and "missing paragraph(s) [1, 2]" in buf.getvalue(),
+        check("summarize rebuild <file> also surfaces incomplete section "
+              "coverage on the CLI (the echo stub writes no FLOW, so this "
+              "must fire)",
+              "section coverage incomplete" in buf.getvalue()
+              and "FLOW skips '# gamma'" in buf.getvalue(),
               buf.getvalue())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws), "summarize", "outline", "gamma.md"])
+        check("summarize outline prints the FLOW line and each section's "
+              "POINT",
+              "FLOW:" in buf.getvalue()
+              and "[1] # gamma — The stub's point of # gamma" in buf.getvalue(),
+              buf.getvalue())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws), "summarize", "show", "gamma.md",
+                      "--section", "1"])
+        check("summarize show --section prints the section block and the "
+              "paragraph gists",
+              "POINT: The stub's point of # gamma" in buf.getvalue()
+              and "[2] stub gist of paragraph 2" in buf.getvalue(),
+              buf.getvalue())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws), "summarize", "show", "gamma.md",
+                      "--paragraph", "2", "--json"])
+        shown = json.loads(buf.getvalue())
+        check("summarize show --paragraph --json prints the record",
+              shown["ordinal"] == 2 and shown["record"]["gist"]
+              == "stub gist of paragraph 2", buf.getvalue())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_main(["--workspace", str(ws), "summarize", "status",
+                      "--level", "section"])
+        check("summarize status --level counts that level's rows per unit",
+              buf.getvalue().count("1/1 row(s)") == 5, buf.getvalue())
 
         print("deprecated status (§12.4 item 5): a departed essay's summary "
               "is respected as not-live, and RESURRECTED when the file "
@@ -493,7 +535,7 @@ def main_test() -> None:
               str({k: v for k, v in ready.items()
                    if k in ("ok", "missing", "stale", "deprecated")}))
         EchoSummarizer.calls.clear()
-        resurrect = sums.rebuild(db, manuscript, llm, only_missing_or_stale=True)
+        resurrect = sums.rebuild(db, manuscript, llms)
         check("the incremental rebuild TARGETS the deprecated unit (it is "
               "not fresh) instead of reusing it",
               resurrect["built"] == ["gamma.md"], str(resurrect))
@@ -612,7 +654,7 @@ def main_test() -> None:
         (ms / "beta.md").write_text(BETA_TEXT)
         with contextlib.redirect_stdout(io.StringIO()):
             api.collect(db, manuscript, config, source="test")
-            sums.rebuild(db, manuscript, llm, only_missing_or_stale=True)
+            sums.rebuild(db, manuscript, llms)
         check("fixture: everything is fresh before any writeup opens",
               all(r["state"] == "fresh" for r in sums.status(db, manuscript)),
               str(sums.status(db, manuscript)))
@@ -679,31 +721,33 @@ def main_test() -> None:
 
         note = sums._coverage_note(beta_entry, ctx_texts["beta.md"])
         check("S9 — coverage for a 'rewriting' entry is measured against "
-              "the PINNED paragraphs (4), not the placeholder's (2): "
-              "against the placeholder it would report a fiction",
-              note is not None and "¶1, ¶2, ¶3, ¶4 uncited" in note,
+              "the PINNED text (one section headed '# beta'), not the "
+              "placeholder (no heading at all): against the placeholder "
+              "it would report complete coverage, a fiction",
+              note is not None and "FLOW names no clause for '# beta'" in note
+              and sums._coverage_note(beta_entry, _api.PLACEHOLDER) is None,
               str(note))
         check("S9 — and that is the note the rendered context carries",
-              "¶1, ¶2, ¶3, ¶4 uncited" in beta_block, ctx)
+              "FLOW names no clause for '# beta'" in beta_block, ctx)
 
         EchoSummarizer.calls.clear()
-        sums.rebuild_one(db, manuscript, "beta.md", llm)
+        sums.rebuild_one(db, manuscript, "beta.md", llms)
         prompt_user = EchoSummarizer.calls[-1]["user"]
-        body = prompt_user.split("THE UNIT: beta.md\n\n", 1)[1]
-        numbered, _npar = sums._numbered_paragraphs(BETA_TEXT)
         check("S5 — a rebuild WHILE the file is in flight summarizes the "
               "pinned text pulled from the database, never the placeholder "
-              "on disk. The refusal prints this remedy, so it has to work "
-              "— getting it wrong would store a confident summary of "
+              "on disk: the section summary it composes from quotes the "
+              "pinned text. The refusal prints this remedy, so it has to "
+              "work — getting it wrong would store a confident summary of "
               "nothing and mark it fresh",
-              body == numbered and _api.MARKER not in prompt_user, body)
+              "Text of beta." in prompt_user and _api.MARKER not in prompt_user,
+              prompt_user)
         states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
         check("S5 — and afterwards the entry settles at 'rewriting', NOT "
               "'fresh': it may not pretend to describe the file on disk",
               states["beta.md"] == "rewriting", str(states))
         check("S5 — it is idempotent: the same rebuild lands on the same "
               "state",
-              sums.rebuild_one(db, manuscript, "beta.md", llm) is not None
+              sums.rebuild_one(db, manuscript, "beta.md", llms) is not None
               and {r["file"]: r["state"]
                    for r in sums.status(db, manuscript)}["beta.md"]
               == "rewriting")
@@ -731,7 +775,7 @@ def main_test() -> None:
               "beta.md is mid-rewrite" in msg
               and "PRE-REWRITE text from the writeup's pinned version" in msg
               and "not the placeholder on disk" in msg, msg)
-        sums.rebuild_one(db, manuscript, "beta.md", llm)
+        sums.rebuild_one(db, manuscript, "beta.md", llms)
 
         with contextlib.redirect_stdout(io.StringIO()):
             api.write_abandon(db, manuscript, config, prefix=beta_wu[:8])
@@ -754,7 +798,7 @@ def main_test() -> None:
               and ready["stale"] == ["beta.md"]
               and "beta.md is mid-rewrite" in _passes.summaries_message(
                   ready, "drafting pass"), str(states))
-        sums.rebuild_one(db, manuscript, "beta.md", llm)
+        sums.rebuild_one(db, manuscript, "beta.md", llms)
         check("S4 — and the printed remedy clears it, landing on "
               "'rewriting'",
               {r["file"]: r["state"]
@@ -790,18 +834,19 @@ def main_test() -> None:
               ctx)
 
         EchoSummarizer.calls.clear()
-        result = sums.rebuild(db, manuscript, llm, only_missing_or_stale=True)
-        check("S6 — the full rebuild summarizes the in-flight REWRITE from "
-              "its pinned text and SKIPS the one that has none, reporting "
-              "it instead of quietly summarizing an empty file",
-              "beta.md" in result["built"]
-              and result["skipped_inflight"] == ["epsilon.md"]
-              and "epsilon.md" not in result["built"], str(result))
+        result = sums.rebuild(db, manuscript, llms)
+        check("S6 — the full rebuild leaves the in-flight REWRITE alone "
+              "(its row matches its pinned text: 'rewriting' is settled), "
+              "rebuilds the unit downstream of it, and SKIPS the one with "
+              "no pre-rewrite text, reporting it instead of quietly "
+              "summarizing an empty file",
+              result["built"] == ["gamma.md"]
+              and result["unwritten"] == ["epsilon.md"], str(result))
         check("S6 — no summarizer call was ever made for it",
               all(c["unit"] != "epsilon.md" for c in EchoSummarizer.calls),
               str([c["unit"] for c in EchoSummarizer.calls]))
         try:
-            sums.rebuild_one(db, manuscript, "epsilon.md", llm)
+            sums.rebuild_one(db, manuscript, "epsilon.md", llms)
             raised = None
         except LookupError as err:
             raised = str(err)
@@ -813,7 +858,7 @@ def main_test() -> None:
         (ms / "zeta.md").write_text("# zeta\n\nText of zeta.\n")
         with contextlib.redirect_stdout(io.StringIO()):
             api.collect(db, manuscript, config, source="test")
-            sums.rebuild(db, manuscript, llm, only_missing_or_stale=True)
+            sums.rebuild(db, manuscript, llms)
         zeta_summary = sums.all_summaries(
             db, manuscript["id"])["zeta.md"]["summary"]
         (ms / "zeta.md").unlink()
@@ -884,7 +929,7 @@ def main_test() -> None:
             if mutated:
                 (ms / "gamma.md").write_text(mutated.pop())
 
-        sums.rebuild(db, manuscript, llm, progress=mutate_once)
+        sums.rebuild(db, manuscript, llms, force=True, progress=mutate_once)
         gamma_row = sums.all_summaries(db, manuscript["id"])["gamma.md"]
         gamma_prompt = next(c["user"] for c in EchoSummarizer.calls
                             if c["unit"] == "gamma.md")
@@ -922,7 +967,8 @@ def main_test() -> None:
                                     gamma_intent["id"][:8])
 
         EchoSummarizer.calls.clear()
-        sums.rebuild(db, manuscript, llm, progress=start_writeup_once)
+        sums.rebuild(db, manuscript, llms, force=True,
+                     progress=start_writeup_once)
         check("P4 — a parallel `write start` that truncates a later essay "
               "MID-RUN does not corrupt its summary: the snapshot's "
               "pre-truncation text is what gets summarized, and the "
@@ -965,7 +1011,7 @@ def main_test() -> None:
         _, restore_units = counting(sums, "units", order_reads)
         _, restore_ctx = counting(sums, "_context_units", order_reads)
         try:
-            sums.rebuild_one(db, manuscript, "alpha.md", llm)
+            sums.rebuild_one(db, manuscript, "alpha.md", llms)
         finally:
             restore_units()
             restore_ctx()
@@ -994,10 +1040,12 @@ def main_test() -> None:
 
         print("prompt artifact:")
         prompt = sums.summarizer_prompt()
-        check("the summarizer prompt is a checked-in file with the labeled "
-              "sections",
-              all(k in prompt for k in ("MOVES:", "INTRODUCES:", "PROMISES:",
-                                        "DEBTS:", "DOES NOT:")))
+        check("the summarizer prompt is a checked-in file with the four "
+              "model-written labels, and names the four derived ones as "
+              "code's (ruling 6)",
+              all(f"\n{k}:" in prompt for k in sums.ESSAY_MODEL_LABELS)
+              and "derived by code" in prompt
+              and all(k in prompt for k in sums.DERIVED_LABELS), prompt)
 
         print("prompt registry & discoverability:")
         from authorlm import prompt_registry as pr

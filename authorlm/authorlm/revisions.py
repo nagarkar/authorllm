@@ -14,6 +14,7 @@ import re
 import sys
 from pathlib import Path
 
+from . import form_grammar
 from .db import Database, ko_fields, loads
 
 MANUSCRIPT_EXTENSIONS = {".md", ".markdown", ".txt"}
@@ -119,7 +120,7 @@ def read_manuscript_files(root: Path) -> dict[str, str]:
                   file=sys.stderr)
             text = path.read_text(encoding="utf-8", errors="replace")
         # A file carrying a `<<old>>{{new}}` form is mid-settle. The
-        # ratified law (threads.py's docstring) is that the canonical
+        # ratified law (form_grammar.py's docstring) is that the canonical
         # text of a pending form is its OLD half: content changes at
         # approval, not at proposal. That law has always been applied to
         # text arriving from a Doc; the filter pass's local settle
@@ -148,8 +149,7 @@ def read_manuscript_files(root: Path) -> dict[str, str]:
         # about. The narrow function is a true no-op on text carrying no
         # `<<old>>{{new}}` form, which is what makes it safe here
         # unconditionally (filter-pass design §2.3).
-        from . import threads as _threads
-        files[rel] = _threads.strip_replacements(strip_embed_lines(text))[0]
+        files[rel] = form_grammar.strip_replacements(strip_embed_lines(text))[0]
     return files
 
 
@@ -312,3 +312,59 @@ def detect_transitions(
                     },
                 )
     return transitions
+
+
+# The mid-rewrite placeholder. `write start` on an
+# EXISTING file leaves this where the essay was, instead of leaving the
+# file empty.
+#
+# Visible text, not an HTML comment: the one path where a hidden marker
+# fails is the one that matters. `export.publish_markdown` used to drop a
+# mid-rewrite essay from the exported book in silence, and an HTML
+# comment is stripped on the way to PDF/EPUB, so the hole would remain.
+# Visible text cannot be shipped by accident, only loudly. The author
+# also opens these files in Obsidian, where a comment is invisible.
+#
+# Bracketed `[AuthorLM: …]`, not the author's literal `<<…>>`: `<<` and
+# `>>` are reserved by the pending-change grammar (form_grammar.PENDING,
+# gdocs.diff_push), so a literal `<<…>>` in a manuscript file would make
+# the next surgical push of it fail with a message about a margin thread
+# that does not exist. The author's WORDS are kept exactly.
+#
+# Deterministic by construction — no id, no timestamp, no file name — so
+# it is written once per writeup and never churns a version or
+# invalidates the prompt-cache prefix on its own.
+MARKER = "[AuthorLM: being presently rewritten]"
+
+PLACEHOLDER = (
+    MARKER + "\n"
+    "\n"
+    "This essay is mid-rewrite and is being drafted one beat at a time. The\n"
+    "previous text is not lost — it is pinned in the database. Run\n"
+    "`authorlm write status` to see the writeup, `authorlm write digest` to\n"
+    "print the pinned original, or `authorlm write abandon` to put the old\n"
+    "essay back. The first accepted beat replaces this placeholder, which is\n"
+    "never part of a finished essay.\n"
+)
+
+
+def is_placeholder(text: str) -> bool:
+    """Whole-file exact match (whitespace-tolerant at the edges). A file
+    the author has HAND-EDITED is not a placeholder — their text is never
+    silently discarded, which is the stronger rule."""
+    return text.strip() == PLACEHOLDER.strip()
+
+
+def marker_present(text: str) -> bool:
+    """The weaker check: the marker line survived inside a file that is
+    no longer just the placeholder. Warned about, never auto-repaired."""
+    return MARKER in text
+
+
+def _version_text(db: Database, version_id: str | None,
+                  file: str) -> str | None:
+    if not version_id:
+        return None
+    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?",
+                 (version_id,))
+    return loads(row["files"], {}).get(file) if row else None

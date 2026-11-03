@@ -98,12 +98,6 @@ AuthorLM — a Decision Learning Engine specialization for philosophy writing.
 
 Engine-specific hook adapters.
 
-## `authorlm.adjudication`
-
-`authorlm/authorlm/adjudication.py`
-
-Step two of a two-step extraction: adjudicate the candidates (opt-in).
-
 ## `authorlm.analysis`
 
 `authorlm/authorlm/analysis.py`
@@ -146,6 +140,12 @@ Session-start backups of the SQLite store (OPS-4).
 
 Learning Engine (RFC AuthorLM §17.8, Chapter 8).
 
+## `authorlm.branding`
+
+`authorlm/authorlm/branding.py`
+
+The AuthorLM brand files every served page links, and the routes that serve them.
+
 ## `authorlm.briefing`
 
 `authorlm/authorlm/briefing.py`
@@ -182,6 +182,12 @@ Bash tab-completion, generated from the live argument parser.
 
 The Concept Graph (RFC AuthorLM Chapter 21) — AuthorLM's enduring asset.
 
+## `authorlm.context`
+
+`authorlm/authorlm/context.py`
+
+Declared inputs: the vocabulary a pass asks in, and the summary levels each member needs.
+
 ## `authorlm.critic`
 
 `authorlm/authorlm/critic.py`
@@ -205,6 +211,12 @@ Storage layer.
 `authorlm/authorlm/dbperf.py`
 
 Always-on database performance log.
+
+## `authorlm.directive_tags`
+
+`authorlm/authorlm/directive_tags.py`
+
+The inline directive tags as text: `[Footnote: …]`, `[Explain: …]`, `[Suggestion: …]` and `[Judgment: …]`, how to find them in a file's text and how to take them out.
 
 ## `authorlm.directives`
 
@@ -230,6 +242,24 @@ Single-file manuscript export — a transient, regenerate-on-demand artifact.
 
 LLM-backed concept and relationship extraction (RFC AuthorLM §7.2, §21.7).
 
+## `authorlm.extraction_adjudicator`
+
+`authorlm/authorlm/extraction_adjudicator.py`
+
+The per-essay adjudicator (docs/extraction-redesign.md §4.5).
+
+## `authorlm.extraction_calibration`
+
+`authorlm/authorlm/extraction_calibration.py`
+
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1): the historical candidates replayed through the gates and the adjudicator, measured against the author's own verdicts, and the three thresholds of §4.6 moved on the measurement. Zero author cost; modelled on the retired tools/measure_adjudication.py (track-a §4, now superseded).
+
+## `authorlm.extraction_migration`
+
+`authorlm/authorlm/extraction_migration.py`
+
+Migration of the old pipeline's pending rows (docs/extraction-redesign.md §5, phase 5 of §9).
+
 ## `authorlm.filtering`
 
 `authorlm/authorlm/filtering.py`
@@ -247,6 +277,12 @@ Filters — the artifact (docs/filter-pass-design.md §1.2).
 `authorlm/authorlm/findings.py`
 
 Generic finding storage — the door shared by any producer that emits arbitrary quote-anchored editorial findings (lens, morph, and any future producer alike): hygiene-gate the quote against the file's real text, store a `guidance_history` row, and — when the finding carries a `footnote`, `judgment`, or `replacement` — stage a Doc edit through the same `<<old>>{{new}}` grammar every other producer uses.
+
+## `authorlm.form_grammar`
+
+`authorlm/authorlm/form_grammar.py`
+
+The pending-change forms a Doc tab or a marked file carries: how to read them, collapse them and write them.
 
 ## `authorlm.gdocs`
 
@@ -283,6 +319,12 @@ Illustration slots: the [Illustration: ...] tag grammar and the scan-derived slo
 `authorlm/authorlm/improvements.py`
 
 Self-improvement tasks: AuthorLM's own defects as knowledge objects.
+
+## `authorlm.input_blocks`
+
+`authorlm/authorlm/input_blocks.py`
+
+The one place that supplies a pass's declared inputs.
 
 ## `authorlm.interlocutor`
 
@@ -344,11 +386,23 @@ Generated clips: plan, start, poll, take (docs/video-clips-design.md §8b, §8c,
 
 The Doc road for clip specs (docs/video-clips-design.md §8e).
 
+## `authorlm.media_tags`
+
+`authorlm/authorlm/media_tags.py`
+
+The podcast media tags as text: `[Clip: …]`, `[Collage: …]` and `[Montage: …]` lines, their fields, the structure a file's tags make, and a book export's copy of a file with them gone.
+
 ## `authorlm.morph`
 
 `authorlm/authorlm/morph.py`
 
 Morph — combined-call paragraph-defect detection and correction (design: docs/morph-design.md).
+
+## `authorlm.normalize`
+
+`authorlm/authorlm/normalize.py`
+
+Canonical markdown: the normalizer that makes a no-op round trip through the Doc byte-stable, whichever editor (local, Obsidian, a Docs export) last wrote the text, with its fence and math lifters and the whitespace helpers that go with it.
 
 ## `authorlm.obsidian`
 
@@ -524,17 +578,47 @@ Dependency-free local HTTP shell for the compiled pronunciation workbench.
 
 The drafting payload seam — stored state in, four blocks out.
 
+## `tests._doc_freshness`
+
+`authorlm/tests/_doc_freshness.py`
+
+How old the Doc-road recordings are, and what to do about it.
+
+## `tests._extraction_fixture`
+
+`authorlm/tests/_extraction_fixture.py`
+
+The twenty edges of docs/extraction-redesign.md §2.4, as a fixture.
+
 ## `tests._offline_prices`
 
 `authorlm/tests/_offline_prices.py`
 
 Pins llmlm's price cache to an empty one that never reaches the network.
 
-## `tests.test_adjudication`
+## `tests._summary_stubs`
 
-`authorlm/tests/test_adjudication.py`
+`authorlm/tests/_summary_stubs.py`
 
-Step-two adjudication: opt-in, and inert when off.
+Canned replies for the three summary-hierarchy prompts, shared by the hermetic suites that stand in for the provider over HTTP (test_e2e's StubLLMHandler, test_summaries' EchoSummarizer). Each stub reads the user message the real builder sends and answers in the shape the builder parses, so a `summarize rebuild --all` runs all three levels offline.
+
+## `tests.doc_road_live`
+
+`authorlm/tests/doc_road_live.py`
+
+Drive the Doc-road failure scenarios (test_doc_road_failures.py) against the LIVE Google API on the one fixture Doc, "AuthorLM test fixture: Doc road", and record every call into tests/doc_cache/.
+
+## `tests.test_anchor_prefix_truncation`
+
+`authorlm/tests/test_anchor_prefix_truncation.py`
+
+`_split_by_anchors` must not truncate the Docs-API anchor to 80 chars.
+
+## `tests.test_anchor_split_and_holds`
+
+`authorlm/tests/test_anchor_split_and_holds.py`
+
+Doc sync doors that silently corrupt when wrong.
 
 ## `tests.test_api`
 
@@ -548,11 +632,35 @@ API-layer tests + CLI/MCP parity checklist (P11).
 
 The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 
+## `tests.test_audio_preview_without_paid_voice`
+
+`authorlm/tests/test_audio_preview_without_paid_voice.py`
+
+Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
+
 ## `tests.test_audio_voice_config`
 
 `authorlm/tests/test_audio_voice_config.py`
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
+
+## `tests.test_branding`
+
+`authorlm/tests/test_branding.py`
+
+Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
+
+## `tests.test_comment_context`
+
+`authorlm/tests/test_comment_context.py`
+
+Comment context on the pull (it adds where a Doc comment's anchor sits and the summaries already fresh there, never building one) and `summarize put` (a section summary written by the session, stamped with the section's hash, refused without the four labels). No LLM.
+
+## `tests.test_context`
+
+`authorlm/tests/test_context.py`
+
+Declared inputs (summary-hierarchy-design.md ruling 10, §6.7, step 5): the `Input` enum, `input_blocks.supply`, the critique pass's OUTLINE and REFERENCED SECTIONS blocks, and the reader load derived from paragraph records. No model call anywhere in this suite: records and section summaries are stored directly.
 
 ## `tests.test_continuation`
 
@@ -566,17 +674,41 @@ Continuation files: export setting `continuation_level`.
 
 Critique-pass tests (docs/critique-pass-design.md).
 
+## `tests.test_doc_add_toc`
+
+`authorlm/tests/test_doc_add_toc.py`
+
+`doc add` registers the new file in toc.toml when the manuscript has one, so a Doc push of it never leaves toc.toml and the Doc's tab order disagreeing. Run: python3 tests/test_doc_add_toc.py
+
 ## `tests.test_doc_bind`
 
 `authorlm/tests/test_doc_bind.py`
 
 `doc bind`: adopt an existing master Doc for a manuscript that has none (a fresh workspace, a cloud session), so `doc pull` fills the folder from its tabs instead of `doc push` creating a new Doc.
 
+## `tests.test_doc_fakes_vs_google`
+
+`authorlm/tests/test_doc_fakes_vs_google.py`
+
+The Doc-road fake checked against Google: every snapshot recorded live by tests/doc_road_live.py (a full documents.get and the markdown export of the same revision) is rebuilt in `_GoogleFake` from the recorded tab content, exported by the fake, and compared, tab by tab, with what Google exported. A difference means the fake no longer renders the way Google does: re-record (`python3 tests/doc_road_live.py --record`) and bring `_GoogleFake` back in line.
+
+## `tests.test_doc_freshness`
+
+`authorlm/tests/test_doc_freshness.py`
+
+The recordings' freshness rule (tests/_doc_freshness.py), with a fake clock, log and Doc: no Google call, no file touched. Run: python3 tests/test_doc_freshness.py
+
 ## `tests.test_doc_road_escapes`
 
 `authorlm/tests/test_doc_road_escapes.py`
 
 Regression (#152): Doc-road escapes the pull left in local files.
+
+## `tests.test_doc_road_failures`
+
+`authorlm/tests/test_doc_road_failures.py`
+
+The Doc-road failures of 2026-10-30 (discernment.md, SMSTTD), reproduced against the surgical double. Each scenario asserts the behaviour the author needs, so on a code base with the defect it FAILS; the runner reports every scenario and exits non-zero if any failed.
 
 ## `tests.test_doc_road_verbs`
 
@@ -590,11 +722,47 @@ Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, 
 
 End-to-end test of every MVP use case, driven through the real CLI.
 
+## `tests.test_essay_summaries`
+
+`authorlm/tests/test_essay_summaries.py`
+
+Summary hierarchy, step 4 (docs/summary-hierarchy-design.md §3.4, §4.5, §6.6, §11.4): the essay-summary pass. The essay is composed from its section summaries (never the text) and the prior essay summaries; the model writes FLOW, MOVES, MOTIFS, DOES NOT and code derives INTRODUCES, ASSUMES, PROMISES, DEBTS from the paragraph records and renders them under those labels; `sections_hash` tells "my sections changed"; `ensure(level="essay")` rebuilds the two lower levels first and prints one cost line per level; the structural coverage check replaces the paragraph citation parser. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `essay-summary` section.
+
 ## `tests.test_export_upload`
 
 `authorlm/tests/test_export_upload.py`
 
 `export … --upload` (any export to the author's Drive, replaced in place on re-export) and `export teleprompter` (the passages the author reads on camera, `voice: author` clips, as a large-type DOCX).
+
+## `tests.test_extraction_adjudicator`
+
+`authorlm/tests/test_extraction_adjudicator.py`
+
+The per-essay adjudicator and the writes (docs/extraction-redesign.md §4.5, §4.8, §9 phase 3), and the run-time model choice (ruling §0.2).
+
+## `tests.test_extraction_calibration`
+
+`authorlm/tests/test_extraction_calibration.py`
+
+`extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1, §9 phase 4): the historical candidates through the gates and the adjudicator, against the author's verdicts, and the thresholds moved.
+
+## `tests.test_extraction_gates`
+
+`authorlm/tests/test_extraction_gates.py`
+
+The candidate contract and the eight gates (docs/extraction-redesign.md §4.4, §4.10, §9 phase 2), on the twenty edges of §2.4.
+
+## `tests.test_extraction_migration`
+
+`authorlm/tests/test_extraction_migration.py`
+
+The migration verbs (docs/extraction-redesign.md §5, §9 phase 5): backup, migrate (plan, apply, dry-run), undo as a round trip.
+
+## `tests.test_extraction_payload`
+
+`authorlm/tests/test_extraction_payload.py`
+
+The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, §9 phase 1): `extraction.assemble` and `authorlm extract <file>`.
 
 ## `tests.test_filter_reply_json`
 
@@ -608,6 +776,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 
 `findings.edit_entry` is the one gate every producer's `replacement` passes through before it is staged as a `<<old>>{{new}}` edit in the author's Doc tab.
 
+## `tests.test_footnote_prefixes_nested`
+
+`authorlm/tests/test_footnote_prefixes_nested.py`
+
+footnote_prefixes must stay injective when nested paths share a stem.
+
 ## `tests.test_gallery`
 
 `authorlm/tests/test_gallery.py`
@@ -619,6 +793,12 @@ Hermetic tests for tools/gallery.py — self-contained image-review pages.
 `authorlm/tests/test_generated_docs.py`
 
 docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generated-docs.
+
+## `tests.test_generation_take_atomic`
+
+`authorlm/tests/test_generation_take_atomic.py`
+
+Retake must not destroy a good paragraph take when the write fails mid-flight.
 
 ## `tests.test_interlocutor`
 
@@ -662,6 +842,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
 
+## `tests.test_paragraph_records`
+
+`authorlm/tests/test_paragraph_records.py`
+
+Summary hierarchy, step 2 (docs/summary-hierarchy-design.md §3.2, §3.5, §4.5, §11.2): the paragraph-records pass. One call per heading section, headings with no call, the span check counted in the build report, the 24,000-character split, lazy rebuild of dirty rows only, and the one cost line. A fake LLM throughout; the live recording is tests/test_live_llm.py's `paragraph-records` section.
+
 ## `tests.test_passes`
 
 `authorlm/tests/test_passes.py`
@@ -686,17 +872,35 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_section_summaries`
+
+`authorlm/tests/test_section_summaries.py`
+
+Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5, §11.3): the section-summary pass. One call per section with the text as authority and the paragraph records as skeleton, conditioned on the earlier sections' POINT lines; MOVES coverage as set equality on the body paragraphs, misses reported; heading-only sections stored with no call; `ensure(level="section")` rebuilds the paragraph level first and prints one cost line per level. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `section-summary` section.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
 
 `setup.py` builds the web pages at install time, because the built pages (`authorlm/*_dist/index.html`) are not tracked in git.
 
+## `tests.test_signature_tag`
+
+`authorlm/tests/test_signature_tag.py`
+
+The [Signature: uri] tag: plain text in the files, a signature block (image, author's name, export date) in every reader output, dropped from the audio-clean build. Run: python3 tests/test_signature_tag.py
+
 ## `tests.test_summaries`
 
 `authorlm/tests/test_summaries.py`
 
-Essay summaries (critique-pass design §4): reading order, autoregressive conditioning, mark-don't-cascade staleness, rebuild semantics.
+Essay summaries (critique-pass design §4; summary-hierarchy design §3.4): reading order, autoregressive conditioning, composition from the section summaries, mark-don't-cascade staleness, rebuild semantics.
+
+## `tests.test_summary_hierarchy`
+
+`authorlm/tests/test_summary_hierarchy.py`
+
+Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): paragraph kinds, content hashes, section hashes, the two new tables, freshness derived at read time, and the read API over current rows. No model call anywhere in this suite.
 
 ## `tests.test_toc_outside`
 
@@ -710,6 +914,12 @@ toc.toml `outside`: Doc tabs that are not part of the book.
 
 _No docstring._
 
+## `tests.test_write_accept_idempotent`
+
+`authorlm/tests/test_write_accept_idempotent.py`
+
+write_accept must not duplicate a beat after a crash mid-accept.
+
 ## `tools.bootstrap_beliefs`
 
 `authorlm/tools/bootstrap_beliefs.py`
@@ -721,12 +931,6 @@ Distil beliefs from the author's decisions already on record.
 `authorlm/tools/convert_llm_cache.py`
 
 One-off: convert authorlm's record/replay recordings to llmlm's cache format.
-
-## `tools.measure_adjudication`
-
-`authorlm/tools/measure_adjudication.py`
-
-Measure the triage burden with and without step-two adjudication.
 
 ## `tools.pdf2md`
 

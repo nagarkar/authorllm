@@ -17,6 +17,9 @@ internal whitespace. NFC matters — the same Sanskrit term arrives
 precomposed from one editor and decomposed from another, and without
 normalization the dictionary would carry two rows the eye cannot tell
 apart.
+
+The audiobook's `cast.md` is a pipe table under the same discipline, so
+reading it lives here too (`parse_cast`); writing it is `audio`'s.
 """
 
 from __future__ import annotations
@@ -69,7 +72,7 @@ def _unwrap_emphasis(cell: str) -> str:
 def _cells(line: str) -> list[str]:
     """The normalized cells of one pipe-table line, or [] when the line
     is not a table row."""
-    # NBSP → space before anything else. `gdocs.normalize_markdown` does
+    # NBSP → space before anything else. `normalize.normalize_markdown` does
     # this on the Doc path, but the parser also reads the file straight
     # off disk (Obsidian, a hand paste), and an interior NBSP that
     # survived there would make the same row two different rows.
@@ -101,7 +104,7 @@ def _unreadable_row(cells: list[str]) -> str | None:
     """Why this line cannot be read as ONE three-column row, or None.
 
     A pipe is the table's own column separator and it does not survive
-    the Doc bridge in any form: `gdocs.normalize_markdown`'s `_ESCAPE`
+    the Doc bridge in any form: `normalize.normalize_markdown`'s `_ESCAPE`
     strips exactly the backslash an escape would write, and `push_doc`
     normalizes and WRITES BACK, so an escaped pipe is unescaped on the
     author's disk and the row reparses with its cells shifted one to the
@@ -315,3 +318,53 @@ def terms(text: str) -> list[str]:
     by construction a term of art."""
     rows, _warnings = parse(text or "")
     return [r["term"] for r in rows]
+
+
+# ------------------------------------------------------------------ cast
+
+CAST_COLUMNS = ("key", "voice", "voice_id", "model", "stability",
+                "similarity", "speed", "note")
+CAST_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def parse_cast(text: str) -> tuple[list[dict], list[str]]:
+    """`(rows, warnings)` from `cast.md`. Same pipe-table discipline as
+    the pronunciation table: prose around the table is ignored, a
+    shifted row is skipped and named, never guessed at."""
+    rows: list[dict] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    in_table = False
+    for line in (text or "").replace("\r\n", "\n").split("\n"):
+        cells = _cells(line)
+        if not cells:
+            if in_table:
+                break
+            continue
+        if not in_table:
+            if cells and cells[0].strip().casefold() == "key":
+                in_table = True
+            continue
+        if _is_delimiter(cells):
+            continue
+        key = cells[0].strip()
+        if not key:
+            continue
+        if len([c for c in cells[len(CAST_COLUMNS):] if c]) or any(
+                "|" in c for c in cells[:len(CAST_COLUMNS)]):
+            warnings.append(f"cast row '{key}' carries a '|' and cannot be "
+                            f"read as one row — skipped")
+            continue
+        if not CAST_KEY_RE.match(key):
+            warnings.append(f"cast key '{key}' is not a key ([a-z][a-z0-9_-]*)"
+                            " — skipped")
+            continue
+        if key in seen:
+            warnings.append(f"cast key '{key}' appears twice — the first "
+                            "row wins")
+            continue
+        seen.add(key)
+        padded = cells + [""] * (len(CAST_COLUMNS) - len(cells))
+        row = dict(zip(CAST_COLUMNS, (c.strip() for c in padded)))
+        rows.append(row)
+    return rows, warnings

@@ -413,20 +413,41 @@ def _strip_bold(text: str) -> str:
     return text.replace("**", "")
 
 
-def _match_paragraph(unit: str, originals: list[str], floor: float = 0.35
-                     ) -> int | None:
+def closest_by_ratio(probe, candidates, normalize, floor: float = 0.0,
+                     strict: bool = False) -> tuple[int | None, float]:
+    """(index, ratio) of the candidate most like `probe` by
+    `difflib.SequenceMatcher` ratio, both sides passed through
+    `normalize` first (a string or a word list — each caller keeps its
+    own). A candidate that normalizes empty is skipped; ties go to the
+    first. The index is None when the best ratio is under `floor` (or
+    not above it, when `strict`); the ratio is the best one either way.
+
+    The ONE place prose similarity is scored. Autojunk is always off:
+    past 200 elements it junks everything seen in more than 1% of the
+    sequence — every common letter of a paragraph — and a 260-character
+    rewording scored 0.09 against its source (0.74 without), losing to
+    short paragraphs with nothing in common (it-9844aefae138)."""
     import difflib
 
-    best, best_ratio = None, floor
-    a = _normalize_words(unit)
-    for k, para in enumerate(originals):
-        b = _normalize_words(para)
+    a = normalize(probe)
+    best, best_ratio = None, 0.0
+    for k, cand in enumerate(candidates):
+        b = normalize(cand)
         if not b:
             continue
         ratio = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
-        if ratio > best_ratio:
+        if best is None or ratio > best_ratio:
             best, best_ratio = k, ratio
-    return best
+    if best is None:
+        return None, 0.0
+    passed = best_ratio > floor if strict else best_ratio >= floor
+    return (best if passed else None), best_ratio
+
+
+def _match_paragraph(unit: str, originals: list[str], floor: float = 0.35
+                     ) -> int | None:
+    return closest_by_ratio(unit, originals, _normalize_words, floor,
+                            strict=True)[0]
 
 
 def mark_changes(draft: str, original: str) -> str:
@@ -513,18 +534,10 @@ def marked_html(marked: str) -> str:
 def best_match(unit: str, candidates: list[str]) -> tuple[int | None, float]:
     """(index, ratio) of the candidate paragraph most like `unit` by word
     sequence, or (None, 0.0) when nothing resembles it at all."""
-    import difflib
-
-    a = _normalize_words(_strip_bold(unit))
-    best, best_ratio = None, 0.0
-    for k, para in enumerate(candidates):
-        b = _normalize_words(_strip_bold(para))
-        if not a or not b:
-            continue
-        ratio = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
-        if ratio > best_ratio:
-            best, best_ratio = k, ratio
-    return best, round(best_ratio, 3)
+    best, ratio = closest_by_ratio(
+        unit, candidates, lambda s: _normalize_words(_strip_bold(s)),
+        floor=0.0, strict=True)
+    return best, round(ratio, 3)
 
 
 def changed_only(marked: str) -> tuple[list[str], int]:

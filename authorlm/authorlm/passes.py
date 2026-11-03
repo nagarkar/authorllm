@@ -16,10 +16,12 @@ import json
 import re
 from pathlib import Path
 
+from .concepts import scoped_concepts
 from .db import Database, ko_fields, loads
 from .llm import LLMClient, resolve_temperature
 from . import summaries as sums
-from . import threads as th
+from . import form_grammar
+from .context import Input, ensure_for
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "editor.md"
 ESSAY_STATES = ("pending", "proposed", "triaged", "written", "resolved",
@@ -182,6 +184,26 @@ def intents_in_scope(db: Database, manuscript: dict, file: str,
     return [dict(r) for r in rows if r["scope"] in chain]
 
 
+def intents_block(db: Database, manuscript: dict, file: str) -> str:
+    """The active intents whose scope covers this essay — tier label and
+    statement only, sorted by tier rank then statement.
+
+    Labelled the way `beat-draft.md` labels it: a goal governs SELECTION
+    AND EMPHASIS, never grounding — and here, never attribution either.
+    A metaphor filter genuinely benefits from knowing what the author is
+    trying to do with the book. Crediting the sweep to that goal is a
+    different thing entirely, and this pass does not do it."""
+    rows = intents_in_scope(db, manuscript, file, "active")
+    entries = []
+    for row in rows:
+        tier = scope_tier(manuscript, file, row["scope"]) or "outside"
+        entries.append((INTENT_TIER_RANK.get(tier, UNKNOWN_TIER_RANK),
+                        row["statement"], tier))
+    entries.sort(key=lambda e: (e[0], e[1]))
+    return "\n".join(f"- [{tier}] {statement}"
+                     for _rank, statement, tier in entries)
+
+
 def preflight(db: Database, manuscript: dict, file: str,
               pass_row: dict | None = None) -> dict:
     """The homework check: anything unconfirmed touching this essay's
@@ -324,12 +346,36 @@ def learnings(db: Database, pass_row: dict) -> list[str]:
     return [f"{r['signal']}: {r['target']}" for r in rows][-40:]
 
 
+# The edit pass's declaration (summary-hierarchy-design.md ruling 10,
+# §6.7): what it reads, as `context.Input` members. The first seven are
+# the blocks it always had; SECTION_OUTLINE (the target's own argument map)
+# and REFERENCED_SECTIONS (the text of other essays' sections the target
+# refers back to) are what §6.0 found it lacking. Changing what the editor
+# sees is a change to this tuple, not to the assembler.
+INPUTS = (Input.STYLE_LAW, Input.VALIDATED_BELIEFS, Input.INTENTS,
+          Input.CONCEPT_SLICE, Input.PRIOR_RUNS, Input.ESSAY_SUMMARIES,
+          Input.ESSAY_TEXT, Input.SECTION_OUTLINE, Input.REFERENCED_SECTIONS)
+
+# Of those, the blocks `input_blocks.supply` renders for this pass; the rest
+# are assembled below as they always were (their shape is what the HTTP
+# stubs in the tests and the editor prompt describe) and move onto
+# `supply` as that module takes their renderers.
+SUPPLIED = (Input.SECTION_OUTLINE, Input.REFERENCED_SECTIONS)
+
+
 def build_context(db: Database, manuscript: dict, file: str,
-                  pass_row: dict, force: bool = False) -> dict:
+                  pass_row: dict, force: bool = False, llm=None) -> dict:
     """Assemble everything the editor model sees. Raises with a precise
-    message when the gate or the summaries block the run."""
+    message when the gate or the summaries block the run.
+
+    `llm` (a `summaries.clients` dict, or one client) is what makes the
+    summaries lazy (ruling 3, ruling 9): every level the declaration reads
+    is brought up to date first, each printing its cost line, and the
+    summaries gate below then has nothing to block on. Without it the
+    stored rows are judged as they are and a stale one still blocks, as
+    the pass has always done."""
     from .styles import render as render_style
-    from . import api
+    from . import input_blocks
 
     gate = preflight(db, manuscript, file, pass_row)
     if not gate["clear"] and not force:
@@ -353,11 +399,17 @@ def build_context(db: Database, manuscript: dict, file: str,
             f"writeup ('write complete') or put the old essay back "
             f"('write abandon'). To refresh its summary from the pinned "
             f"pre-rewrite text meanwhile: 'summarize rebuild {file}'.")
+    if file not in texts:
+        raise LookupError(f"'{file}' is not in the manuscript's reading order")
+    if llm is not None:
+        ensure_for(db, manuscript, file, list(INPUTS), llm)
+        # The rebuild wrote rows; the gate must judge the text it captured
+        # against the rows as they are now, so the capture is retaken.
+        capture = sums.capture(db, manuscript)
+        texts, _unlisted, inflight_now = capture
     ready = summaries_ready(db, manuscript, file, capture=capture)
     if not ready["ok"]:
         raise RuntimeError(summaries_message(ready, "edit pass"))
-    if file not in texts:
-        raise LookupError(f"'{file}' is not in the manuscript's reading order")
     # Disk text for the target: the refusal above has already proved this
     # file is not in flight, so the capture carries no overlay for it.
     paragraphs = paragraphs_of(texts[file])
@@ -366,7 +418,7 @@ def build_context(db: Database, manuscript: dict, file: str,
         "SELECT * FROM editorial_beliefs WHERE manuscript_id = ? AND "
         "status = 'validated' ORDER BY confidence DESC", (manuscript["id"],))]
     try:
-        concepts = api.scoped_concepts(db, manuscript, file=file)
+        concepts = scoped_concepts(db, manuscript, file=file)
     except LookupError:
         concepts = {"nodes": [], "edges": []}
     return {
@@ -376,6 +428,8 @@ def build_context(db: Database, manuscript: dict, file: str,
         "before": ready["before"], "after": ready["after"],
         "inflight": ready["inflight"],
         "learnings": learnings(db, pass_row),
+        "blocks": input_blocks.supply(db, manuscript, file, list(SUPPLIED),
+                                      capture=capture),
         "gate": gate, "forced": force and not gate["clear"],
     }
 
@@ -416,6 +470,7 @@ def render_user_message(ctx: dict) -> str:
                         for e in ctx["after"] if e["summary"])
     essay = "\n\n".join(f"[{n}] {p}" for n, p in
                         enumerate(ctx["paragraphs"], 1))
+    blocks = ctx.get("blocks") or {}
     return "\n".join([
         block("STYLE GUIDE", ctx["style"]),
         block("POLICIES", beliefs),
@@ -424,6 +479,10 @@ def render_user_message(ctx: dict) -> str:
         block("LEARNINGS (this pass)", learn),
         block("BOOK CONTEXT — BEFORE", before),
         block("BOOK CONTEXT — AFTER", after),
+        block("OUTLINE — this essay's sections",
+              blocks.get(Input.SECTION_OUTLINE, "")),
+        block("REFERENCED SECTIONS — text this essay refers back to",
+              blocks.get(Input.REFERENCED_SECTIONS, "")),
         block(f"THE ESSAY — {ctx['file']} ({len(ctx['paragraphs'])} "
               "paragraphs)", essay),
     ])
@@ -637,7 +696,7 @@ def _edit_evidence(db: Database, manuscript_id: str, thread: dict,
     caller changes. Explained rejections still reach belief learning
     either way: that path runs off the evidence stream and the author's
     words, never off an episode."""
-    from .gdocs import clamp
+    from .normalize import clamp
 
     target = f"{thread['file']}: «{clamp(thread['proposed_old'] or '(insertion)')}»"
     if signal == "revised":
@@ -745,13 +804,13 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
                 # Keep the live embed outside the form so resolve leaves
                 # the author's pick in place (capture_embeds cannot read
                 # a tag wrapped in <<>>{{}}).
-                para = (th.render_pending(t["proposed_old"], t["proposed_new"])
+                para = (form_grammar.render_pending(t["proposed_old"], t["proposed_new"])
                         + embed_suffix)
         out.append(para)
         for t in by_para.get(n, []):
             if (loads(t.get("metadata"), {}) or {}).get("kind") == "insert":
-                out.append(th.render_insertion(t["proposed_new"]))
-    head = [th.render_insertion(t["proposed_new"]) for t in by_para.get(0, [])
+                out.append(form_grammar.render_insertion(t["proposed_new"]))
+    head = [form_grammar.render_insertion(t["proposed_new"]) for t in by_para.get(0, [])
             if (loads(t.get("metadata"), {}) or {}).get("kind") == "insert"]
     return "\n\n".join(head + out) + "\n"
 
@@ -761,32 +820,54 @@ def final_text_from_marked(marked: str,
                            kinds: tuple[str, ...] = ("replace", "insert")
                            ) -> tuple[str, list[dict]]:
     """Resolve: written forms keep their CURRENT {{new}} half (author
-    post-edits win); any other pending form on the tab (e.g. an open
-    margin-thread proposal) collapses to OLD so resolve never silently
-    approves foreign grammar. Returns (final_text, matched_forms).
+    post-edits win); any other pending REPLACE form on the tab (e.g. an
+    open margin-thread proposal) collapses to OLD so resolve never
+    silently approves foreign grammar. Returns (final_text, matched_forms).
 
     `kinds` restricts which forms are CONSIDERED, and defaults to both,
-    so the critique pass is unchanged. The local settle transport passes
-    `("replace",)`: a filter never stages an insertion, and an unmatched
-    insertion form collapses to its old half — which for an insertion is
-    the empty string — so leaving bare `{{…}}` in scope would delete a
-    `{{title}}` the author wrote (filter-pass design §2.3)."""
-    forms = [f for f in th.pending_forms(marked) if f["kind"] in kinds]
+    so the critique pass can settle insertions. The local settle
+    transport passes `("replace",)`: a filter never stages an insertion.
+
+    Insertions come from `form_grammar.pending_forms`, which lists own-line
+    forms only — inline author `{{title}}` / `{{a, b}}` are not forms.
+    Matching is content-first (`proposed_new`), then FIFO among the
+    remaining insert threads for post-edited greens. Unmatched own-line
+    inserts still collapse to the empty old half (foreign planted forms);
+    unmatched replaces collapse to old."""
+    forms = [f for f in form_grammar.pending_forms(marked) if f["kind"] in kinds]
     if not written:
-        # No written threads: keep old for every form (nothing to approve).
-        return th.strip_pending(marked)[0], []
+        # No written threads: keep old for every REPLACE form. Prefer
+        # strip_replacements over strip_pending so a stray unmatched
+        # own-line `{{…}}` the author typed as its own paragraph is not
+        # deleted when nothing was staged to approve.
+        return form_grammar.strip_replacements(marked)[0], []
     unmatched = list(written)
-    insert_queue = [t for t in written if t["proposed_old"] == ""]
     critique_forms = []
     keep_new: set[tuple[int, int]] = set()
+    # Pass 1: exact matches (replaces by old half; inserts by new half).
     for form in forms:
         match = None
         if form["kind"] == "replace":
             match = next((t for t in unmatched
                           if t["proposed_old"] == form["old"]), None)
-        elif insert_queue:
-            match = insert_queue.pop(0)
+        elif form["kind"] == "insert":
+            match = next((t for t in unmatched
+                          if t["proposed_old"] == ""
+                          and t["proposed_new"] == form["new"]), None)
         if match is None or match not in unmatched:
+            continue
+        unmatched.remove(match)
+        critique_forms.append(form)
+        keep_new.add((form["start"], form["end"]))
+    # Pass 2: post-edited inserts — FIFO among remaining insert threads.
+    insert_queue = [t for t in unmatched if t["proposed_old"] == ""]
+    for form in forms:
+        if form["kind"] != "insert" or (form["start"], form["end"]) in keep_new:
+            continue
+        if not insert_queue:
+            break
+        match = insert_queue.pop(0)
+        if match not in unmatched:
             continue
         unmatched.remove(match)
         critique_forms.append(form)
@@ -796,7 +877,7 @@ def final_text_from_marked(marked: str,
     for form in sorted(forms, key=lambda f: f["start"], reverse=True):
         span = (form["start"], form["end"])
         replacement = (form["new"] if span in keep_new else form["old"])
-        text = text[: form["start"]] + replacement + text[form["end"]:]
+        text = text[:form["start"]] + replacement + text[form["end"]:]
     return text, critique_forms
 
 
@@ -809,22 +890,19 @@ def _closest_paragraph(text: str, probe: str,
     removed themselves. `exclude` holds paragraphs that cannot be the
     answer — the batch's other proposals' old and new halves, which a
     similar-looking probe would otherwise claim as its own."""
-    import difflib
+    from .lint import closest_by_ratio
 
-    probe_n = " ".join(probe.split())
-    best, best_ratio = None, 0.0
+    def flat(s: str) -> str:
+        return " ".join(s.split())
+
     # Units are paragraphs, and a paragraph is one line in this
     # pipeline's markdown — the Doc export separates them with single
     # newlines, the local file with blank lines. Splitting on newlines
     # serves both shapes.
-    for para in re.split(r"\n+", text):
-        p = " ".join(para.split())
-        if not p or p in exclude:
-            continue
-        ratio = difflib.SequenceMatcher(None, probe_n, p).ratio()
-        if ratio > best_ratio:
-            best, best_ratio = p, ratio
-    return best if best_ratio >= 0.5 else None
+    paras = [p for p in (flat(x) for x in re.split(r"\n+", text))
+             if p and p not in exclude]
+    k, _ = closest_by_ratio(probe, paras, flat, floor=0.5)
+    return paras[k] if k is not None else None
 
 
 def record_resolution(db: Database, manuscript_id: str, file: str,
@@ -861,17 +939,21 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
                                  origin_type=origin_type)
     diffs = []
     unmatched = list(threads)
-    # Replaces match by their verbatim OLD half (law). Insertions have no
-    # old half, so they match in document order among the insertion
-    # threads — the marked text was composed in that same order.
-    insert_queue = [t for t in threads if t["proposed_old"] == ""]
+    # Replaces match by their verbatim OLD half (law). Insertions match
+    # by proposed_new first; post-edited insertions fall back FIFO among
+    # the remaining insertion threads (same rule as final_text_from_marked).
     for form in forms:
         match = None
         if form["kind"] == "replace":
             match = next((t for t in unmatched
                           if t["proposed_old"] == form["old"]), None)
-        elif insert_queue:
-            match = insert_queue.pop(0)
+        elif form["kind"] == "insert":
+            match = next((t for t in unmatched
+                          if t["proposed_old"] == ""
+                          and t["proposed_new"] == form["new"]), None)
+            if match is None:
+                match = next((t for t in unmatched
+                              if t["proposed_old"] == ""), None)
         if match is None or match not in unmatched:
             continue
         unmatched.remove(match)
@@ -909,13 +991,19 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
         # inside the braces. Insertions are excluded: their old half is
         # the empty string, which is "present" in any text.
         old = " ".join((t["proposed_old"] or "").split())
-        if norm_final is None or not old or old in norm_final:
+        proposed = t["proposed_new"] or ""
+        new = " ".join(proposed.split())
+        # The old text counts as standing only OUTSIDE the landed new: a
+        # new that extends its old (a sentence appended or prepended)
+        # carries the old inside it once it lands, and that is the
+        # acceptance, not the old text restored (SMSTTD, 2026-10-18).
+        rest = (norm_final.replace(new, "\0") if new and norm_final
+                else norm_final)
+        if norm_final is None or not old or old in rest:
             db.update("doc_threads", t["id"], {"state": "declined"})
             _edit_evidence(db, manuscript_id, t, "declined",
                            evidence_type=evidence_type)
             continue
-        proposed = t["proposed_new"] or ""
-        new = " ".join(proposed.split())
         if new and new in norm_final:
             db.update("doc_threads", t["id"], {"state": "cleaned"})
             _edit_evidence(db, manuscript_id, t, "resolved",

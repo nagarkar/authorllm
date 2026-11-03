@@ -29,7 +29,7 @@ they are **never summed into one number** anywhere:
   call-site edit. Sixteen of the seventeen audited sites reach it that
   way; `generate_image` is not a client and calls `record_image` itself.
   Tokens are exact (the provider reported them); `est_cost_usd` is an
-  ESTIMATE from litellm's public price list and is labelled as one
+  ESTIMATE from llmlm's price cache and is labelled as one
   everywhere it is printed.
 - **`kind: "chat"` — consumption.** Tokens the author's Claude Code
   subscription absorbed, swept incrementally from the session transcript
@@ -38,15 +38,19 @@ they are **never summed into one number** anywhere:
   token and printing a number next to it invents a bill that does not
   exist.
 
-**Pricing goes through `litellm.get_model_info`, never
-`litellm.model_cost[key]`.** The dict's keys are inconsistent about the
-vendor prefix and the inconsistency lands precisely on the shipped
-config's most expensive paths: `model_cost` has `gemini/gemini-2.5-flash`
-but not `openai/gpt-5.6-luna`, `anthropic/claude-fable-5` or
-`openai/gpt-image-2`. A direct lookup would have recorded `cost: null`
-for the summariser, the critique editor, illustration rendering and beat
-drafting — silently, and exactly where the money is. `get_model_info`
-resolves all four. Pinned by `check_usage_price_resolves_vendor_prefix`.
+**Pricing goes through llmlm's price cache (`llmlm.prices`), never a
+vendor map read directly.** The cache is a machine-wide state file
+(`~/.llmlm/prices.json`), refreshed weekly from litellm's published map,
+with hand-verified overrides for what the map lacks. The map's keys are
+inconsistent about the vendor prefix and the inconsistency lands
+precisely on the shipped config's most expensive paths: it has
+`gemini/gemini-2.5-flash` but not `openai/gpt-5.6-luna`,
+`anthropic/claude-fable-5` or `openai/gpt-image-2`. A direct lookup
+would have recorded `cost: null` for the summariser, the critique editor,
+illustration rendering and beat drafting — silently, and exactly where
+the money is. llmlm's lookup tries the exact key, then the bare name
+after the vendor prefix, and resolves all four. Pinned by
+`check_usage_price_resolves_vendor_prefix`.
 
 A model the map does not know records **tokens with a null cost, never a
 guess**; `cost_complete` then goes false and the report names the gap in
@@ -83,6 +87,7 @@ from pathlib import Path
 from typing import Any
 
 from llmlm import ledger as model_ledger
+from llmlm import prices
 from llmlm import usage as model_usage
 
 FILENAME = "usage.jsonl"
@@ -178,55 +183,55 @@ def settings() -> Settings:
 
 # -------------------------------------------------------------- pricing
 
-# Tests inject here rather than depending on litellm's live map, which
-# changes under us and would make a cost assertion a time bomb.
-_PRICE_OVERRIDE: dict[str, dict | None] = {}
+# The price table. None means llmlm's machine-wide cache
+# (`llmlm.prices.default()`); tests set a `prices.Prices` built on a
+# temporary file and a fake fetch, because the live map changes under us
+# and a cost assertion pinned to it would be a time bomb.
+PRICES: prices.Prices | None = None
 _PRICE_CACHE: dict[str, dict | None] = {}
 
-_RATE_KEYS = (("input", "input_cost_per_token"),
-              ("output", "output_cost_per_token"),
-              ("cache_read", "cache_read_input_token_cost"),
-              ("cache_write", "cache_creation_input_token_cost"))
+_RATE_KEYS = (("input", "input_per_m"),
+              ("output", "output_per_m"),
+              ("cache_read", "cache_read_per_m"),
+              ("cache_write", "cache_write_per_m"))
 
 
 def price(model: str) -> dict | None:
-    """The four per-token rates for `model`, or `None` when litellm does
-    not know it. Memoized per model per process — a verb making 24
-    summariser calls does one lookup.
+    """The four per-token rates for `model`, or `None` when the price
+    cache does not know it. Memoized per model per process — a verb
+    making 24 summariser calls does one lookup.
 
     NEVER guesses: an unmapped model prices to `None` and the line
     records `cost: null`, which is a different claim from `0.0` and is
     kept apart from it all the way to the report.
 
-    The lookup is `litellm.get_model_info(model)` and **not**
-    `litellm.model_cost[model]` — see the module docstring. A rate absent
-    from an otherwise-known model contributes 0 to the sum and sets
-    `partial`, which the report names."""
-    if model in _PRICE_OVERRIDE:
-        return _PRICE_OVERRIDE[model]
+    The lookup is llmlm's (`Prices.rates`: exact key, then the bare name
+    after the vendor prefix — see the module docstring), and llmlm's
+    rates are dollars per MILLION tokens; this returns dollars per token,
+    the unit `estimate()` and the report always used. A rate llmlm has
+    as 0 on an otherwise-priced model (the map carried no figure for it)
+    contributes 0 to the sum and sets `partial`, which the report names;
+    a row whose every rate is 0 is not a price."""
     if model in _PRICE_CACHE:
         return _PRICE_CACHE[model]
     found: dict | None = None
     try:
-        import litellm
-
-        # The unmapped-model path prints a provider list otherwise.
-        litellm.suppress_debug_info = True
-        info = litellm.get_model_info(model)
-        rates: dict = {"partial": False}
-        for name, key in _RATE_KEYS:
-            value = info.get(key) if isinstance(info, dict) else None
-            if value is None:
-                rates["partial"] = True
-                rates[name] = 0.0
-            else:
-                rates[name] = float(value)
-        # An "info" row with no usable rate at all is not a price.
-        if any(rates[name] for name, _ in _RATE_KEYS):
-            found = rates
+        table = PRICES if PRICES is not None else prices.default()
+        row = table.rates(model)
+        if row is not None:
+            rates: dict = {"partial": False}
+            for name, key in _RATE_KEYS:
+                value = float(getattr(row, key) or 0.0) / 1e6
+                if value == 0.0:
+                    rates["partial"] = True
+                rates[name] = value
+            # A row with no usable rate at all is not a price.
+            if any(rates[name] for name, _ in _RATE_KEYS):
+                found = rates
     except Exception:
-        # No litellm installed, or a model it does not map. Pricing is an
-        # ENRICHMENT: the ledger records every token either way.
+        # The cache file cannot be read or fetched, or a model it does not
+        # map. Pricing is an ENRICHMENT: the ledger records every token
+        # either way.
         found = None
     _PRICE_CACHE[model] = found
     return found
