@@ -10687,6 +10687,17 @@ def main_test() -> None:
               and "[Judgment" not in ri["staged"][0]["proposed_new"]
               and api.get_intent(ldb, ri["intents"][0]["intent"])["scope"] == "02-second.md"
               if hasattr(api, "get_intent") else len(ri["intents"]) == 1, str(ri))
+        link = lms / "02-link.md"
+        link.symlink_to("02-second.md")
+        rl = lenses.assemble_repair(ldb, lm, "02-link.md")
+        tag_l = next(t for t in rl.tags if t["id"] == fact[:11])
+        ril = lenses.record_repairs(ldb, lm, lsession, "02-link.md", {"repairs": [
+            {"id": tag_l["id"], "action": "intent",
+             "text": "Say which census counted the sentence"}]}, payload=rl)
+        check("a repair on a symlinked file scopes its intent to the link's target",
+              ldb.one("SELECT scope FROM declared_intents WHERE id = ?",
+                      (ril["intents"][0]["intent"],))["scope"] == "02-second.md", str(ril))
+        link.unlink()
         dm = lenses.dismiss_judgments(ldb, lm, "02-second.md", [fact[:11]],
                                       "the count is illustrative")
         check("dismissal rejects the finding with the reason and stages the "
