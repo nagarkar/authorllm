@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  AuthorLM's audiobook page (authorlm/authorlm/audiobook_server.py) on 127.0.0.1, kept running by
+  launchd and started at login. Tailscale fronts it on the tailnet port in the owner's served-apps
+  table (metalm operations.md).
+  This is a template: __AUTHORLM__, __PATH__, __REPO__, __HOME__ and __MANUSCRIPT__ are filled in by
+  scripts/install-launch-agent.sh, which writes the machine-specific copy to ~/Library/LaunchAgents/
+  and prints the one command the owner runs to load it (Claude Code loads nothing that starts at
+  login). The manuscript is only the one the page opens on; its dropdown lists the rest.
+  PATH is spelled out because launchd's default has no ffmpeg or pandoc.
+  Restart onto new code (after every merge that touches the server's Python):
+    launchctl kickstart -k gui/$(id -u)/com.nagarkar.authorlm.serve
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nagarkar.authorlm.serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__AUTHORLM__</string>
+    <string>-m</string>
+    <string>__MANUSCRIPT__</string>
+    <string>audio</string>
+    <string>serve</string>
+    <string>--no-open</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO__/authorlm</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- At most one restart attempt per 10 s, e.g. while something else holds the port. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.authorlm/logs/serve.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.authorlm/logs/serve.log</string>
+</dict>
+</plist>

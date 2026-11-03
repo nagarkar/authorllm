@@ -531,7 +531,8 @@ def scenario_editorial_loop(root: Path) -> None:
           str(ccollect))
     check("compact collect passes non-version reports through",
           _capi.compact_collect({"unchanged": True}) == {"unchanged": True})
-    cgraph = _capi.compact_concepts(_capi.list_concepts(_cdb, _cms))
+    from authorlm import concepts as _cconcepts
+    cgraph = _cconcepts.compact_concepts(_capi.list_concepts(_cdb, _cms))
     check("compact concept listing projects to name/kind/status",
           cgraph["node_count"] == len(cgraph["nodes"])
           and all(set(n) <= {"name", "kind", "status", "introduced_in",
@@ -664,7 +665,7 @@ def scenario_prerequisite_gap(root: Path) -> None:
 
     # Guidance ordering must only ever use relations the shared vocabulary
     # accepts — every surface (extraction, triage, guidance) reads one set.
-    from authorlm.extraction import VALID_RELATIONS
+    from authorlm.concepts import VALID_RELATIONS
     from authorlm.guidance import PREREQUISITE_FIRST, PREREQUISITE_SECOND
     check("ordering relations all belong to the shared relation vocabulary",
           (PREREQUISITE_FIRST | PREREQUISITE_SECOND) <= VALID_RELATIONS,
@@ -3611,7 +3612,7 @@ def scenario_doc_comments(root: Path) -> None:
           and not hasattr(mf, "refresh") and not hasattr(mf, "FILENAME"),
           str(structure.SIDECAR_FILES))
 
-    from authorlm.gdocs import chapter_stats
+    from authorlm.manifest import chapter_stats
     sample = ("# Heading\n\nThe cat sat on the mat. It was warm. "
               "Everything considered, the philosophical implications "
               "remained extraordinarily complicated.\n")
@@ -7403,7 +7404,7 @@ def scenario_pronunciations(root: Path) -> None:
         # a second writer of anything normalize_markdown is not a no-op
         # on. Driven at the seam — what is under test is the write-back,
         # not Drive.
-        from authorlm.gdocs import normalize_markdown as _norm
+        from authorlm.normalize import normalize_markdown as _norm
         pushed = _norm(dict_path.read_text(encoding="utf-8"))
         check("E3 `doc push` normalizes and writes back, so its "
               "normalizer must be a NO-OP on the dictionary — otherwise "

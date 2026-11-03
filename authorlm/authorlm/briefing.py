@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .concepts import unrealized_with_dependents
 from .db import Database, loads
+from .sessions import critic_tallies
 
 EPOCH = "1970-01-01T00:00:00Z"
 
@@ -204,13 +205,11 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
 
     # Non-author-sourced material announces itself (critique-pass design
     # §2): critic input must never silently blend into the author's record.
-    from . import critique as crit
-
     critique_pending = [
         {"name": r["name"],
          "intents_proposed": r["intents"]["proposed"],
          "elements_proposed": r["elements"]["proposed"]}
-        for r in crit.status(db, manuscript_id)
+        for r in critic_tallies(db, manuscript_id)
         if r["intents"]["proposed"] or r["elements"]["proposed"]]
 
     return {

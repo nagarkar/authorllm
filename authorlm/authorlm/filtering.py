@@ -47,8 +47,9 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import passes
+from .concepts import concept_notes, scoped_concepts
 from .db import Database, loads
-from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
 
 NONE = "(none)"
 PROFILE_DIR = "_profiles"
@@ -243,68 +244,16 @@ def _validated_beliefs(db: Database, manuscript_id: str) -> str:
                      sorted(row["statement"] for row in rows))
 
 
-def _intents_block(db: Database, manuscript: dict, file: str) -> str:
-    """The active intents whose scope covers this essay — tier label and
-    statement only, sorted by tier rank then statement.
-
-    Labelled the way `beat-draft.md` labels it: a goal governs SELECTION
-    AND EMPHASIS, never grounding — and here, never attribution either.
-    A metaphor filter genuinely benefits from knowing what the author is
-    trying to do with the book. Crediting the sweep to that goal is a
-    different thing entirely, and this pass does not do it."""
-    from . import passes
-
-    rows = passes.intents_in_scope(db, manuscript, file, "active")
-    entries = []
-    for row in rows:
-        tier = passes.scope_tier(manuscript, file, row["scope"]) or "outside"
-        entries.append((INTENT_TIER_RANK.get(tier, UNKNOWN_TIER_RANK),
-                        row["statement"], tier))
-    entries.sort(key=lambda e: (e[0], e[1]))
-    return "\n".join(f"- [{tier}] {statement}"
-                     for _rank, statement, tier in entries)
-
-
 def _scoped(db: Database, manuscript: dict, file: str,
             text: str | None) -> dict:
     """The file-scoped graph slice, read from THE CAPTURE.
 
     `text` is the caller's captured essay text (`assemble`'s parameter),
     which `scoped_concepts` uses in place of a second disk read. Passing
-    it is what makes CONCEPT NOTES and PROTECTED TERMS obey the
-    one-capture rule: without it a parallel session's edit between window
-    N and window N+1 changes block A and forfeits the cached prefix."""
-    from . import api
-
-    return api.scoped_concepts(db, manuscript, file=file, text=text)
-
-
-def _concept_notes(db: Database, manuscript: dict, file: str,
-                   text: str | None = None) -> str:
-    try:
-        graph = _scoped(db, manuscript, file, text)
-    except LookupError:
-        return ""
-    lines = []
-    for node in sorted(graph.get("nodes", []),
-                       key=lambda n: n.get("name") or ""):
-        notes = (node.get("notes") or "").strip() or "(no notes)"
-        # ALIASES ride with the definition, not only with PROTECTED
-        # TERMS. A concept reached by an alternate name is the same
-        # concept, and a filter that cannot see the alias will read two
-        # names for one thing as two things.
-        aliases = [a for a in (node.get("aliases") or []) if a]
-        also = f" (also: {', '.join(sorted(aliases))})" if aliases else ""
-        lines.append(f"- {node['name']}{also} — {notes}")
-    # EDGES: the graph's own relations between the concepts this essay
-    # touches. `scoped_concepts` already restricts them to the selected
-    # nodes, so nothing here reaches outside the slice.
-    edges = [e.get("edge") for e in graph.get("edges", []) if e.get("edge")]
-    if edges:
-        lines.append("")
-        lines.append("Relations the author has recorded between them:")
-        lines.extend(f"- {e}" for e in sorted(edges))
-    return "\n".join(lines)
+    it is what makes PROTECTED TERMS obey the one-capture rule: without
+    it a parallel session's edit between window N and window N+1 changes
+    block A and forfeits the cached prefix."""
+    return scoped_concepts(db, manuscript, file=file, text=text)
 
 
 def _profiles_block(manuscript: dict, keys: list[str]) -> str:
@@ -490,7 +439,7 @@ def cast_block(cast_text: str) -> str:
     """The CAST block from `_audio/cast.md`'s text: one line per row,
     key and role note. Voice ids and parameters are deliberately left
     out — the filter places tags, it does not cast."""
-    from .audio import parse_cast
+    from .pronunciations import parse_cast
 
     rows, _warnings = parse_cast(cast_text)
     if not rows:
@@ -756,11 +705,11 @@ def _frame_block(db: Database, manuscript: dict, run: dict,
         _section("INTENTS (they govern which changes matter — never "
                  "whether a change is grounded, never what the essay "
                  "claims, and never who this work is filed under)",
-                 _intents_block(db, manuscript, file)),
+                 passes.intents_block(db, manuscript, file)),
         _section("VALIDATED BELIEFS",
                  _validated_beliefs(db, manuscript["id"])),
         _section("CONCEPT NOTES (the author's settled definitions)",
-                 _concept_notes(db, manuscript, file, text)),
+                 concept_notes(db, manuscript, file, text)),
         _section(PROTECTED_HEADER,
                  _protected_block(protected_terms(db, manuscript, file,
                                                   text, dictionary))),
@@ -926,11 +875,11 @@ def assemble_prelude(db: Database, manuscript: dict, run: dict,
         _section("INTENTS (they govern which changes matter — never "
                  "whether a change is grounded, never what the essay "
                  "claims, and never who this work is filed under)",
-                 _intents_block(db, manuscript, file)),
+                 passes.intents_block(db, manuscript, file)),
         _section("VALIDATED BELIEFS",
                  _validated_beliefs(db, manuscript["id"])),
         _section("CONCEPT NOTES (the author's settled definitions)",
-                 _concept_notes(db, manuscript, file, text)),
+                 concept_notes(db, manuscript, file, text)),
         _section(PROTECTED_HEADER, _protected_block(terms)),
         _section(DICTIONARY_HEADER, _dictionary_block(dictionary)),
         _section(f"THE ESSAY — {file} ({len(units)} units)",

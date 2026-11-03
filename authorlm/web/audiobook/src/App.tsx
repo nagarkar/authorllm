@@ -24,7 +24,15 @@ interface Status {
 type Source = "preview" | "take";
 
 const fmt = (n: number) => n.toLocaleString();
-const when = (iso: string | null | undefined) => iso ? iso.slice(0, 16).replace("T", " ") : "";
+// A stamp with a zone (the server writes UTC) reads in the viewer's local time;
+// one without keeps its own digits, since its zone is unknown.
+const when = (iso: string | null | undefined) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (!/(Z|[+-]\d\d:?\d\d)$/.test(iso) || isNaN(d.getTime())) return iso.slice(0, 16).replace("T", " ");
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
 const mmss = (s: number | null | undefined) => s == null ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 type PageMode = "chapters" | "pron";
 // #<manuscript>/<stem> or #<manuscript>/pron:<term>; a bare #<stem> opens

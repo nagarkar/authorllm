@@ -54,8 +54,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from authorlm import api, audio, filtering, filters, passes  # noqa: E402
+from authorlm import api, audio, filtering, filters, passes, pronunciations  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
+from authorlm.normalize import normalize_markdown  # noqa: E402
 from authorlm.export import strip_voice_lines, VOICE_LINE  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "audiobook"
@@ -201,19 +202,19 @@ def check_voice_tags() -> None:
 
 
 def check_cast() -> None:
-    rows, warnings = audio.parse_cast(audio.SEED_CAST)
+    rows, warnings = pronunciations.parse_cast(audio.SEED_CAST)
     check("the seed cast has one narrator row with no voice id",
           [r["key"] for r in rows] == ["narrator"] and rows[0]["voice_id"] == "")
     text = audio.set_cast_row(audio.SEED_CAST, {
         "key": "herdsman", "voice": "Adam", "voice_id": "v1", "model": "",
         "stability": "0.65", "similarity": "0.8", "speed": "0.97",
         "note": "x"})
-    rows, _w = audio.parse_cast(text)
+    rows, _w = pronunciations.parse_cast(text)
     check("set_cast_row appends after the last row",
           [r["key"] for r in rows] == ["narrator", "herdsman"])
     again = audio.set_cast_row(text, {"key": "herdsman", "voice": "Julian",
                                       "voice_id": "v2"})
-    rows2, _w = audio.parse_cast(again)
+    rows2, _w = pronunciations.parse_cast(again)
     check("set_cast_row replaces the row with the same key in place",
           [r["key"] for r in rows2] == ["narrator", "herdsman"]
           and rows2[1]["voice_id"] == "v2" and again.count("\n") == text.count("\n"))
@@ -225,7 +226,7 @@ def check_cast() -> None:
         check("a bad key is refused", False)
     except audio.AudioError as err:
         check("a bad key is refused by name", "Bad Key" in str(err))
-    shifted, warnings = audio.parse_cast(
+    shifted, warnings = pronunciations.parse_cast(
         "| Key | Voice |\n| --- | --- |\n| a\\|b | x | y | z | 1 | 1 | 1 | n |\n")
     check("a row carrying a pipe is skipped and named",
           shifted == [] and warnings and "'|'" in warnings[0], str(warnings))
@@ -484,7 +485,7 @@ def check_cli_and_refusals() -> None:
         out, code = run_cli("-w", str(ws), "audio", "cast", "set", "the_dead",
                             "--voice-id", "3MTvEr8xCMCC2mL9ujrI",
                             "--stability", "0.55")
-        rows, _w = audio.parse_cast((book / "_audio" / "cast.md")
+        rows, _w = pronunciations.parse_cast((book / "_audio" / "cast.md")
                                     .read_text(encoding="utf-8"))
         row = next(r for r in rows if r["key"] == "the_dead")
         check("audio cast set updates one field and keeps the rest",
@@ -1927,7 +1928,7 @@ def check_audiobook_continuation_edit() -> None:
         # was last pushed is skipped, without a call to Google.
         pushed.clear()
         import hashlib as _h
-        main_text = gdocs.strip_embed_lines(gdocs.normalize_markdown(
+        main_text = gdocs.strip_embed_lines(normalize_markdown(
             (book / "kindness.md").read_text(encoding="utf-8")))
         meta = gdocs._mapping(s.db, s.manuscript)
         meta.setdefault("gdocs", {})["kindness.md"] = {
@@ -1940,7 +1941,7 @@ def check_audiobook_continuation_edit() -> None:
         pushed.clear()
         meta = gdocs._mapping(s.db, s.manuscript)
         meta["gdocs"]["kindness-2.md"] = {"tab_id": "t2", "pushed_hash": _h.sha256(
-            gdocs.strip_embed_lines(gdocs.normalize_markdown(cont.read_text(encoding="utf-8")))
+            gdocs.strip_embed_lines(normalize_markdown(cont.read_text(encoding="utf-8")))
             .encode()).hexdigest()[:16]}
         gdocs._save_mapping(s.db, s.manuscript, meta)
         job = s.enqueue("push", stem="kindness")

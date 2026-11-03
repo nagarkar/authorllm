@@ -14,7 +14,7 @@ from typing import Any
 
 from . import concepts as cg
 from .db import Database, ko_fields, loads, now_iso
-from .extraction import VALID_RELATIONS, record_triage
+from .extraction import record_triage
 
 CONCEPT_TRIAGE_HELP = (
     "Keys: [k]eep  [r]etire  [s]kip (or Enter)  [n] reword notes  "
@@ -127,7 +127,7 @@ TRIAGE_SCHEMAS: dict[str, dict[str, Any]] = {
             {"id": "reject", "label": "Reject", "help": "Reject the inferred relationship."},
             {"id": "flip", "label": "Flip & keep", "help": "Reverse the relationship direction and confirm it."},
             {"id": "retype", "label": "Retype", "help": "Confirm the relationship with a different relation.",
-             "parameter": {"id": "relation", "label": "Relation", "options": sorted(VALID_RELATIONS)},
+             "parameter": {"id": "relation", "label": "Relation", "options": sorted(cg.VALID_RELATIONS)},
              "reason": _optional_reason("Why should this relationship have a different type?")},
             {"id": "alias", "label": "Alias merge", "help": "Merge one endpoint into the other canonical concept.",
              "parameter": {"id": "canonical_id", "label": "Canonical endpoint", "source": "edge_endpoints"},
@@ -547,7 +547,7 @@ def _validate_action(db: Database, manuscript: dict, triage_type: str,
         if parameters.get("kind") not in cg.NODE_KINDS:
             raise ValueError(f"invalid concept kind '{parameters.get('kind', '')}'")
     if triage_type == "edges" and action == "retype":
-        if parameters.get("relation") not in VALID_RELATIONS:
+        if parameters.get("relation") not in cg.VALID_RELATIONS:
             raise ValueError(f"invalid relation '{parameters.get('relation', '')}'")
     if action == "reword_notes" and not str(parameters.get("notes", "")).strip():
         raise ValueError("Reword notes needs non-empty notes")

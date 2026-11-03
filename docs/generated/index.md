@@ -186,7 +186,7 @@ The Concept Graph (RFC AuthorLM Chapter 21) — AuthorLM's enduring asset.
 
 `authorlm/authorlm/context.py`
 
-Declared inputs — what a pass asks for, and the one place that supplies it (summary-hierarchy-design.md ruling 10, §6.7).
+Declared inputs: the vocabulary a pass asks in, and the summary levels each member needs.
 
 ## `authorlm.critic`
 
@@ -212,6 +212,12 @@ Storage layer.
 
 Always-on database performance log.
 
+## `authorlm.directive_tags`
+
+`authorlm/authorlm/directive_tags.py`
+
+The inline directive tags as text: `[Footnote: …]`, `[Explain: …]`, `[Suggestion: …]` and `[Judgment: …]`, how to find them in a file's text and how to take them out.
+
 ## `authorlm.directives`
 
 `authorlm/authorlm/directives.py`
@@ -223,6 +229,12 @@ Inline directives: `[Footnote: …]`, `[Explain: …]` and `[Suggestion: …]` �
 `authorlm/authorlm/docs.py`
 
 Mechanical document management (RFC §16.1 Level 3).
+
+## `authorlm.drive_upload`
+
+`authorlm/authorlm/drive_upload.py`
+
+Export files on the author's Drive: the export Doc and per-output uploads.
 
 ## `authorlm.export`
 
@@ -272,6 +284,12 @@ Filters — the artifact (docs/filter-pass-design.md §1.2).
 
 Generic finding storage — the door shared by any producer that emits arbitrary quote-anchored editorial findings (lens, morph, and any future producer alike): hygiene-gate the quote against the file's real text, store a `guidance_history` row, and — when the finding carries a `footnote`, `judgment`, or `replacement` — stage a Doc edit through the same `<<old>>{{new}}` grammar every other producer uses.
 
+## `authorlm.form_grammar`
+
+`authorlm/authorlm/form_grammar.py`
+
+The pending-change forms a Doc tab or a marked file carries: how to read them, collapse them and write them.
+
 ## `authorlm.gdocs`
 
 `authorlm/authorlm/gdocs.py`
@@ -307,6 +325,12 @@ Illustration slots: the [Illustration: ...] tag grammar and the scan-derived slo
 `authorlm/authorlm/improvements.py`
 
 Self-improvement tasks: AuthorLM's own defects as knowledge objects.
+
+## `authorlm.input_blocks`
+
+`authorlm/authorlm/input_blocks.py`
+
+The one place that supplies a pass's declared inputs.
 
 ## `authorlm.interlocutor`
 
@@ -368,11 +392,23 @@ Generated clips: plan, start, poll, take (docs/video-clips-design.md §8b, §8c,
 
 The Doc road for clip specs (docs/video-clips-design.md §8e).
 
+## `authorlm.media_tags`
+
+`authorlm/authorlm/media_tags.py`
+
+The podcast media tags as text: `[Clip: …]`, `[Collage: …]` and `[Montage: …]` lines, their fields, the structure a file's tags make, and a book export's copy of a file with them gone.
+
 ## `authorlm.morph`
 
 `authorlm/authorlm/morph.py`
 
 Morph — combined-call paragraph-defect detection and correction (design: docs/morph-design.md).
+
+## `authorlm.normalize`
+
+`authorlm/authorlm/normalize.py`
+
+Canonical markdown: the normalizer that makes a no-op round trip through the Doc byte-stable, whichever editor (local, Obsidian, a Docs export) last wrote the text, with its fence and math lifters and the whitespace helpers that go with it.
 
 ## `authorlm.obsidian`
 
@@ -469,6 +505,12 @@ Essay summaries — the editor's working memory (critique-pass design §4).
 `authorlm/authorlm/sweeps.py`
 
 Sweep framework vanguards (design: docs/sweep-framework.md).
+
+## `authorlm.teleprompter`
+
+`authorlm/authorlm/teleprompter.py`
+
+The author's on-camera passages of one file, for a teleprompter.
 
 ## `authorlm.threads`
 
@@ -630,7 +672,7 @@ Comment context on the pull (it adds where a Doc comment's anchor sits and the s
 
 `authorlm/tests/test_context.py`
 
-Declared inputs (summary-hierarchy-design.md ruling 10, §6.7, step 5): the `Input` enum, `context.supply`, the critique pass's OUTLINE and REFERENCED SECTIONS blocks, and the reader load derived from paragraph records. No model call anywhere in this suite: records and section summaries are stored directly.
+Declared inputs (summary-hierarchy-design.md ruling 10, §6.7, step 5): the `Input` enum, `input_blocks.supply`, the critique pass's OUTLINE and REFERENCED SECTIONS blocks, and the reader load derived from paragraph records. No model call anywhere in this suite: records and section summaries are stored directly.
 
 ## `tests.test_continuation`
 
