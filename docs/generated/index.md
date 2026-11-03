@@ -650,6 +650,12 @@ Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
 
 Comment context on the pull (it adds where a Doc comment's anchor sits and the summaries already fresh there, never building one) and `summarize put` (a section summary written by the session, stamped with the section's hash, refused without the four labels). No LLM.
 
+## `tests.test_concept_mention_patterns`
+
+`authorlm/tests/test_concept_mention_patterns.py`
+
+Realization vs first-mention firewall (`concept_pattern` / `mention_pattern`).
+
 ## `tests.test_context`
 
 `authorlm/tests/test_context.py`
@@ -691,6 +697,12 @@ The Doc-road fake checked against Google: every snapshot recorded live by tests/
 `authorlm/tests/test_doc_freshness.py`
 
 The recordings' freshness rule (tests/_doc_freshness.py), with a fake clock, log and Doc: no Google call, no file touched. Run: python3 tests/test_doc_freshness.py
+
+## `tests.test_doc_gone`
+
+`authorlm/tests/test_doc_gone.py`
+
+`export._doc_gone` decides whether a Drive/Docs failure means the remembered file was deleted, so export may recreate it in place.
 
 ## `tests.test_doc_road_escapes`
 
@@ -776,6 +788,12 @@ The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, �
 
 footnote_prefixes must stay injective when nested paths share a stem.
 
+## `tests.test_form_remnants`
+
+`authorlm/tests/test_form_remnants.py`
+
+`form_grammar.form_remnants` / `strip_form_remnants` clean hand-resolved Doc forms after pull.
+
 ## `tests.test_gallery`
 
 `authorlm/tests/test_gallery.py`
@@ -800,6 +818,24 @@ Retake must not destroy a good paragraph take when the write fails mid-flight.
 
 Interlocutor tests (docs/interlocutor-design.md).
 
+## `tests.test_iter_manuscript_paths`
+
+`authorlm/tests/test_iter_manuscript_paths.py`
+
+`revisions.iter_manuscript_paths` is the observation visibility gate.
+
+## `tests.test_lint_checks`
+
+`authorlm/tests/test_lint_checks.py`
+
+Individual `lint.check_*` helpers encode ratified style laws that `write propose` can refuse as errors.
+
+## `tests.test_lint_shingles`
+
+`authorlm/tests/test_lint_shingles.py`
+
+Lint word-normalization, syllable count, and n-gram shingles.
+
 ## `tests.test_live_llm`
 
 `authorlm/tests/test_live_llm.py`
@@ -812,11 +848,29 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 
 Proposal learning loop — firewall, screen, distillation, retraction.
 
+## `tests.test_manifest_normalize`
+
+`authorlm/tests/test_manifest_normalize.py`
+
+`manifest._normalize` is the term cleaner behind essay debt columns.
+
+## `tests.test_manifest_render_lines`
+
+`authorlm/tests/test_manifest_render_lines.py`
+
+`manifest.render_lines` is the plain-text Reader load that `gdocs.manifest_text` appends under the chapter inventory (#243).
+
 ## `tests.test_media`
 
 `authorlm/tests/test_media.py`
 
 Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
+
+## `tests.test_media_gen_next_n`
+
+`authorlm/tests/test_media_gen_next_n.py`
+
+`media_gen._next_n`: numbered vs imported take slots.
 
 ## `tests.test_morph_targets`
 
@@ -841,6 +895,12 @@ Regression: spaced CommonMark thematic breaks must survive normalize.
 `authorlm/tests/test_paragraph_records.py`
 
 Summary hierarchy, step 2 (docs/summary-hierarchy-design.md §3.2, §3.5, §4.5, §11.2): the paragraph-records pass. One call per heading section, headings with no call, the span check counted in the build report, the 24,000-character split, lazy rebuild of dirty rows only, and the one cost line. A fake LLM throughout; the live recording is tests/test_live_llm.py's `paragraph-records` section.
+
+## `tests.test_parse_fields`
+
+`authorlm/tests/test_parse_fields.py`
+
+`media.parse_fields` is the grammar door for every [Clip]/[Collage] field list: description, optional ⇢ note, then `| key: value` pairs.
 
 ## `tests.test_passes`
 
@@ -884,6 +944,12 @@ Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5,
 
 The [Signature: uri] tag: plain text in the files, a signature block (image, author's name, export date) in every reader output, dropped from the audio-clean build. Run: python3 tests/test_signature_tag.py
 
+## `tests.test_structure_find_file`
+
+`authorlm/tests/test_structure_find_file.py`
+
+`structure.title_of` / `find_file` are the shared file-lookup helpers moved down from `lenses` in #346.
+
 ## `tests.test_summaries`
 
 `authorlm/tests/test_summaries.py`
@@ -895,6 +961,12 @@ Essay summaries (critique-pass design §4; summary-hierarchy design §3.4): read
 `authorlm/tests/test_summary_hierarchy.py`
 
 Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): paragraph kinds, content hashes, section hashes, the two new tables, freshness derived at read time, and the read API over current rows. No model call anywhere in this suite.
+
+## `tests.test_sweeps_narrowing`
+
+`authorlm/tests/test_sweeps_narrowing.py`
+
+`sweeps._changed_files` / `_claims_for` are the deterministic narrowing step before the ontology sweep spends tokens.
 
 ## `tests.test_toc_outside`
 
