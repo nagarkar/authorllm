@@ -117,7 +117,7 @@ def cmd_setup(args):
         print(f"Using existing database at {path}")
         print(f"Recorded AUTHORLM_WORKSPACE={workspace} in {env_file}")
         return
-    if not args.yes and sys.stdin.isatty() and not _ask_yes(
+    if not args.no_questions and sys.stdin.isatty() and not _ask_yes(
             f"No database at {path}. Create it?"):
         sys.exit("Nothing created.")
     _setup_workspace(workspace)
@@ -5476,16 +5476,6 @@ def _export_upload(args, db, manuscript: dict, path: str) -> None:
     print(f"{verb} on Drive: {up['url']}")
 
 
-def _confirm(prompt: str, yes: bool) -> bool:
-    if yes:
-        return True
-    if not sys.stdin.isatty():
-        raise SystemExit(ui.yellow(
-            f"{prompt} — no terminal to ask on; pass --yes to proceed"))
-    answer = input(f"{prompt} [y/N] ").strip().lower()
-    return answer in ("y", "yes")
-
-
 def cmd_audio(args):
     """The audiobook verbs (docs/audiobook-pipeline-design.md §11)."""
     from . import audio
@@ -5493,6 +5483,9 @@ def cmd_audio(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
     rest = list(args.rest or [])
+    if args.live and args.dry_run:
+        raise SystemExit("error: --live goes ahead and --dry-run previews. "
+                         "Rerun with one of them.")
     try:
         if args.action == "init":
             result = audio.init(manuscript)
@@ -5569,11 +5562,11 @@ def cmd_audio(args):
                 raise SystemExit("give --text, or --file F --paragraphs N-M")
             candidates = [c.strip() for c in args.cast.split(",") if c.strip()]
             chars = len(audio.normalize(text)) * len(candidates)
-            if not _confirm(f"This audition spends about {chars:,} "
-                            f"ElevenLabs characters ({len(candidates)} "
-                            f"voice(s) × {len(audio.normalize(text)):,}). "
-                            "Proceed?", args.yes):
-                print("Nothing rendered.")
+            print(f"This audition spends about {chars:,} ElevenLabs "
+                  f"characters ({len(candidates)} voice(s) × "
+                  f"{len(audio.normalize(text)):,}).")
+            if not args.live:
+                print("Nothing rendered. Rerun with --live to spend them.")
                 return
             overrides = {"stability": args.stability,
                          "similarity": args.similarity, "speed": args.speed,
@@ -5655,7 +5648,7 @@ def cmd_audio(args):
 
         if args.action == "dictionary":
             if rest[:1] != ["push"]:
-                raise SystemExit("usage: audio dictionary push [--yes]")
+                raise SystemExit("usage: audio dictionary push [--dry-run | --live]")
             client = audio.ElevenLabs(audio.api_key())
             plan = audio.dictionary_plan(manuscript, client)
             for line in audio.describe_plan(plan):
@@ -5663,8 +5656,8 @@ def cmd_audio(args):
             if not (plan["create"] or plan["add"] or plan["change"] or plan["remove"]):
                 print(ui.green("Nothing to push."))
                 return
-            if not _confirm("Apply?", args.yes):
-                print("Nothing pushed.")
+            if not args.live:
+                print("Nothing pushed. Rerun with --live to apply this plan.")
                 return
             result = audio.dictionary_apply(plan, client)
             print(f"Dictionary {result['id']} at version "
@@ -9083,8 +9076,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "setup", help="point this checkout at a workspace and create its database")
-    p.add_argument("--yes", "-y", action="store_true",
-                   help="create without asking (with --workspace)")
+    p.add_argument("--no-questions", action="store_true", dest="no_questions",
+                   help="create the database without asking (with --workspace)")
     p.set_defaults(func=cmd_setup)
 
     p = sub.add_parser("init", help="register a manuscript directory")
@@ -9769,14 +9762,16 @@ def build_parser() -> argparse.ArgumentParser:
                "  audio voices [--search WORDS] [--library]   free preview "
                "clips into the audition gallery\n"
                "  audio audition --cast narrator,3MTv… --file sermons.md "
-               "--paragraphs 3-5   paid clips on the book's words\n"
+               "--paragraphs 3-5   states the cost; --live renders the paid "
+               "clips on the book's words\n"
                "  audio cast set herdsman --voice-id ID --voice 'Adam Stone' "
                "--stability 0.65\n"
                "  audio say Basilides --say \"buh-SIL-ih-deez,ba-SIL-i-deez\"   "
                "hear each respelling in a real sentence, in its voice, "
                "no dictionary push; --settle keeps one\n"
-               "  audio dictionary push             pronunciations.md → the "
-               "named ElevenLabs dictionary, after showing the diff\n"
+               "  audio dictionary push             shows the diff between "
+               "pronunciations.md and the named ElevenLabs dictionary; --live "
+               "applies it\n"
                "  audio status [becker] [--find Basilides] [-v]   the board: "
                "takes, what moved since them, the stitch\n"
                "  audio generate becker --remaining [--dry-run]   render every "
@@ -9820,7 +9815,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--remaining", action="store_true",
                    help="generate: every paragraph of the chapter without a take")
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
-                   help="generate/retake: print the cost, render nothing")
+                   help="generate/retake: print the cost, render nothing; "
+                        "audition/dictionary push: preview only, the same as "
+                        "leaving out --live")
     p.add_argument("--find", metavar="WORDS",
                    help="status: list the paragraphs whose text contains WORDS")
     p.add_argument("--verbose", "-v", action="store_true",
@@ -9864,8 +9861,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--similarity", type=float)
     p.add_argument("--speed", type=float)
     p.add_argument("--note", help="cast set: the role note")
-    p.add_argument("--yes", action="store_true",
-                   help="audition / dictionary push: skip the confirmation")
+    p.add_argument("--live", action="store_true",
+                   help="audition / dictionary push: go ahead (audition bills "
+                        "ElevenLabs characters, push changes the remote "
+                        "dictionary); without it they only preview")
     p.set_defaults(func=cmd_audio)
 
     p = sub.add_parser(

@@ -101,6 +101,46 @@ def check_show_verbs() -> None:
               "show" in choices, f"{verb} actions: {choices}")
 
 
+def check_no_agreement_flags() -> None:
+    """`yes` says nothing about what happens: `--dry-run` previews, `--live`
+    goes ahead, and a flag that skips a question says so (metalm
+    guidelines/cli.md). Walks every parser, so a new verb cannot bring the
+    flag back, and parses the old spellings, so they stay gone."""
+    import argparse
+
+    from authorlm.cli import build_parser
+
+    root = build_parser()
+    seen: set[str] = set()
+    pending = [("authorlm", root)]
+    while pending:
+        name, parser = pending.pop()
+        for action in parser._actions:
+            for flag in action.option_strings:
+                if flag in ("--yes", "-y"):
+                    seen.add(f"{name} {flag}")
+            if isinstance(action.choices, dict):
+                pending.extend((f"{name} {verb}", sub)
+                               for verb, sub in action.choices.items()
+                               if isinstance(sub, argparse.ArgumentParser))
+    check("no verb declares --yes or -y", not seen, str(sorted(seen)))
+    for argv in (["setup", "--workspace", "x", "--yes"],
+                 ["setup", "--workspace", "x", "-y"],
+                 ["audio", "audition", "--yes"],
+                 ["audio", "dictionary", "push", "--yes"]):
+        rejected = False
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                root.parse_args(argv)
+        except SystemExit:
+            rejected = True
+        check(f"`{' '.join(argv)}` is not accepted", rejected)
+    check("setup --no-questions parses",
+          root.parse_args(["setup", "--no-questions"]).no_questions)
+    check("audio --live parses",
+          root.parse_args(["audio", "dictionary", "push", "--live"]).live)
+
+
 def check_broken_pipe() -> None:
     """`authorlm <listing> | head` must exit quietly.
 
@@ -5985,10 +6025,10 @@ def check_workspace_guard() -> None:
         shutil.rmtree(ws)  # the stand-in mount point (plus any logs the refusals wrote)
         shutil.move(str(root / "ws.unmounted"), str(ws))
 
-        # 6. setup -y elsewhere: new database, pointer rewritten in place, keys intact.
+        # 6. setup --no-questions elsewhere: new database, pointer rewritten in place, keys intact.
         ws2 = root / "ws2"
-        out, code = run("setup", "--workspace", str(ws2), "--yes")
-        check("setup --yes creates a new workspace", code is None and api.db_path(ws2).exists(), f"{code} {out}")
+        out, code = run("setup", "--workspace", str(ws2), "--no-questions")
+        check("setup --no-questions creates a new workspace", code is None and api.db_path(ws2).exists(), f"{code} {out}")
         text = env_file.read_text()
         check("the pointer line is replaced, not duplicated",
               text == f"GEMINI_API_KEY=keep-me\nAUTHORLM_WORKSPACE={ws2}\n", text)
@@ -6520,6 +6560,7 @@ def main_test() -> None:
     check_style_refusal_names_candidates()
     check_broken_pipe()
     check_show_verbs()
+    check_no_agreement_flags()
     check_config_parity()
     check_usage_ledger()
     check_chat_usage_sweep()

@@ -91,7 +91,7 @@ What the CLI needs in the cloud, and where each piece comes from:
 | piece | source | where it goes |
 |---|---|---|
 | the Google token | the Mac's `~/.authorlm/gdocs_token.json`; its refresh token renews without a browser, and it carries the client id and secret, so no client file is needed | the environment's secret variable `AUTHORLM_GDOCS_TOKEN`, the file's contents as one line. The CLI reads it when the file is absent and keeps it in memory: a cloud session may not write a credential to disk, and the second cloud test (2026-10-19) found the setup script did not either |
-| a workspace | `authorlm setup --workspace ~/authorlm-ws --yes` in the session's first turn | disposable; the Doc is the source of truth |
+| a workspace | `authorlm setup --workspace ~/authorlm-ws --no-questions` in the session's first turn | disposable; the Doc is the source of truth |
 | the manuscript | `authorlm init --name <Manuscript> --path ~/authorlm-ws/<Manuscript> --extraction off`, then `authorlm doc bind <masterDocId> -m <Manuscript>`, then `authorlm doc pull -m <Manuscript>`, which adopts every `.md` tab as a local file | the local cache of the tabs, with per-tab state |
 
 `doc bind` (added 2026-10-19) records an existing master Doc on a fresh workspace and writes nothing to the Doc; without it the first `doc push` would create a new Doc beside the real one. `cloud-test-2.md` beside this skill tests the road end to end. Until that test passes, a cloud session reads through the connector and writes nothing to the Doc; what it drafts goes to a new Doc in the master's folder named exactly as the tab would be, and the local session folds it into the tab.

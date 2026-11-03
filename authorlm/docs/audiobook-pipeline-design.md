@@ -406,7 +406,7 @@ Rulings:
      manuscript's name); create it if absent;
   2. read the remote rules; diff against the table;
   3. show the diff as prose — rows to add, rows whose reading changed,
-     remote rules with no table row — and **ask before applying**;
+     remote rules with no table row — and **apply only with `--live`**;
   4. adds → add-rules; a changed reading → remove-rules then add-rules
      (a duplicate appended behind the old rule would be shadowed by
      first-match-wins);
@@ -526,9 +526,9 @@ id.
 | `audio export [--chapters …]` | Compiles `audiobook.json` and `chapters/*.json`; rewrites only changed files; warns per inline-math span, per unresolved tag, per over-long section. | `export_audio` |
 | `audio check` | Readiness (§12). Exit 1 on any blocking item. | `audio_readiness` |
 | `audio voices [--search …]` | Account and library voices with their free preview clips into the gallery. | `list_voices` |
-| `audio audition --cast-candidates A,B [--text … \| --file F --paragraphs 3-5] [--stability … --similarity … --speed …]` | Renders the candidates on the given words at `[tts].model`; appends to the gallery with parameters printed; states the character cost and asks first. | `audition_voices` |
+| `audio audition --cast-candidates A,B [--text … \| --file F --paragraphs 3-5] [--stability … --similarity … --speed …]` | Renders the candidates on the given words at `[tts].model`; appends to the gallery with parameters printed; states the character cost and renders only with `--live`. | `audition_voices` |
 | `audio cast set <key> --voice-id … [--voice … --model … --stability … --similarity … --speed … --note …]` | Writes one `cast.md` row. | `set_cast` |
-| `audio dictionary push` | §7. | `push_pronunciations` |
+| `audio dictionary push [--dry-run \| --live]` | §7. | `push_pronunciations` |
 | `filter run casting <file>` | Not new; the casting filter on the existing verbs. | existing |
 
 Absent on purpose: `audio generate` (audiostation's), any writer of

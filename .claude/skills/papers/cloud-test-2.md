@@ -10,7 +10,7 @@ Run the papers cloud test 2 in `.claude/skills/papers/cloud-test-2.md`, step by 
 
 **1b. Tools and keys.** `pandoc --version | head -1`, `ffmpeg -version | head -1`, `which pip python3 authorlm`, and `python3 -c "import os;print({k: bool(os.environ.get(k)) for k in ['GEMINI_API_KEY','ANTHROPIC_API_KEY','OPENAI_API_KEY','AUTHORLM_SKIP_WEB_BUILD']})"`. Pass: pandoc and ffmpeg print a version, the three programs resolve under /opt/authorlm-venv, and the Gemini key is present. Print only the booleans, never a value. Then `cd authorlm && pip install -e ".[all]"` timed, and `authorlm --help`.
 
-**2. Workspace.** `authorlm setup --workspace ~/authorlm-ws --yes` then `authorlm status`. Pass: a database is created and status runs.
+**2. Workspace.** `authorlm setup --workspace ~/authorlm-ws --no-questions` then `authorlm status`. Pass: a database is created and status runs.
 
 **3. Manuscript and bind.** `mkdir -p ~/authorlm-ws/SMSTTD && authorlm init --name SMSTTD --path ~/authorlm-ws/SMSTTD --extraction off`, then `authorlm doc bind 1VDLq5605h6f9yykyMCtWnsCOP9lnMIsTdVl6IrgF2ls -m SMSTTD`, then `authorlm doc list -m SMSTTD`. Pass: the list names the master Doc and its tabs. Record whether the list already shows tab ids before any pull.
 
