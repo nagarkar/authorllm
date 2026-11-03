@@ -1876,12 +1876,27 @@ def _holds_doc_edits(local: str, base: str, doc: str) -> bool:
     removed does not still appear more often locally than in the Doc.
     Blank lines are not counted. Counts matter — a repeated line the
     Doc added (or deleted) once is not "held" just because another copy
-    remains elsewhere (2026-10-27). A push of such a file loses nothing
-    of the Doc's."""
+    remains elsewhere (2026-10-27). Order matters too: a Doc-only
+    paragraph reorder leaves the bag of lines unchanged, and a push that
+    treated that as held wrote the local order back over the tab
+    (2026-11-01). Shared lines must keep the Doc's relative order in
+    the local file. A push of such a file loses nothing of the Doc's."""
     from collections import Counter
 
     def counts(text: str) -> Counter:
         return Counter(line for line in text.splitlines() if line.strip())
+
+    def nonblank(text: str) -> list[str]:
+        return [line for line in text.splitlines() if line.strip()]
+
+    def projection(seq: list[str], bag: Counter) -> list[str]:
+        have = Counter(bag)
+        out: list[str] = []
+        for line in seq:
+            if have[line] > 0:
+                out.append(line)
+                have[line] -= 1
+        return out
 
     base_c, doc_c, local_c = counts(base), counts(doc), counts(local)
     for line in set(base_c) | set(doc_c):
@@ -1890,7 +1905,11 @@ def _holds_doc_edits(local: str, base: str, doc: str) -> bool:
             return False
         if d < b and loc > d:
             return False
-    return True
+    # Same bag of shared lines in a different order is a Doc edit the
+    # counts above do not see (paragraph reorder in the tab).
+    common = doc_c & local_c
+    return projection(nonblank(doc), common) == projection(
+        nonblank(local), common)
 
 
 def unchanged_since_push(db: Database, manuscript: dict, query: str,
@@ -3288,6 +3307,22 @@ def reconcile(db: Database, manuscript: dict, service,
             # Pending margin-thread spans are review state, not content:
             # canonical comparison uses the old half on the Doc side too.
             doc_text, _ = form_grammar.strip_pending(doc_text)
+            # Same remnant + broken-form gate as pull_doc: a `}}` left
+            # from a hand-resolved form of this file is not prose, and a
+            # form that lost a marker must not auto-pull into the local
+            # file (2026-11-02: session-start reconcile wrote
+            # `{{unterminated…` into the manuscript after #331 taught
+            # pull_doc to refuse the same tab).
+            doc_text, _ = form_grammar.strip_form_remnants(
+                doc_text, form_news(db, manuscript["id"], relpath))
+            if form_grammar.has_broken_forms(doc_text):
+                report["errors"].append({
+                    "file": relpath,
+                    "error": "tab has a form that lost a marker "
+                             "(<<, >>, {{ or }}); local file left "
+                             "untouched — mend or remove it in the Doc, "
+                             "then pull"})
+                continue
             path = Path(manuscript["path"]) / relpath
             local_raw = (path.read_text(encoding="utf-8")
                          if path.exists() else "")
@@ -5300,11 +5335,31 @@ def _form_owner(paragraph: str, known: list[dict]) -> dict | None:
     """The thread whose form is in this export paragraph: a live one
     first (a paragraph with a live form is never overwritten), else the
     newest settled one, else None (markers nobody recorded, which still
-    block: they may be the author's own)."""
-    flat = _form_flat(paragraph)
-    owners = [k for k in known
-              if (k["new"] and k["new"] in flat)
-              or (k["old"] and k["old"] in flat)]
+    block: they may be the author's own).
+
+    Match on the form halves `pending_forms` reads, not a bare substring
+    of the paragraph: a settled thread whose new half was "." (or any
+    short common token) otherwise owned every marked paragraph that
+    merely contained that token, and diff_push cleared a live or
+    hand-written form as an "orphan" (2026-10-31, discernment.md)."""
+    owners: list[dict] = []
+    seen: set[int] = set()
+    for form in form_grammar.pending_forms(paragraph):
+        fo, fn = _form_flat(form["old"]), _form_flat(form["new"])
+        for i, k in enumerate(known):
+            if i in seen:
+                continue
+            # Replace: the old half is what the record planted and the
+            # author does not edit; a rewritten green half still owns.
+            # Insert: only the new half exists — exact match, or the
+            # push blocks (None) rather than clearing a rewritten live
+            # form under a short settled token.
+            if fo and fo == k["old"]:
+                owners.append(k)
+                seen.add(i)
+            elif not fo and not k["old"] and fn and fn == k["new"]:
+                owners.append(k)
+                seen.add(i)
     live = [k for k in owners if k["live"]]
     if live:
         return live[0]

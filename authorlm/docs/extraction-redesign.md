@@ -76,21 +76,29 @@ Asked one at a time and answered; the reasoning follows each.
 
 ## 1. The pipeline as found, end to end
 
-What runs today, with the line that does it. The owner's word
+**Historical.** This section is the pre-redesign inventory (the system as
+found on 2026-10-25). As-built triggers and laziness are ruling 11 and
+§9 — `init` / `collect` / `write complete` never mine; only
+`authorlm extract --native` and MCP `extract_concepts` do. Line numbers
+below may have drifted; trust the module docstrings and the CLI.
+
+What ran then, with the line that did it. The owner's word
 "deterministic" is half right: the candidates come from a model
 (`extraction.py:854`), and everything that admits, grounds, scores and
 retires them is deterministic string work. The noise comes from both halves.
 
-### 1.1 Triggers
+### 1.1 Triggers (as found — superseded by ruling 11)
 
 - `authorlm extract` (`cli.py:180-193`): collects a revision, then
   `extract_concepts`.
 - Closing a writeup (`api.py:3191`, `api.py:3278-3284`): a collect, then
   `run_extraction` (`api.py:4370-4377`) when `extraction_allowed` is true.
+  **As built:** write-complete no longer extracts (ruling 11).
 - MCP `extract_concepts` (`mcp_server.py:1807`).
 - Two switches: `[extraction] enabled` (`extraction.py:558-564`,
-  `config.toml:124`, **off since the owner's ruling of 2026-09-25**) and the
-  per-manuscript switch in `manuscripts.metadata` (`extraction.py:573-589`).
+  `config.toml:124`; the 2026-09-25 "off pending redo" stance is retired —
+  the switch is a plain kill switch again) and the per-manuscript switch
+  in `manuscripts.metadata` (`extraction.py:573-589`).
   `[extraction] adjudicate = true` (`config.toml:139`).
 
 ### 1.2 What is read

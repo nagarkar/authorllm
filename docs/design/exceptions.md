@@ -25,7 +25,7 @@ This repo adopted metalm with the gaps below grandfathered. New work follows met
 | Config never moves by environment variable; test fakes are injected in-process | coding.md#where-env-lives | `authorlm/authorlm/paths.py:22` (`AUTHORLM_CONFIG`, `AUTHORLM_ENV`, `AUTHORLM_CRAFT`), `clients.py:776`, env pins at the top of each test file | adopted 2026-10-05 |
 | Data objects are `@dataclass(frozen=True, slots=True)` | coding.md#data-objects | 21 `@dataclass` uses in `authorlm/authorlm/`, none with `slots=True` | adopted 2026-10-05 |
 | Atomic writes: temp file plus rename | coding.md#idempotence-and-writes | `authorlm/authorlm/staging.py:190`, `manifest.py:176` (most of 73 `write_text` calls) | adopted 2026-10-05 |
-| Only the adapter imports a vendor SDK | coding.md#external-services-and-outbound-actions | `authorlm/authorlm/export.py:317`, `usage.py:195`, `llm.py:1498`, `gdocs.py` | adopted 2026-10-05 |
+| Only the adapter imports a vendor SDK | coding.md#external-services-and-outbound-actions | `authorlm/authorlm/drive_upload.py`, `usage.py:195`, `llm.py:1498`, `gdocs.py` | adopted 2026-10-05 |
 | Retry only 429/529, bounded | coding.md#llm-calls | `authorlm/authorlm/llm.py:1153` retries every error | adopted 2026-10-05 |
 | Prompts are versioned files `<role>_vN.md` with front matter; none inline | coding.md#llm-calls | `authorlm/authorlm/prompts/*.md` (14, unversioned); inline prompts per `prompt_registry.py:11` | adopted 2026-10-05 |
 | Layout: `doctor` gate, `./<repo>.sh` launcher, Python 3.12, pytest and ruff in the dev extra | coding.md#layout | No `doctor` verb or launcher; `authorlm/pyproject.toml` `requires-python = ">=3.11"` | adopted 2026-10-05 |

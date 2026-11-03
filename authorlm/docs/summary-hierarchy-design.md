@@ -2,14 +2,18 @@
 
 Status: RATIFIED by the owner 2026-10-25, after a ten-question grill (the
 rulings are §0) and the owner's confirmation that §6.0's reading of the
-processes matches theirs. Build not started; §11 is the plan. Written from
-the owner's request of the same day ("a first class paragraph summary
-generation process … we still need section summaries … an essay summary
-which takes all of the section summaries … figure out what the correct
-inputs to filters and lenses ought to be … a deep dive is required"). No
-code changed by this document; every count was read from the live DB
-read-only. The extraction redesign (`docs/extraction-redesign.md`, PR
-nagarkar/authorllm#267) consumes §7 through `summaries.for_unit`.
+processes matches theirs. **Built** steps 1–5 (first slice, through
+2026-10-26): paragraph records, section/essay summaries, lazy rebuild on
+use, CLI `summarize …`, and `context.Input` / `supply` with the first
+consumers (`passes.build_context`, `manifest`). Not yet on `supply`: the
+critique pass's seven original blocks, the beat loop, filters and lenses
+(see §6.7). Written from the owner's request of the same day ("a first
+class paragraph summary generation process … we still need section
+summaries … an essay summary which takes all of the section summaries …
+figure out what the correct inputs to filters and lenses ought to be …
+a deep dive is required"). Counts in the body were read from the live DB
+read-only at ratification. The extraction redesign
+(`docs/extraction-redesign.md`) consumes §7 through `summaries.for_unit`.
 
 Companion designs: critique-pass-design.md §4 (the current `essay_summaries`
 table), autoregressive-writing-design.md §12 (the 2026-08-27 finding that

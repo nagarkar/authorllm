@@ -230,6 +230,12 @@ Inline directives: `[Footnote: …]`, `[Explain: …]` and `[Suggestion: …]` �
 
 Mechanical document management (RFC §16.1 Level 3).
 
+## `authorlm.drive_upload`
+
+`authorlm/authorlm/drive_upload.py`
+
+Export files on the author's Drive: the export Doc and per-output uploads.
+
 ## `authorlm.export`
 
 `authorlm/authorlm/export.py`
@@ -499,6 +505,12 @@ Essay summaries — the editor's working memory (critique-pass design §4).
 `authorlm/authorlm/sweeps.py`
 
 Sweep framework vanguards (design: docs/sweep-framework.md).
+
+## `authorlm.teleprompter`
+
+`authorlm/authorlm/teleprompter.py`
+
+The author's on-camera passages of one file, for a teleprompter.
 
 ## `authorlm.threads`
 
@@ -817,6 +829,12 @@ Interlocutor tests (docs/interlocutor-design.md).
 `authorlm/tests/test_live_llm.py`
 
 Live-LLM integration tests with record/replay (RFC §24.5 discipline).
+
+## `tests.test_locate_block_voice`
+
+`authorlm/tests/test_locate_block_voice.py`
+
+locate_block must match a card by section id, not spoken text alone.
 
 ## `tests.test_loop`
 
