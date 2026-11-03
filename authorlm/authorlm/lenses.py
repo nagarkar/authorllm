@@ -1064,11 +1064,11 @@ def judgment_tags(db: Database, manuscript: dict, files: dict[str, str],
     """Every open [Judgment: …] tag in the file, with the unit that
     carries it and the finding its id names (None when the id is
     missing or unknown — a hand-written tag is still a work order)."""
-    from . import directives, passes
+    from . import directive_tags, passes
     text = files[rel]
     units = passes.paragraphs_of(text)
     out = []
-    for tag in directives.scan_text(text, "judgment"):
+    for tag in directive_tags.scan_text(text, "judgment"):
         m = JUDGMENT_ID.search(tag["gist"])
         finding = None
         fid = m.group(1) if m else None

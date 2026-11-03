@@ -55,7 +55,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import directives
+from . import directive_tags
 from . import pronunciations as pron
 from .export import (VOICE_LINE, load_settings, resolve_regions,
                      strip_display_math)
@@ -629,7 +629,7 @@ def audio_source(name: str, raw: str) -> str:
 
     text = resolve_regions(normalize_markdown(raw), {"audio"}, name)
     text, _media_tags = strip_for_book(text, name)
-    text, _unresolved = directives.strip_tags(text)
+    text, _unresolved = directive_tags.strip_tags(text)
     text = strip_display_math(text)
     return normalize_markdown(text)
 
@@ -1397,7 +1397,7 @@ def check(db, manuscript: dict) -> dict:
     for name, text in files.items():
         if not name.endswith(".md") or name == pron.FILENAME:
             continue
-        _t, unresolved = directives.strip_tags(normalize_markdown(text))
+        _t, unresolved = directive_tags.strip_tags(normalize_markdown(text))
         for tag in unresolved:
             problems.append(f"{name}: unresolved [{tag['kind'].title()}: "
                             f"{tag['gist'][:50]}]")

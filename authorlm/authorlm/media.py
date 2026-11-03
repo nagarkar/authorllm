@@ -256,12 +256,12 @@ def _spoken(text: str) -> str:
     """The words read aloud from a stretch of (region-resolved) text:
     directive tags, illustration and image lines, voice lines, footnote
     markers and display math removed; whitespace collapsed."""
-    from . import directives
+    from . import directive_tags
     from .export import strip_display_math, strip_voice_lines
     from .gdocs import normalize_markdown
     from .illus import parse_tag
 
-    text, _ = directives.strip_tags(normalize_markdown(text))
+    text, _ = directive_tags.strip_tags(normalize_markdown(text))
     text = strip_voice_lines(text)
     try:
         text = strip_display_math(text)

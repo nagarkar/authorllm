@@ -16,7 +16,7 @@ import re
 from datetime import date
 from pathlib import Path
 
-from . import directives
+from . import directive_tags
 from .db import Database
 from .gdocs import (GDOC_MIME, _ensure_folder, _mapping, _save_mapping,
                     normalize_markdown)
@@ -567,7 +567,7 @@ def publish_markdown(manuscript: dict, variant: str,
         # damage, and a reviewer cannot act on it (footnote-directive
         # design §6). Stripped and named, never kept as a production
         # note the way an illustration slot is.
-        text, unresolved = directives.strip_tags(text)
+        text, unresolved = directive_tags.strip_tags(text)
         for tag in unresolved:
             warnings.append(f"{name}: unresolved [{tag['kind'].title()}: "
                             f"{tag['gist'][:60]}] stripped — draft it in "

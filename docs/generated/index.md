@@ -212,6 +212,12 @@ Storage layer.
 
 Always-on database performance log.
 
+## `authorlm.directive_tags`
+
+`authorlm/authorlm/directive_tags.py`
+
+The inline directive tags as text: `[Footnote: …]`, `[Explain: …]`, `[Suggestion: …]` and `[Judgment: …]`, how to find them in a file's text and how to take them out.
+
 ## `authorlm.directives`
 
 `authorlm/authorlm/directives.py`

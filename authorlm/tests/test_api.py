@@ -69,7 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
-from authorlm import api, concepts, docs, form_grammar, guidance as guidance_module  # noqa: E402
+from authorlm import api, concepts, directive_tags, docs, form_grammar, guidance as guidance_module  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 from authorlm.db import ko_fields, loads  # noqa: E402
 
@@ -5245,8 +5245,8 @@ def check_directives() -> None:
             "In 1916.[FOOTNOTE: Jung's Seven Sermons date | label: RD]\n\n"
             "An [Illustration: a tracker kneeling] is not a request, nor is\n"
             "[Footnote: a tag split\nacross lines], nor [Explain:] alone.\n")
-    fn = dv.scan_text(text, "footnote")
-    ex = dv.scan_text(text, "explain")
+    fn = directive_tags.scan_text(text, "footnote")
+    ex = directive_tags.scan_text(text, "explain")
     check("footnote grammar: inline, case-insensitive keyword, optional "
           "| label: override, never across lines, never an illustration tag",
           [(t["n"], t["line"], t["gist"], t["label"]) for t in fn]
@@ -5259,7 +5259,7 @@ def check_directives() -> None:
     check("a tag's paragraph rides with it (the evidence row's anchor)",
           fn[0]["paragraph"].startswith("The vital lie.")
           and ex[1]["paragraph"] == "[Explain: why the Field is not a substance]")
-    stripped, removed = dv.strip_tags(text)
+    stripped, removed = directive_tags.strip_tags(text)
     check("exports strip every kind of tag — inline without disturbing the "
           "sentence's spacing, standalone with its whole line",
           "The vital lie. It holds. Then on.\n\nIn 1916.\n\nAn [Illustration"
@@ -5509,7 +5509,7 @@ def check_suggestions() -> None:
             "Beta states the claim without a case.\n\n"
             "[suggestion: add an example]\n\n"
             "Gamma closes.[Explain: what closing means]\n")
-    sg = dv.scan_text(text, "suggestion")
+    sg = directive_tags.scan_text(text, "suggestion")
     check("suggestion grammar: inline targets its own paragraph, standalone "
           "targets the paragraph BEFORE it, keyword case-insensitive",
           [(t["n"], t["line"], t["gist"], t["standalone"]) for t in sg]
@@ -5520,9 +5520,9 @@ def check_suggestions() -> None:
           and text[sg[1]["target_start"]:sg[1]["target_end"]] == sg[1]["target"],
           str(sg))
     check("a standalone tag with nothing before it has no target",
-          dv.scan_text("[Suggestion: lead with the claim]\n\nA.\n",
+          directive_tags.scan_text("[Suggestion: lead with the claim]\n\nA.\n",
                        "suggestion")[0]["target"] is None)
-    stripped, removed = dv.strip_tags(text)
+    stripped, removed = directive_tags.strip_tags(text)
     check("exports strip the suggestion tag like any other, inline and "
           "standalone",
           "Alpha opens. It runs long. Then on.\n\nBeta states the claim "
@@ -10549,7 +10549,7 @@ def main_test() -> None:
               len(fn["edits_staged"]) == 1
               and "Every Beat counts.[Footnote: cite the (census) table for the count]"
               in planted
-              and len(_dir.scan_text(planted, "footnote")) == 1
+              and len(directive_tags.scan_text(planted, "footnote")) == 1
               and _json.loads(fn["findings"][0]["metadata"])["footnote"]
               == "cite the (census) table for the count", planted)
         pl = lenses.run_lens(ldb, lm, lsession, "plain", "02-second.md",
@@ -10597,13 +10597,13 @@ def main_test() -> None:
                             f"or give it a claim | id: {jr['findings'][0]['id'][:11]}]")
               and _json.loads(j_thread["metadata"])["kind"] == "insert"
               and _json.loads(j_thread["metadata"])["anchor_paragraph"] >= 1
-              and len(_dir.scan_text(j_new, "judgment")) == 1
+              and len(directive_tags.scan_text(j_new, "judgment")) == 1
               and j_meta["judgment"].startswith("cut the Beat"), j_new)
         folded = api._fold_judgment("A first paragraph.\n\n{{" + j_new + "}}\n\nNext.", "{{" + j_new + "}}", j_new)
         check("an accepted judgment folds back onto the end of the paragraph "
               "it follows, where the file has always carried it",
               folded == "A first paragraph." + j_new + "\n\nNext.", repr(folded))
-        stripped, removed = _dir.strip_tags(j_new)
+        stripped, removed = directive_tags.strip_tags(j_new)
         check("exports strip a judgment tag like any directive",
               "[Judgment" not in stripped and removed[0]["kind"] == "judgment")
         try:
