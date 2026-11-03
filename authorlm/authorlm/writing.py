@@ -331,7 +331,7 @@ def _label_lines(text: str) -> dict[str, int]:
 
     Bare words on their own line, the convention `prompts/summarizer.md`
     already uses — and deliberately NOT `<<…>>`, which is reserved
-    grammar here (`threads._ANY_MARKER`; `gdocs.diff_push` raises on any
+    grammar here (`form_grammar._ANY_MARKER`; `gdocs.diff_push` raises on any
     paragraph containing `<<`), so a draft carrying those delimiters
     would break the next surgical Doc push."""
     found: dict[str, int] = {}

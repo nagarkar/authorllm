@@ -68,6 +68,7 @@ import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
 import _summary_stubs  # noqa: E402
 from authorlm import api, critique, gdocs, passes, summaries as sums  # noqa: E402
+from authorlm import form_grammar  # noqa: E402
 from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 from authorlm.db import loads  # noqa: E402
@@ -592,7 +593,7 @@ def _local_transport_guards(root: Path) -> None:
     # composer's output written to disk.
     marked = MARKED_ESSAY.replace(
         "Original paragraph text.",
-        th.render_pending("Original paragraph text.",
+        form_grammar.render_pending("Original paragraph text.",
                           "Rewritten paragraph text."))
     (ms / "solo.md").write_text(marked)
     thread = _ko("dt")
@@ -962,7 +963,7 @@ def _inline_markup_forms(root: Path) -> None:
           gdocs.render_emphasis("**a *b* c** d")
           == ("a b c d", [(2, 3, {"italic": True}), (0, 5, {"bold": True})]))
     fetched = gdocs.tab_marked_markdown(db, manuscript, "solo.md", fake, fake)
-    forms = th.pending_forms(fetched["marked"])
+    forms = form_grammar.pending_forms(fetched["marked"])
     check("the export gives the record back: each form's old half equals "
           "its thread's markdown, so the resolve can match it",
           sorted(f["old"] for f in forms) == sorted([ITALIC_TWO, ITALIC_FOUR]),
@@ -1004,7 +1005,7 @@ def _identical_old_halves(root: Path) -> None:
     repetition) therefore both resolved to the SAME span, and because
     the write order is descending the second write landed INSIDE the
     wrapper the first had just planted — `<<<<old>>{{new2}}>>{{new4}}`.
-    At settle `threads.PENDING` is non-greedy, so it matched
+    At settle `form_grammar.PENDING` is non-greedy, so it matched
     `<<<<old>>{{new2}}` with `old = "<<old"`, matched no thread,
     collapsed to that old half, and left the literal string
     `<<old>>{{new4}}` in the finished manuscript.
@@ -3971,7 +3972,6 @@ def _braces_are_the_authors(root: Path) -> None:
 
     from authorlm import revisions as _rev
     from authorlm import staging as _staging
-    from authorlm import threads as _th
     from authorlm.gdocs import normalize_markdown
 
     print("AQ/FU-A: a brace the AUTHOR wrote is not this grammar's:")
@@ -3996,20 +3996,20 @@ def _braces_are_the_authors(root: Path) -> None:
           "nothing wrong: a warning on every templating example would be "
           "noise that trains the author to ignore the warnings that "
           "matter",
-          _th.strip_replacements(TEMPLATE_ESSAY)[1] == [],
-          _th.strip_replacements(TEMPLATE_ESSAY)[1])
-    doc_stripped, doc_warns = _th.strip_pending(TEMPLATE_ESSAY)
+          form_grammar.strip_replacements(TEMPLATE_ESSAY)[1] == [],
+          form_grammar.strip_replacements(TEMPLATE_ESSAY)[1])
+    doc_stripped, doc_warns = form_grammar.strip_pending(TEMPLATE_ESSAY)
     check("strip_pending (Doc pull/reconcile) leaves author braces intact "
           "— the tab holds the pushed essay, not only AuthorLM forms",
           doc_stripped == TEMPLATE_ESSAY and doc_warns == [],
           repr((doc_stripped, doc_warns)))
     with_math = TEMPLATE_ESSAY + "Energy $E={{mc}}^2$.\n"
-    math_stripped, _ = _th.strip_pending(with_math)
+    math_stripped, _ = form_grammar.strip_pending(with_math)
     check("...including TeX grouping braces that math push carries intact",
           "$E={{mc}}^2$" in math_stripped, repr(math_stripped))
     mixed = (TEMPLATE_ESSAY.rstrip() + "\n\n{{critique insertion}}\n\n"
              "Trailing prose.\n")
-    mixed_stripped, _ = _th.strip_pending(mixed)
+    mixed_stripped, _ = form_grammar.strip_pending(mixed)
     check("...while still dropping a critique paragraph insertion "
           "byte-clean, braces in the surrounding prose untouched",
           "{{title}}" in mixed_stripped
@@ -4021,7 +4021,7 @@ def _braces_are_the_authors(root: Path) -> None:
     # stripped tab differs. After a clean push those two sides must agree.
     pushed = normalize_markdown(TEMPLATE_ESSAY)
     base = hashlib.sha256(pushed.encode()).hexdigest()[:16]
-    tab_canon = _th.strip_pending(pushed)[0]
+    tab_canon = form_grammar.strip_pending(pushed)[0]
     local_hash = hashlib.sha256(pushed.encode()).hexdigest()[:16]
     check("reconcile would NOT auto-pull after a clean brace-bearing push "
           "— stripped tab equals local, so session-start cannot gut "
@@ -4038,7 +4038,7 @@ def _braces_are_the_authors(root: Path) -> None:
     marked_doc = (
         TEMPLATE_ESSAY.replace(
             "The point is that a brace is only a brace.",
-            _th.render_pending("The point is that a brace is only a brace.",
+            form_grammar.render_pending("The point is that a brace is only a brace.",
                                "A brace is only a brace."))
         + "\n{{A bridging paragraph, new.}}\n")
     written = [
@@ -4049,7 +4049,7 @@ def _braces_are_the_authors(root: Path) -> None:
          "proposed_new": "A bridging paragraph, new.", "metadata":
          json.dumps({"kind": "insert"})},
     ]
-    pf = _th.pending_forms(marked_doc)
+    pf = form_grammar.pending_forms(marked_doc)
     check("pending_forms lists the replace + own-line insert only — not "
           "inline {{title}} / {{a, b}} / {{author.name}}",
           [(f["kind"], f["new"][:40]) for f in pf]
@@ -4086,7 +4086,7 @@ def _braces_are_the_authors(root: Path) -> None:
         "[^old]: earlier.\n"
         "{{[^1]: First definition.}}\n"
         "{{[^2]: Second definition.}}\n")
-    fn_forms = [f for f in _th.pending_forms(footnote_stack)
+    fn_forms = [f for f in form_grammar.pending_forms(footnote_stack)
                 if f["kind"] == "insert"]
     check("stacked footnote-definition inserts (single newlines) are "
           "still pending_forms inserts — the #65 false-negative shape",
@@ -4116,7 +4116,7 @@ def _braces_are_the_authors(root: Path) -> None:
         "$$\n{{a,b},{c}}\n$$\n\n"
         "Then the prose resumes.\n\n"
         "{{A real insertion, planted.}}\n")
-    math_forms = _th.pending_forms(math_text)
+    math_forms = form_grammar.pending_forms(math_text)
     check("pending_forms skips braces inside $…$ and $$…$$ — only the "
           "real own-line insertion is a form",
           [(f["kind"], f["new"]) for f in math_forms]
@@ -4134,7 +4134,7 @@ def _braces_are_the_authors(root: Path) -> None:
           and "A real insertion, planted." in math_final
           and "{{A real" not in math_final
           and len(math_matched) == 1, repr(math_final))
-    math_stripped, math_warns = _th.strip_pending(math_text)
+    math_stripped, math_warns = form_grammar.strip_pending(math_text)
     check("strip_pending (Doc pull) drops the insertion and keeps both "
           "math spans, no warnings",
           "${{a,b},{c}}$" in math_stripped
@@ -4166,7 +4166,7 @@ def _braces_are_the_authors(root: Path) -> None:
     # replace form and every one of those answers flips.
     marked = TEMPLATE_ESSAY.replace(
         "The point is that a brace is only a brace.",
-        _th.render_pending("The point is that a brace is only a brace.",
+        form_grammar.render_pending("The point is that a brace is only a brace.",
                            "A brace is only a brace."))
     (ms / "templating.md").write_text(marked)
     check("a REAL <<old>>{{new}} form still marks the file",
@@ -4203,10 +4203,9 @@ def _pull_writes_when_unmarked(db, manuscript, ms: Path, fake) -> bool:
     """Discrimination for the pull guard: unmark the file and prove the
     very same stubbed pull overwrites it. Without this the assertion
     above would pass just as well against a pull that never writes."""
-    from authorlm import threads as _th
 
     (ms / "solo.md").write_text(
-        _th.strip_pending((ms / "solo.md").read_text())[0])
+        form_grammar.strip_pending((ms / "solo.md").read_text())[0])
     gdocs.pull_doc(db, manuscript, "solo.md", service=fake, force=True,
                    with_comments=False, docs_service=fake)
     return ("A sentence the Doc has and local does not."
@@ -4867,19 +4866,19 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
     gdocs._save_mapping(db3, ms3, meta)
     fake3 = _CommentedDocFake([("book", ""), ("solo.md", SKY_ESSAY)],
                               "Beta holds.", "solo.md", render=True)
-    real_insertion = gdocs.threads_mod.render_insertion
+    real_insertion = gdocs.form_grammar.render_insertion
 
     def job_never_reads_back(new):
         return ("never in the tab" if "Job 38." in new
                 else real_insertion(new))
 
-    gdocs.threads_mod.render_insertion = job_never_reads_back
+    gdocs.form_grammar.render_insertion = job_never_reads_back
     try:
         rep = dv.apply(db3, ms3, {}, "footnote", "solo.md",
                        [(1, "Psalm 121."), (2, "Job 38.")],
                        services=lambda: (fake3, fake3))
     finally:
-        gdocs.threads_mod.render_insertion = real_insertion
+        gdocs.form_grammar.render_insertion = real_insertion
     tab = fake3.tab_text("solo.md")
     states = {r["state"] for r in db3.all(
         "SELECT state FROM doc_threads WHERE manuscript_id = ? AND "
@@ -4919,24 +4918,24 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
     gdocs._save_mapping(db4, ms4, meta)
     fake4 = _CommentedDocFake([("book", ""), ("solo.md", hold_doc)],
                               "Beta holds.", "solo.md", render=True)
-    real_insertion = gdocs.threads_mod.render_insertion
+    real_insertion = gdocs.form_grammar.render_insertion
 
     def never_reads_back(new):
         return "never in the tab"
 
-    gdocs.threads_mod.render_insertion = never_reads_back
+    gdocs.form_grammar.render_insertion = never_reads_back
     try:
         rep = dv.apply(db4, ms4, {}, "footnote", "solo.md",
                        [(1, "Job 38.")],
                        services=lambda: (fake4, fake4))
     finally:
-        gdocs.threads_mod.render_insertion = real_insertion
+        gdocs.form_grammar.render_insertion = real_insertion
     links = gdocs._mapping(db4, ms4).get("gdocs", {})
     local = gdocs.strip_embed_lines(gdocs.normalize_markdown(
         (msdir4 / "solo.md").read_text(encoding="utf-8")))
     # pushed_hash is the export's markdown (fetch_tab_markdown), not the
     # Docs body runs — same side pull/three_way read.
-    tab = gdocs.threads_mod.strip_pending(gdocs.fetch_tab_markdown(
+    tab = gdocs.form_grammar.strip_pending(gdocs.fetch_tab_markdown(
         fake4, fake4, links["_master_id"], links,
         gdocs.manuscript_bridge(ms4), "solo.md"))[0]
     base_hash = (links.get("solo.md") or {}).get("pushed_hash")
@@ -5284,7 +5283,6 @@ def _an_outside_caller_rewrites_its_green_half(root: Path) -> None:
     paragraphs, or with the old half struck again by hand. Each was
     recorded declined while the reworded text landed."""
     print("outside callers: a rewritten green half is a modification:")
-    from authorlm import threads as th
 
     # --- the marked text → the additions' verdicts ----------------------
     marked = ("# Field\n\nThe world stands.\n\n{{" + _ADDED_REWORDED
@@ -5312,13 +5310,13 @@ def _an_outside_caller_rewrites_its_green_half(root: Path) -> None:
     # --- the marked text → the replacement's form -----------------------
     struck = ("A ~~~~<<" + _FIELD_OLD + ">>~~~~{{" + _FIELD_PART1
               + "}} B.")
-    forms = th.pending_forms(struck)
+    forms = form_grammar.pending_forms(struck)
     check("an old half struck once by the writer and once more by hand "
           "is still one form, its old half bare",
           len(forms) == 1 and forms[0]["kind"] == "replace"
           and forms[0]["old"] == _FIELD_OLD
           and forms[0]["new"] == _FIELD_PART1
-          and th.strip_pending(struck)[0] == "A " + _FIELD_OLD + " B.",
+          and form_grammar.strip_pending(struck)[0] == "A " + _FIELD_OLD + " B.",
           str(forms))
 
     # --- end to end: stage, the author rewrites, resolve ----------------
@@ -6000,7 +5998,7 @@ def main_test() -> None:
             raised = "drifted" in str(err)
         check("drifted paragraph fails loudly before any Doc write", raised)
         check("strip_pending on the marked text gives back the pristine essay",
-              th.strip_pending(marked)[0].strip() == ESSAY.strip())
+              form_grammar.strip_pending(marked)[0].strip() == ESSAY.strip())
 
         # Local road: observation strips embed lines, but on disk the
         # embed glues under the illustration tag as one paragraph. Compose

@@ -751,7 +751,7 @@ def _settle_empty_declines(db, manuscript_id: str, marked: str,
     evidence written here. A green half the author typed into, or a
     deleted form (the tag standing again), is left to the generic
     resolve. Returns (marked, the threads still to resolve, settled)."""
-    from . import passes, threads as th
+    from . import form_grammar, passes
 
     remaining, settled = [], 0
     for t in written:
@@ -760,7 +760,7 @@ def _settle_empty_declines(db, manuscript_id: str, marked: str,
                 and t["proposed_old"] and t["proposed_new"] == ""):
             remaining.append(t)
             continue
-        form = th.render_pending(t["proposed_old"], "")
+        form = form_grammar.render_pending(t["proposed_old"], "")
         at = marked.find(form)
         if at < 0 or not _standalone(marked, at, at + len(form)):
             remaining.append(t)

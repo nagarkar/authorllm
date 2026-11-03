@@ -272,6 +272,12 @@ Filters — the artifact (docs/filter-pass-design.md §1.2).
 
 Generic finding storage — the door shared by any producer that emits arbitrary quote-anchored editorial findings (lens, morph, and any future producer alike): hygiene-gate the quote against the file's real text, store a `guidance_history` row, and — when the finding carries a `footnote`, `judgment`, or `replacement` — stage a Doc edit through the same `<<old>>{{new}}` grammar every other producer uses.
 
+## `authorlm.form_grammar`
+
+`authorlm/authorlm/form_grammar.py`
+
+The pending-change forms a Doc tab or a marked file carries: how to read them, collapse them and write them.
+
 ## `authorlm.gdocs`
 
 `authorlm/authorlm/gdocs.py`

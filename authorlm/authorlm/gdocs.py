@@ -28,12 +28,12 @@ import weakref
 from pathlib import Path
 
 from .db import Database, loads, now_iso
+from . import form_grammar
 from . import threads as threads_mod
 from .illus import (ILLUS_DIR, PROMPTS_SUBDIR, capture_embeds,
                     join_prompt_embeds, reembed, snapshot_prompts,
                     split_prompt_embeds, strip_dangling)
 from .revisions import is_placeholder, iter_manuscript_paths, strip_embed_lines
-from .staging import is_marked as staging_is_marked
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 GDOC_MIME = "application/vnd.google-apps.document"
@@ -1869,8 +1869,6 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
     Byte-level rather than a database query, deliberately — it is the
     guard that survives a database that has lost the run row, and the
     state is fully described by the bytes (filter-pass design §2.3)."""
-    from .staging import is_marked
-
     if is_placeholder(text):
         raise LookupError(
             f"'{relpath}' is mid-rewrite: an active writeup holds it and "
@@ -1878,7 +1876,7 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
             f"the Doc the working copy for text that does not exist yet. "
             f"Finish the writeup ('write complete') or put the old essay "
             f"back ('write abandon') first.")
-    if is_marked(text):
+    if form_grammar.has_replacement(text):
         raise LookupError(
             f"'{relpath}' is mid-settle: the file on disk carries "
             f"<<old>>{{{{new}}}} pending-change forms, which are staged "
@@ -2747,7 +2745,7 @@ def doc_three_way(db: Database, manuscript: dict, query: str, service,
     if tab is None:
         raise LookupError(f"the Doc export has no section for '{relpath}' "
                           "(was its tab renamed?). authorlm doc list")
-    doc, _ = threads_mod.strip_pending(tab)
+    doc, _ = form_grammar.strip_pending(tab)
     local = strip_embed_lines(path.read_text(encoding="utf-8")
                               if path.exists() else "")
     base_hash = entry.get("pushed_hash")
@@ -2899,7 +2897,7 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
     marked = normalize_markdown(sections[file])
     # Collapse pending forms to their OLD half purely to classify sync
     # state — `marked` (forms intact) is what actually gets resolved.
-    collapsed, marker_warns = threads_mod.strip_pending(marked)
+    collapsed, marker_warns = form_grammar.strip_pending(marked)
     path = bridge.root / file
     current_raw = path.read_text(encoding="utf-8") if path.exists() else ""
     current = strip_embed_lines(current_raw)
@@ -3005,7 +3003,7 @@ def read_manuscript(db: Database, manuscript: dict, service,
             continue
         _, entry["dangling"] = strip_dangling(sections[name])
         marked = normalize_markdown(sections[name])
-        settled, entry["marker_warnings"] = threads_mod.strip_pending(marked)
+        settled, entry["marker_warnings"] = form_grammar.strip_pending(marked)
         path = bridge.root / name
         current = strip_embed_lines(
             path.read_text(encoding="utf-8") if path.exists() else "")
@@ -3014,7 +3012,7 @@ def read_manuscript(db: Database, manuscript: dict, service,
             state=three_way(settled, current,
                             links[name].get("pushed_hash")),
             forms=[{"kind": f["kind"], "old": f["old"], "new": f["new"]}
-                   for f in threads_mod.pending_forms(marked)])
+                   for f in form_grammar.pending_forms(marked)])
 
     try:
         open_comments = fetch_open_comments(service, master_id)
@@ -3198,10 +3196,10 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         # Margin threads: pending spans (<<old>>{{new}}) are review
         # state living only in the Doc; canonical local text is the old
         # half until the author approves (docs/margin-threads-design.md).
-        text, marker_warns = threads_mod.strip_pending(text)
+        text, marker_warns = form_grammar.strip_pending(text)
         # A `}}` the author left when hand-resolving one of this file's
         # own forms is not prose (it-459f2c04ef77); any other `}}` is.
-        text, remnant = threads_mod.strip_form_remnants(
+        text, remnant = form_grammar.strip_form_remnants(
             text, form_news(db, manuscript["id"], relpath))
         if remnant:
             marker_warns = marker_warns + [
@@ -3215,7 +3213,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         # put the markers into the manuscript. The file is left as it is
         # and named, until the form is mended or removed in the Doc
         # (2026-10-30, discernment.md).
-        if threads_mod.has_broken_forms(text):
+        if form_grammar.has_broken_forms(text):
             report.setdefault("unterminated", []).append(relpath)
             continue
         path = bridge.root / relpath
@@ -3230,7 +3228,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         # the shape `conflicts` and `local_ahead` already use; the
         # remedy is `filter resolve` or `filter unmark`
         # (filter-pass design §2.3).
-        if staging_is_marked(current_raw):
+        if form_grammar.has_replacement(current_raw):
             report.setdefault("marked", []).append(relpath)
             entry = links[relpath]
             entry["checked_out"] = False
@@ -3563,7 +3561,7 @@ def reconcile(db: Database, manuscript: dict, service,
             doc_text = normalize_markdown(sections[relpath])
             # Pending margin-thread spans are review state, not content:
             # canonical comparison uses the old half on the Doc side too.
-            doc_text, _ = threads_mod.strip_pending(doc_text)
+            doc_text, _ = form_grammar.strip_pending(doc_text)
             path = Path(manuscript["path"]) / relpath
             local_raw = (path.read_text(encoding="utf-8")
                          if path.exists() else "")
@@ -3889,7 +3887,7 @@ def push_prompt_tabs(db: Database, manuscript: dict, service,
 
 # ------------------------------------------------------- margin threads
 # (docs/margin-threads-design.md — the Docs/Drive side; deterministic
-# grammar and records live in threads.py)
+# grammar lives in form_grammar.py, records in threads.py)
 
 def _utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
@@ -3955,7 +3953,7 @@ def _locate_in_tab(docs_service, master_id: str, tab_id: str,
     paragraphs in one essay — a refrain, a liturgical repetition) both
     searched for the same needle and both resolved to the same span; the
     descending write order then landed the second write INSIDE the
-    wrapper the first had planted, and `threads.PENDING`, being
+    wrapper the first had planted, and `form_grammar.PENDING`, being
     non-greedy, matched `<<<<old>>{{new}}` at resolve and left the rest
     of the wrapper in the author's manuscript as literal text. Text
     corruption, not a cosmetic fault (design-filter-doc-settle §9.3).
@@ -4013,8 +4011,7 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
     insertions only), style it like track-changes, post the prefixed
     reply, and record the thread. The prose itself was drafted in chat;
     this is the state machine's write."""
-    from .threads import (PREFIX, create_thread, get_thread,
-                          render_pending)
+    from .threads import PREFIX, create_thread, get_thread
 
     bridge = bridge or manuscript_bridge(manuscript)
     mid = manuscript["id"]
@@ -4066,7 +4063,7 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
         reply_id, scope_kind="file", scope_ref=relpath,
     )
     return {"thread_id": thread["id"], "file": relpath,
-            "pending": render_pending(old, new), "reply_id": reply_id}
+            "pending": form_grammar.render_pending(old, new), "reply_id": reply_id}
 
 
 GREEN = {"color": {"rgbColor": {"red": 0.13, "green": 0.55, "blue": 0.13}}}
@@ -4140,7 +4137,7 @@ def _mark_replace_requests(tab_id: str, start: int, end: int, old: str,
     an insertion inherits the style of the character before it, and a
     paragraph that ends in italics would otherwise export its form as
     `*>>{{…}}*`, which the pending grammar cannot read."""
-    threads_mod.assert_no_pending_markers(old, new)
+    form_grammar.assert_no_pending_markers(old, new)
     old16 = _utf16_len(old)
     new, new_styles = render_emphasis(new)
     new16 = _utf16_len(new)
@@ -4226,7 +4223,7 @@ def _mark_insert_requests(tab_id: str, at: int, new: str) -> list[dict]:
     by a line break the style of the one it was split from, so an
     insertion after a heading came out as a heading (found 2026-10-02 on
     the first tab an outside caller built from its `# title` down)."""
-    threads_mod.assert_no_pending_markers("", new)
+    form_grammar.assert_no_pending_markers("", new)
     new, new_styles = render_emphasis(new)
     text = "\n" + "{{" + new + "}}"
     requests = [
@@ -4516,8 +4513,8 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
     for t in list(written):
         tab_old = tab_old_of.get(t["id"], t["proposed_old"])
         tab_new = rendered_text(t["proposed_new"])
-        form = (threads_mod.render_pending(tab_old, tab_new)
-                if tab_old else threads_mod.render_insertion(tab_new))
+        form = (form_grammar.render_pending(tab_old, tab_new)
+                if tab_old else form_grammar.render_insertion(tab_new))
         if form not in full:
             written.remove(t)
             failed.append((t, "read-back: form not found after write"))
@@ -4551,7 +4548,7 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
         try:
             fetched = tab_marked_markdown(db, manuscript, file, service,
                                           docs_service, bridge)
-            forms = threads_mod.pending_forms(fetched.get("marked") or "")
+            forms = form_grammar.pending_forms(fetched.get("marked") or "")
         except Exception as err:  # noqa: BLE001 — proof unavailable is failure
             forms, err_text = None, str(err)
         for t in rendered:
@@ -4572,7 +4569,7 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
                                   "not give this insertion back verbatim "
                                   "(inline markup) — left in the tab"))
                 continue
-            form = threads_mod.render_pending(tab_old,
+            form = form_grammar.render_pending(tab_old,
                                               rendered_text(t["proposed_new"]))
             span = _locate_in_tab(docs_service, master_id, tab_id, form)
             if span is not None:
@@ -4646,7 +4643,7 @@ def settled_form_outcomes(db: Database, manuscript_id: str,
 
 def form_news(db: Database, manuscript_id: str, relpath: str) -> list[str]:
     """The new halves of every form this file's record knows — what
-    `threads.form_remnants` may strip a stray `}}` after."""
+    `form_grammar.form_remnants` may strip a stray `}}` after."""
     return [r["proposed_new"] for r in db.all(
         "SELECT proposed_new FROM doc_threads WHERE manuscript_id = ? "
         "AND file = ? AND COALESCE(proposed_new, '') != ''",
@@ -4753,7 +4750,7 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
         # Last to first, so the text before each remnant is unchanged
         # when it is located: the tab text up to and including the `}}`
         # ends at the remnant's doc index, whatever repeats before it.
-        for close, _ in reversed(threads_mod.form_remnants(full, shown)):
+        for close, _ in reversed(form_grammar.form_remnants(full, shown)):
             span = _locate_in_tab(docs_service, master_id, tab_id,
                                   full[:close + 2])
             if span is not None:
@@ -4907,8 +4904,6 @@ def _replace_pending(db: Database, manuscript: dict, thread: dict,
     Doc tab, clear the track-changes styling, and mirror the outcome
     into the local file. Exactness is law: returns False (stale) when
     the span is not found verbatim."""
-    from .threads import render_pending
-
     meta = _mapping(db, manuscript)
     links = meta.get(bridge.meta_key, {})
     master_id = links.get("_master_id")
@@ -5780,7 +5775,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         orphan_holds.clear()
         tab_md, doc_paras, tab_paras, healed = read_tab_healed(
             healed, reuse if attempt == 1 else None)
-        canonical = [threads_mod.strip_pending(p)[0].strip("\n")
+        canonical = [form_grammar.strip_pending(p)[0].strip("\n")
                      for p in tab_paras]
         local_paras = [p.strip("\n") for p in _md_units(local_md)]
         if canonical == local_paras:
@@ -5848,10 +5843,10 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                 marks.setdefault(i, []).append(hit)
         target, held = _hold_commented(canonical, local_paras, marks)
         if held and target == canonical:
-            entry["pushed_hash"] = _hashlib.sha256(threads_mod.strip_pending(
+            entry["pushed_hash"] = _hashlib.sha256(form_grammar.strip_pending(
                 tab_md)[0].encode()).hexdigest()[:16]
             entry["checked_out"] = True
-            vouch(revs["sure"], threads_mod.strip_pending(tab_md)[0])
+            vouch(revs["sure"], form_grammar.strip_pending(tab_md)[0])
             links[relpath] = entry
             _save_mapping(db, manuscript, meta)
             return {"relpath": relpath, "mode": "diff", "ops": 0,
@@ -5995,13 +5990,13 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                               doc_spacing(manuscript), chain=chain)
 
         verify_md, _verify_doc, verify_paras = read_tab()
-        verify = [threads_mod.strip_pending(p)[0].strip("\n")
+        verify = [form_grammar.strip_pending(p)[0].strip("\n")
                   for p in verify_paras]
         if verify == target:
             # A partial push records what the tab now holds, not the
             # local file: pull then sees only local moved (local_ahead)
             # and keeps the held paragraphs' new text.
-            pushed = (threads_mod.strip_pending(verify_md)[0] if held
+            pushed = (form_grammar.strip_pending(verify_md)[0] if held
                       else local_md)
             entry["pushed_hash"] = _hashlib.sha256(
                 pushed.encode()).hexdigest()[:16]

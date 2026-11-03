@@ -69,7 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
-from authorlm import api, concepts, docs, guidance as guidance_module  # noqa: E402
+from authorlm import api, concepts, docs, form_grammar, guidance as guidance_module  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 from authorlm.db import ko_fields, loads  # noqa: E402
 
@@ -7225,7 +7225,7 @@ def main_test() -> None:
               repr(normalize_markdown(stanza)))
         from authorlm.gdocs import HARD_BREAK_CHAR, rendered_text
         stanza_md = "Every morning I rise,\\\nTo fight a *fiery* dragon."
-        from authorlm.threads import pending_forms as _pf
+        from authorlm.form_grammar import pending_forms as _pf
         struck = ("~~<<Each day, I write a bit,~~\\\n~~Tis only a modest "
                   "stride,~~\\\n~~The essence will be clarified.>>~~"
                   "{{Each day,\\\nOnly a stride.}}")
@@ -7311,7 +7311,7 @@ def main_test() -> None:
         # export's delimiters on the marked text left the new half's
         # `\$` escaped, and the resolve landed it (2026-10-18, SMSTTD
         # recapitulation.md R10). Spans are found per reading now.
-        from authorlm.threads import _collapse
+        from authorlm.form_grammar import _collapse
         exporter2 = lambda s: _re_math.sub(r"([\\_=$<>])", r"\\\1", s)
         span = "$\\neg N:=\\{\\neg x:x\\in N\\}$"
         for marked in (
@@ -8487,10 +8487,10 @@ def main_test() -> None:
         from authorlm import threads as th
         from authorlm.gdocs import propose_change
 
-        strip_out = th.strip_pending("A <<old>>{{new}} B")
+        strip_out = form_grammar.strip_pending("A <<old>>{{new}} B")
         check("pending grammar strips to canonical old; strays warn",
               strip_out == ("A old B", [])
-              and th.strip_pending("stray << here")[1], str(strip_out))
+              and form_grammar.strip_pending("stray << here")[1], str(strip_out))
         check("verdict grammar is deterministic, whole-reply only",
               th.classify_reply("Go ahead!") == "approve"
               and th.classify_reply("no") == "decline"
@@ -8503,39 +8503,39 @@ def main_test() -> None:
         # insertions, strikethrough wrappers, and form enumeration that
         # must not double-count the {{new}} half of a replace.
         check("render_pending with empty old is the insertion form",
-              th.render_pending("", "bridge") == "{{bridge}}"
-              and th.render_insertion("bridge") == "{{bridge}}")
+              form_grammar.render_pending("", "bridge") == "{{bridge}}"
+              and form_grammar.render_insertion("bridge") == "{{bridge}}")
         wrapped = "Lead.\n\n~~<<old span>>~~{{new span}}\n\nTail.\n"
         check("approved_text keeps {{new}} halves (incl. ~~-wrapped replaces)",
-              th.approved_text(wrapped) == "Lead.\n\nnew span\n\nTail.\n",
-              th.approved_text(wrapped))
+              form_grammar.approved_text(wrapped) == "Lead.\n\nnew span\n\nTail.\n",
+              form_grammar.approved_text(wrapped))
         check("strip_pending on ~~-wrapped replaces still yields OLD",
-              th.strip_pending(wrapped)[0] == "Lead.\n\nold span\n\nTail.\n",
-              th.strip_pending(wrapped))
+              form_grammar.strip_pending(wrapped)[0] == "Lead.\n\nold span\n\nTail.\n",
+              form_grammar.strip_pending(wrapped))
         with_insert = ("Para one.\n\n{{inserted paragraph}}\n\n"
                        "<<swap me>>{{swapped}}\n\nPara three.\n")
-        stripped_ins, _ = th.strip_pending(with_insert)
+        stripped_ins, _ = form_grammar.strip_pending(with_insert)
         check("strip_pending drops paragraph insertions byte-clean",
               stripped_ins == "Para one.\n\nswap me\n\nPara three.\n",
               stripped_ins)
         check("approved_text keeps paragraph insertions and replace news",
-              th.approved_text(with_insert)
+              form_grammar.approved_text(with_insert)
               == ("Para one.\n\ninserted paragraph\n\n"
                   "swapped\n\nPara three.\n"),
-              th.approved_text(with_insert))
+              form_grammar.approved_text(with_insert))
         # Author braces reach the tab via push; bare-INSERTION collapse
         # used to delete them on pull/reconcile (silent auto-pull when
         # local still matched pushed_hash). Paragraph insertions only.
         author_braces = (
             "A template substitutes {{title}} and writes {{a, b}}.\n\n"
             "Energy $E={{mc}}^2$.\n")
-        brace_stripped, brace_warns = th.strip_pending(author_braces)
+        brace_stripped, brace_warns = form_grammar.strip_pending(author_braces)
         check("strip_pending leaves author {{…}} / TeX braces intact "
               "with no marker warning",
               brace_stripped == author_braces and brace_warns == [],
               repr((brace_stripped, brace_warns)))
         head_insert = "{{lead insert}}\n\n" + author_braces
-        head_stripped, _ = th.strip_pending(head_insert)
+        head_stripped, _ = form_grammar.strip_pending(head_insert)
         check("strip_pending still drops a start-of-text critique "
               "insertion while keeping author braces below it",
               head_stripped == author_braces
@@ -8543,10 +8543,10 @@ def main_test() -> None:
               repr(head_stripped))
         check("approved_text unwraps paragraph insertions but does not "
               "eat inline author braces",
-              th.approved_text(head_insert)
+              form_grammar.approved_text(head_insert)
               == "lead insert\n\n" + author_braces,
-              th.approved_text(head_insert))
-        forms = th.pending_forms(with_insert)
+              form_grammar.approved_text(head_insert))
+        forms = form_grammar.pending_forms(with_insert)
         check("pending_forms lists replace + insert once each, doc order",
               [(f["kind"], f["old"], f["new"]) for f in forms]
               == [("insert", "", "inserted paragraph"),
@@ -8554,11 +8554,11 @@ def main_test() -> None:
               str(forms))
         nested = "<<keep {{this}} literal>>{{replacement}}"
         check("pending_forms does not treat replace's {{new}} as an insert",
-              th.pending_forms(nested)
+              form_grammar.pending_forms(nested)
               == [{"kind": "replace", "old": "keep {{this}} literal",
                    "new": "replacement", "start": 0,
                    "end": len(nested)}],
-              str(th.pending_forms(nested)))
+              str(form_grammar.pending_forms(nested)))
 
         pull_doc(db, manuscript, "01-choice.md", service=stub, force=True)
         stub.add_comment("c-1", "Doc went another way",
@@ -8820,21 +8820,21 @@ def main_test() -> None:
         # with ~~ strikethrough in the markdown export).
         exported = ("~~\\<\\<the old way.\\>\\>~~"
                     "{{the new way.}}")
-        stripped_exp = th.strip_pending(normalize_markdown(exported))
+        stripped_exp = form_grammar.strip_pending(normalize_markdown(exported))
         check("export-escaped pending spans strip to canonical old",
               stripped_exp == ("the old way.\n", []), str(stripped_exp))
 
         # Nested braces in proposal text would truncate at the first }} —
         # refuse before any Doc write.
         try:
-            th.assert_no_pending_markers("safe old", "f(x)={{a}}")
+            form_grammar.assert_no_pending_markers("safe old", "f(x)={{a}}")
             check("propose refuses delimiter-bearing new text", False)
         except ValueError as err:
             check("propose refuses delimiter-bearing new text",
                   "pending-change grammar" in str(err)
                   and ("{{" in str(err) or "}}" in str(err)), str(err))
         try:
-            th.render_pending("<<already marked>>", "new")
+            form_grammar.render_pending("<<already marked>>", "new")
             check("render_pending refuses delimiter-bearing old text", False)
         except ValueError as err:
             check("render_pending refuses delimiter-bearing old text",

@@ -14,6 +14,7 @@ import re
 import sys
 from pathlib import Path
 
+from . import form_grammar
 from .db import Database, ko_fields, loads
 
 MANUSCRIPT_EXTENSIONS = {".md", ".markdown", ".txt"}
@@ -119,7 +120,7 @@ def read_manuscript_files(root: Path) -> dict[str, str]:
                   file=sys.stderr)
             text = path.read_text(encoding="utf-8", errors="replace")
         # A file carrying a `<<old>>{{new}}` form is mid-settle. The
-        # ratified law (threads.py's docstring) is that the canonical
+        # ratified law (form_grammar.py's docstring) is that the canonical
         # text of a pending form is its OLD half: content changes at
         # approval, not at proposal. That law has always been applied to
         # text arriving from a Doc; the filter pass's local settle
@@ -148,8 +149,7 @@ def read_manuscript_files(root: Path) -> dict[str, str]:
         # about. The narrow function is a true no-op on text carrying no
         # `<<old>>{{new}}` form, which is what makes it safe here
         # unconditionally (filter-pass design §2.3).
-        from . import threads as _threads
-        files[rel] = _threads.strip_replacements(strip_embed_lines(text))[0]
+        files[rel] = form_grammar.strip_replacements(strip_embed_lines(text))[0]
     return files
 
 
@@ -326,7 +326,7 @@ def detect_transitions(
 # also opens these files in Obsidian, where a comment is invisible.
 #
 # Bracketed `[AuthorLM: …]`, not the author's literal `<<…>>`: `<<` and
-# `>>` are reserved by the pending-change grammar (threads.PENDING,
+# `>>` are reserved by the pending-change grammar (form_grammar.PENDING,
 # gdocs.diff_push), so a literal `<<…>>` in a manuscript file would make
 # the next surgical push of it fail with a message about a margin thread
 # that does not exist. The author's WORDS are kept exactly.
