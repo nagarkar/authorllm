@@ -26,6 +26,7 @@ from typing import Any
 
 from . import clients
 from . import concepts as cg
+from . import form_grammar
 from .concepts import _compact_concept, _compact_edge, _preview
 from . import beliefs as bel
 from . import proposals as prop
@@ -41,6 +42,7 @@ from . import hygiene
 from . import triage as triage_service
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
+from .normalize import clamp, normalize_markdown
 from .sessions import NO_EPISODE
 from .summaries import drafting_context_for_write_status, drafting_context_for_writeup
 from .revisions import (
@@ -4143,14 +4145,14 @@ def extraction_scope(db: Database, manuscript: dict, knob: dict,
     when there is none). Mirrors `cli._extract_scope` without its exits:
     an unknown file is a LookupError for the caller to report."""
     from . import extraction as ex
-    from .lenses import _resolve
+    from .structure import find_file
     from .revisions import read_manuscript_files
 
     on_disk = read_manuscript_files(Path(manuscript["path"]))
     if files:
         # A named file held by an active writeup (its text on disk is the
         # placeholder) has nothing to mine: dropped, never sent.
-        scope = [(rel, None) for rel in (_resolve(on_disk, f) for f in files)
+        scope = [(rel, None) for rel in (find_file(on_disk, f) for f in files)
                  if not ex.is_in_flight(on_disk.get(rel, ""))]
     elif full:
         scope = [(name, None) for name in ex.eligible_files(on_disk)]
@@ -5226,7 +5228,7 @@ def _twin_warning(accepted: list[dict]) -> str | None:
         where = " and ".join(str(u) for u in units)
         lines.append(
             f"{len(units)} of these changes replace the same paragraph "
-            f"text, word for word: «{gdocs.clamp(old)}» (units {where}). "
+            f"text, word for word: «{clamp(old)}» (units {where}). "
             f"They settle by position — the first form in the Doc is the "
             f"first change — so reword either freely. The one thing to "
             f"avoid is DELETING one of them outright: your manuscript "
@@ -5982,8 +5984,6 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     from . import lenses as _lenses
     from . import morph as _morph
     from . import summaries as sums
-    from . import threads as th
-
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
     written = staging.door_threads(db, mid, rel, states=("written",),
@@ -6020,7 +6020,7 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
     final, forms = passes.final_text_from_marked(
         marked, written=replaces, kinds=("replace",))
-    final, _ = th.strip_form_remnants(
+    final, _ = form_grammar.strip_form_remnants(
         final, [t["proposed_new"] for t in written])
     landed = _door_final_text(rel, fetched, final, path, "morph resolve")
     _apply_judgment_rulings(db, mid, rulings, _morph.MORPH_EVIDENCE)
@@ -6179,10 +6179,10 @@ def _door_final_text(rel: str, fetched: dict, final: str, path: Path,
 
     if fetched["state"] != "local_ahead":
         return final
-    local = gdocs.normalize_markdown(strip_embed_lines(
+    local = normalize_markdown(strip_embed_lines(
         path.read_text(encoding="utf-8")))
     merged = _merge_local_edits(fetched["collapsed"], local,
-                                gdocs.normalize_markdown(final))
+                                normalize_markdown(final))
     if merged is None:
         raise ValueError(
             f"'{rel}' was edited locally since the last push, on a line "
@@ -6244,8 +6244,6 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
     it-459f2c04ef77)."""
     from . import gdocs
     from . import summaries as sums
-    from . import threads as th
-
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
     written = staging.door_threads(db, mid, rel, states=("written",),
@@ -6281,7 +6279,7 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
     replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
     final, forms = passes.final_text_from_marked(
         marked, written=replaces, kinds=("replace",))
-    final, _ = th.strip_form_remnants(
+    final, _ = form_grammar.strip_form_remnants(
         final, [t["proposed_new"] for t in written])
     landed = _door_final_text(rel, fetched, final, path, "lens resolve")
     _apply_judgment_rulings(db, mid, rulings, LENS_EVIDENCE)
@@ -6661,7 +6659,6 @@ def stage_revisions(db: Database, manuscript: dict, file: str,
     "warnings"} — `index` is the revision's place in the list handed
     in, `failed` carries the caller's own dicts."""
     from . import gdocs
-    from . import threads as th
     from .revisions import _paragraphs
 
     origin = (origin or "").strip()
@@ -6731,7 +6728,7 @@ def stage_revisions(db: Database, manuscript: dict, file: str,
         anchor = rev.get("anchor_paragraph")
         why = None
         try:
-            th.assert_no_pending_markers(old, new)
+            form_grammar.assert_no_pending_markers(old, new)
         except ValueError as err:
             why = str(err)
         if why is None and not new.strip():
@@ -6849,7 +6846,7 @@ def _rule_external_marked(marked: str, replaces: list[dict],
 
     Additions. Pair each addition with its own form — the same new text
     first, then the closest reworded one — and unwrap in place.
-    `threads.pending_forms` already lists own-line insertions only (inline
+    `form_grammar.pending_forms` already lists own-line insertions only (inline
     author braces are not forms). An addition whose form is gone, or
     emptied, is a decline; one whose braces the author removed by hand,
     text kept, is an acceptance.
@@ -6863,8 +6860,6 @@ def _rule_external_marked(marked: str, replaces: list[dict],
     alone; the replacements are still forms, or plain old text, in the
     returned marked text."""
     from . import lint
-    from . import threads as th
-
     def flat(s: str) -> str:
         return " ".join(s.split())
 
@@ -6874,7 +6869,7 @@ def _rule_external_marked(marked: str, replaces: list[dict],
             r"(?:~~)*<<" + old + r">>(?:~~)*(?:\{\{\s*\}\}|(?!~~|\{\{))",
             lambda m, t=t: t["proposed_old"], marked, count=1)
 
-    forms = [f for f in th.pending_forms(marked) if f["kind"] == "insert"]
+    forms = [f for f in form_grammar.pending_forms(marked) if f["kind"] == "insert"]
     free = [f for f in forms if f["new"].strip()]
     pairs: dict[str, dict] = {}
     for t in inserts:                       # the same text, first
@@ -6952,8 +6947,6 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
     they folded it into other prose and it cannot be located), else
     None."""
     from . import gdocs
-    from . import threads as th
-
     origin = (origin or "").strip()
     mid = manuscript["id"]
     rel = _resolve_relpath(manuscript, file)
@@ -7024,7 +7017,7 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
     # just collapsed to its old half; an insertion that is a paragraph
     # of its own is dropped the way a pull drops it, and braces the
     # author wrote inside a sentence stay.
-    final = th.strip_pending(final)[0]
+    final = form_grammar.strip_pending(final)[0]
     # A local edit the tab has not seen (a paragraph a push held for an
     # open comment, or an edit made while the forms were out) is kept
     # beside the resolved text, as the doors' resolves keep it: writing

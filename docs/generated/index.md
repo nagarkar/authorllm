@@ -212,6 +212,12 @@ Storage layer.
 
 Always-on database performance log.
 
+## `authorlm.directive_tags`
+
+`authorlm/authorlm/directive_tags.py`
+
+The inline directive tags as text: `[Footnote: …]`, `[Explain: …]`, `[Suggestion: …]` and `[Judgment: …]`, how to find them in a file's text and how to take them out.
+
 ## `authorlm.directives`
 
 `authorlm/authorlm/directives.py`
@@ -271,6 +277,12 @@ Filters — the artifact (docs/filter-pass-design.md §1.2).
 `authorlm/authorlm/findings.py`
 
 Generic finding storage — the door shared by any producer that emits arbitrary quote-anchored editorial findings (lens, morph, and any future producer alike): hygiene-gate the quote against the file's real text, store a `guidance_history` row, and — when the finding carries a `footnote`, `judgment`, or `replacement` — stage a Doc edit through the same `<<old>>{{new}}` grammar every other producer uses.
+
+## `authorlm.form_grammar`
+
+`authorlm/authorlm/form_grammar.py`
+
+The pending-change forms a Doc tab or a marked file carries: how to read them, collapse them and write them.
 
 ## `authorlm.gdocs`
 
@@ -368,11 +380,23 @@ Generated clips: plan, start, poll, take (docs/video-clips-design.md §8b, §8c,
 
 The Doc road for clip specs (docs/video-clips-design.md §8e).
 
+## `authorlm.media_tags`
+
+`authorlm/authorlm/media_tags.py`
+
+The podcast media tags as text: `[Clip: …]`, `[Collage: …]` and `[Montage: …]` lines, their fields, the structure a file's tags make, and a book export's copy of a file with them gone.
+
 ## `authorlm.morph`
 
 `authorlm/authorlm/morph.py`
 
 Morph — combined-call paragraph-defect detection and correction (design: docs/morph-design.md).
+
+## `authorlm.normalize`
+
+`authorlm/authorlm/normalize.py`
+
+Canonical markdown: the normalizer that makes a no-op round trip through the Doc byte-stable, whichever editor (local, Obsidian, a Docs export) last wrote the text, with its fence and math lifters and the whitespace helpers that go with it.
 
 ## `authorlm.obsidian`
 

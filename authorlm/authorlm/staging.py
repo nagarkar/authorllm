@@ -33,7 +33,7 @@ from pathlib import Path
 
 from .db import Database, ko_fields, loads
 from . import passes
-from . import threads as th
+from . import form_grammar
 
 
 def is_marked(text: str) -> bool:
@@ -44,13 +44,13 @@ def is_marked(text: str) -> bool:
     database that has lost the run row, and the state it describes is
     fully described by the bytes.
 
-    The REPLACE form only. `threads.pending_forms` also reports a bare
+    The REPLACE form only. `form_grammar.pending_forms` also reports a bare
     `{{…}}` as an insertion, which is right for a Doc tab and wrong for
     a manuscript file — an essay containing `{{title}}` is not
     mid-settle, and treating it as such refused its Doc push forever
     with a message about a resolve that does not exist. A filter never
     stages an insertion, so nothing this predicate guards is missed."""
-    return th.has_replacement(text)
+    return form_grammar.has_replacement(text)
 
 
 # --------------------------------------------------------- staging
@@ -174,7 +174,7 @@ def apply_accepted(text: str, threads: list[dict]) -> str:
     the accepted set. Written this way on purpose: a second composition
     routine is a second way for the door to be wrong about where an
     edit goes."""
-    return th.approved_text(passes.compose_marked_text(text, threads))
+    return form_grammar.approved_text(passes.compose_marked_text(text, threads))
 
 
 def mark_local(path: Path, text: str, threads: list[dict]) -> str:
@@ -201,7 +201,7 @@ def unmark(path: Path) -> tuple[str, list[str]]:
     The narrow strip, for the reason `is_marked` gives: an unmark that
     also deleted the author's `{{title}}` would be a recovery that
     damaged the file it recovered."""
-    text, warnings = th.strip_replacements(path.read_text(encoding="utf-8"))
+    text, warnings = form_grammar.strip_replacements(path.read_text(encoding="utf-8"))
     path.write_text(text, encoding="utf-8")
     return text, warnings
 
@@ -214,7 +214,7 @@ def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
 
     Byte for byte the critique resolve's second half, with
     `gdocs.tab_marked_markdown` replaced by `path.read_text`:
-    `threads.pending_forms` → `passes.final_text_from_marked` →
+    `form_grammar.pending_forms` → `passes.final_text_from_marked` →
     `passes.record_resolution`, all three unchanged. The author's
     post-edits to the `{{new}}` halves win, as always.
 

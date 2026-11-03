@@ -489,7 +489,7 @@ def cast_block(cast_text: str) -> str:
     """The CAST block from `_audio/cast.md`'s text: one line per row,
     key and role note. Voice ids and parameters are deliberately left
     out — the filter places tags, it does not cast."""
-    from .audio import parse_cast
+    from .pronunciations import parse_cast
 
     rows, _warnings = parse_cast(cast_text)
     if not rows:

@@ -20,7 +20,7 @@ from .concepts import scoped_concepts
 from .db import Database, ko_fields, loads
 from .llm import LLMClient, resolve_temperature
 from . import summaries as sums
-from . import threads as th
+from . import form_grammar
 from .context import Input
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "editor.md"
@@ -676,7 +676,7 @@ def _edit_evidence(db: Database, manuscript_id: str, thread: dict,
     caller changes. Explained rejections still reach belief learning
     either way: that path runs off the evidence stream and the author's
     words, never off an episode."""
-    from .gdocs import clamp
+    from .normalize import clamp
 
     target = f"{thread['file']}: «{clamp(thread['proposed_old'] or '(insertion)')}»"
     if signal == "revised":
@@ -784,13 +784,13 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
                 # Keep the live embed outside the form so resolve leaves
                 # the author's pick in place (capture_embeds cannot read
                 # a tag wrapped in <<>>{{}}).
-                para = (th.render_pending(t["proposed_old"], t["proposed_new"])
+                para = (form_grammar.render_pending(t["proposed_old"], t["proposed_new"])
                         + embed_suffix)
         out.append(para)
         for t in by_para.get(n, []):
             if (loads(t.get("metadata"), {}) or {}).get("kind") == "insert":
-                out.append(th.render_insertion(t["proposed_new"]))
-    head = [th.render_insertion(t["proposed_new"]) for t in by_para.get(0, [])
+                out.append(form_grammar.render_insertion(t["proposed_new"]))
+    head = [form_grammar.render_insertion(t["proposed_new"]) for t in by_para.get(0, [])
             if (loads(t.get("metadata"), {}) or {}).get("kind") == "insert"]
     return "\n\n".join(head + out) + "\n"
 
@@ -808,19 +808,19 @@ def final_text_from_marked(marked: str,
     so the critique pass can settle insertions. The local settle
     transport passes `("replace",)`: a filter never stages an insertion.
 
-    Insertions come from `threads.pending_forms`, which lists own-line
+    Insertions come from `form_grammar.pending_forms`, which lists own-line
     forms only — inline author `{{title}}` / `{{a, b}}` are not forms.
     Matching is content-first (`proposed_new`), then FIFO among the
     remaining insert threads for post-edited greens. Unmatched own-line
     inserts still collapse to the empty old half (foreign planted forms);
     unmatched replaces collapse to old."""
-    forms = [f for f in th.pending_forms(marked) if f["kind"] in kinds]
+    forms = [f for f in form_grammar.pending_forms(marked) if f["kind"] in kinds]
     if not written:
         # No written threads: keep old for every REPLACE form. Prefer
         # strip_replacements over strip_pending so a stray unmatched
         # own-line `{{…}}` the author typed as its own paragraph is not
         # deleted when nothing was staged to approve.
-        return th.strip_replacements(marked)[0], []
+        return form_grammar.strip_replacements(marked)[0], []
     unmatched = list(written)
     critique_forms = []
     keep_new: set[tuple[int, int]] = set()

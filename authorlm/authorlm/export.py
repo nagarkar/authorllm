@@ -16,10 +16,11 @@ import re
 from datetime import date
 from pathlib import Path
 
-from . import directives
+from . import directive_tags
 from .db import Database
-from .gdocs import (GDOC_MIME, _ensure_folder, _mapping, _save_mapping,
-                    normalize_markdown)
+from .gdocs import GDOC_MIME, _ensure_folder, _mapping, _save_mapping
+from .normalize import normalize_markdown
+from .media_tags import scan_text as media_scan, strip_for_book
 from .revisions import is_placeholder, read_manuscript_files
 from .structure import is_continuation, reading_order, select_chapters
 
@@ -305,8 +306,6 @@ def combined_markdown(manuscript: dict) -> tuple[str, list[str], list[str]]:
     namespaced per file (footnote_prefixes): they are only file-unique
     in the sources, and pandoc would bind colliding labels to one
     definition across essays. Region tags resolve for the `doc` output."""
-    from .media import strip_for_book
-
     def strip_media(text: str, name: str) -> str:
         return strip_for_book(text, name)[0]
 
@@ -527,7 +526,6 @@ def publish_markdown(manuscript: dict, variant: str,
     Returns (text, order, warnings)."""
     from .illus import (ILLUS_DIR, capture_embeds, parse_tag,
                         slot_candidates, slot_key)
-    from .media import strip_for_book
 
     root = Path(manuscript["path"])
     files = read_manuscript_files(root)
@@ -567,7 +565,7 @@ def publish_markdown(manuscript: dict, variant: str,
         # damage, and a reviewer cannot act on it (footnote-directive
         # design §6). Stripped and named, never kept as a production
         # note the way an illustration slot is.
-        text, unresolved = directives.strip_tags(text)
+        text, unresolved = directive_tags.strip_tags(text)
         for tag in unresolved:
             warnings.append(f"{name}: unresolved [{tag['kind'].title()}: "
                             f"{tag['gist'][:60]}] stripped — draft it in "
@@ -645,8 +643,6 @@ def check_manuscript(manuscript: dict) -> list[str]:
                 problems.append(str(err))
                 break
         # Clip, Collage and Montage structure (docs/video-clips-design.md §8i).
-        from .media import scan_text as media_scan
-
         items, media_problems = media_scan(text)
         problems.extend(f"{name}: {p}" for p in media_problems)
         problems.extend(f"{name}:{it['line']}: {e}" for it in items

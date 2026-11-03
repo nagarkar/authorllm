@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import proposals
-from .concepts import (primary_location, NODE_KINDS, add_concept, concept_pattern, get_concept,
+from .concepts import (primary_location, NODE_KINDS, VALID_RELATIONS, add_concept, concept_pattern, get_concept,
                        link_concepts, mention_pattern, node_names,
                        scan_realizations, scoped_concepts)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
@@ -33,11 +33,6 @@ from .llm import LLMClient
 from .loop import similarity as _similarity
 from .revisions import _paragraphs, is_placeholder, read_manuscript_files
 
-VALID_RELATIONS = {
-    "depends_on", "motivates", "contrasts_with", "elaborates", "generalizes",
-    "specializes", "answers", "foreshadows", "illustrates", "permits",
-    "creates", "distinguishes", "defines", "leads_to", "refutes",
-}
 # Materiality floor (Q/note-materiality): a note_update that says the same
 # thing in different words is not new information — see _note_update_blocked.
 # Measured (proposal-learning-loop design doc), not guessed: 0.72 is the
@@ -860,14 +855,14 @@ def assemble_essay(db: Database, manuscript: dict, file: str,
                    knob: dict | None = None) -> list[ExtractionPayload]:
     """Every section payload of one essay (or the `section` it names, or
     the given `units`), with S, G, P and M rendered once and shared."""
-    from .lenses import _resolve, _title_of
+    from .structure import find_file, title_of
     from .structure import refuse_sidecar
     from .summaries import verse_files_of
 
     refuse_sidecar(Path(file).name)
     if files is None:
         files = read_manuscript_files(Path(manuscript["path"]))
-    rel = _resolve(files, file)
+    rel = find_file(files, file)
     text = files[rel]
     if is_in_flight(text):
         raise ValueError(f"{rel} is held by an active writeup (its text on "
@@ -889,7 +884,7 @@ def assemble_essay(db: Database, manuscript: dict, file: str,
     precedents = _precedent_block(prec, rel)
     summaries_text, summary_unit = _summary_block(db, manuscript, rel, text,
                                                   knob["summaries"])
-    title = _title_of(text) or rel
+    title = title_of(text) or rel
     return [ExtractionPayload(
         law=law, glossary=glossary, precedents=precedents,
         summaries=summaries_text, section=_section_block(rel, title, unit),

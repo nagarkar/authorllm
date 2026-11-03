@@ -1978,13 +1978,13 @@ def set_cast(key: str, voice_id: str, voice: str | None = None,
     author has heard the clip and said so. Replaces the row with the same
     key; fields left None keep their current value."""
     def run():
-        from . import audio
+        from . import audio, pronunciations
         db = _db()
         selected = _manuscript(db, manuscript)
         root = audio.audio_dir(selected)
         path = root / audio.CAST_FILENAME
         current = path.read_text(encoding="utf-8") if path.exists() else ""
-        existing, _w = audio.parse_cast(current)
+        existing, _w = pronunciations.parse_cast(current)
         row = next((r for r in existing if r["key"] == key), {})
         new = {"key": key,
                "voice": voice if voice is not None else row.get("voice", ""),

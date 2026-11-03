@@ -32,6 +32,8 @@ from . import paths as paths_mod
 from .db import Database, ko_fields, loads
 from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
+from .normalize import clamp
+from .pronunciations import parse_cast
 from .revisions import collect_revision, detect_transitions
 
 
@@ -1523,8 +1525,8 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
           + (ui.dim(f", {len(diffs)} modified acceptance(s) recorded")
              if diffs else ""))
     for d in diffs:
-        print(ui.dim(f"  «{gdocs.clamp(d['proposal'])}» → "
-                     f"«{gdocs.clamp(d['final'])}»"))
+        print(ui.dim(f"  «{clamp(d['proposal'])}» → "
+                     f"«{clamp(d['final'])}»"))
     # Collect, then rebuild this essay's summary at the gate.
     #
     # NO_EPISODE, not ambient (AQ; §15.17's disposition table, the
@@ -2315,7 +2317,7 @@ def _run_triage(db: Database, mid: str) -> None:
 
 
 def _run_edge_triage(db: Database, mid: str) -> None:
-    from .extraction import VALID_RELATIONS
+    from .concepts import VALID_RELATIONS
 
     relations = sorted(VALID_RELATIONS)
     edges = [dict(e) for e in db.all(
@@ -4635,8 +4637,6 @@ def _lens_autopush(db, manuscript, args, target: str, staged: int) -> None:
 
 
 def gdocs_clamp(text: str, limit: int = 90) -> str:
-    from .gdocs import clamp
-
     return clamp(text or "", limit)
 
 
@@ -5597,7 +5597,7 @@ def cmd_audio(args):
             root = audio.audio_dir(manuscript)
             path = root / audio.CAST_FILENAME
             text = path.read_text(encoding="utf-8") if path.exists() else ""
-            existing, _w = audio.parse_cast(text)
+            existing, _w = parse_cast(text)
             row = next((r for r in existing if r["key"] == key), {})
             new = {"key": key,
                    "voice": args.voice if args.voice is not None else row.get("voice", ""),
@@ -6702,7 +6702,7 @@ def _extract_scope(db: Database, manuscript: dict, args, knob: dict
     the sections changed since the extraction watermark (everything when
     there is none). `units` None means every unit of the file."""
     from . import extraction as ex
-    from .lenses import _resolve
+    from .structure import find_file
     from .revisions import read_manuscript_files
 
     files = read_manuscript_files(Path(manuscript["path"]))
@@ -6711,7 +6711,7 @@ def _extract_scope(db: Database, manuscript: dict, args, knob: dict
                  "extract <file> --section <n|heading>")
     if args.target:
         try:
-            return [(_resolve(files, f), None) for f in args.target]
+            return [(find_file(files, f), None) for f in args.target]
         except LookupError as err:
             sys.exit(f"error: {err}")
     if args.full:
@@ -6793,14 +6793,14 @@ def _extract_choose(config: dict, knob: dict, essays: list, llm, args,
 
 def _extract_screened(db: Database, manuscript: dict, args) -> None:
     from . import extraction as ex
-    from .lenses import _resolve
+    from .structure import find_file
     from .revisions import read_manuscript_files
 
     if len(args.target) != 2:
         sys.exit("usage: authorlm extract screened <file>")
     files = read_manuscript_files(Path(manuscript["path"]))
     try:
-        rel = _resolve(files, args.target[1])
+        rel = find_file(files, args.target[1])
     except LookupError as err:
         sys.exit(f"error: {err}")
     rows = ex.screened(db, manuscript, rel)
@@ -6825,7 +6825,7 @@ def _extract_calibrate(db: Database, manuscript: dict, args,
     from . import extraction as ex
     from . import extraction_adjudicator as adj
     from . import extraction_calibration as cal
-    from .lenses import _resolve
+    from .structure import find_file
     from .revisions import read_manuscript_files
 
     try:
@@ -6840,7 +6840,7 @@ def _extract_calibrate(db: Database, manuscript: dict, args,
     if named:
         files = read_manuscript_files(Path(manuscript["path"]))
         try:
-            only = [_resolve(files, f) for f in named]
+            only = [find_file(files, f) for f in named]
         except LookupError as err:
             sys.exit(f"error: {err}")
     replay = cal.prepare(db, manuscript, knob, only=only)
@@ -7259,8 +7259,6 @@ def cmd_belief(args):
 def _print_held(result: dict) -> None:
     """Name each paragraph a push held back because an open comment is
     anchored in it (it-e26a44f924be), with the comment, and the road."""
-    from .gdocs import clamp
-
     held = result.get("held") or []
     if not held:
         return

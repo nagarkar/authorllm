@@ -19,6 +19,11 @@ NODE_KINDS = frozenset({
     "concept", "objection", "example", "metaphor", "question",
     "historical_reference", "mathematical_construct", "syllogism",
 })
+VALID_RELATIONS = {
+    "depends_on", "motivates", "contrasts_with", "elaborates", "generalizes",
+    "specializes", "answers", "foreshadows", "illustrates", "permits",
+    "creates", "distinguishes", "defines", "leads_to", "refutes",
+}
 
 
 def add_concept(

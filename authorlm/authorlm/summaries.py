@@ -27,7 +27,7 @@ import json
 import re
 from pathlib import Path
 
-from .concepts import scoped_concepts
+from .concepts import VALID_RELATIONS, scoped_concepts
 from .db import Database, ko_fields, loads
 from .llm import LLMClient, resolve_temperature
 
@@ -960,11 +960,9 @@ def verse_files_of(manuscript: dict) -> set[str]:
 def _check_record(record: dict, text: str) -> tuple[dict, dict]:
     """Guarantee 1 of §7: every span is a verbatim substring of the
     paragraph (byte equality), every relation is in
-    `extraction.VALID_RELATIONS`, every role, move and direction is a
+    `concepts.VALID_RELATIONS`, every role, move and direction is a
     known value. Offending items are DROPPED, not repaired, and counted
     in the returned report. `definitions[].sentence` is a span too."""
-    from .extraction import VALID_RELATIONS
-
     dropped = {"span": 0, "relation": 0, "role": 0, "direction": 0}
     clean: dict = {"gist": str(record.get("gist") or "").strip(),
                    "claim": record.get("claim") or None,
@@ -1418,8 +1416,6 @@ ESSAY_LABELS = ("FLOW", "MOVES", "INTRODUCES", "ASSUMES", "PROMISES", "DEBTS",
 
 
 def paragraph_prompt() -> str:
-    from .extraction import VALID_RELATIONS
-
     return (PARAGRAPH_PROMPT_PATH.read_text(encoding="utf-8")
             .replace("<<MOVES>>", ", ".join(MOVES))
             .replace("<<RELATIONS>>", ", ".join(sorted(VALID_RELATIONS))))
@@ -1445,8 +1441,6 @@ def paragraph_schema() -> tuple[str, dict]:
     object root; `_reply_records` unwraps it. Enum checks stay in
     `store_paragraph_record` too: a model without schema support still
     gets only the prose."""
-    from .extraction import VALID_RELATIONS
-
     record = _obj(
         n={"type": "integer"}, gist=_STR, claim=_STR_OR_NULL,
         move={"type": "string", "enum": list(MOVES)},
