@@ -22,6 +22,7 @@ from pathlib import Path
 from . import lint
 from .db import Database, loads
 from .revisions import _version_text, is_placeholder
+from .summaries import drafting_context_for_write_status
 
 NEAREST = 8          # passages from other essays shown to the critic
 NEAREST_N = 5        # shingle width for the resemblance ranking
@@ -149,8 +150,6 @@ def assemble(db: Database, manuscript: dict, writeup: dict, beat: dict,
     # text cannot supply while it is still empty. (The lint corpus does
     # NOT include it, deliberately: a modeled rewrite is meant to reuse
     # the original's language.)
-    from . import api as _api
-
     original = _version_text(db, writeup.get("source_version_id"), file)
     if original and is_placeholder(original):
         original = None
@@ -159,7 +158,7 @@ def assemble(db: Database, manuscript: dict, writeup: dict, beat: dict,
     # or a back-reference to an earlier essay is unjudgeable. AFTER is
     # withheld: it is not ground for the drafter either.
     try:
-        context = _api._status_drafting_context(db, manuscript, writeup)
+        context = drafting_context_for_write_status(db, manuscript, writeup)
     except Exception:
         context = ""
     marker = context.find("AFTER")

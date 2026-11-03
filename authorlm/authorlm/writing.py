@@ -44,6 +44,7 @@ from .concepts import show_concept
 from .db import Database, loads
 from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
 from .revisions import _version_text, is_placeholder
+from .summaries import drafting_context_for_writeup
 
 NONE = "(none)"
 EMPTY_ACCEPTED = "(nothing accepted yet)"
@@ -310,13 +311,11 @@ def assemble(db: Database, manuscript: dict, writeup: dict, beat: dict,
     one-capture-per-invocation convention): the drafting context that
     reaches the model must be the same text the caller's own gates saw,
     not a second read a parallel session could have moved underneath it."""
-    from . import api
-
     return Payload(
         law=_law_block(db, manuscript["id"], writeup["file"]),
         frame=_frame_block(db, manuscript, writeup,
-                           api._drafting_context(db, manuscript, writeup,
-                                                 capture=capture)),
+                           drafting_context_for_writeup(db, manuscript, writeup,
+                                                        capture=capture)),
         accepted=_accepted_block(manuscript, writeup),
         beat=_beat_block(db, writeup, beat),
     )

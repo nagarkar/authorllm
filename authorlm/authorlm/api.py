@@ -39,6 +39,7 @@ from . import hygiene
 from . import triage as triage_service
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
+from .summaries import drafting_context_for_write_status, drafting_context_for_writeup
 from .revisions import (
     MARKER, PLACEHOLDER, _version_text, collect_revision, detect_transitions, is_placeholder,
     marker_present, massive_deletions, read_manuscript_files,
@@ -1442,44 +1443,6 @@ def _beat_tallies(db: Database, writeup: dict) -> dict:
     return {r["state"]: r["n"] for r in rows}
 
 
-def _drafting_context(db: Database, manuscript: dict, writeup: dict,
-                      capture=None) -> str:
-    """The writeup's L1 book-frame (design §12.4 item 1): compressed
-    summaries of the resolved essays before this one and the upcoming
-    ones after it. Recomputed on every read rather than stored — the
-    summaries themselves are the source of truth and a rebuild between
-    beats must show through. The declared placement, however, IS stored
-    (§12.4 item 3), so a resumed writeup on a not-yet-placed essay
-    recomputes the same split without the author repeating the flag.
-
-    `capture` is `write_start`'s own snapshot: the context it prints must
-    be the same text its gate just passed, not a second read that a
-    parallel session could have changed underneath it. Every other caller
-    (the resume view) is a fresh invocation and takes a fresh one."""
-    from . import summaries as sums
-
-    placement = loads(writeup["metadata"], {}).get("placement")
-    return sums.drafting_context(db, manuscript, writeup["file"],
-                                 placement=placement, capture=capture)
-
-
-def _status_drafting_context(db: Database, manuscript: dict,
-                             writeup: dict) -> str:
-    """`write status` is the resume entry point, so it degrades rather
-    than dies: if the file (or the placement target) has left the disk,
-    the context is replaced by a one-line note and the plan, cursor,
-    pending proposal and tallies still render. write_start does NOT get
-    this treatment — its gate has already proved the context resolves."""
-    from . import summaries as sums
-
-    try:
-        return _drafting_context(db, manuscript, writeup)
-    except LookupError as err:
-        return (f"{sums.WARN_PREFIX}DRAFTING CONTEXT unavailable — {err}. "
-                f"Restore the file, or close the writeup with "
-                f"'write abandon' (it restores the pinned source version).")
-
-
 def _resolve_placement(manuscript: dict, after: str | None) -> str | None:
     """The `--after` argument as a placement for summaries.before_after:
     the sentinel passes through, anything else resolves to a real
@@ -1889,8 +1852,8 @@ def write_start(db: Database, manuscript: dict, config: dict,
             "source_chars": len(source_text),
             "created": bool(new), "brief": brief or None,
             "style": guide["name"] if guide else None,
-            "drafting_context": _drafting_context(db, manuscript, row,
-                                                  capture=capture)}
+            "drafting_context": drafting_context_for_writeup(db, manuscript, row,
+                                                              capture=capture)}
 
 
 def write_intents(db: Database, manuscript: dict,
@@ -2544,7 +2507,7 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
         "drafting_models": meta.get("drafting_models") or [],
         "marker_present": marker_present(_disk) and not is_placeholder(_disk),
         "accounting": _accounting(writeup),
-        "drafting_context": _status_drafting_context(db, manuscript, writeup),
+        "drafting_context": drafting_context_for_write_status(db, manuscript, writeup),
     }
 
 
