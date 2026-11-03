@@ -5410,9 +5410,11 @@ def cmd_export(args):
             raise SystemExit(ui.yellow(
                 "export teleprompter needs --file <file> — the monologue "
                 "whose on-camera passages to collect"))
+        from . import teleprompter
+
         try:
-            result = ex.export_teleprompter(manuscript, args.file,
-                                            whole=args.whole)
+            result = teleprompter.export_teleprompter(
+                manuscript, args.file, whole=args.whole)
         except (LookupError, ValueError) as err:
             raise SystemExit(ui.yellow(f"export failed: {err}"))
         print(f"Wrote {result['docx']} ({', '.join(result['passages'])}).")

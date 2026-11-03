@@ -500,6 +500,12 @@ Essay summaries — the editor's working memory (critique-pass design §4).
 
 Sweep framework vanguards (design: docs/sweep-framework.md).
 
+## `authorlm.teleprompter`
+
+`authorlm/authorlm/teleprompter.py`
+
+The author's on-camera passages of one file, for a teleprompter.
+
 ## `authorlm.threads`
 
 `authorlm/authorlm/threads.py`

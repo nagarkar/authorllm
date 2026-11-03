@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE.parent))
 # test_passes pins the config/.env/client lookups away from the real ones.
 import test_passes  # noqa: E402,F401
 
-from authorlm import api, export, gdocs, media, media_tags  # noqa: E402
+from authorlm import api, export, gdocs, media, media_tags, teleprompter  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 
 # The shape of the SpiritualHindu monologues: a spoken intro and outro,
@@ -189,8 +189,8 @@ class ExportTests(unittest.TestCase):
 
     def test_teleprompter_passages_are_the_authors_lines_only(self):
         db = api.open_db(str(self.ws))
-        passages = export.teleprompter_passages(api.get_manuscript(db),
-                                                "picture-story.md")
+        passages = teleprompter.teleprompter_passages(
+            api.get_manuscript(db), "picture-story.md")
         self.assertEqual([p["label"] for p in passages], ["Intro", "Outro"])
         self.assertEqual(passages[0]["paragraphs"],
                          ["Namaste, and welcome to The Spiritual Hindu.",
@@ -225,7 +225,7 @@ class ExportTests(unittest.TestCase):
 
     def test_teleprompter_whole_puts_the_body_between_the_clips(self):
         db = api.open_db(str(self.ws))
-        passages = export.teleprompter_passages(
+        passages = teleprompter.teleprompter_passages(
             api.get_manuscript(db), "picture-story.md", whole=True)
         labels = [p["label"] for p in passages]
         self.assertEqual(labels[0], "Intro")
@@ -244,7 +244,7 @@ class ExportTests(unittest.TestCase):
             "# P\n\n[Omit: audio]\n\nNamaste, said on camera.\n\n"
             "[/Omit]\n\nJust prose.\n", encoding="utf-8")
         db = api.open_db(str(self.ws))
-        passages = export.teleprompter_passages(
+        passages = teleprompter.teleprompter_passages(
             api.get_manuscript(db), "plain.md", whole=True)
         self.assertEqual(passages[0]["paragraphs"],
                          ["Namaste, said on camera.", "Just prose."])
