@@ -578,6 +578,46 @@ def _local_transport_guards(root: Path) -> None:
         "SELECT COUNT(*) AS n FROM manuscript_versions WHERE "
         "manuscript_id = ?", (mid,))["n"]
 
+    # _form_owner: a settled short new half must not own unrelated markers
+    # (diff_push would clear a live/hand form as an "orphan").
+    from authorlm.gdocs import _form_flat, _form_owner
+    hand = "<<hand authored old>>{{hand authored new.}}"
+    settled_dot = [{"old": _form_flat("totally different"),
+                    "new": _form_flat("."), "live": False, "comment": None}]
+    check("_form_owner does not let a settled '.' claim hand-written "
+          "markers by substring",
+          _form_owner(hand, settled_dot) is None, str(_form_owner(hand, settled_dot)))
+    real = "<<The answer is 42.>>{{The answer is forty-two.}}"
+    real_known = [{"old": _form_flat("The answer is 42."),
+                   "new": _form_flat("The answer is forty-two."),
+                   "live": False, "comment": "c1"}]
+    check("...while still recognising the thread whose halves match",
+          _form_owner(real, real_known) is real_known[0])
+    rewritten = "<<alpha beta gamma>>{{rewritten by author in doc.}}"
+    live_plus_dot = [
+        {"old": _form_flat("alpha beta gamma"),
+         "new": _form_flat("original proposal text"),
+         "live": True, "comment": None},
+        {"old": _form_flat("x"), "new": _form_flat("."),
+         "live": False, "comment": None}]
+    check("a live replace still owns after the green half was rewritten "
+          "(matched on old), not the settled '.'",
+          _form_owner(rewritten, live_plus_dot) is live_plus_dot[0])
+    live_ins = "{{completely rewritten by author.}}"
+    ins_known = [
+        {"old": "", "new": _form_flat("original proposal text"),
+         "live": True, "comment": None},
+        {"old": _form_flat("other"), "new": _form_flat("."),
+         "live": False, "comment": None}]
+    check("a rewritten live insertion matches nobody — block, do not "
+          "clear under a settled short token",
+          _form_owner(live_ins, ins_known) is None)
+    exact_ins = "{{original proposal text}}"
+    check("...while an untouched insertion still finds its own thread",
+          _form_owner(exact_ins, ins_known) is ins_known[0])
+    check("a paragraph with no form at all owns nothing",
+          _form_owner("plain prose with a . in it", settled_dot) is None)
+
     # A mapping, so push_doc gets past the no-tab refusal and reaches
     # the guards rather than failing for an unrelated reason.
     normalized = normalize_markdown(MARKED_ESSAY)

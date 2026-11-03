@@ -5319,11 +5319,31 @@ def _form_owner(paragraph: str, known: list[dict]) -> dict | None:
     """The thread whose form is in this export paragraph: a live one
     first (a paragraph with a live form is never overwritten), else the
     newest settled one, else None (markers nobody recorded, which still
-    block: they may be the author's own)."""
-    flat = _form_flat(paragraph)
-    owners = [k for k in known
-              if (k["new"] and k["new"] in flat)
-              or (k["old"] and k["old"] in flat)]
+    block: they may be the author's own).
+
+    Match on the form halves `pending_forms` reads, not a bare substring
+    of the paragraph: a settled thread whose new half was "." (or any
+    short common token) otherwise owned every marked paragraph that
+    merely contained that token, and diff_push cleared a live or
+    hand-written form as an "orphan" (2026-10-31, discernment.md)."""
+    owners: list[dict] = []
+    seen: set[int] = set()
+    for form in form_grammar.pending_forms(paragraph):
+        fo, fn = _form_flat(form["old"]), _form_flat(form["new"])
+        for i, k in enumerate(known):
+            if i in seen:
+                continue
+            # Replace: the old half is what the record planted and the
+            # author does not edit; a rewritten green half still owns.
+            # Insert: only the new half exists — exact match, or the
+            # push blocks (None) rather than clearing a rewritten live
+            # form under a short settled token.
+            if fo and fo == k["old"]:
+                owners.append(k)
+                seen.add(i)
+            elif not fo and not k["old"] and fn and fn == k["new"]:
+                owners.append(k)
+                seen.add(i)
     live = [k for k in owners if k["live"]]
     if live:
         return live[0]
