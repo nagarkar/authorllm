@@ -24,6 +24,7 @@ import json
 from pathlib import Path
 
 from . import media
+from .sessions import NO_EPISODE
 
 ORIGIN = "clip"
 
@@ -173,7 +174,7 @@ def resolve_specs(db, manuscript: dict, config: dict, file: str,
     api._write_resolved_text(root / file, root, final)
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source="clip-resolve",
-                            episode=api.NO_EPISODE)
+                            episode=NO_EPISODE)
     states = [db.one("SELECT state FROM doc_threads WHERE id = ?",
                      (t["id"],))["state"] for t in written]
     url = None

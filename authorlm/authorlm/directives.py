@@ -47,6 +47,7 @@ import re
 from pathlib import Path
 
 from .revisions import is_placeholder, iter_manuscript_paths
+from .sessions import NO_EPISODE
 
 KINDS = ("footnote", "explain", "suggestion", "judgment")
 _TAGS = {
@@ -622,7 +623,7 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
 
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source=f"{kind}-apply",
-                            episode=api.NO_EPISODE)
+                            episode=NO_EPISODE)
     return {"kind": kind, "file": file, "mode": "applied", "landed": landed,
             "version_no": after.get("version_no"), "url": None, "failed": []}
 
@@ -893,7 +894,7 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
     api._write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source=f"{kind}-resolve",
-                            episode=api.NO_EPISODE)
+                            episode=NO_EPISODE)
     states = [db.one("SELECT state FROM doc_threads WHERE id = ?",
                      (t["id"],))["state"] for t in written]
     url = None

@@ -39,6 +39,7 @@ from . import hygiene
 from . import triage as triage_service
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
+from .sessions import NO_EPISODE
 from .summaries import drafting_context_for_write_status, drafting_context_for_writeup
 from .revisions import (
     MARKER, PLACEHOLDER, _version_text, collect_revision, detect_transitions, is_placeholder,
@@ -1221,15 +1222,6 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
 
 BEAT_KIND = "beat"
 
-# The third value of `collect(episode=…)` (filter-pass design §1.8).
-#
-# `None` already means AMBIENT — attach to the session's most recently
-# created open episode — so there was no way to say "attach to nothing"
-# without inventing a value that is neither a row nor None. A sentinel
-# object is that value: it can never collide with an episode dict, it
-# cannot be produced by a database read, and `is` comparison makes the
-# branch unmistakable at the call site.
-NO_EPISODE = object()
 
 # The modeled-rewrite digest (UC-B, design §13.2): the four lists it may
 # carry, mapped to each list's own required text field. The digest is
