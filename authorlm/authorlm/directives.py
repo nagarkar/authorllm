@@ -587,8 +587,10 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
             # it on acceptance. A decline wraps the tag itself: the
             # author sees it going and the paragraph staying. Anchor from
             # target_start so an intervening illustration/clip is not the
-            # planted unit (`anchor -= 1` only worked when the target was
-            # the immediate previous blank-line paragraph).
+            # planted unit, and a note on the next line (no blank) anchors
+            # on the unit it shares with its prose (`anchor -= 1` only
+            # worked when the target was the immediate previous
+            # blank-line paragraph).
             if c["decline"]:
                 old = tag["raw"] if tag["standalone"] else tag["target"]
                 new = "" if tag["standalone"] else _target_without_tag(tag)

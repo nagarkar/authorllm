@@ -78,11 +78,15 @@ def scan_text(text: str, kind: str) -> list[dict]:
     None when nothing precedes it), and — footnotes — the `| label:`
     override when the author gave one.
 
-    A standalone suggestion's "paragraph before" is the nearest prior
-    *prose* unit (design §1: the note under what it comments on). An
-    intervening illustration, clip, heading, footnote definition, or
-    other directive line is not the target — taking it as one let apply
-    destroy that markup (or plant `<<tag>>{{prose}}` on the Doc road)."""
+    A standalone suggestion's "paragraph before" follows how the author
+    writes the note under what it comments on (design §1). When the tag
+    shares a blank-line unit with lines above it (the common
+    `para\\n[Suggestion: …]` with no blank line), those preceding lines
+    ARE the target — never an earlier unit. A tag that is its own unit
+    targets the nearest prior *prose* unit: an intervening illustration,
+    clip, heading, footnote definition, or other directive line is not
+    the target — taking it as one let apply destroy that markup (or
+    plant `<<tag>>{{prose}}` on the Doc road)."""
     pattern = TAGS[check_kind(kind)]
     paragraphs = [(m.start(), m.end(), m.group(0))
                   for m in _PARAGRAPH.finditer(text)]
@@ -100,10 +104,19 @@ def scan_text(text: str, kind: str) -> list[dict]:
                     (start, end, ""))
         standalone = is_standalone(text, start, end)
         if standalone:
-            target = (_prior_prose_target(paragraphs, start)
-                      if kind == "suggestion"
-                      else next(((a, b, p) for a, b, p in reversed(paragraphs)
-                                 if b <= start), None))
+            holding_start = here[0]
+            line_start = text.rfind("\n", 0, start) + 1
+            if holding_start < line_start:
+                # Note on the next line of the same unit: the lines above
+                # the tag, not the previous blank-line paragraph.
+                chunk = text[holding_start:line_start].rstrip("\n")
+                target = ((holding_start, holding_start + len(chunk), chunk)
+                          if chunk.strip() else None)
+            elif kind == "suggestion":
+                target = _prior_prose_target(paragraphs, start)
+            else:
+                target = next(((a, b, p) for a, b, p in reversed(paragraphs)
+                               if b <= start), None)
         else:
             target = here
         tags.append({
