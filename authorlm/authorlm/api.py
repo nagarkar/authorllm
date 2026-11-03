@@ -40,7 +40,8 @@ from . import triage as triage_service
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
 from .revisions import (
-    collect_revision, detect_transitions, massive_deletions, read_manuscript_files,
+    MARKER, PLACEHOLDER, collect_revision, detect_transitions, is_placeholder,
+    marker_present, massive_deletions, read_manuscript_files,
 )
 # The filter pass's two collaborators, at module scope because its
 # verbs are ordinary members of this module rather than a lazily
@@ -1249,51 +1250,6 @@ DIGEST_PROVENANCE = ("source_version_id", "source_file", "recorded_at",
                      "point_count")
 DIGEST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 
-# The mid-rewrite placeholder (design §14.3). `write start` on an
-# EXISTING file leaves this where the essay was, instead of leaving the
-# file empty.
-#
-# Visible text, not an HTML comment: the one path where a hidden marker
-# fails is the one that matters. `export.publish_markdown` used to drop a
-# mid-rewrite essay from the exported book in silence, and an HTML
-# comment is stripped on the way to PDF/EPUB, so the hole would remain.
-# Visible text cannot be shipped by accident, only loudly. The author
-# also opens these files in Obsidian, where a comment is invisible.
-#
-# Bracketed `[AuthorLM: …]`, not the author's literal `<<…>>`: `<<` and
-# `>>` are reserved by the pending-change grammar (threads.PENDING,
-# gdocs.diff_push), so a literal `<<…>>` in a manuscript file would make
-# the next surgical push of it fail with a message about a margin thread
-# that does not exist. The author's WORDS are kept exactly.
-#
-# Deterministic by construction — no id, no timestamp, no file name — so
-# it is written once per writeup and never churns a version or
-# invalidates the prompt-cache prefix on its own.
-MARKER = "[AuthorLM: being presently rewritten]"
-
-PLACEHOLDER = (
-    MARKER + "\n"
-    "\n"
-    "This essay is mid-rewrite and is being drafted one beat at a time. The\n"
-    "previous text is not lost — it is pinned in the database. Run\n"
-    "`authorlm write status` to see the writeup, `authorlm write digest` to\n"
-    "print the pinned original, or `authorlm write abandon` to put the old\n"
-    "essay back. The first accepted beat replaces this placeholder, which is\n"
-    "never part of a finished essay.\n"
-)
-
-
-def is_placeholder(text: str) -> bool:
-    """Whole-file exact match (whitespace-tolerant at the edges). A file
-    the author has HAND-EDITED is not a placeholder — their text is never
-    silently discarded, which is the stronger rule."""
-    return text.strip() == PLACEHOLDER.strip()
-
-
-def marker_present(text: str) -> bool:
-    """The weaker check: the marker line survived inside a file that is
-    no longer just the placeholder. Warned about, never auto-repaired."""
-    return MARKER in text
 # Two values only. A third ("moved", "deferred") is where enum-shaped
 # schemas rot; the nuance belongs in the free-text reason, which is what
 # the "What Was Removed and Why" section quotes anyway.

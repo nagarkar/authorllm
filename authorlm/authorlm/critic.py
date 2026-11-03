@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import lint
 from .db import Database, loads
+from .revisions import is_placeholder
 
 NEAREST = 8          # passages from other essays shown to the critic
 NEAREST_N = 5        # shingle width for the resemblance ranking
@@ -151,7 +152,7 @@ def assemble(db: Database, manuscript: dict, writeup: dict, beat: dict,
     from . import api as _api
 
     original = _api._version_text(db, writeup.get("source_version_id"), file)
-    if original and _api.is_placeholder(original):
+    if original and is_placeholder(original):
         original = None
     # The settled context the drafter was allowed to lean on: the BEFORE
     # half of the drafting context. The critic must see the same ground,

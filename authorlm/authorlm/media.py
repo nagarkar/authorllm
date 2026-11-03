@@ -41,7 +41,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .revisions import read_manuscript_files
+from .revisions import is_placeholder, read_manuscript_files
 
 DRAFT_WORDS = 150          # §8e: a generation spec under this is a draft
 WORDS_PER_MINUTE = 150     # estimated_seconds is a generation hint only
@@ -653,7 +653,6 @@ def list_media(root: Path, files: list[str] | None = None,
     """`media list`: every clip, collage, montage and illustration in reading
     order, each with everything this slice knows (§8f), plus the
     file-level problems. Paths only, never bytes."""
-    from .api import is_placeholder
     from .illus import cast_index, load_prompts
     from .structure import TOC_FILENAME, reading_order, toc_attrs
 

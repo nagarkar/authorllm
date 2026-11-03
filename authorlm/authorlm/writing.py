@@ -42,6 +42,7 @@ from pathlib import Path
 
 from .db import Database, loads
 from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
+from .revisions import is_placeholder
 
 NONE = "(none)"
 EMPTY_ACCEPTED = "(nothing accepted yet)"
@@ -219,7 +220,7 @@ def _original_block(db: Database, writeup: dict) -> str:
 
     text = api._version_text(db, writeup.get("source_version_id"),
                              writeup["file"])
-    if not text or api.is_placeholder(text):
+    if not text or is_placeholder(text):
         return ""
     return text
 
@@ -254,11 +255,9 @@ def _accepted_block(manuscript: dict, writeup: dict) -> str:
     Under the in-flight stream a truncated file holds the mid-rewrite
     PLACEHOLDER. That marker is scaffolding, never prose, and must never
     reach the drafting payload as if the essay opened with it."""
-    from . import api
-
     path = Path(manuscript["path"]) / writeup["file"]
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    if api.is_placeholder(text) or not text.strip():
+    if is_placeholder(text) or not text.strip():
         text = ""
     return _section("ACCEPTED TEXT SO FAR", text or EMPTY_ACCEPTED)
 

@@ -31,7 +31,7 @@ from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
 from .db import Database, ko_fields
 from .llm import LLMClient
 from .loop import similarity as _similarity
-from .revisions import _paragraphs, read_manuscript_files
+from .revisions import _paragraphs, is_placeholder, read_manuscript_files
 
 VALID_RELATIONS = {
     "depends_on", "motivates", "contrasts_with", "elaborates", "generalizes",
@@ -153,8 +153,6 @@ def is_in_flight(text: str) -> bool:
 
     PER FILE, never per payload: `eligible_files` drops such a file before
     any unit of it is assembled, so no block E can carry the marker."""
-    from .api import is_placeholder
-
     return is_placeholder(text)
 
 

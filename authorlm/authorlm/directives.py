@@ -46,7 +46,7 @@ import json
 import re
 from pathlib import Path
 
-from .revisions import iter_manuscript_paths
+from .revisions import is_placeholder, iter_manuscript_paths
 
 KINDS = ("footnote", "explain", "suggestion", "judgment")
 _TAGS = {
@@ -140,7 +140,6 @@ def scan(root: Path, kind: str, files: list[str] | None = None
     """Open tags of one kind by file (or the named files only). Files
     with no tag are absent. The TOC and a file holding only the
     mid-rewrite placeholder are never scanned."""
-    from .api import is_placeholder
     from .structure import TOC_FILENAME
 
     _kind(kind)

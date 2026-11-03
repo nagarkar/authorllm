@@ -61,7 +61,7 @@ from .export import (VOICE_LINE, load_settings, resolve_regions,
                      strip_display_math)
 from .gdocs import normalize_markdown
 from .illus import parse_tag as parse_illustration_tag
-from .revisions import read_manuscript_files
+from .revisions import is_placeholder, read_manuscript_files
 from .structure import is_continuation, reading_order, toc_attrs
 
 AUDIO_DIR = "_audio"
@@ -1126,7 +1126,6 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
     from .export import continuation_level
     level = continuation_level(manuscript)
     previous: dict | None = None
-    from .api import is_placeholder
     for name in order:
         if name == TITLE_FILE or name == pron.FILENAME:
             continue

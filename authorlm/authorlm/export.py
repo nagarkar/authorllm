@@ -20,7 +20,7 @@ from . import directives
 from .db import Database
 from .gdocs import (GDOC_MIME, _ensure_folder, _mapping, _save_mapping,
                     normalize_markdown)
-from .revisions import read_manuscript_files
+from .revisions import is_placeholder, read_manuscript_files
 from .structure import is_continuation, reading_order, select_chapters
 
 EXPORT_DIR = "_exports"
@@ -537,7 +537,6 @@ def publish_markdown(manuscript: dict, variant: str,
         order = select_chapters(files, only)
     else:
         order, _unlisted = reading_order(files)
-    from .api import is_placeholder
     from .structure import matter_map
 
     matter = matter_map(files)
