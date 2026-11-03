@@ -359,3 +359,12 @@ def marker_present(text: str) -> bool:
     """The weaker check: the marker line survived inside a file that is
     no longer just the placeholder. Warned about, never auto-repaired."""
     return MARKER in text
+
+
+def _version_text(db: Database, version_id: str | None,
+                  file: str) -> str | None:
+    if not version_id:
+        return None
+    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?",
+                 (version_id,))
+    return loads(row["files"], {}).get(file) if row else None

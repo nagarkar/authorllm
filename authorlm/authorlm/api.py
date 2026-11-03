@@ -40,7 +40,7 @@ from . import triage as triage_service
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
 from .revisions import (
-    MARKER, PLACEHOLDER, collect_revision, detect_transitions, is_placeholder,
+    MARKER, PLACEHOLDER, _version_text, collect_revision, detect_transitions, is_placeholder,
     marker_present, massive_deletions, read_manuscript_files,
 )
 # The filter pass's two collaborators, at module scope because its
@@ -4660,15 +4660,6 @@ def _touched_filter_run(db: Database, row: dict) -> dict:
     clients.touch(db, "filter_runs", row, verb=clients.current_verb())
     fresh = db.one("SELECT * FROM filter_runs WHERE id = ?", (row["id"],))
     return dict(fresh) if fresh is not None else row
-
-
-def _version_text(db: Database, version_id: str | None,
-                  file: str) -> str | None:
-    if not version_id:
-        return None
-    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?",
-                 (version_id,))
-    return loads(row["files"], {}).get(file) if row else None
 
 
 def _latest_version_id(db: Database, manuscript_id: str) -> str | None:
