@@ -537,8 +537,8 @@ Absent on purpose: `audio generate` (audiostation's), any writer of
 
 **The pronunciation workbench (added 2026-09-04).** `audio say <term>`
 renders the word's own sentence in the voice that says it with a
-respelling substituted inline as the alias rule would; `--settle` writes
-the row. `authorlm workbench` is the same loop as a **local page**
+respelling substituted inline as the alias rule would. It states the cost
+and renders with `--live`; `--settle --live` writes the row. `authorlm workbench` is the same loop as a **local page**
 served on a loopback port and opened in the browser, exactly like the
 Triage App (`web/workbench/` → `authorlm/workbench_dist/`, served by
 `workbench_server.py`, transport `POST /api/workbench`): every word,

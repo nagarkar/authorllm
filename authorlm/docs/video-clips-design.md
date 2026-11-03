@@ -229,7 +229,7 @@ returns reasons:
 3. A span is closed and wraps at least one full sentence.
 4. The field combinations of §5 hold; a quoted clip has a valid url and
    is under a maximum length.
-5. Cost over a per-call or per-day cap needs `--confirm`.
+5. Cost over a per-call or per-day cap stops the verb and names `--force`; with `--force` it goes on and prints the cap it passed.
 
 A model-judged "is this filmable" check is deferred until bad
 generations show it is needed.
@@ -311,7 +311,7 @@ AuthorLM makes the model call.
 | verb | does | can spend |
 |---|---|---|
 | `media list [ms] [--file F] [--key K]` | the one umbrella verb: every clip, collage and illustration, each with its `kind` (below) | no |
-| `clip ensure ms:key [--generate] [--dry-run] [--confirm]` | paths of fresh takes; generates only when none is fresh, or with `--generate` to add one; else a job id or gate reasons | yes |
+| `clip ensure ms:key [--generate] [--dry-run] [--force]` | paths of fresh takes; generates only when none is fresh, or with `--generate` to add one; else a job id or gate reasons | yes |
 | `clip job <id>` | state; when done the take's path; always paths to the composed prompt, request, response and error log, so podlm can diagnose a bad generation | no |
 | `clip attach ms:key <file>` | inserts an outside asset as take `iNN`; returns its path | no |
 | `clip pick ms:key NN` | registers the chosen take; moves the embed line | no |
@@ -597,7 +597,7 @@ Gemini API over plain REST (no SDK), as illustrations call Gemini.
   generation to `allow_adult`.
 - **Verbs:** `clip ensure <key>` returns fresh takes' paths, or the plan
   with `--dry-run` (model, length, cost, prompt — nothing spent);
-  `--generate` starts a job (billed), `--confirm` passes a cap; `clip job
+  `--generate` starts a job (billed), `--force` passes a cap and prints it; `clip job
   <id>` polls and downloads the take to
   `_clips/<key>-<deschash8>-<lawhash4>-NN.mp4`; the first take is chosen;
   `clip pick <key> --take NN`; `clip attach <key> --file F` adds `iNN`.

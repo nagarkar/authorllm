@@ -1906,6 +1906,13 @@ def say_contexts(manuscript: dict, term: str, file: str | None = None,
     return out
 
 
+def _clip_words(ctx: dict, term: str, respelling: str) -> str:
+    """The words a clip says: the sentence, with the respelling inline."""
+    if (respelling or "").strip():
+        return substitute_alias(ctx["sentence"], term, alias_for(respelling))
+    return ctx["sentence"]
+
+
 def render_context(manuscript: dict, client: ElevenLabs, ctx: dict, term: str,
                    respelling: str, use_dictionary: bool = False,
                    quality: str = "mp3_44100_64", locators: list | None = None,
@@ -1922,10 +1929,7 @@ def render_context(manuscript: dict, client: ElevenLabs, ctx: dict, term: str,
     # The box wins for the word in focus in every mode that has one; with
     # the dictionary attached, every OTHER word reads by its pushed rule
     # (author's ask 2026-09-26: hear the respelling "in company").
-    if (respelling or "").strip():
-        spoken = substitute_alias(ctx["sentence"], term, alias_for(respelling))
-    else:
-        spoken = ctx["sentence"]
+    spoken = _clip_words(ctx, term, respelling)
     audio_bytes, _rid = client.tts(spoken, voice, quality,
                                    locators=locators if use_dictionary else None)
     clips_dir = root / AUDIO_DIR / AUDITIONS_DIR / "say"
@@ -1957,14 +1961,11 @@ def table_say(manuscript: dict, term: str) -> str:
     return pron.lookup(rows).get(pron.key(term), {}).get("say", "")
 
 
-def say(manuscript: dict, client: ElevenLabs, term: str,
-        says: list[str] | None = None, cast_key: str | None = None,
-        file: str | None = None, use_dictionary: bool = False,
-        quality: str = "mp3_44100_64") -> dict:
-    """Render the term's sentence once per respelling (default: the
-    table's), in the voice of the first section that carries it (or
-    `cast_key`'s). Returns the clips, their character cost, and the
-    gallery page."""
+def say_plan(manuscript: dict, term: str, says: list[str] | None = None,
+             cast_key: str | None = None, file: str | None = None,
+             use_dictionary: bool = False) -> dict:
+    """What `say` would render, without a client: the context, each clip's
+    words and the character cost. Nothing is spent or written."""
     root = Path(manuscript["path"])
     config = load_config(root)
     contexts = say_contexts(manuscript, term, file, limit=1)
@@ -1981,11 +1982,29 @@ def say(manuscript: dict, client: ElevenLabs, term: str,
     if not variants and not use_dictionary:
         raise AudioError(f"'{term}' has no reading in {pron.FILENAME} — give one "
                          "with --say")
-    locators = None
     if use_dictionary:
-        locators = dictionary_locators(manuscript, client)
         variants = variants or [""]
     ctx = {**ctx, "voice": voice}
+    # `--dictionary` sends the sentence untouched (see `say`).
+    clips = [{"say": v, "spoken": _clip_words(ctx, term, "" if use_dictionary else v)}
+             for v in variants]
+    return {"term": term, "context": ctx, "variants": variants, "clips": clips,
+            "characters": sum(len(c["spoken"]) for c in clips)}
+
+
+def say(manuscript: dict, client: ElevenLabs, term: str,
+        says: list[str] | None = None, cast_key: str | None = None,
+        file: str | None = None, use_dictionary: bool = False,
+        quality: str = "mp3_44100_64") -> dict:
+    """Render the term's sentence once per respelling (default: the
+    table's), in the voice of the first section that carries it (or
+    `cast_key`'s). Returns the clips, their character cost, and the
+    gallery page."""
+    root = Path(manuscript["path"])
+    plan = say_plan(manuscript, term, says=says, cast_key=cast_key, file=file,
+                    use_dictionary=use_dictionary)
+    ctx, voice, variants = plan["context"], plan["context"]["voice"], plan["variants"]
+    locators = dictionary_locators(manuscript, client) if use_dictionary else None
     entries: list[dict] = []
     clips: list[dict] = []
     chars = 0

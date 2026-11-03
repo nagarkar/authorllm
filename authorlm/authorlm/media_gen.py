@@ -488,16 +488,16 @@ def _key() -> str:
 
 
 def start(db, manuscript: dict, key: str, model: str | None = None,
-          confirm: bool = False, http=None) -> dict:
+          force: bool = False, http=None) -> dict:
     """Start a generation (paid). Declines when the gate has reasons, or
-    when a cap is passed without `confirm`. Records the job and returns it."""
+    when a cap is passed without `force`. Records the job and returns it."""
     p = plan(db, manuscript, key, model)
     if p["reasons"]:
         raise ValueError(f"{key} is not ready to generate: "
                          + "; ".join(p["reasons"]))
-    if p["needs_confirm"] and not confirm:
+    if p["needs_confirm"] and not force:
         raise ValueError("over a spend cap — " + "; ".join(p["needs_confirm"])
-                         + " — rerun with --confirm")
+                         + " — rerun with --force to go past it")
     http = http or _http
     omni = is_omni(p["model"])
     if omni:
@@ -687,16 +687,16 @@ def edit_body(p: dict) -> dict:
 
 
 def edit_start(manuscript: dict, key: str, take: str, instruction: str,
-               confirm: bool = False, http=None) -> dict:
+               force: bool = False, http=None) -> dict:
     """Start revising a take (paid). Same gate and caps as `start`; poll
     the returned job with `poll`, and the revision lands as take eNN."""
     p = edit_plan(manuscript, key, take, instruction)
     if p["reasons"]:
         raise ValueError(f"take {take} of {key} cannot be revised: "
                          + "; ".join(p["reasons"]))
-    if p["needs_confirm"] and not confirm:
+    if p["needs_confirm"] and not force:
         raise ValueError("over a spend cap — " + "; ".join(p["needs_confirm"])
-                         + " — rerun with --confirm")
+                         + " — rerun with --force to go past it")
     http = http or _http
     body = edit_body(p)
     op = http("POST", f"{BASE_URL}/interactions", _key(), body)

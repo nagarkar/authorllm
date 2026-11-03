@@ -804,12 +804,12 @@ def sweep_previews(root: Path, book: dict) -> int:
 
 
 def preview(manuscript: dict, stem: str | None = None, spec: str | None = None,
-            force: bool = False, workers: int = 4,
+            rebuild: bool = False, workers: int = 4,
             renderer: Callable[[Path, dict, str, int], Path] | None = None,
             progress: Progress | None = None) -> dict:
     """Render the previews that are missing — one chapter, the named
     paragraphs of it, or (stem None) the whole book — on `workers`
-    threads, then sweep the previews of ids that are gone. `force`
+    threads, then sweep the previews of ids that are gone. `rebuild`
     re-renders even where a preview exists. Returns `{rendered, kept,
     swept, voice, rate, chapters}`."""
     from concurrent.futures import ThreadPoolExecutor
@@ -828,7 +828,7 @@ def preview(manuscript: dict, stem: str | None = None, spec: str | None = None,
         for sp in speech_of(chapter):
             if wanted is not None and sp["id"] not in wanted:
                 continue
-            if not force and preview_path(root, sp["id"]).exists():
+            if not rebuild and preview_path(root, sp["id"]).exists():
                 kept += 1
                 continue
             todo.append((st, sp))

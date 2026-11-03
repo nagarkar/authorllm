@@ -2846,7 +2846,8 @@ def _clip_take_verbs(args, db, manuscript, root) -> None:
         if args.generate and not args.dry_run:
             try:
                 out["job"] = media_gen.start(db, manuscript, args.key, args.model,
-                                             confirm=args.confirm)
+                                             force=args.force)
+                out["overrode"] = plan["needs_confirm"] if args.force else []
             except (ValueError, RuntimeError) as err:
                 sys.exit(str(err))
         print(json.dumps(out, indent=1))
@@ -2864,8 +2865,9 @@ def _clip_take_verbs(args, db, manuscript, root) -> None:
                         *plan["references"]] if x)))
     for reason in plan["reasons"]:
         print(ui.red(f"  {reason}"))
-    for cap in plan["needs_confirm"]:
-        print(ui.yellow(f"  {cap} — needs --confirm"))
+    if not args.force:
+        for cap in plan["needs_confirm"]:
+            print(ui.yellow(f"  {cap} — needs --force"))
     if args.dry_run or not args.generate:
         if args.dry_run:
             print(ui.dim("--- prompt ---\n" + plan["prompt"]))
@@ -2874,11 +2876,19 @@ def _clip_take_verbs(args, db, manuscript, root) -> None:
         return
     try:
         job = media_gen.start(db, manuscript, args.key, args.model,
-                              confirm=args.confirm)
+                              force=args.force)
     except (ValueError, RuntimeError) as err:
         sys.exit(str(err))
+    _print_caps_overridden(plan, args)
     print(f"Started job {job['id']} (about ${job['est_usd']:.2f}). "
           f"'clip job {job['id']}' checks it and downloads the take.")
+
+
+def _print_caps_overridden(plan: dict, args) -> None:
+    """--force names what it went past (metalm guidelines/cli.md)."""
+    if args.force:
+        for cap in plan["needs_confirm"]:
+            print(ui.yellow(f"--force: went past the spend cap: {cap}"))
 
 
 def _clip_edit(args, manuscript, media_gen) -> None:
@@ -2894,7 +2904,8 @@ def _clip_edit(args, manuscript, media_gen) -> None:
         out = {"plan": p, "job": None}
         if args.generate and not args.dry_run:
             out["job"] = media_gen.edit_start(manuscript, args.key, args.take,
-                                              args.text, confirm=args.confirm)
+                                              args.text, force=args.force)
+            out["overrode"] = p["needs_confirm"] if args.force else []
         print(json.dumps(out, indent=1))
         return
     print(f"{p['key']}: revise {p['take']} with {p['model']} — about "
@@ -2902,13 +2913,15 @@ def _clip_edit(args, manuscript, media_gen) -> None:
     print(ui.dim(f"  prompt: {p['prompt']}"))
     for reason in p["reasons"]:
         print(ui.red(f"  {reason}"))
-    for cap in p["needs_confirm"]:
-        print(ui.yellow(f"  {cap} — needs --confirm"))
+    if not args.force:
+        for cap in p["needs_confirm"]:
+            print(ui.yellow(f"  {cap} — needs --force"))
     if not args.generate or args.dry_run:
         print(ui.dim("'--generate' starts the revision (billed)."))
         return
     job = media_gen.edit_start(manuscript, args.key, args.take, args.text,
-                               confirm=args.confirm)
+                               force=args.force)
+    _print_caps_overridden(p, args)
     print(f"Started job {job['id']} (about ${job['est_usd']:.2f}). "
           f"'clip job {job['id']}' checks it and downloads the take.")
 
@@ -4942,6 +4955,8 @@ def cmd_lens(args):
             raise SystemExit(f"error: {err}")
         print(ui.green(f"{res['reopened']} lens form(s) returned to staged; "
                        f"{res['file']}'s tab rebuilt from the file."))
+        print(ui.yellow("--force: anything typed in that tab since the push "
+                        "is gone."))
         return
     if args.action == "repair":
         target = args.name or args.file
@@ -5476,16 +5491,24 @@ def _export_upload(args, db, manuscript: dict, path: str) -> None:
     print(f"{verb} on Drive: {up['url']}")
 
 
+# The audio actions that spend or send: they preview unless --live.
+AUDIO_LIVE_ACTIONS = ("audition", "dictionary", "generate", "retake", "say")
+
+
 def cmd_audio(args):
     """The audiobook verbs (docs/audiobook-pipeline-design.md §11)."""
     from . import audio
 
-    db = _open_db(args)
-    manuscript = _manuscript(db, args)
-    rest = list(args.rest or [])
     if args.live and args.dry_run:
         raise SystemExit("error: --live goes ahead and --dry-run previews. "
                          "Rerun with one of them.")
+    if args.live and args.action not in AUDIO_LIVE_ACTIONS:
+        raise SystemExit(f"error: audio {args.action} takes no --live; only "
+                         f"{', '.join(AUDIO_LIVE_ACTIONS)} do. "
+                         "Rerun without it.")
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    rest = list(args.rest or [])
     try:
         if args.action == "init":
             result = audio.init(manuscript)
@@ -5616,9 +5639,24 @@ def cmd_audio(args):
             if not rest:
                 raise SystemExit("usage: audio say <term> [--say S[,S…]] "
                                  "[--cast KEY] [--file F] [--dictionary] "
-                                 "[--settle] [--no-play]")
+                                 "[--settle] [--no-play] [--dry-run | --live]")
             term = " ".join(rest)
             says = [s.strip() for s in (args.say or "").split(",") if s.strip()]
+            if args.settle and len(says) != 1:
+                raise SystemExit("--settle needs exactly one --say")
+            if not args.live:
+                plan = audio.say_plan(manuscript, term, says=says or None,
+                                      cast_key=args.cast, file=args.file,
+                                      use_dictionary=args.dictionary)
+                ctx = plan["context"]
+                print(f"{term} is said by {ctx['cast']} in {ctx['file']}: "
+                      f"«{ctx['sentence'][:120]}»")
+                print(f"This say spends about {plan['characters']:,} ElevenLabs "
+                      f"characters ({len(plan['clips'])} clip(s)).")
+                print("Nothing rendered"
+                      + (" and nothing settled" if args.settle else "")
+                      + ". Rerun with --live to spend them.")
+                return
             client = audio.ElevenLabs(audio.api_key())
             result = audio.say(manuscript, client, term, says=says or None,
                                cast_key=args.cast, file=args.file,
@@ -5634,8 +5672,6 @@ def cmd_audio(args):
                     subprocess.run(["afplay", clip["path"]], check=False)
             print(f"{result['characters']} characters → {result['page']}")
             if args.settle:
-                if len(says) != 1:
-                    raise SystemExit("--settle needs exactly one --say")
                 done = audio.settle_say(manuscript, term, says[0], args.note)
                 print(f"{'Added' if done['added'] else 'Updated'} "
                       f"'{done['term']}' → {done['say']} in "
@@ -5643,7 +5679,7 @@ def cmd_audio(args):
                       f"push', then 'audio export'.")
             elif says:
                 print(ui.dim(f"  to keep one: audio say {term} --say \"…\" "
-                             "--settle   (writes the pronunciations.md row)"))
+                             "--settle --live   (writes the pronunciations.md row)"))
             return
 
         if args.action == "dictionary":
@@ -5672,11 +5708,12 @@ def cmd_audio(args):
             from . import generation
             if not rest:
                 raise SystemExit(f"usage: audio {args.action} <chapter> "
-                                 "(-p 12,14-16 | --remaining) [--dry-run]")
+                                 "(-p 12,14-16 | --remaining) [--dry-run | --live]")
             stem = rest[0]
             retake = args.action == "retake"
             if retake and not args.paragraphs:
-                raise SystemExit("usage: audio retake <chapter> -p 12[,14-16]")
+                raise SystemExit("usage: audio retake <chapter> -p 12[,14-16] "
+                                 "[--dry-run | --live]")
             shown: list[str] = []
 
             def progress(line: str) -> None:
@@ -5684,10 +5721,10 @@ def cmd_audio(args):
             result = generation.generate(
                 manuscript, stem, spec=args.paragraphs,
                 remaining=args.remaining, retake=retake,
-                dry_run=args.dry_run, progress=progress)
+                dry_run=not args.live, progress=progress)
             for p in result["skipped"]:
                 shown.append(f"  ¶ {p['ordinal']} already has a take — "
-                             f"'audio retake {stem} -p {p['ordinal']}' re-renders it")
+                             f"'audio retake {stem} -p {p['ordinal']} --live' re-renders it")
             if not result["planned"]:
                 print("\n".join(shown) if shown else
                       f"{stem}: nothing to render.")
@@ -5696,11 +5733,11 @@ def cmd_audio(args):
             planned = ", ".join(str(p["ordinal"]) for p in result["planned"])
             print(f"{stem} ¶ {planned}: {len(result['planned'])} paragraph(s), "
                   f"{sum(p['characters'] for p in result['planned']):,} characters"
-                  f" at {result['quality']}"
-                  + (f" — dry run, nothing {verb}ed" if result["dry_run"] else ""))
+                  f" at {result['quality']}")
             for line in shown:
                 print(line)
             if result["dry_run"]:
+                print(f"Nothing {verb}ed. Rerun with --live to spend them.")
                 return
             for r in result["rendered"]:
                 print(f"  ¶ {r['ordinal']} {r['id'][:8]}… {r['characters']:,} chars"
@@ -5715,10 +5752,10 @@ def cmd_audio(args):
             from . import generation
             if not rest and not args.all:
                 raise SystemExit("usage: audio preview <chapter> [-p 12,14-16] "
-                                 "| --all  [--force]")
+                                 "| --all  [--rebuild]")
             result = generation.preview(
                 manuscript, None if args.all else rest[0], spec=args.paragraphs,
-                force=args.force, progress=lambda m: print(ui.dim(f"  {m}")))
+                rebuild=args.rebuild, progress=lambda m: print(ui.dim(f"  {m}")))
             for err in result["errors"]:
                 print(ui.yellow(f"  ! {err}"))
             chars = sum(r["characters"] for r in result["rendered"])
@@ -7727,6 +7764,10 @@ def cmd_doc(args):
                                     "one side to match the other, then "
                                     "pull or push."))
                     _print_toc_pairs(result.get("toc_conflict_pairs") or {})
+                for relpath in result.get("forced", []):
+                    print(ui.yellow(f"--force: {relpath} took the Doc's version "
+                                    "over its local edits (they stay in "
+                                    "version history)."))
                 for relpath in result["changed"]:
                     print(f"Pulled {relpath} from its tab (normalized).")
                 for relpath, refs in (result.get("dangling_images")
@@ -9768,17 +9809,18 @@ def build_parser() -> argparse.ArgumentParser:
                "--stability 0.65\n"
                "  audio say Basilides --say \"buh-SIL-ih-deez,ba-SIL-i-deez\"   "
                "hear each respelling in a real sentence, in its voice, "
-               "no dictionary push; --settle keeps one\n"
+               "no dictionary push; states the cost, --live renders (paid), "
+               "--settle --live keeps one\n"
                "  audio dictionary push             shows the diff between "
                "pronunciations.md and the named ElevenLabs dictionary; --live "
                "applies it\n"
                "  audio status [becker] [--find Basilides] [-v]   the board: "
                "takes, what moved since them, the stitch\n"
-               "  audio generate becker --remaining [--dry-run]   render every "
-               "paragraph without a take (paid; the cost prints first)\n"
-               "  audio generate becker -p 12,14-16   render those paragraphs; "
-               "a done one is skipped\n"
-               "  audio retake becker -p 14          re-render a paragraph that "
+               "  audio generate becker --remaining   states the cost of every "
+               "paragraph without a take; --live renders them (paid)\n"
+               "  audio generate becker -p 12,14-16 --live   render those "
+               "paragraphs (paid); a done one is skipped\n"
+               "  audio retake becker -p 14 --live   re-render a paragraph that "
                "has a take (paid)\n"
                "  audio stitch becker                one file, ffmpeg, "
                "loudness-normalised (free)\n"
@@ -9804,8 +9846,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="serve: port (default 8792)")
     p.add_argument("--no-open", action="store_true", dest="no_open",
                    help="serve: do not open the browser")
-    p.add_argument("--force", action="store_true",
-                   help="preview: re-render even where a preview exists")
+    p.add_argument("--rebuild", action="store_true",
+                   help="preview: re-render even where a preview exists "
+                        "(free; macOS say)")
     p.add_argument("--preview", action="store_true",
                    help="stitch: join the chapter's free macOS say previews "
                         "(rendering any missing) into _audio/preview/chapters/"
@@ -9815,9 +9858,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--remaining", action="store_true",
                    help="generate: every paragraph of the chapter without a take")
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
-                   help="generate/retake: print the cost, render nothing; "
-                        "audition/dictionary push: preview only, the same as "
-                        "leaving out --live")
+                   help="generate/retake/say/audition/dictionary push: "
+                        "preview only, the same as leaving out --live")
     p.add_argument("--find", metavar="WORDS",
                    help="status: list the paragraphs whose text contains WORDS")
     p.add_argument("--verbose", "-v", action="store_true",
@@ -9862,9 +9904,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speed", type=float)
     p.add_argument("--note", help="cast set: the role note")
     p.add_argument("--live", action="store_true",
-                   help="audition / dictionary push: go ahead (audition bills "
-                        "ElevenLabs characters, push changes the remote "
-                        "dictionary); without it they only preview")
+                   help="generate/retake/say/audition/dictionary push: go "
+                        "ahead (the renders bill ElevenLabs characters, push "
+                        "changes the remote dictionary); without it they print "
+                        "the cost or the plan and do nothing. A usage error on "
+                        "every other audio action")
     p.set_defaults(func=cmd_audio)
 
     p = sub.add_parser(
@@ -9926,8 +9970,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
                    help="ensure: show the model, length, cost and the exact "
                         "prompt; spend nothing")
-    p.add_argument("--confirm", action="store_true",
-                   help="ensure: go ahead past a per-call or per-day cap")
+    p.add_argument("--force", action="store_true",
+                   help="ensure, edit: go ahead past a per-call or per-day "
+                        "spend cap and print the cap it passed; only "
+                        "--generate starts anything")
     p.add_argument("--model", help="ensure: a model other than the pin — a "
                                    "veo-3.1-* model or gemini-omni-1.1-flash")
     p.add_argument("--json", action="store_true",
