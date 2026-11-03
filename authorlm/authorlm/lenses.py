@@ -1134,7 +1134,7 @@ def record_repairs(db: Database, manuscript: dict, session: dict, file: str,
     intents are declared scoped to the essay and their tag removal is
     staged. A `new` that still carries the tag, carries reserved
     markers, or is empty is refused by id."""
-    from . import sessions, staging
+    from . import docs, sessions, staging
     if payload is None:
         payload = assemble_repair(db, manuscript, file)
     files = read_manuscript_files(Path(manuscript["path"]))
@@ -1173,8 +1173,9 @@ def record_repairs(db: Database, manuscript: dict, session: dict, file: str,
             if not statement:
                 refused.append({"id": fid, "reason": "intent without a statement"})
                 continue
-            declared = sessions.declare_intent(db, manuscript["id"], statement,
-                                               scope=rel)
+            declared = sessions.declare_intent(
+                db, manuscript["id"], statement,
+                scope=docs._resolve_relpath(manuscript, rel))
             intents.append({"id": fid, "intent": declared["id"],
                             "text": statement})
             entries.append({"n": tag["n"], "new": _remove_tag(tag["unit"], tag["raw"]),
