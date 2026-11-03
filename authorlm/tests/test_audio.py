@@ -931,6 +931,13 @@ def check_live_is_rejected_where_it_means_nothing() -> None:
                   code == 1 and "--live" in out and action in out, out)
             check(f"audio {action} --live runs nothing",
                   sorted(str(p) for p in book.rglob("*")) == before)
+        for action in sorted(set(actions) - set(AUDIO_LIVE_ACTIONS)):
+            before = sorted(str(p) for p in book.rglob("*"))
+            out, code = run_cli("-w", str(ws), "audio", action, "--dry-run")
+            check(f"audio {action} --dry-run is a usage error",
+                  code == 1 and "--dry-run" in out and action in out, out)
+            check(f"audio {action} --dry-run runs nothing",
+                  sorted(str(p) for p in book.rglob("*")) == before)
     finally:
         shutil.rmtree(book, ignore_errors=True)
         shutil.rmtree(ws, ignore_errors=True)

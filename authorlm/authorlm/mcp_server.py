@@ -887,7 +887,7 @@ def clip_ensure(key: str, generate: bool = False, dry_run: bool = True,
         if dry_run or not generate:
             return {"plan": plan}
         return {"job": media_gen.start(db, ms, key, model, force=force),
-                "overrode": plan["needs_confirm"] if force else []}
+                "overrode": plan["over_cap"] if force else []}
     return _guard(run)
 
 
@@ -922,7 +922,7 @@ def clip_edit(key: str, take: str, instruction: str, generate: bool = False,
             return {"plan": plan}
         return {"job": media_gen.edit_start(ms, key, take, instruction,
                                             force=force),
-                "overrode": plan["needs_confirm"] if force else []}
+                "overrode": plan["over_cap"] if force else []}
     return _guard(run)
 
 

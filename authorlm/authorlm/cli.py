@@ -2847,7 +2847,7 @@ def _clip_take_verbs(args, db, manuscript, root) -> None:
             try:
                 out["job"] = media_gen.start(db, manuscript, args.key, args.model,
                                              force=args.force)
-                out["overrode"] = plan["needs_confirm"] if args.force else []
+                out["overrode"] = plan["over_cap"] if args.force else []
             except (ValueError, RuntimeError) as err:
                 sys.exit(str(err))
         print(json.dumps(out, indent=1))
@@ -2866,7 +2866,7 @@ def _clip_take_verbs(args, db, manuscript, root) -> None:
     for reason in plan["reasons"]:
         print(ui.red(f"  {reason}"))
     if not args.force:
-        for cap in plan["needs_confirm"]:
+        for cap in plan["over_cap"]:
             print(ui.yellow(f"  {cap} — needs --force"))
     if args.dry_run or not args.generate:
         if args.dry_run:
@@ -2887,7 +2887,7 @@ def _clip_take_verbs(args, db, manuscript, root) -> None:
 def _print_caps_overridden(plan: dict, args) -> None:
     """--force names what it went past (metalm guidelines/cli.md)."""
     if args.force:
-        for cap in plan["needs_confirm"]:
+        for cap in plan["over_cap"]:
             print(ui.yellow(f"--force: went past the spend cap: {cap}"))
 
 
@@ -2905,7 +2905,7 @@ def _clip_edit(args, manuscript, media_gen) -> None:
         if args.generate and not args.dry_run:
             out["job"] = media_gen.edit_start(manuscript, args.key, args.take,
                                               args.text, force=args.force)
-            out["overrode"] = p["needs_confirm"] if args.force else []
+            out["overrode"] = p["over_cap"] if args.force else []
         print(json.dumps(out, indent=1))
         return
     print(f"{p['key']}: revise {p['take']} with {p['model']} — about "
@@ -2914,7 +2914,7 @@ def _clip_edit(args, manuscript, media_gen) -> None:
     for reason in p["reasons"]:
         print(ui.red(f"  {reason}"))
     if not args.force:
-        for cap in p["needs_confirm"]:
+        for cap in p["over_cap"]:
             print(ui.yellow(f"  {cap} — needs --force"))
     if not args.generate or args.dry_run:
         print(ui.dim("'--generate' starts the revision (billed)."))
@@ -5504,6 +5504,10 @@ def cmd_audio(args):
                          "Rerun with one of them.")
     if args.live and args.action not in AUDIO_LIVE_ACTIONS:
         raise SystemExit(f"error: audio {args.action} takes no --live; only "
+                         f"{', '.join(AUDIO_LIVE_ACTIONS)} do. "
+                         "Rerun without it.")
+    if args.dry_run and args.action not in AUDIO_LIVE_ACTIONS:
+        raise SystemExit(f"error: audio {args.action} takes no --dry-run; only "
                          f"{', '.join(AUDIO_LIVE_ACTIONS)} do. "
                          "Rerun without it.")
     db = _open_db(args)

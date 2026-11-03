@@ -496,7 +496,7 @@ class MediaTests(unittest.TestCase):
 
     def test_a_cap_stops_and_names_force(self):
         key, ms = self._capped_clip()
-        caps = media_gen.plan(self._DB(), ms, key)["needs_confirm"]
+        caps = media_gen.plan(self._DB(), ms, key)["over_cap"]
         self.assertTrue(caps)
         calls = []
         with self.assertRaises(ValueError) as stopped:
@@ -531,7 +531,7 @@ class MediaTests(unittest.TestCase):
 
     def test_clip_ensure_force_goes_past_the_cap_and_says_so(self):
         key, ms = self._capped_clip()
-        cap = media_gen.plan(self._DB(), ms, key)["needs_confirm"][0]
+        cap = media_gen.plan(self._DB(), ms, key)["over_cap"][0]
         _out, code, calls = self._run_clip(ms, "ensure", key, "--generate")
         self.assertIn("--force", str(code))
         self.assertEqual(calls, [])
@@ -547,7 +547,7 @@ class MediaTests(unittest.TestCase):
         from authorlm import mcp_server
 
         key, ms = self._capped_clip()
-        cap = media_gen.plan(self._DB(), ms, key)["needs_confirm"][0]
+        cap = media_gen.plan(self._DB(), ms, key)["over_cap"][0]
         os.environ["GEMINI_API_KEY"] = "test-key"
         calls = []
 
@@ -568,7 +568,7 @@ class MediaTests(unittest.TestCase):
 
     def test_clip_ensure_json_names_what_force_overrode(self):
         key, ms = self._capped_clip()
-        cap = media_gen.plan(self._DB(), ms, key)["needs_confirm"][0]
+        cap = media_gen.plan(self._DB(), ms, key)["over_cap"][0]
         out, code, calls = self._run_clip(ms, "ensure", key, "--json",
                                           "--generate", "--force")
         self.assertEqual(code, 0)

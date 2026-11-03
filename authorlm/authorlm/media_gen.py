@@ -332,7 +332,7 @@ def plan(db, manuscript: dict, key: str, model: str | None = None) -> dict:
     """Everything a generation would send and cost, plus the gate. Spends
     nothing — this is `--dry-run`. Returns {key, file, model, resolution,
     aspect_ratio, duration, est_usd, prompt, first_frame, last_frame,
-    references, desc, law, reasons, needs_confirm, fresh_takes}."""
+    references, desc, law, reasons, over_cap, fresh_takes}."""
     root = Path(manuscript["path"])
     listing = media.list_media(root, None, key)["media"]
     if not listing or listing[0]["kind"] != "clip":
@@ -371,12 +371,12 @@ def plan(db, manuscript: dict, key: str, model: str | None = None) -> dict:
         reasons.append(f"{model} has no {resolution} output")
     est = round((rate or 0) * duration, 2)
     spent = day_spend(root)
-    needs_confirm = []
+    over_cap = []
     if est > cfg["max_call_usd"]:
-        needs_confirm.append(f"${est:.2f} is over the per-call cap "
+        over_cap.append(f"${est:.2f} is over the per-call cap "
                              f"${cfg['max_call_usd']:.2f}")
     if spent + est > cfg["max_day_usd"]:
-        needs_confirm.append(f"today's ${spent:.2f} + ${est:.2f} is over the "
+        over_cap.append(f"today's ${spent:.2f} + ${est:.2f} is over the "
                              f"per-day cap ${cfg['max_day_usd']:.2f}")
     desc = desc_hash(spec, fields)
     lawh = _hash(law, 4)
@@ -393,7 +393,7 @@ def plan(db, manuscript: dict, key: str, model: str | None = None) -> dict:
             "last_frame": str(last) if last else None,
             "references": [str(p) for p in refs],
             "desc": desc, "law": lawh, "reasons": reasons,
-            "needs_confirm": needs_confirm, "fresh_takes": fresh}
+            "over_cap": over_cap, "fresh_takes": fresh}
 
 
 # ------------------------------------------------------------------ the API
@@ -495,8 +495,8 @@ def start(db, manuscript: dict, key: str, model: str | None = None,
     if p["reasons"]:
         raise ValueError(f"{key} is not ready to generate: "
                          + "; ".join(p["reasons"]))
-    if p["needs_confirm"] and not force:
-        raise ValueError("over a spend cap — " + "; ".join(p["needs_confirm"])
+    if p["over_cap"] and not force:
+        raise ValueError("over a spend cap — " + "; ".join(p["over_cap"])
                          + " — rerun with --force to go past it")
     http = http or _http
     omni = is_omni(p["model"])
@@ -657,12 +657,12 @@ def edit_plan(manuscript: dict, key: str, take: str, instruction: str) -> dict:
     est = round(MODELS.get(model, {}).get("720p", 0.10) * duration
                 + duration * OMNI_TOKENS_PER_SECOND * OMNI_RATES["input"], 2)
     spent = day_spend(root)
-    needs_confirm = []
+    over_cap = []
     if est > cfg["max_call_usd"]:
-        needs_confirm.append(f"${est:.2f} is over the per-call cap "
+        over_cap.append(f"${est:.2f} is over the per-call cap "
                              f"${cfg['max_call_usd']:.2f}")
     if spent + est > cfg["max_day_usd"]:
-        needs_confirm.append(f"today's ${spent:.2f} + ${est:.2f} is over the "
+        over_cap.append(f"today's ${spent:.2f} + ${est:.2f} is over the "
                              f"per-day cap ${cfg['max_day_usd']:.2f}")
     m = TAKE.match(parent["name"])
     return {"key": ckey, "take": parent["path"], "model": model,
@@ -674,7 +674,7 @@ def edit_plan(manuscript: dict, key: str, take: str, instruction: str) -> dict:
             "aspect_ratio": cfg["aspect_ratio"], "est_usd": est,
             "day_spent_usd": spent, "desc": m.group("desc"),
             "law": m.group("law"), "reasons": reasons,
-            "needs_confirm": needs_confirm}
+            "over_cap": over_cap}
 
 
 def edit_body(p: dict) -> dict:
@@ -694,8 +694,8 @@ def edit_start(manuscript: dict, key: str, take: str, instruction: str,
     if p["reasons"]:
         raise ValueError(f"take {take} of {key} cannot be revised: "
                          + "; ".join(p["reasons"]))
-    if p["needs_confirm"] and not force:
-        raise ValueError("over a spend cap — " + "; ".join(p["needs_confirm"])
+    if p["over_cap"] and not force:
+        raise ValueError("over a spend cap — " + "; ".join(p["over_cap"])
                          + " — rerun with --force to go past it")
     http = http or _http
     body = edit_body(p)
