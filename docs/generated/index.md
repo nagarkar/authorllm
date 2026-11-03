@@ -380,6 +380,12 @@ Generated clips: plan, start, poll, take (docs/video-clips-design.md §8b, §8c,
 
 The Doc road for clip specs (docs/video-clips-design.md §8e).
 
+## `authorlm.media_tags`
+
+`authorlm/authorlm/media_tags.py`
+
+The podcast media tags as text: `[Clip: …]`, `[Collage: …]` and `[Montage: …]` lines, their fields, the structure a file's tags make, and a book export's copy of a file with them gone.
+
 ## `authorlm.morph`
 
 `authorlm/authorlm/morph.py`

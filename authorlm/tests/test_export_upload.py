@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE.parent))
 # test_passes pins the config/.env/client lookups away from the real ones.
 import test_passes  # noqa: E402,F401
 
-from authorlm import api, export, gdocs, media  # noqa: E402
+from authorlm import api, export, gdocs, media, media_tags  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 
 # The shape of the SpiritualHindu monologues: a spoken intro and outro,
@@ -163,7 +163,7 @@ class ExportTests(unittest.TestCase):
     # -- the voice: field
 
     def test_voice_author_is_a_clip_field(self):
-        parsed = media.parse_fields("x | use: a.mp4 | voice: author")
+        parsed = media_tags.parse_fields("x | use: a.mp4 | voice: author")
         self.assertEqual(parsed["fields"].get("voice"), "author")
         self.assertEqual(parsed["errors"], [])
 

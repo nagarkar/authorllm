@@ -625,7 +625,7 @@ def audio_source(name: str, raw: str) -> str:
     `audio` regions, strip the media tag lines (prose stays), the
     inline directive tags and display math.
     Illustration and image lines fall out in `blocks_of`."""
-    from .media import strip_for_book
+    from .media_tags import strip_for_book
 
     text = resolve_regions(normalize_markdown(raw), {"audio"}, name)
     text, _media_tags = strip_for_book(text, name)
