@@ -55,13 +55,13 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import directives
+from . import directive_tags
 from . import pronunciations as pron
 from .export import (VOICE_LINE, load_settings, resolve_regions,
                      strip_display_math)
-from .gdocs import normalize_markdown
+from .normalize import normalize_markdown
 from .illus import parse_tag as parse_illustration_tag
-from .revisions import read_manuscript_files
+from .revisions import is_placeholder, read_manuscript_files
 from .structure import is_continuation, reading_order, toc_attrs
 
 AUDIO_DIR = "_audio"
@@ -147,9 +147,6 @@ SEED_CAST = (
     "| narrator |  |  |  | 0.5 | 0.75 | 1.0 | The default for every essay and heading |\n"
 )
 
-CAST_COLUMNS = ("key", "voice", "voice_id", "model", "stability",
-                "similarity", "speed", "note")
-_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 class AudioError(ValueError):
@@ -245,7 +242,7 @@ def _validate_config(data: dict, where: str) -> None:
 
 
 def _validate_voice_key(value: object, where: str) -> None:
-    if not isinstance(value, str) or not _KEY_RE.fullmatch(value):
+    if not isinstance(value, str) or not pron.CAST_KEY_RE.fullmatch(value):
         raise AudioError(f"{where} must be a nonempty cast key "
                          "([a-z][a-z0-9_-]*)")
 
@@ -303,67 +300,20 @@ def init(manuscript: dict) -> dict:
 
 # ------------------------------------------------------------------ cast
 
-def _cast_cells(line: str) -> list[str]:
-    return pron._cells(line)
-
-
-def parse_cast(text: str) -> tuple[list[dict], list[str]]:
-    """`(rows, warnings)` from `cast.md`. Same pipe-table discipline as
-    the pronunciation table: prose around the table is ignored, a
-    shifted row is skipped and named, never guessed at."""
-    rows: list[dict] = []
-    warnings: list[str] = []
-    seen: set[str] = set()
-    in_table = False
-    for line in (text or "").replace("\r\n", "\n").split("\n"):
-        cells = _cast_cells(line)
-        if not cells:
-            if in_table:
-                break
-            continue
-        if not in_table:
-            if cells and cells[0].strip().casefold() == "key":
-                in_table = True
-            continue
-        if pron._is_delimiter(cells):
-            continue
-        key = cells[0].strip()
-        if not key:
-            continue
-        if len([c for c in cells[len(CAST_COLUMNS):] if c]) or any(
-                "|" in c for c in cells[:len(CAST_COLUMNS)]):
-            warnings.append(f"cast row '{key}' carries a '|' and cannot be "
-                            f"read as one row — skipped")
-            continue
-        if not _KEY_RE.match(key):
-            warnings.append(f"cast key '{key}' is not a key ([a-z][a-z0-9_-]*)"
-                            " — skipped")
-            continue
-        if key in seen:
-            warnings.append(f"cast key '{key}' appears twice — the first "
-                            "row wins")
-            continue
-        seen.add(key)
-        padded = cells + [""] * (len(CAST_COLUMNS) - len(cells))
-        row = dict(zip(CAST_COLUMNS, (c.strip() for c in padded)))
-        rows.append(row)
-    return rows, warnings
-
-
 def render_cast_row(row: dict) -> str:
-    for field in CAST_COLUMNS:
+    for field in pron.CAST_COLUMNS:
         value = str(row.get(field) or "")
         if "|" in value or "\n" in value:
             raise AudioError(f"a cast row's `{field}` carries a '|' or a "
                              "newline; a row is one line")
-    return "| " + " | ".join(str(row.get(f) or "") for f in CAST_COLUMNS) + " |"
+    return "| " + " | ".join(str(row.get(f) or "") for f in pron.CAST_COLUMNS) + " |"
 
 
 def set_cast_row(text: str, row: dict) -> str:
     """Write one row: replace the row with the same key, else append
     after the table's last row. Rewrites no other line."""
     key = (row.get("key") or "").strip()
-    if not _KEY_RE.match(key):
+    if not pron.CAST_KEY_RE.match(key):
         raise AudioError(f"'{key}' is not a cast key ([a-z][a-z0-9_-]*)")
     line = render_cast_row(row)
     if not (text or "").strip():
@@ -374,7 +324,7 @@ def set_cast_row(text: str, row: dict) -> str:
     last_row = None
     in_table = False
     for i, raw in enumerate(lines):
-        cells = _cast_cells(raw)
+        cells = pron._cells(raw)
         if not cells:
             if in_table:
                 break
@@ -413,7 +363,7 @@ def load_cast(root: Path, config: dict) -> tuple[dict[str, dict], list[str]]:
     """key → resolved voice (voice_id, voice_name, model, stability,
     similarity, speed, note) with the defaults applied."""
     path = root / AUDIO_DIR / CAST_FILENAME
-    rows, warnings = parse_cast(path.read_text(encoding="utf-8")
+    rows, warnings = pron.parse_cast(path.read_text(encoding="utf-8")
                                 if path.exists() else "")
     cast: dict[str, dict] = {}
     for row in rows:
@@ -447,7 +397,7 @@ def parse_voice_tag(line: str) -> dict | None:
         return None
     parts = [p.strip() for p in m.group("body").split("|")]
     key = parts[0]
-    if not _KEY_RE.match(key):
+    if not pron.CAST_KEY_RE.match(key):
         raise AudioError(f"[Voice: {key}] — '{key}' is not a cast key "
                          "([a-z][a-z0-9_-]*)")
     overrides: dict = {}
@@ -625,11 +575,11 @@ def audio_source(name: str, raw: str) -> str:
     `audio` regions, strip the media tag lines (prose stays), the
     inline directive tags and display math.
     Illustration and image lines fall out in `blocks_of`."""
-    from .media import strip_for_book
+    from .media_tags import strip_for_book
 
     text = resolve_regions(normalize_markdown(raw), {"audio"}, name)
     text, _media_tags = strip_for_book(text, name)
-    text, _unresolved = directives.strip_tags(text)
+    text, _unresolved = directive_tags.strip_tags(text)
     text = strip_display_math(text)
     return normalize_markdown(text)
 
@@ -848,27 +798,62 @@ def chapter_sections(name: str, source: str, config: dict,
 # ---------------------------------------------------- editing on the page
 
 def locate_block(root: Path, names: list[str], config: dict, spoken: str,
-                 kind: str) -> dict | None:
+                 kind: str, *, want_id: str | None = None,
+                 cast: dict[str, dict] | None = None,
+                 default_keys: dict[str, str] | None = None,
+                 rules: list[dict] | None = None) -> dict | None:
     """The raw markdown block behind one speech section, for the page's
     on-the-spot edit (author's ask 2026-10-26: "fix problems while I'm
     listening"). The export's line numbers count the pre-passed text
-    (regions resolved, tag lines gone), so a section is found by what it
-    says: the first block of `names` (the chapter file and its
-    continuations) whose spoken form is `spoken`. Returns
-    `{file, line, lines, markdown}` or None when no block says it whole
-    — a paragraph carrying an inline tag the audio strips, a list read
-    one item at a time."""
+    (regions resolved, tag lines gone), so a section is found by walking
+    `names` (the chapter file and its continuations) the way
+    `chapter_sections` does.
+
+    When `want_id` is set (the card's section id), the match is on that
+    id — spoken text alone is not enough: two paragraphs that say the
+    same words under different `[Voice:]` tags are different cards, and
+    a first-spoken hit used to rewrite the earlier one (2026-11-01).
+    `cast`, `default_keys` (file → cast key; each file starts fresh, as
+    build does), and `rules` are required for the id walk.
+
+    Without `want_id`, the first block whose spoken form is `spoken`
+    wins (legacy). Returns `{file, line, lines, markdown}` or None when
+    no block says it whole — a paragraph carrying an inline tag the
+    audio strips, or (without `want_id`) a list read one item at a time.
+    """
     from .export import _REGION_CLOSE, _REGION_OPEN
 
     def is_tag(line: str) -> bool:
         return bool(_REGION_OPEN.match(line) or _REGION_CLOSE.match(line))
+
+    by_id = want_id is not None
+    if by_id and (cast is None or default_keys is None):
+        raise AudioError("locate_block(want_id=…) needs cast and default_keys")
+    rules = rules or []
+    heading_policy = config["headings"]["voice"]
+    one_per_item = config["text"]["lists"] == "one-per-item"
 
     for name in names:
         path = root / name
         if not path.exists():
             continue
         raw_lines = path.read_text(encoding="utf-8").split("\n")
+        # Each file starts on its own default voice (build → chapter_sections),
+        # never carrying a prior file's [Voice:] across a continuation.
+        current_key = (default_keys.get(name) or config["text"]["voice"]
+                       if by_id else "")
+        current_over: dict = {}
         for block in blocks_of("\n".join(raw_lines)):
+            if by_id and block["kind"] == "voice":
+                tag = parse_voice_tag(block["text"].strip())
+                if block["text"].count("\n"):
+                    continue
+                try:
+                    _resolve_voice(cast, tag["key"], {}, f"{name}:{block['line']}")
+                except AudioError:
+                    continue
+                current_key, current_over = tag["key"], tag["overrides"]
+                continue
             if block["kind"] in ("voice", "footnote", "illustration", "rule"):
                 continue
             count = block["text"].count("\n") + 1
@@ -880,11 +865,66 @@ def locate_block(root: Path, names: list[str], config: dict, spoken: str,
             if not prose.strip():
                 continue
             inner_kind, extra = _block_kind(prose)
-            inner = {"kind": inner_kind, "line": block["line"], "text": prose, **extra}
-            if (inner["kind"] == "heading") != (kind == "heading"):
-                continue
+            inner = {"kind": inner_kind, "line": block["line"], "text": prose,
+                     **extra}
             if inner["kind"] == "heading":
                 inner["text_heading"] = inner["text"]
+
+            if by_id:
+                where = f"{name}:{block['line']}"
+                if inner["kind"] == "heading":
+                    # Headings reset the cast to the file default (§5.3).
+                    current_key, current_over = (
+                        default_keys.get(name) or config["text"]["voice"], {})
+                    key = (current_key if heading_policy == "essay-default"
+                           else heading_policy)
+                    try:
+                        voice = _resolve_voice(cast, key, {}, where)
+                        said, _w = _spoken(inner, config)
+                    except AudioError:
+                        continue
+                    if (kind == "heading" and said and section_id(
+                            said, voice, applicable_rules(said, rules)
+                    ) == want_id):
+                        return {"file": name, "line": block["line"],
+                                "lines": count, "markdown": "\n".join(raw)}
+                    continue
+                if kind == "heading":
+                    continue
+                try:
+                    voice = _resolve_voice(cast, current_key, current_over,
+                                           where)
+                except AudioError:
+                    continue
+                if inner["kind"] == "list" and one_per_item:
+                    items = [_LIST_ITEM.sub("", ln).strip()
+                             for ln in prose.split("\n") if ln.strip()]
+                    for i, item in enumerate(items):
+                        try:
+                            said, _w = speech_text(item, config)
+                        except AudioError:
+                            continue
+                        if said and section_id(
+                                said, voice, applicable_rules(said, rules)
+                        ) == want_id:
+                            # One list line is the card; rewrite only it.
+                            line = block["line"] + i
+                            return {"file": name, "line": line, "lines": 1,
+                                    "markdown": raw_lines[line - 1]}
+                    continue
+                try:
+                    said, _w = _spoken(inner, config)
+                except AudioError:
+                    continue
+                if said and section_id(
+                        said, voice, applicable_rules(said, rules)
+                ) == want_id:
+                    return {"file": name, "line": block["line"],
+                            "lines": count, "markdown": "\n".join(raw)}
+                continue
+
+            if (inner["kind"] == "heading") != (kind == "heading"):
+                continue
             try:
                 said, _w = _spoken(inner, config)
             except AudioError:
@@ -1126,7 +1166,6 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
     from .export import continuation_level
     level = continuation_level(manuscript)
     previous: dict | None = None
-    from .api import is_placeholder
     for name in order:
         if name == TITLE_FILE or name == pron.FILENAME:
             continue
@@ -1398,7 +1437,7 @@ def check(db, manuscript: dict) -> dict:
     for name, text in files.items():
         if not name.endswith(".md") or name == pron.FILENAME:
             continue
-        _t, unresolved = directives.strip_tags(normalize_markdown(text))
+        _t, unresolved = directive_tags.strip_tags(normalize_markdown(text))
         for tag in unresolved:
             problems.append(f"{name}: unresolved [{tag['kind'].title()}: "
                             f"{tag['gist'][:50]}]")

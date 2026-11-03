@@ -27,6 +27,9 @@ for), is rendered with the `!!` marker `write status` uses and the row is
 still shown. A report that will not appear when the book is mid-flight is a
 report that is never there when it is wanted; the push that wants exact
 rows runs `summarize rebuild` first.
+
+`chapter_stats` is the readability line the same tab's chapter inventory
+shows beside each chapter.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import re
 
 from .context import Input
 from .db import Database, loads
+from .revisions import is_placeholder
 
 # The reader load's declaration (ruling 10).
 INPUTS = (Input.PARAGRAPH_RECORDS,)
@@ -130,3 +134,40 @@ def render_lines(rows: list[dict]) -> list[str]:
     if not debts:
         out.append("None. Every essay stands on ground an earlier one laid.")
     return out
+
+
+# -------------------------------------------------------- chapter readability
+
+_VOWEL_GROUPS = re.compile(r"[aeiouy]+", re.I)
+
+
+def _syllables(word: str) -> int:
+    w = word.lower().strip(".,;:!?\"'()[]—–")
+    if not w:
+        return 0
+    groups = len(_VOWEL_GROUPS.findall(w))
+    if w.endswith("e") and groups > 1:
+        groups -= 1
+    return max(groups, 1)
+
+
+def chapter_stats(text: str) -> dict:
+    """Deterministic readability signals for one chapter. ASL = average
+    sentence length in words; AWL = average word length in characters;
+    FRE = Flesch Reading Ease with a heuristic syllable count (treat as
+    approximate; higher is easier, 60–70 is plain English)."""
+    if is_placeholder(text):
+        # As for an empty file: a readability score for a mid-rewrite
+        # marker is noise in the manifest.
+        return {}
+    prose = re.sub(r"^#.*$", "", text, flags=re.M)   # headings aren't prose
+    words = re.findall(r"[A-Za-z'’]+", prose)
+    if not words:
+        return {}
+    sentences = max(len(re.findall(r"[.!?]+(?:[\s\"'’”)]|$)", prose)), 1)
+    syllables = sum(_syllables(w) for w in words)
+    asl = len(words) / sentences
+    fre = 206.835 - 1.015 * asl - 84.6 * (syllables / len(words))
+    return {"asl": asl,
+            "awl": sum(len(w) for w in words) / len(words),
+            "fre": max(0.0, min(100.0, fre))}

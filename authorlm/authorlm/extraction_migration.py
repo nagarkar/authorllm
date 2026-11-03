@@ -133,14 +133,14 @@ def _essay_payload(db: Database, manuscript: dict, essay: str, text: str,
                    own: set[str], knob: dict):
     """The adjudicator's context for one essay: blocks G and P without the
     essay's own pending nodes, and the summary unit (block M's source)."""
-    from .lenses import _title_of
+    from .structure import title_of
 
     nodes, edges = glossary_nodes(db, manuscript, essay, text, exclude=own)
     prec = precedent_rows(db, manuscript, essay, text,
                           int(knob["precedents_nearest"]), exclude=own)
     _text, unit = _summary_block(db, manuscript, essay, text,
                                  knob["summaries"])
-    return SimpleNamespace(file=essay, title=_title_of(text) or essay,
+    return SimpleNamespace(file=essay, title=title_of(text) or essay,
                            glossary=_glossary_block(nodes, edges),
                            precedents=_precedent_block(prec, essay),
                            summary_unit=unit)

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+from pathlib import Path
 
 TOC_FILENAME = "toc.toml"
 
@@ -73,6 +74,22 @@ def is_continuation(name: str, text: str, level: int | None) -> bool:
         return False
     found = first_heading_level(text)
     return found is not None and found >= level
+
+
+def title_of(text: str) -> str:
+    for line in (text or "").split("\n"):
+        s = line.strip()
+        if s.startswith("#"):
+            return s.lstrip("#").strip().strip("*").strip()
+    return ""
+
+
+def find_file(files: dict[str, str], file: str) -> str:
+    rel = next((r for r in files if r == file or r.endswith("/" + file)
+                or Path(r).name == file), None)
+    if rel is None:
+        raise LookupError(f"'{file}' is not a manuscript file")
+    return rel
 
 
 def is_sidecar(name: str) -> bool:

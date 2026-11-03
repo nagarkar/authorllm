@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from authorlm.gdocs import normalize_markdown
+from authorlm.normalize import normalize_markdown
 
 
 def check(label: str, cond: bool, detail: object = "") -> None:

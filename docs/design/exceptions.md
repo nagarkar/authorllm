@@ -25,7 +25,7 @@ This repo adopted metalm with the gaps below grandfathered. New work follows met
 | Config never moves by environment variable; test fakes are injected in-process | coding.md#where-env-lives | `authorlm/authorlm/paths.py:22` (`AUTHORLM_CONFIG`, `AUTHORLM_ENV`, `AUTHORLM_CRAFT`), `clients.py:776`, env pins at the top of each test file | adopted 2026-10-05 |
 | Data objects are `@dataclass(frozen=True, slots=True)` | coding.md#data-objects | 21 `@dataclass` uses in `authorlm/authorlm/`, none with `slots=True` | adopted 2026-10-05 |
 | Atomic writes: temp file plus rename | coding.md#idempotence-and-writes | `authorlm/authorlm/staging.py:190`, `manifest.py:176` (most of 73 `write_text` calls) | adopted 2026-10-05 |
-| Only the adapter imports a vendor SDK | coding.md#external-services-and-outbound-actions | `authorlm/authorlm/export.py:317`, `usage.py:195`, `llm.py:1498`, `gdocs.py` | adopted 2026-10-05 |
+| Only the adapter imports a vendor SDK | coding.md#external-services-and-outbound-actions | `authorlm/authorlm/drive_upload.py`, `usage.py:195`, `llm.py:1498`, `gdocs.py` | adopted 2026-10-05 |
 | Retry only 429/529, bounded | coding.md#llm-calls | `authorlm/authorlm/llm.py:1153` retries every error | adopted 2026-10-05 |
 | Prompts are versioned files `<role>_vN.md` with front matter; none inline | coding.md#llm-calls | `authorlm/authorlm/prompts/*.md` (14, unversioned); inline prompts per `prompt_registry.py:11` | adopted 2026-10-05 |
 | Layout: `doctor` gate, `./<repo>.sh` launcher, Python 3.12, pytest and ruff in the dev extra | coding.md#layout | No `doctor` verb or launcher; `authorlm/pyproject.toml` `requires-python = ">=3.11"` | adopted 2026-10-05 |
@@ -39,7 +39,7 @@ This repo adopted metalm with the gaps below grandfathered. New work follows met
 | Tests mirror the source; unit tests alongside integration | testing.md#where-tests-live | 22 test files for 84 modules; `gdocs.py` (4K lines) has no unit file | adopted 2026-10-05 |
 | A test plan per area | testing.md#test-plans | Only `authorlm/docs/morph-test-plan.md` | adopted 2026-10-05 |
 | `tailscale serve --https=<port>`, never the bare port | operations.md#tailscale-serve | `.claude/skills/authorlm/SKILL.md:1517`, `authorlm/authorlm/audiobook_server.py:10` and `:160`, `authorlm/docs/audiobook-review-design.md:116` | adopted 2026-10-05 |
-| Served apps answer only this machine's Host (else 421); `doctor`, launch agent, plist and sandbox script | operations.md#served-apps | `authorlm/authorlm/audiobook_server.py:95`, `triage_server.py:43`, `workbench_server.py:40`; no `scripts/` | adopted 2026-10-05 |
+| Served apps answer only this machine's Host (else 421); `doctor` and sandbox script | operations.md#served-apps | `authorlm/authorlm/audiobook_server.py:95`, `triage_server.py:43`, `workbench_server.py:40`; no `doctor` verb, no `scripts/sandbox_server.sh` | adopted 2026-10-05 |
 | Agents do not start servers; pages are checked in real Chrome at desktop and 375 px | operations.md#launch-agents | `.claude/skills/authorlm/SKILL.md:604`, `:1479-1481` | adopted 2026-10-05 |
 | Separate test and production credentials, with a confirmation phrase for paid calls | operations.md#credentials | `authorlm/tests/test_live_llm.py` | adopted 2026-10-05 |
 | One object, one page | ui.md#one-object-one-page | Pronunciations are edited on both `authorlm/web/workbench/` and `authorlm/web/audiobook/` (two diverged `Workbench.tsx`) | adopted 2026-10-05 |

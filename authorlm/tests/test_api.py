@@ -69,9 +69,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
-from authorlm import api, concepts, guidance as guidance_module  # noqa: E402
+from authorlm import api, concepts, directive_tags, docs, form_grammar, guidance as guidance_module  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 from authorlm.db import ko_fields, loads  # noqa: E402
+from authorlm.manifest import chapter_stats  # noqa: E402
 
 PASSED = 0
 
@@ -3026,11 +3027,11 @@ def check_placeholder_reader_paths() -> None:
         check("F5 — chapter_stats returns {} for a placeholder, as it "
               "already does for an empty file: a Flesch score for a "
               "mid-rewrite marker is noise in the manifest",
-              _gdocs.chapter_stats(api.PLACEHOLDER) == {},
-              str(_gdocs.chapter_stats(api.PLACEHOLDER)))
+              chapter_stats(api.PLACEHOLDER) == {},
+              str(chapter_stats(api.PLACEHOLDER)))
         check("...and it still scores real prose (the guard did not "
               "swallow the function)",
-              _gdocs.chapter_stats("# H\n\nA sentence of real prose "
+              chapter_stats("# H\n\nA sentence of real prose "
                                    "stands here.\n").get("fre") is not None)
 
         # --- change 24: neither push path may make the Doc the working
@@ -5245,8 +5246,8 @@ def check_directives() -> None:
             "In 1916.[FOOTNOTE: Jung's Seven Sermons date | label: RD]\n\n"
             "An [Illustration: a tracker kneeling] is not a request, nor is\n"
             "[Footnote: a tag split\nacross lines], nor [Explain:] alone.\n")
-    fn = dv.scan_text(text, "footnote")
-    ex = dv.scan_text(text, "explain")
+    fn = directive_tags.scan_text(text, "footnote")
+    ex = directive_tags.scan_text(text, "explain")
     check("footnote grammar: inline, case-insensitive keyword, optional "
           "| label: override, never across lines, never an illustration tag",
           [(t["n"], t["line"], t["gist"], t["label"]) for t in fn]
@@ -5259,7 +5260,7 @@ def check_directives() -> None:
     check("a tag's paragraph rides with it (the evidence row's anchor)",
           fn[0]["paragraph"].startswith("The vital lie.")
           and ex[1]["paragraph"] == "[Explain: why the Field is not a substance]")
-    stripped, removed = dv.strip_tags(text)
+    stripped, removed = directive_tags.strip_tags(text)
     check("exports strip every kind of tag — inline without disturbing the "
           "sentence's spacing, standalone with its whole line",
           "The vital lie. It holds. Then on.\n\nIn 1916.\n\nAn [Illustration"
@@ -5468,7 +5469,7 @@ def check_directives() -> None:
               _raises(lambda: dv.apply(db, ms, {}, "footnote", abs_becker,
                                        [(1, "x")]), "checked out to Google Docs")
               and (ms_dir / "becker.md").read_text() == becker
-              and api._resolve_relpath(ms, abs_becker) == "becker.md")
+              and docs._resolve_relpath(ms, abs_becker) == "becker.md")
         outside = str((root / "other.md").resolve())
         (root / "other.md").write_text("Alpha.[Footnote: leak]\n")
         check("an absolute path outside the manuscript is refused — "
@@ -5509,7 +5510,7 @@ def check_suggestions() -> None:
             "Beta states the claim without a case.\n\n"
             "[suggestion: add an example]\n\n"
             "Gamma closes.[Explain: what closing means]\n")
-    sg = dv.scan_text(text, "suggestion")
+    sg = directive_tags.scan_text(text, "suggestion")
     check("suggestion grammar: inline targets its own paragraph, standalone "
           "targets the paragraph BEFORE it, keyword case-insensitive",
           [(t["n"], t["line"], t["gist"], t["standalone"]) for t in sg]
@@ -5520,9 +5521,91 @@ def check_suggestions() -> None:
           and text[sg[1]["target_start"]:sg[1]["target_end"]] == sg[1]["target"],
           str(sg))
     check("a standalone tag with nothing before it has no target",
-          dv.scan_text("[Suggestion: lead with the claim]\n\nA.\n",
+          directive_tags.scan_text("[Suggestion: lead with the claim]\n\nA.\n",
                        "suggestion")[0]["target"] is None)
-    stripped, removed = dv.strip_tags(text)
+    # The author writes the note on the NEXT line (design §1: "under it"),
+    # often with no blank line. That shares a blank-line unit with the
+    # paragraph above — the target is those lines, never an earlier unit.
+    tight = ("# Essay\n\n"
+             "First real paragraph.\n\n"
+             "Second paragraph that should be edited.\n"
+             "[Suggestion: make this clearer]\n"
+             "Third paragraph that must survive.\n\n"
+             "Fourth.\n")
+    tight_tag = directive_tags.scan_text(tight, "suggestion")[0]
+    check("a note on the next line (no blank) targets the lines above it "
+          "in the same unit, not the previous blank-line paragraph",
+          tight_tag["standalone"]
+          and tight_tag["target"] == "Second paragraph that should be edited."
+          and tight[tight_tag["target_start"]:tight_tag["target_end"]]
+          == tight_tag["target"],
+          repr(tight_tag.get("target")))
+    check("landing that next-line note replaces only its target and keeps "
+          "prose that followed the tag in the same unit",
+          dv._land_suggestion(tight, tight_tag, "REPLACED.")
+          == ("# Essay\n\n"
+              "First real paragraph.\n\n"
+              "REPLACED.\n"
+              "Third paragraph that must survive.\n\n"
+              "Fourth.\n"),
+          repr(dv._land_suggestion(tight, tight_tag, "REPLACED.")))
+    tight_root = Path(tempfile.mkdtemp(prefix="authorlm-sugg-tight-"))
+    try:
+        tight_ms = tight_root / "manuscript"
+        tight_ms.mkdir()
+        (tight_ms / "wall.md").write_text(tight)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(tight_root), "init", "--name",
+                      "sugg-tight", "--path", str(tight_ms)])
+        tight_db = api.open_db(str(tight_root))
+        tight_man = api.get_manuscript(tight_db)
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(tight_db, tight_man, {})
+        dv.apply(tight_db, tight_man, {}, "suggestion", "wall.md",
+                 [(1, "REPLACED.")])
+        got = (tight_ms / "wall.md").read_text()
+        check("direct apply of a next-line note does not wipe an earlier "
+              "blank-line paragraph",
+              got == ("# Essay\n\n"
+                      "First real paragraph.\n\n"
+                      "REPLACED.\n"
+                      "Third paragraph that must survive.\n\n"
+                      "Fourth.\n"),
+              repr(got))
+    finally:
+        shutil.rmtree(tight_root, ignore_errors=True)
+    # A margin note under prose with an illustration/clip between them:
+    # the nearest prior *prose* is the target; apply must not destroy the
+    # intervening markup (or plant <<Illustration:…>>{{revised}}).
+    intervening = ("# Essay\n\n"
+                   "Prose that should be revised.\n\n"
+                   "[Illustration: kailash]\n\n"
+                   "[Clip: tired man]\nSpoken in the clip.\n[/Clip]\n\n"
+                   "[Suggestion: simplify]\n")
+    intervening_tag = directive_tags.scan_text(intervening, "suggestion")[0]
+    check("a standalone note after intervening markup targets the prior "
+          "prose, not the illustration or clip",
+          intervening_tag["standalone"]
+          and intervening_tag["target"] == "Prose that should be revised."
+          and intervening[intervening_tag["target_start"]:
+                          intervening_tag["target_end"]]
+          == intervening_tag["target"],
+          repr(intervening_tag.get("target")))
+    landed_intervening = dv._land_suggestion(
+        intervening, intervening_tag, "Simplified prose.")
+    check("landing that note replaces only the prose and keeps the "
+          "intervening illustration and clip",
+          landed_intervening == ("# Essay\n\n"
+                                 "Simplified prose.\n\n"
+                                 "[Illustration: kailash]\n\n"
+                                 "[Clip: tired man]\nSpoken in the clip.\n"
+                                 "[/Clip]\n"),
+          repr(landed_intervening))
+    check("a standalone note with only markup before it has no prose "
+          "target",
+          directive_tags.scan_text("[Illustration: x]\n\n[Suggestion: y]\n",
+                       "suggestion")[0]["target"] is None)
+    stripped, removed = directive_tags.strip_tags(text)
     check("exports strip the suggestion tag like any other, inline and "
           "standalone",
           "Alpha opens. It runs long. Then on.\n\nBeta states the claim "
@@ -7033,7 +7116,7 @@ def main_test() -> None:
         check("definition is not a concept-node kind",
               "definition" not in concepts.NODE_KINDS)
         check("defines remains a graph relation",
-              "defines" in extraction.VALID_RELATIONS)
+              "defines" in concepts.VALID_RELATIONS)
         check("definition remains a guidance kind",
               "definition" in guidance_module.GUIDANCE_KINDS)
         try:
@@ -7204,7 +7287,8 @@ def main_test() -> None:
         api.close_session(db, manuscript)
 
         # --- Google Docs bridge: normalizer + stub-service round trip ---
-        from authorlm.gdocs import normalize_markdown, pull_doc, push_doc
+        from authorlm.gdocs import pull_doc, push_doc
+        from authorlm.normalize import normalize_markdown
 
         messy = ("# Title\r\n\r\n\r\n\r\nSome \\-escaped \\. text here.   \n"
                  "*  a bullet\n\nEnds with nbsp.")
@@ -7225,7 +7309,7 @@ def main_test() -> None:
               repr(normalize_markdown(stanza)))
         from authorlm.gdocs import HARD_BREAK_CHAR, rendered_text
         stanza_md = "Every morning I rise,\\\nTo fight a *fiery* dragon."
-        from authorlm.threads import pending_forms as _pf
+        from authorlm.form_grammar import pending_forms as _pf
         struck = ("~~<<Each day, I write a bit,~~\\\n~~Tis only a modest "
                   "stride,~~\\\n~~The essence will be clarified.>>~~"
                   "{{Each day,\\\nOnly a stride.}}")
@@ -7311,7 +7395,7 @@ def main_test() -> None:
         # export's delimiters on the marked text left the new half's
         # `\$` escaped, and the resolve landed it (2026-10-18, SMSTTD
         # recapitulation.md R10). Spans are found per reading now.
-        from authorlm.threads import _collapse
+        from authorlm.form_grammar import _collapse
         exporter2 = lambda s: _re_math.sub(r"([\\_=$<>])", r"\\\1", s)
         span = "$\\neg N:=\\{\\neg x:x\\in N\\}$"
         for marked in (
@@ -7360,8 +7444,8 @@ def main_test() -> None:
               repr(normalize_markdown(empty_heading)))
 
         # --- illustration slots: tag grammar + scan-derived registry ---
-        from authorlm.illus import (desc_hash, parse_tag, slot_report,
-                                    strip_dangling)
+        from authorlm.illus import desc_hash, parse_tag, slot_report
+        from authorlm.normalize import strip_dangling
 
         tag = parse_tag(
             "[Illustration: a tracker kneeling | caption: The tracker]")
@@ -8487,10 +8571,10 @@ def main_test() -> None:
         from authorlm import threads as th
         from authorlm.gdocs import propose_change
 
-        strip_out = th.strip_pending("A <<old>>{{new}} B")
+        strip_out = form_grammar.strip_pending("A <<old>>{{new}} B")
         check("pending grammar strips to canonical old; strays warn",
               strip_out == ("A old B", [])
-              and th.strip_pending("stray << here")[1], str(strip_out))
+              and form_grammar.strip_pending("stray << here")[1], str(strip_out))
         check("verdict grammar is deterministic, whole-reply only",
               th.classify_reply("Go ahead!") == "approve"
               and th.classify_reply("no") == "decline"
@@ -8503,39 +8587,39 @@ def main_test() -> None:
         # insertions, strikethrough wrappers, and form enumeration that
         # must not double-count the {{new}} half of a replace.
         check("render_pending with empty old is the insertion form",
-              th.render_pending("", "bridge") == "{{bridge}}"
-              and th.render_insertion("bridge") == "{{bridge}}")
+              form_grammar.render_pending("", "bridge") == "{{bridge}}"
+              and form_grammar.render_insertion("bridge") == "{{bridge}}")
         wrapped = "Lead.\n\n~~<<old span>>~~{{new span}}\n\nTail.\n"
         check("approved_text keeps {{new}} halves (incl. ~~-wrapped replaces)",
-              th.approved_text(wrapped) == "Lead.\n\nnew span\n\nTail.\n",
-              th.approved_text(wrapped))
+              form_grammar.approved_text(wrapped) == "Lead.\n\nnew span\n\nTail.\n",
+              form_grammar.approved_text(wrapped))
         check("strip_pending on ~~-wrapped replaces still yields OLD",
-              th.strip_pending(wrapped)[0] == "Lead.\n\nold span\n\nTail.\n",
-              th.strip_pending(wrapped))
+              form_grammar.strip_pending(wrapped)[0] == "Lead.\n\nold span\n\nTail.\n",
+              form_grammar.strip_pending(wrapped))
         with_insert = ("Para one.\n\n{{inserted paragraph}}\n\n"
                        "<<swap me>>{{swapped}}\n\nPara three.\n")
-        stripped_ins, _ = th.strip_pending(with_insert)
+        stripped_ins, _ = form_grammar.strip_pending(with_insert)
         check("strip_pending drops paragraph insertions byte-clean",
               stripped_ins == "Para one.\n\nswap me\n\nPara three.\n",
               stripped_ins)
         check("approved_text keeps paragraph insertions and replace news",
-              th.approved_text(with_insert)
+              form_grammar.approved_text(with_insert)
               == ("Para one.\n\ninserted paragraph\n\n"
                   "swapped\n\nPara three.\n"),
-              th.approved_text(with_insert))
+              form_grammar.approved_text(with_insert))
         # Author braces reach the tab via push; bare-INSERTION collapse
         # used to delete them on pull/reconcile (silent auto-pull when
         # local still matched pushed_hash). Paragraph insertions only.
         author_braces = (
             "A template substitutes {{title}} and writes {{a, b}}.\n\n"
             "Energy $E={{mc}}^2$.\n")
-        brace_stripped, brace_warns = th.strip_pending(author_braces)
+        brace_stripped, brace_warns = form_grammar.strip_pending(author_braces)
         check("strip_pending leaves author {{…}} / TeX braces intact "
               "with no marker warning",
               brace_stripped == author_braces and brace_warns == [],
               repr((brace_stripped, brace_warns)))
         head_insert = "{{lead insert}}\n\n" + author_braces
-        head_stripped, _ = th.strip_pending(head_insert)
+        head_stripped, _ = form_grammar.strip_pending(head_insert)
         check("strip_pending still drops a start-of-text critique "
               "insertion while keeping author braces below it",
               head_stripped == author_braces
@@ -8543,10 +8627,10 @@ def main_test() -> None:
               repr(head_stripped))
         check("approved_text unwraps paragraph insertions but does not "
               "eat inline author braces",
-              th.approved_text(head_insert)
+              form_grammar.approved_text(head_insert)
               == "lead insert\n\n" + author_braces,
-              th.approved_text(head_insert))
-        forms = th.pending_forms(with_insert)
+              form_grammar.approved_text(head_insert))
+        forms = form_grammar.pending_forms(with_insert)
         check("pending_forms lists replace + insert once each, doc order",
               [(f["kind"], f["old"], f["new"]) for f in forms]
               == [("insert", "", "inserted paragraph"),
@@ -8554,11 +8638,11 @@ def main_test() -> None:
               str(forms))
         nested = "<<keep {{this}} literal>>{{replacement}}"
         check("pending_forms does not treat replace's {{new}} as an insert",
-              th.pending_forms(nested)
+              form_grammar.pending_forms(nested)
               == [{"kind": "replace", "old": "keep {{this}} literal",
                    "new": "replacement", "start": 0,
                    "end": len(nested)}],
-              str(th.pending_forms(nested)))
+              str(form_grammar.pending_forms(nested)))
 
         pull_doc(db, manuscript, "01-choice.md", service=stub, force=True)
         stub.add_comment("c-1", "Doc went another way",
@@ -8820,21 +8904,21 @@ def main_test() -> None:
         # with ~~ strikethrough in the markdown export).
         exported = ("~~\\<\\<the old way.\\>\\>~~"
                     "{{the new way.}}")
-        stripped_exp = th.strip_pending(normalize_markdown(exported))
+        stripped_exp = form_grammar.strip_pending(normalize_markdown(exported))
         check("export-escaped pending spans strip to canonical old",
               stripped_exp == ("the old way.\n", []), str(stripped_exp))
 
         # Nested braces in proposal text would truncate at the first }} —
         # refuse before any Doc write.
         try:
-            th.assert_no_pending_markers("safe old", "f(x)={{a}}")
+            form_grammar.assert_no_pending_markers("safe old", "f(x)={{a}}")
             check("propose refuses delimiter-bearing new text", False)
         except ValueError as err:
             check("propose refuses delimiter-bearing new text",
                   "pending-change grammar" in str(err)
                   and ("{{" in str(err) or "}}" in str(err)), str(err))
         try:
-            th.render_pending("<<already marked>>", "new")
+            form_grammar.render_pending("<<already marked>>", "new")
             check("render_pending refuses delimiter-bearing old text", False)
         except ValueError as err:
             check("render_pending refuses delimiter-bearing old text",
@@ -9065,7 +9149,8 @@ def main_test() -> None:
         (ms / "07-critique-write.md").unlink()
 
         # --- single-manuscript export (doc create-manuscript) ---
-        from authorlm.export import combined_markdown, export_manuscript
+        from authorlm.drive_upload import export_manuscript
+        from authorlm.export import combined_markdown
 
         (ms / "00-intro.md").write_text("# Intro\n\nWelcome.\n")
         (ms / "toc.toml").write_text(
@@ -10549,7 +10634,7 @@ def main_test() -> None:
               len(fn["edits_staged"]) == 1
               and "Every Beat counts.[Footnote: cite the (census) table for the count]"
               in planted
-              and len(_dir.scan_text(planted, "footnote")) == 1
+              and len(directive_tags.scan_text(planted, "footnote")) == 1
               and _json.loads(fn["findings"][0]["metadata"])["footnote"]
               == "cite the (census) table for the count", planted)
         pl = lenses.run_lens(ldb, lm, lsession, "plain", "02-second.md",
@@ -10597,13 +10682,13 @@ def main_test() -> None:
                             f"or give it a claim | id: {jr['findings'][0]['id'][:11]}]")
               and _json.loads(j_thread["metadata"])["kind"] == "insert"
               and _json.loads(j_thread["metadata"])["anchor_paragraph"] >= 1
-              and len(_dir.scan_text(j_new, "judgment")) == 1
+              and len(directive_tags.scan_text(j_new, "judgment")) == 1
               and j_meta["judgment"].startswith("cut the Beat"), j_new)
         folded = api._fold_judgment("A first paragraph.\n\n{{" + j_new + "}}\n\nNext.", "{{" + j_new + "}}", j_new)
         check("an accepted judgment folds back onto the end of the paragraph "
               "it follows, where the file has always carried it",
               folded == "A first paragraph." + j_new + "\n\nNext.", repr(folded))
-        stripped, removed = _dir.strip_tags(j_new)
+        stripped, removed = directive_tags.strip_tags(j_new)
         check("exports strip a judgment tag like any directive",
               "[Judgment" not in stripped and removed[0]["kind"] == "judgment")
         try:
@@ -10687,6 +10772,17 @@ def main_test() -> None:
               and "[Judgment" not in ri["staged"][0]["proposed_new"]
               and api.get_intent(ldb, ri["intents"][0]["intent"])["scope"] == "02-second.md"
               if hasattr(api, "get_intent") else len(ri["intents"]) == 1, str(ri))
+        link = lms / "02-link.md"
+        link.symlink_to("02-second.md")
+        rl = lenses.assemble_repair(ldb, lm, "02-link.md")
+        tag_l = next(t for t in rl.tags if t["id"] == fact[:11])
+        ril = lenses.record_repairs(ldb, lm, lsession, "02-link.md", {"repairs": [
+            {"id": tag_l["id"], "action": "intent",
+             "text": "Say which census counted the sentence"}]}, payload=rl)
+        check("a repair on a symlinked file scopes its intent to the link's target",
+              ldb.one("SELECT scope FROM declared_intents WHERE id = ?",
+                      (ril["intents"][0]["intent"],))["scope"] == "02-second.md", str(ril))
+        link.unlink()
         dm = lenses.dismiss_judgments(ldb, lm, "02-second.md", [fact[:11]],
                                       "the count is illustrative")
         check("dismissal rejects the finding with the reason and stages the "

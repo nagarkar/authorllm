@@ -17,7 +17,7 @@ import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from authorlm import audio, export, media, media_gen
+from authorlm import audio, export, media, media_gen, media_tags
 
 TOC = '[[chapter]]\nfile = "ecce.md"\n'
 FILL = " ".join(["word"] * 120)
@@ -702,7 +702,7 @@ class MediaTests(unittest.TestCase):
                 "[Montage: c]\nMontage prose kept.\n[Clip: y | use: a.mp4]\n"
                 "[/Montage]\n\n[Collage: cut]\n[Clip: z | use: a.mp4]\n"
                 "[/Collage]\n\nAfter.\n")
-        out, removed = media.strip_for_book(text, "ecce.md")
+        out, removed = media_tags.strip_for_book(text, "ecce.md")
         for kept in ("Intro.", "Kept prose.", "Montage prose kept.", "After."):
             self.assertIn(kept, out)
         self.assertNotIn("[Clip", out)
