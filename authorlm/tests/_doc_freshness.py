@@ -10,7 +10,7 @@ the Doc line is the witness that survives a deleted log.
     log missing or old, Doc line old
       or absent                      -> re-record live
     log missing, Doc line fresh      -> FAIL: something deleted the log
-    no Google token (a cloud run)    -> skip the live step, say so
+    no Google token (a cloud run)    -> skip the live step, print a SKIP line
 
 `decide` is pure (clock, log and Doc are handed in) so the rule is
 tested hermetically (test_doc_freshness.py); `ensure_fresh` wires it to
@@ -117,9 +117,8 @@ def ensure_fresh() -> str:
     action = decide(now, log_time(), LOG.exists(), TOKEN.exists(),
                     read_doc_time)
     if action == "skip":
-        print("  notice: no Google token (~/.authorlm/gdocs_token.json); "
-              "the recordings' age is not checked live, using them as "
-              "they are")
+        print("  SKIP: the live check of the Doc recordings' age, no Google "
+              "token (~/.authorlm/gdocs_token.json); using them as they are")
     elif action == "record":
         print("  recordings are 7 days old or more: re-recording live "
               "(tests/doc_road_live.py --record)", flush=True)

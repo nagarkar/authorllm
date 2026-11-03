@@ -3950,6 +3950,7 @@ def scenario_alias_and_syllogism(root: Path) -> None:
         import readline
     except ImportError:
         readline = None
+        print("  SKIP: triage keystroke history check, this Python has no readline")
     if readline is not None:
         from authorlm.cli import _ephemeral_history
         base = readline.get_current_history_length()
@@ -4701,7 +4702,7 @@ def scenario_ephemeral_history() -> None:
     try:
         import readline
     except ImportError:
-        print("  (readline unavailable — skipped)")
+        print("  SKIP: triage history checks of Scenario H, this Python has no readline")
         return
     from authorlm.cli import _ephemeral_history
     base = readline.get_current_history_length()

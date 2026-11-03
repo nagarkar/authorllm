@@ -1170,7 +1170,9 @@ def check_casting_filter_block() -> None:
 def _mp3(path: Path, secs: float = 0.2) -> None:
     """A real, tiny mp3 — ffmpeg concat refuses fake bytes."""
     import subprocess
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+
+    from authorlm.generation import find_tool
+    subprocess.run([find_tool("ffmpeg"), "-y", "-loglevel", "error", "-f", "lavfi", "-i",
                     "sine=frequency=440:sample_rate=44100", "-t",
                     str(secs), "-c:a", "libmp3lame", "-q:a", "9", str(path)],
                    check=True)
@@ -1301,6 +1303,8 @@ def check_generation() -> None:
               >= stamp_before)
 
         # Stitch, with real tiny mp3s standing in for the takes.
+        if not gen.find_tool("ffmpeg"):
+            print("  SKIP: stitch checks, ffmpeg not found")
         if gen.find_tool("ffmpeg"):
             for sid in ids:
                 _mp3(root / f"audio/{sid}.mp3_44100_128.mp3")
@@ -1363,6 +1367,8 @@ def check_generation() -> None:
         check("status counts previews and names them per paragraph",
               st["previewed"] == 4 and st["sections"][0]["preview"] == f"preview/{ids[0]}.mp3")
         # stitch --preview: the free stand-in narration of one chapter.
+        if not gen.find_tool("ffmpeg"):
+            print("  SKIP: stitch --preview checks, ffmpeg not found")
         if gen.find_tool("ffmpeg"):
             said_ids: list[str] = []
 
@@ -1399,6 +1405,8 @@ def check_generation() -> None:
             again_ps = gen.stitch_preview(manuscript, "kindness", renderer=mp3_stub)
             check("a second stitch --preview renders nothing", again_ps["rendered"] == 0
                   and said_ids == [ids[0]])
+        if sys.platform != "darwin" or not gen.find_tool("ffmpeg"):
+            print("  SKIP: real `say` render checks, they need macOS and ffmpeg")
         if sys.platform == "darwin" and gen.find_tool("ffmpeg"):
             real = gen.render_preview(root, {"id": "c" * 32, "text": "A short test.",
                                              "speed": 1.0, "pronunciations": []},

@@ -501,7 +501,7 @@ def test_shell_history(root: Path) -> None:
     try:
         import readline
     except ImportError:
-        print("  (readline unavailable — skipped)")
+        print("  SKIP: persistent shell history checks, this Python has no readline")
         return
     from authorlm.shell import (_install_history, _save_history,
                                 _trim_nested_history)

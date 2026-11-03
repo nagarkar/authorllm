@@ -608,6 +608,12 @@ Canned replies for the three summary-hierarchy prompts, shared by the hermetic s
 
 Drive the Doc-road failure scenarios (test_doc_road_failures.py) against the LIVE Google API on the one fixture Doc, "AuthorLM test fixture: Doc road", and record every call into tests/doc_cache/.
 
+## `tests.run_all`
+
+`authorlm/tests/run_all.py`
+
+The one way to run the whole test suite.
+
 ## `tests.test_anchor_prefix_truncation`
 
 `authorlm/tests/test_anchor_prefix_truncation.py`
@@ -714,7 +720,7 @@ The Doc-road failures of 2026-10-30 (discernment.md, SMSTTD), reproduced against
 
 `authorlm/tests/test_doc_road_verbs.py`
 
-Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, `doc merge`, `doc resolve-comments`, `revise stage|resolve`, `footnote apply --from-json`, the diff-push divergence message, the pull's TOC-conflict pairs, and `tools/run_tests.sh`.
+Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, `doc merge`, `doc resolve-comments`, `revise stage|resolve`, `footnote apply --from-json`, the diff-push divergence message and the pull's TOC-conflict pairs.
 
 ## `tests.test_e2e`
 
@@ -871,6 +877,12 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 `authorlm/tests/test_pdf2md_text_layer_gate.py`
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
+
+## `tests.test_run_all`
+
+`authorlm/tests/test_run_all.py`
+
+tests/run_all.py, the suite's one runner, against fixture trees: throwaway test files whose outcome is known, so nothing here needs Node, a model or the real suite. Every test that ought to run runs; a silent skip or an early stop is how one does not. (owner)
 
 ## `tests.test_section_summaries`
 

@@ -9214,6 +9214,8 @@ def main_test() -> None:
         # which the markdown importer cannot carry) — so the Drive half
         # needs pandoc, like every other publishing output.
         import shutil as _shutil_exp
+        if not _shutil_exp.which("pandoc"):
+            print("  SKIP: export Doc upload checks, pandoc not on PATH")
         if _shutil_exp.which("pandoc"):
             exported = export_manuscript(db, manuscript, service=stub)
             check("export creates the manuscript Doc in the existing folder",
@@ -9416,6 +9418,9 @@ def main_test() -> None:
               any("05-math.md:" in p and "never closed" in p
                   for p in math_problems), math_problems)
         import shutil as _shutil_chk
+        if not _shutil_chk.which("pandoc"):
+            print("  SKIP: export check of math outside the portable subset, "
+                  "pandoc not on PATH")
         if _shutil_chk.which("pandoc"):
             check("export check names math outside the portable subset",
                   any("04-bad.md: math outside" in p and "dv" in p
@@ -9748,8 +9753,7 @@ def main_test() -> None:
                   and "Author House LLC" in core_properties,
                   core_properties)
         else:
-            print("  note: pandoc not on PATH — docx conversion untested "
-                  "in this run")
+            print("  SKIP: docx conversion checks, pandoc not on PATH")
         (ms / "title.md").unlink()
 
         # --- chapter-scoped publishing: a part of the book, same build ---
@@ -9844,6 +9848,8 @@ def main_test() -> None:
               and "A different end." not in Path(
                   second["markdown"]).read_text(),
               f"{first['markdown']!r} vs {second['markdown']!r}")
+        if not _shutil.which("pandoc"):
+            print("  SKIP: chapter epub checks, pandoc not on PATH")
         if _shutil.which("pandoc"):
             whole = export_published(db, manuscript, fmt="md",
                                      variant="images")
