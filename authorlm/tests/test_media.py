@@ -11,10 +11,13 @@ os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-media/config.toml"
 os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-media/.env"
 os.environ["AUTHORLM_CLIENT"] = "none"
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from authorlm import audio, export, media, media_gen, media_tags
@@ -485,14 +488,94 @@ class MediaTests(unittest.TestCase):
         self.assertTrue(any("only a clip with a generation spec" in r
                             for r in p["reasons"]))
 
-    def test_caps_need_confirm(self):
+    def _capped_clip(self):
         key = self._generated_clip(words=10)
         (self.root / "_clips" / "settings.toml").write_text(
             "max_call_usd = 0.10\n", encoding="utf-8")
-        ms = {"path": str(self.root), "id": "m"}
-        self.assertTrue(media_gen.plan(self._DB(), ms, key)["needs_confirm"])
-        with self.assertRaises(ValueError):
-            media_gen.start(self._DB(), ms, key, http=lambda *a, **k: {})
+        return key, {"path": str(self.root), "id": "m"}
+
+    def test_a_cap_stops_and_names_force(self):
+        key, ms = self._capped_clip()
+        caps = media_gen.plan(self._DB(), ms, key)["over_cap"]
+        self.assertTrue(caps)
+        calls = []
+        with self.assertRaises(ValueError) as stopped:
+            media_gen.start(self._DB(), ms, key,
+                            http=lambda *a, **k: calls.append(a) or {})
+        self.assertIn("--force", str(stopped.exception))
+        self.assertIn(caps[0], str(stopped.exception))
+        self.assertEqual(calls, [])
+
+    def _run_clip(self, ms, *argv):
+        """The CLI road with the database and the billed call stubbed."""
+        from authorlm import cli
+
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        calls = []
+
+        def http(method, url, k, body=None, raw=False, timeout=120):
+            calls.append(url)
+            return {"name": "models/veo/operations/op1"}
+        out = io.StringIO()
+        args = cli.build_parser().parse_args(["clip", *argv])
+        with mock.patch.object(cli, "_open_db", return_value=self._DB()), \
+                mock.patch.object(cli, "_manuscript", return_value=ms), \
+                mock.patch.object(media_gen, "_http", http), \
+                contextlib.redirect_stdout(out):
+            try:
+                cli.cmd_clip(args)
+                code = 0
+            except SystemExit as err:
+                code = err.code
+        return out.getvalue(), code, calls
+
+    def test_clip_ensure_force_goes_past_the_cap_and_says_so(self):
+        key, ms = self._capped_clip()
+        cap = media_gen.plan(self._DB(), ms, key)["over_cap"][0]
+        _out, code, calls = self._run_clip(ms, "ensure", key, "--generate")
+        self.assertIn("--force", str(code))
+        self.assertEqual(calls, [])
+        out, code, calls = self._run_clip(ms, "ensure", key, "--force")
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [], "--force alone never starts a generation")
+        out, code, calls = self._run_clip(ms, "ensure", key, "--generate", "--force")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertIn(f"--force: went past the spend cap: {cap}", out)
+
+    def test_mcp_clip_ensure_names_what_force_overrode(self):
+        from authorlm import mcp_server
+
+        key, ms = self._capped_clip()
+        cap = media_gen.plan(self._DB(), ms, key)["over_cap"][0]
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        calls = []
+
+        def http(method, url, k, body=None, raw=False, timeout=120):
+            calls.append(url)
+            return {"name": "models/veo/operations/op1"}
+        with mock.patch.object(mcp_server, "_db", return_value=self._DB()), \
+                mock.patch.object(mcp_server, "_manuscript", return_value=ms), \
+                mock.patch.object(media_gen, "_http", http):
+            stopped = mcp_server.clip_ensure(key, generate=True, dry_run=False)
+            self.assertFalse(stopped["ok"])
+            self.assertIn("--force", stopped["error"])
+            self.assertEqual(calls, [])
+            went = mcp_server.clip_ensure(key, generate=True, dry_run=False,
+                                          force=True)
+        self.assertEqual(went["result"]["overrode"], [cap])
+        self.assertEqual(len(calls), 1)
+
+    def test_clip_ensure_json_names_what_force_overrode(self):
+        key, ms = self._capped_clip()
+        cap = media_gen.plan(self._DB(), ms, key)["over_cap"][0]
+        out, code, calls = self._run_clip(ms, "ensure", key, "--json",
+                                          "--generate", "--force")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        reply = json.loads(out)
+        self.assertEqual(reply["overrode"], [cap])
+        self.assertTrue(reply["job"])
 
     def test_start_poll_take_pick_attach(self):
         os.environ["GEMINI_API_KEY"] = "test-key"
@@ -616,6 +699,24 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(p["previous_interaction_id"], "v1_x")
         self.assertEqual(p["est_usd"], 0.43)      # $0.40 out + $0.03 re-read
         self.assertTrue(p["prompt"].endswith("Keep everything else the same."))
+        # A cap stops the revision and names --force; --force goes past it.
+        settings = self.root / "_clips" / "settings.toml"
+        before = settings.read_text(encoding="utf-8") if settings.exists() else None
+        settings.write_text("max_call_usd = 0.10\n", encoding="utf-8")
+        posts = len(calls)
+        with self.assertRaises(ValueError) as stopped:
+            media_gen.edit_start(ms, key, "01", "warmer light", http=http)
+        self.assertIn("--force", str(stopped.exception))
+        self.assertEqual(len(calls), posts)
+        forced = media_gen.edit_start(ms, key, "01", "warmer light", force=True,
+                                      http=http)
+        self.assertEqual(forced["edit_of"], first)
+        (self.root / "_clips/jobs" / f"{forced['id']}.json").unlink()
+        (self.root / "_clips/jobs" / f"{forced['id']}.request.json").unlink()
+        if before is None:
+            settings.unlink()
+        else:
+            settings.write_text(before, encoding="utf-8")
         edit = media_gen.edit_start(ms, key, "01", "warmer light", http=http)
         self.assertEqual(calls[-1][2]["previous_interaction_id"], "v1_x")
         self.assertEqual(edit["edit_of"], first)

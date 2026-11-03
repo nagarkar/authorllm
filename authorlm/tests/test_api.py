@@ -102,10 +102,11 @@ def check_show_verbs() -> None:
 
 
 def check_no_agreement_flags() -> None:
-    """`yes` says nothing about what happens: `--dry-run` previews, `--live`
-    goes ahead, and a flag that skips a question says so (metalm
-    guidelines/cli.md). Walks every parser, so a new verb cannot bring the
-    flag back, and parses the old spellings, so they stay gone."""
+    """`yes` and `confirm` say nothing about what happens: `--dry-run`
+    previews, `--live` goes ahead, `--force` overrides a stop, and a flag that
+    skips a question says so (metalm guidelines/cli.md). Walks every parser
+    and every MCP tool, so a new verb cannot bring the flag back, and parses
+    the old spellings, so they stay gone."""
     import argparse
 
     from authorlm.cli import build_parser
@@ -117,17 +118,30 @@ def check_no_agreement_flags() -> None:
         name, parser = pending.pop()
         for action in parser._actions:
             for flag in action.option_strings:
-                if flag in ("--yes", "-y"):
+                if flag in ("--yes", "-y", "--confirm"):
                     seen.add(f"{name} {flag}")
             if isinstance(action.choices, dict):
                 pending.extend((f"{name} {verb}", sub)
                                for verb, sub in action.choices.items()
                                if isinstance(sub, argparse.ArgumentParser))
-    check("no verb declares --yes or -y", not seen, str(sorted(seen)))
+    check("no verb declares --yes, -y or --confirm", not seen, str(sorted(seen)))
+    from authorlm.mcp_server import mcp
+    agreeing = {tool.name for tool in mcp._tool_manager.list_tools()
+                if {"yes", "confirm"} & set(tool.parameters.get("properties", {}))}
+    check("no MCP tool takes yes or confirm", not agreeing, str(sorted(agreeing)))
+    tools = {tool.name: set(tool.parameters.get("properties", {}))
+             for tool in mcp._tool_manager.list_tools()}
+    for name in ("audition_voices", "push_pronunciations", "say_term"):
+        check(f"MCP {name} goes ahead with live", "live" in tools[name])
+    for name in ("clip_ensure", "clip_edit"):
+        check(f"MCP {name} passes a cap with force", "force" in tools[name])
     for argv in (["setup", "--workspace", "x", "--yes"],
                  ["setup", "--workspace", "x", "-y"],
                  ["audio", "audition", "--yes"],
-                 ["audio", "dictionary", "push", "--yes"]):
+                 ["audio", "dictionary", "push", "--yes"],
+                 ["clip", "ensure", "k", "--generate", "--confirm"],
+                 ["clip", "edit", "k", "--take", "01", "--confirm"],
+                 ["audio", "preview", "becker", "--force"]):
         rejected = False
         try:
             with contextlib.redirect_stderr(io.StringIO()):
@@ -139,6 +153,10 @@ def check_no_agreement_flags() -> None:
           root.parse_args(["setup", "--no-questions"]).no_questions)
     check("audio --live parses",
           root.parse_args(["audio", "dictionary", "push", "--live"]).live)
+    check("clip ensure --force parses",
+          root.parse_args(["clip", "ensure", "k", "--force"]).force)
+    check("audio preview --rebuild parses",
+          root.parse_args(["audio", "preview", "becker", "--rebuild"]).rebuild)
 
 
 def check_broken_pipe() -> None:
@@ -8412,6 +8430,8 @@ def main_test() -> None:
         check("pull --force takes the Doc's version",
               forced["changed"] == ["01-choice.md"]
               and "Edited in Docs again" in (ms / "01-choice.md").read_text())
+        check("pull --force reports the file it overrode",
+              forced.get("forced") == ["01-choice.md"], str(forced))
 
         # A Doc-pasted image exports as a dangling ![][imageN] ref: the
         # pull strips it (the bridge cannot transport images) and warns.
@@ -13444,8 +13464,8 @@ def main_test() -> None:
             "move_style_law",
             # The audiobook (audiobook-pipeline-design §11): the export,
             # the readiness report, free voice discovery, the paid
-            # audition (confirm-gated), the cast row, the dictionary push
-            # (confirm-gated). `audio init` is CLI-only: a one-time seed.
+            # audition (live=True), the cast row, the dictionary push
+            # (live=True). `audio init` is CLI-only: a one-time seed.
             "export_audio", "audio_readiness", "list_voices",
             "audition_voices", "set_cast", "push_pronunciations", "say_term",
             # Media for podcasts (video-clips-design §8f/§8g): the one

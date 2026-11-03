@@ -165,8 +165,8 @@ set`, `dictionary push`, `say`, `workbench`) are unchanged. The
 | Verb | Does | Cost |
 |---|---|---|
 | `audio preview <chapter> [-p 12,14-16] [--all]` | Renders Daniel previews for every paragraph that lacks one (keyed by id) into `_audio/preview/<id>.mp3`. `--all` for every chapter. | free |
-| `audio generate <chapter> -p 12,14-16 \| --remaining [--dry-run]` | Renders the named paragraphs, or every one without a take. Prints the character count before and after. Never renders an id that has a take. | paid |
-| `audio retake <chapter> -p 12` | Re-renders a paragraph that has a take and replaces it. | paid |
+| `audio generate <chapter> -p 12,14-16 \| --remaining [--dry-run \| --live]` | Prints the character cost and renders nothing; with `--live`, renders the named paragraphs, or every one without a take, and prints what it spent. Never renders an id that has a take. | paid |
+| `audio retake <chapter> -p 12 [--dry-run \| --live]` | Prints the cost and renders nothing; with `--live`, re-renders a paragraph that has a take and replaces it. | paid |
 | `audio stitch <chapter>` | ffmpeg concat with the silence clips, two-pass EBU R128 to −20 LUFS / −3 dBTP, one `<stem>.<quality>.mp3`; records duration and loudness in state. Ported from `stitch.rs`. | free |
 | `audio status [chapter] [--find <words>]` | The board (§7). `--find` lists paragraphs whose text contains the words, with ordinal and first words, for the session to resolve a chat request. | free |
 | `audio serve` | §3. | — |
@@ -278,7 +278,7 @@ becker  Doc in sync · exported 2026-09-26 03:02 · 38 paragraphs
   not stitched
 ```
 
-`audio generate becker -p 14`, as it prints:
+`audio generate becker -p 14 --live`, as it prints:
 
 ```
 becker ¶ 14 "After centuries of silent torment…"  1,204 characters

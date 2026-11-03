@@ -3115,6 +3115,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             report["local_ahead"].append(relpath)
             entry["checked_out"] = False
             continue
+        if state in ("conflict", "local_ahead"):
+            report.setdefault("forced", []).append(relpath)
         if text != current:
             path.write_text(reembed(text, bridge.root,
                                     capture_embeds(current_raw)),
@@ -3172,6 +3174,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             if state == "local_ahead" and not force:
                 report["local_ahead"].append(display)
                 continue
+            if state in ("conflict", "local_ahead"):
+                report.setdefault("forced", []).append(display)
             if text != current:
                 prompts_dir.mkdir(parents=True, exist_ok=True)
                 path.write_text(join_prompt_embeds(text, prior_embeds),

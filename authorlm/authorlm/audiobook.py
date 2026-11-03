@@ -277,7 +277,7 @@ class Session:
             if params.get("stem"):
                 gen.load_chapter(root, book, params["stem"])
             if kind == "preview":
-                job["force"] = bool(params.get("force"))
+                job["rebuild"] = bool(params.get("rebuild"))
         else:
             raise ValueError(f"unknown job kind {kind!r}")
         with self._lock:
@@ -373,7 +373,7 @@ class Session:
 
     def _job_preview(self, job: dict) -> str:
         pv = gen.preview(self.manuscript, job.get("stem"), renderer=PREVIEW_RENDERER,
-                         force=bool(job.get("force")),
+                         rebuild=bool(job.get("rebuild")),
                          progress=lambda m: self._set(job, message=m))
         return (f"{len(pv['rendered'])} preview(s) rendered · {pv['kept']} kept"
                 + (f" · {pv['swept']} swept" if pv["swept"] else ""))
@@ -549,7 +549,7 @@ def dispatch(method: str, params: dict[str, Any],
         return s.enqueue("refresh", stem=params.get("stem"))
     if method == "preview":
         return s.enqueue("preview", stem=params.get("stem"),
-                         force=bool(params.get("force")))
+                         rebuild=bool(params.get("rebuild")))
     if method == "generate":
         return s.enqueue("generate", stem=params["stem"],
                          ids=params.get("ids"), remaining=bool(params.get("remaining")))
