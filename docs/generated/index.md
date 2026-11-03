@@ -626,12 +626,6 @@ Drive the Doc-road failure scenarios (test_doc_road_failures.py) against the LIV
 
 The one way to run the whole test suite.
 
-## `tests.test_anchor_prefix_truncation`
-
-`authorlm/tests/test_anchor_prefix_truncation.py`
-
-`_split_by_anchors` must not truncate the Docs-API anchor to 80 chars.
-
 ## `tests.test_anchor_split_and_holds`
 
 `authorlm/tests/test_anchor_split_and_holds.py`
