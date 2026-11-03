@@ -27,6 +27,7 @@ import json
 import re
 from pathlib import Path
 
+from .concepts import VALID_RELATIONS, scoped_concepts
 from .db import Database, ko_fields, loads
 from .llm import LLMClient, resolve_temperature
 
@@ -537,14 +538,46 @@ def drafting_context(db: Database, manuscript: dict, file: str,
         + block(after, AFTER_HEADER))
 
 
+def drafting_context_for_writeup(db: Database, manuscript: dict, writeup: dict,
+                                 capture=None) -> str:
+    """The writeup's L1 book-frame: compressed summaries of the resolved
+    essays before this one and the upcoming ones after it. Recomputed on
+    every read rather than stored — the summaries themselves are the
+    source of truth and a rebuild between beats must show through. The
+    declared placement, however, IS stored, so a resumed writeup on a
+    not-yet-placed essay recomputes the same split without the author
+    repeating the flag.
+
+    `capture` is `write_start`'s own snapshot: the context it prints must
+    be the same text its gate just passed, not a second read that a
+    parallel session could have changed underneath it. Every other caller
+    (the resume view) is a fresh invocation and takes a fresh one."""
+    placement = loads(writeup["metadata"], {}).get("placement")
+    return drafting_context(db, manuscript, writeup["file"],
+                            placement=placement, capture=capture)
+
+
+def drafting_context_for_write_status(db: Database, manuscript: dict,
+                                      writeup: dict) -> str:
+    """`write status` is the resume entry point, so it degrades rather
+    than dies: if the file (or the placement target) has left the disk,
+    the context is replaced by a one-line note and the plan, cursor,
+    pending proposal and tallies still render. write_start does NOT get
+    this treatment — its gate has already proved the context resolves."""
+    try:
+        return drafting_context_for_writeup(db, manuscript, writeup)
+    except LookupError as err:
+        return (f"{WARN_PREFIX}DRAFTING CONTEXT unavailable — {err}. "
+                f"Restore the file, or close the writeup with "
+                f"'write abandon' (it restores the pinned source version).")
+
+
 # ------------------------------------------------------------- building
 
 def _concept_slice(db: Database, manuscript: dict, file: str) -> str:
     """The graph's file= slice as prompt text: name — notes."""
-    from . import api
-
     try:
-        sliced = api.scoped_concepts(db, manuscript, file=file)
+        sliced = scoped_concepts(db, manuscript, file=file)
     except LookupError:
         return "(none recorded)"
     lines = []
@@ -927,11 +960,9 @@ def verse_files_of(manuscript: dict) -> set[str]:
 def _check_record(record: dict, text: str) -> tuple[dict, dict]:
     """Guarantee 1 of §7: every span is a verbatim substring of the
     paragraph (byte equality), every relation is in
-    `extraction.VALID_RELATIONS`, every role, move and direction is a
+    `concepts.VALID_RELATIONS`, every role, move and direction is a
     known value. Offending items are DROPPED, not repaired, and counted
     in the returned report. `definitions[].sentence` is a span too."""
-    from .extraction import VALID_RELATIONS
-
     dropped = {"span": 0, "relation": 0, "role": 0, "direction": 0}
     clean: dict = {"gist": str(record.get("gist") or "").strip(),
                    "claim": record.get("claim") or None,
@@ -1385,8 +1416,6 @@ ESSAY_LABELS = ("FLOW", "MOVES", "INTRODUCES", "ASSUMES", "PROMISES", "DEBTS",
 
 
 def paragraph_prompt() -> str:
-    from .extraction import VALID_RELATIONS
-
     return (PARAGRAPH_PROMPT_PATH.read_text(encoding="utf-8")
             .replace("<<MOVES>>", ", ".join(MOVES))
             .replace("<<RELATIONS>>", ", ".join(sorted(VALID_RELATIONS))))
@@ -1412,8 +1441,6 @@ def paragraph_schema() -> tuple[str, dict]:
     object root; `_reply_records` unwraps it. Enum checks stay in
     `store_paragraph_record` too: a model without schema support still
     gets only the prose."""
-    from .extraction import VALID_RELATIONS
-
     record = _obj(
         n={"type": "integer"}, gist=_STR, claim=_STR_OR_NULL,
         move={"type": "string", "enum": list(MOVES)},

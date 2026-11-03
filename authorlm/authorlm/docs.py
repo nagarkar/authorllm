@@ -43,6 +43,26 @@ def _match(candidates: dict[str, Path], query: str) -> Path:
     return hits[0]
 
 
+def _resolve_relpath(manuscript: dict, query: str) -> str:
+    """Map a file argument to the manuscript-relative path used as the
+    Doc-mapping key and the on-disk name. Absolute paths that sit under
+    the manuscript root (and relative paths that resolve there) are
+    accepted; anything outside is refused. Bare names still go through
+    `_match`'s exact-then-unique-substring forgiveness."""
+    root = Path(manuscript["path"])
+    candidates = iter_manuscript_paths(root)
+    probe = Path(query).expanduser()
+    try:
+        resolved = (probe if probe.is_absolute() else root / probe).resolve()
+        rel = str(resolved.relative_to(root.resolve()))
+    except (ValueError, OSError):
+        rel = None
+    if rel is not None and rel in candidates:
+        return rel
+    path = _match(candidates, query)
+    return str(path.relative_to(root))
+
+
 def list_docs(db: Database, manuscript: dict) -> dict:
     root = Path(manuscript["path"])
     concepts_by_file: dict[str, list[str]] = {}

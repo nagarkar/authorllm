@@ -224,7 +224,7 @@ Done 2026-09-02:
   the resolve landed it and the next push lost the span's `\{` `\}`
   (2026-10-18, SMSTTD recapitulation.md R10). A TeX `\$` inside math now
   round-trips too.
-- `export.export_manuscript` builds the export Doc from the pandoc DOCX
+- `drive_upload.export_manuscript` builds the export Doc from the pandoc DOCX
   (`export.build_docx`), so the Doc carries native equations, footnotes,
   and illustrations.
 - Export setting `pdf_mathfont`, default `STIX Two Math`.

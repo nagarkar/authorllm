@@ -799,7 +799,7 @@ and an unknown name is rejected by name at parse time, as the current
 front-matter vocabularies already are.
 
 Built (step 5, first slice, 2026-10-26): `context.py` holds the enum,
-`Input.parse`, and `supply`, which renders STYLE_LAW, VALIDATED_BELIEFS,
+`Input.parse` and `ensure_for`; `input_blocks.py` holds `supply`, which renders STYLE_LAW, VALIDATED_BELIEFS,
 INTENTS, CONCEPT_SLICE, ESSAY_SUMMARIES, SECTION_OUTLINE, PARAGRAPH_RECORDS,
 REFERENCED_SECTIONS, READING_ORDER and ESSAY_TEXT; the six inputs whose
 renderer needs an argument only its pass has (PROTECTED_TERMS, DICTIONARY,
@@ -819,7 +819,7 @@ beat loop, filters and lenses.
 
 ### 6.8 REFERENCED_SECTIONS: how a backward reference finds its text
 
-`context.referenced_sections(db, manuscript, file, texts)`: for every
+`input_blocks.referenced_sections(db, manuscript, file, texts)`: for every
 record of `file` with a reference of direction `back`, the term's first
 `introduces | defines` mention in reading order (`summaries.mentions`),
 when it lies in another file, names a section; that section's text enters

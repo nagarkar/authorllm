@@ -292,7 +292,8 @@ not re-ask at each beat.
    that matters, because those ride along with every future writeup.
 
 2. **Plan.** Expand the outline into beat specs conversationally
-   (`{"role", "concepts", "budget", "notes"}` each); after the author
+   (`{"role", "concepts", "budget", "notes"}` each; the budget counts prose
+   only, never footnotes); after the author
    RATIFIES, persist: `authorlm write plan` with the JSON array on stdin.
    **PRESENT the plan as a numbered READING, and say plainly what you are
    asking for.** The author's words on the old presentation: *"This is
@@ -467,6 +468,11 @@ not re-ask at each beat.
    - accept as-is → `authorlm write accept`
    - author reworded → `authorlm write accept` with their text on stdin
      (recorded as `modified`; the draft→final diff is the evidence)
+   - author asked for changes you wrote out yourself → assemble again
+     to a file (step a, `write draft --dry-run --out`), run the changed
+     text through the critic (steps d and e), and only then `write accept` with it on stdin. Your
+     own wording of their note is not their dictation. Their dictated words
+     stay exempt, and a sentence they approved stands against the critic.
    - reject → `authorlm write reject --reason "<their why, verbatim>"` —
      the reason is required; then redraft with it in context.
    Accept appends to the file, collects, records the review, and advances
@@ -506,8 +512,13 @@ not re-ask at each beat.
    the recorded dispositions in the writeup are the durable record, and the
    accepted beat is its author-review; the prose itself is workflow
    accounting, not book content.
-5. **Learnings.** When a pattern recurs across verdicts (not on every
-   verdict), distill one line and send it on STDIN — `write learn` takes no
+5. **Learnings.** Any author note that applies beyond the current beat is
+   recorded at once, before the next payload is assembled: the drafter and
+   the critic see only the most recent verdict, so a note left in the
+   conversation never reaches them on a later beat (author ruling
+   2026-11-01: "When I provide [feedback], you should be passing it back to
+   the critic"). When a pattern recurs across verdicts, record that too.
+   Distill one line and send it on STDIN — `write learn` takes no
    positional lesson (a positional after `-m` trips argparse's greedy
    `nargs='*'`), so `authorlm write learn "<lesson>"` silently ignores the
    argument and then refuses for want of stdin:
@@ -1549,9 +1560,11 @@ the stitched file, counted in samples. Prints the path; `--json` prints
 `{path, duration_s, sections, rendered}`. Run `audio export` first so
 the manifest matches the text.
 
-**The page — the author's surface, on the Mac and the phone.** Run
-`authorlm audio serve -m <ms> --no-open` in the background from Bash
-(fixed port 8792 by default; verify `curl -s http://127.0.0.1:8792/health`)
+**The page — the author's surface, on the Mac and the phone.** The launch
+agent `com.nagarkar.authorlm.serve` keeps it running (`scripts/install-launch-agent.sh`;
+restart only with `launchctl kickstart -k gui/$(id -u)/com.nagarkar.authorlm.serve`,
+never `nohup`; if the agent is not loaded, ask the author to load it). Verify
+`curl -s http://127.0.0.1:8792/health`
 and show `http://127.0.0.1:8792/#<stem>` in the in-app Browser pane. The
 page is one chapter at a time with a dropdown, under a manuscript
 dropdown listing every manuscript with an audio export (`-m` is only

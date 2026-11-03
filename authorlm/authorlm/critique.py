@@ -410,30 +410,5 @@ def tally(decisions: list[dict]) -> dict:
 
 
 def status(db: Database, manuscript_id: str) -> list[dict]:
-    """Per-critic tallies for briefing badges and `critique status`."""
-    rows = db.all(
-        """SELECT s.id AS source_id, s.name,
-                  SUM(CASE WHEN i.status = 'proposed' THEN 1 ELSE 0 END) AS proposed,
-                  SUM(CASE WHEN i.status IN ('active', 'completed') THEN 1 ELSE 0 END) AS accepted,
-                  SUM(CASE WHEN i.status = 'rejected' THEN 1 ELSE 0 END) AS rejected
-           FROM sources s JOIN declared_intents i ON i.source_id = s.id
-           WHERE s.kind = 'critic' AND i.manuscript_id = ?
-           GROUP BY s.id""", (manuscript_id,))
-    result = []
-    for r in rows:
-        el = db.one(
-            """SELECT SUM(CASE WHEN status = 'proposed' THEN 1 ELSE 0 END) AS proposed,
-                      SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS accepted,
-                      SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected
-               FROM style_laws WHERE manuscript_id = ? AND source_id = ?""",
-            (manuscript_id, r["source_id"]))
-        result.append({
-            "source_id": r["source_id"], "name": r["name"],
-            "intents": {"proposed": r["proposed"] or 0,
-                        "accepted": r["accepted"] or 0,
-                        "rejected": r["rejected"] or 0},
-            "elements": {"proposed": el["proposed"] or 0,
-                         "accepted": el["accepted"] or 0,
-                         "rejected": el["rejected"] or 0},
-        })
-    return result
+    """Per-critic tallies for `critique status`."""
+    return sessions.critic_tallies(db, manuscript_id)
