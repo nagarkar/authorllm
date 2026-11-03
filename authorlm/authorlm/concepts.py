@@ -485,7 +485,7 @@ def scoped_concepts(db: Database, manuscript: dict,
     one-capture violation rather than adding a feature. With `file` and
     no `text` this re-reads the disk through `read_manuscript_files` —
     a SECOND read inside a verb that already took exactly one capture.
-    `filtering._concept_notes` did precisely that, so `filter run`'s
+    `concept_notes` did precisely that, so `filter run`'s
     CONCEPT NOTES could differ between window N and window N+1 if a
     parallel session edited the file, silently forfeiting the cached
     prefix that block A exists to hold. Supplying the caller's own
@@ -527,3 +527,38 @@ def scoped_concepts(db: Database, manuscript: dict,
             "AND status NOT IN ('rejected', 'retired')", (mid,))
         if e["from_node"] in ids and e["to_node"] in ids]
     return compact_concepts({"nodes": nodes, "edges": edges})
+
+
+def concept_notes(db: Database, manuscript: dict, file: str,
+                  text: str | None = None) -> str:
+    """The CONCEPT NOTES block for one essay: its slice of the graph, empty
+    when the file is not in the manuscript.
+
+    `text` is the caller's captured essay text, which is what makes this
+    block obey the one-capture rule: without it a parallel session's edit
+    between window N and window N+1 changes block A and forfeits the cached
+    prefix."""
+    try:
+        graph = scoped_concepts(db, manuscript, file=file, text=text)
+    except LookupError:
+        return ""
+    lines = []
+    for node in sorted(graph.get("nodes", []),
+                       key=lambda n: n.get("name") or ""):
+        notes = (node.get("notes") or "").strip() or "(no notes)"
+        # ALIASES ride with the definition, not only with PROTECTED
+        # TERMS. A concept reached by an alternate name is the same
+        # concept, and a filter that cannot see the alias will read two
+        # names for one thing as two things.
+        aliases = [a for a in (node.get("aliases") or []) if a]
+        also = f" (also: {', '.join(sorted(aliases))})" if aliases else ""
+        lines.append(f"- {node['name']}{also} — {notes}")
+    # EDGES: the graph's own relations between the concepts this essay
+    # touches. `scoped_concepts` already restricts them to the selected
+    # nodes, so nothing here reaches outside the slice.
+    edges = [e.get("edge") for e in graph.get("edges", []) if e.get("edge")]
+    if edges:
+        lines.append("")
+        lines.append("Relations the author has recorded between them:")
+        lines.extend(f"- {e}" for e in sorted(edges))
+    return "\n".join(lines)

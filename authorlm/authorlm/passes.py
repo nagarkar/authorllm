@@ -21,7 +21,7 @@ from .db import Database, ko_fields, loads
 from .llm import LLMClient, resolve_temperature
 from . import summaries as sums
 from . import form_grammar
-from .context import Input
+from .context import Input, ensure_for
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "editor.md"
 ESSAY_STATES = ("pending", "proposed", "triaged", "written", "resolved",
@@ -184,6 +184,26 @@ def intents_in_scope(db: Database, manuscript: dict, file: str,
     return [dict(r) for r in rows if r["scope"] in chain]
 
 
+def intents_block(db: Database, manuscript: dict, file: str) -> str:
+    """The active intents whose scope covers this essay — tier label and
+    statement only, sorted by tier rank then statement.
+
+    Labelled the way `beat-draft.md` labels it: a goal governs SELECTION
+    AND EMPHASIS, never grounding — and here, never attribution either.
+    A metaphor filter genuinely benefits from knowing what the author is
+    trying to do with the book. Crediting the sweep to that goal is a
+    different thing entirely, and this pass does not do it."""
+    rows = intents_in_scope(db, manuscript, file, "active")
+    entries = []
+    for row in rows:
+        tier = scope_tier(manuscript, file, row["scope"]) or "outside"
+        entries.append((INTENT_TIER_RANK.get(tier, UNKNOWN_TIER_RANK),
+                        row["statement"], tier))
+    entries.sort(key=lambda e: (e[0], e[1]))
+    return "\n".join(f"- [{tier}] {statement}"
+                     for _rank, statement, tier in entries)
+
+
 def preflight(db: Database, manuscript: dict, file: str,
               pass_row: dict | None = None) -> dict:
     """The homework check: anything unconfirmed touching this essay's
@@ -336,7 +356,7 @@ INPUTS = (Input.STYLE_LAW, Input.VALIDATED_BELIEFS, Input.INTENTS,
           Input.CONCEPT_SLICE, Input.PRIOR_RUNS, Input.ESSAY_SUMMARIES,
           Input.ESSAY_TEXT, Input.SECTION_OUTLINE, Input.REFERENCED_SECTIONS)
 
-# Of those, the blocks `context.supply` renders for this pass; the rest
+# Of those, the blocks `input_blocks.supply` renders for this pass; the rest
 # are assembled below as they always were (their shape is what the HTTP
 # stubs in the tests and the editor prompt describe) and move onto
 # `supply` as that module takes their renderers.
@@ -355,7 +375,7 @@ def build_context(db: Database, manuscript: dict, file: str,
     stored rows are judged as they are and a stale one still blocks, as
     the pass has always done."""
     from .styles import render as render_style
-    from . import context
+    from . import input_blocks
 
     gate = preflight(db, manuscript, file, pass_row)
     if not gate["clear"] and not force:
@@ -382,7 +402,7 @@ def build_context(db: Database, manuscript: dict, file: str,
     if file not in texts:
         raise LookupError(f"'{file}' is not in the manuscript's reading order")
     if llm is not None:
-        context.ensure_for(db, manuscript, file, list(INPUTS), llm)
+        ensure_for(db, manuscript, file, list(INPUTS), llm)
         # The rebuild wrote rows; the gate must judge the text it captured
         # against the rows as they are now, so the capture is retaken.
         capture = sums.capture(db, manuscript)
@@ -408,8 +428,8 @@ def build_context(db: Database, manuscript: dict, file: str,
         "before": ready["before"], "after": ready["after"],
         "inflight": ready["inflight"],
         "learnings": learnings(db, pass_row),
-        "blocks": context.supply(db, manuscript, file, list(SUPPLIED),
-                                 capture=capture),
+        "blocks": input_blocks.supply(db, manuscript, file, list(SUPPLIED),
+                                      capture=capture),
         "gate": gate, "forced": force and not gate["clear"],
     }
 

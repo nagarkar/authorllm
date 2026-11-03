@@ -186,7 +186,7 @@ The Concept Graph (RFC AuthorLM Chapter 21) — AuthorLM's enduring asset.
 
 `authorlm/authorlm/context.py`
 
-Declared inputs — what a pass asks for, and the one place that supplies it (summary-hierarchy-design.md ruling 10, §6.7).
+Declared inputs: the vocabulary a pass asks in, and the summary levels each member needs.
 
 ## `authorlm.critic`
 
@@ -319,6 +319,12 @@ Illustration slots: the [Illustration: ...] tag grammar and the scan-derived slo
 `authorlm/authorlm/improvements.py`
 
 Self-improvement tasks: AuthorLM's own defects as knowledge objects.
+
+## `authorlm.input_blocks`
+
+`authorlm/authorlm/input_blocks.py`
+
+The one place that supplies a pass's declared inputs.
 
 ## `authorlm.interlocutor`
 
@@ -654,7 +660,7 @@ Comment context on the pull (it adds where a Doc comment's anchor sits and the s
 
 `authorlm/tests/test_context.py`
 
-Declared inputs (summary-hierarchy-design.md ruling 10, §6.7, step 5): the `Input` enum, `context.supply`, the critique pass's OUTLINE and REFERENCED SECTIONS blocks, and the reader load derived from paragraph records. No model call anywhere in this suite: records and section summaries are stored directly.
+Declared inputs (summary-hierarchy-design.md ruling 10, §6.7, step 5): the `Input` enum, `input_blocks.supply`, the critique pass's OUTLINE and REFERENCED SECTIONS blocks, and the reader load derived from paragraph records. No model call anywhere in this suite: records and section summaries are stored directly.
 
 ## `tests.test_continuation`
 
