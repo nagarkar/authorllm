@@ -56,6 +56,7 @@ import contextlib
 import http.server
 import io
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -63,10 +64,14 @@ import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
+import _summary_stubs  # noqa: E402
 from authorlm import api, critique, gdocs, passes, summaries as sums  # noqa: E402
+from authorlm import form_grammar  # noqa: E402
 from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
+from authorlm.normalize import _TABLE_DELIM, normalize_markdown  # noqa: E402
 from authorlm.db import loads  # noqa: E402
 
 PASSED = 0
@@ -161,7 +166,7 @@ class _RecordingDrive:
                 return self._result
 
         class _Documents:
-            def get(self, documentId=None, includeTabsContent=None):
+            def get(self, documentId=None, includeTabsContent=None, fields=None):
                 def tab(tid, title):
                     return {"tabProperties": {"tabId": tid,
                                               "title": title},
@@ -469,7 +474,7 @@ class _SurgicalDocFake:
                 return self._result
 
         class _Documents:
-            def get(self, documentId=None, includeTabsContent=None):
+            def get(self, documentId=None, includeTabsContent=None, fields=None):
                 if documentId in outer.temps:
                     return _Req({"body": {"content": outer._temp_content(
                         outer.temps[documentId])}})
@@ -575,7 +580,7 @@ def _local_transport_guards(root: Path) -> None:
 
     # A mapping, so push_doc gets past the no-tab refusal and reaches
     # the guards rather than failing for an unrelated reason.
-    normalized = gdocs.normalize_markdown(MARKED_ESSAY)
+    normalized = normalize_markdown(MARKED_ESSAY)
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
@@ -589,7 +594,7 @@ def _local_transport_guards(root: Path) -> None:
     # composer's output written to disk.
     marked = MARKED_ESSAY.replace(
         "Original paragraph text.",
-        th.render_pending("Original paragraph text.",
+        form_grammar.render_pending("Original paragraph text.",
                           "Rewritten paragraph text."))
     (ms / "solo.md").write_text(marked)
     thread = _ko("dt")
@@ -749,7 +754,7 @@ def _local_transport_guards(root: Path) -> None:
 
         def documents(self):
             class _Documents:
-                def get(self, documentId=None, includeTabsContent=None):
+                def get(self, documentId=None, includeTabsContent=None, fields=None):
                     class _Req:
                         def execute(self):
                             return {"tabs": [
@@ -789,9 +794,12 @@ TWIN_ESSAY = (
 TWIN = "And so the wall stands, and the Dead do not pass."
 
 
-def _twin_fixture(root: Path, subdir: str, essay: str = TWIN_ESSAY):
+def _twin_fixture(root: Path, subdir: str, essay: str = TWIN_ESSAY,
+                  render: bool = False):
     """A workspace whose one essay is mapped to a tab of a live-text
-    Doc fake, positioned exactly where `critique write` finds it."""
+    Doc fake, positioned exactly where `critique write` finds it.
+    `render` is the fake's render mode (a real export: paragraph gaps
+    survive a pull)."""
     ws = root / subdir
     ms = ws / "book"
     ms.mkdir(parents=True)
@@ -803,7 +811,8 @@ def _twin_fixture(root: Path, subdir: str, essay: str = TWIN_ESSAY):
     manuscript = api.get_manuscript(db)
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, {})
-    fake = _SurgicalDocFake([("book", ""), ("solo.md", essay)])
+    fake = _SurgicalDocFake([("book", ""), ("solo.md", essay)],
+                            render=render)
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
@@ -955,7 +964,7 @@ def _inline_markup_forms(root: Path) -> None:
           gdocs.render_emphasis("**a *b* c** d")
           == ("a b c d", [(2, 3, {"italic": True}), (0, 5, {"bold": True})]))
     fetched = gdocs.tab_marked_markdown(db, manuscript, "solo.md", fake, fake)
-    forms = th.pending_forms(fetched["marked"])
+    forms = form_grammar.pending_forms(fetched["marked"])
     check("the export gives the record back: each form's old half equals "
           "its thread's markdown, so the resolve can match it",
           sorted(f["old"] for f in forms) == sorted([ITALIC_TWO, ITALIC_FOUR]),
@@ -997,7 +1006,7 @@ def _identical_old_halves(root: Path) -> None:
     repetition) therefore both resolved to the SAME span, and because
     the write order is descending the second write landed INSIDE the
     wrapper the first had just planted — `<<<<old>>{{new2}}>>{{new4}}`.
-    At settle `threads.PENDING` is non-greedy, so it matched
+    At settle `form_grammar.PENDING` is non-greedy, so it matched
     `<<<<old>>{{new2}}` with `old = "<<old"`, matched no thread,
     collapsed to that old half, and left the literal string
     `<<old>>{{new4}}` in the finished manuscript.
@@ -1663,6 +1672,56 @@ def _the_doc_transport_push(root: Path) -> None:
           "formed at all", not fake3.bodies, str(fake3.bodies[:1]))
 
 
+def _critique_write_refuses_checked_out(root: Path) -> None:
+    """RISK-4 — `critique write` opened with a levelling push that wiped
+    Doc-ahead prose when the essay was checked out. Same gate as
+    `filter push`: refuse, name `doc pull`, touch nothing on the wire."""
+    import authorlm.gdocs as _gd
+
+    print("RISK-4: critique write refuses a checked-out file:")
+
+    ws_name = "critique-gate-ws"
+    db, manuscript, ms, fake = _twin_fixture(root, ws_name)
+    mid = manuscript["id"]
+    _twin_threads(db, mid, [(2, "The wall stands, in my voice.")])
+    # Doc holds ahead prose the local file does not — the wipe case if
+    # write_pending_forms' levelling push ran.
+    ahead = TWIN_ESSAY.replace(
+        "Alpha opens the essay and says a thing.",
+        "Alpha opens the essay, edited only in the Doc.", 1)
+    for tab in fake.tabs:
+        if tab["title"] == "solo.md":
+            tab["body"] = fake._as_body(ahead, tab["id"])
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    gdocs._save_mapping(db, manuscript, meta)
+
+    saved = (_gd.get_service, _gd.get_docs_service)
+    _gd.get_service = lambda *a, **k: fake
+    _gd.get_docs_service = lambda *a, **k: fake
+    raised = None
+    try:
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli_main(["--workspace", str(root / ws_name),
+                          "critique", "write", "solo.md"])
+        except SystemExit as err:
+            raised = str(err)
+    finally:
+        _gd.get_service, _gd.get_docs_service = saved
+
+    check("RISK-4 `critique write` refuses a CHECKED-OUT file, naming "
+          "`doc pull` — staging read `old` from local; a levelling push "
+          "would overwrite Doc-side prose",
+          raised is not None and "checked out to Google Docs" in raised
+          and "doc pull solo.md" in raised, raised)
+    check("RISK-4 ...and nothing reached the wire",
+          not fake.bodies, str(fake.bodies[:1]))
+    check("RISK-4 ...and the Doc-ahead prose is still in the tab",
+          "edited only in the Doc" in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md")[:200])
+
+
 NON_CANONICAL_ESSAY = (
     "# The Wall\n\n"
     "* one thing the wall does   \n"
@@ -1698,7 +1757,7 @@ def _the_push_says_what_it_did_to_the_file(root: Path) -> None:
     before = (ms / "solo.md").read_text()
     check("the fixture really is non-canonical — otherwise this whole "
           "test is asserting nothing (§14.8)",
-          gdocs.normalize_markdown(before) != before, repr(before))
+          normalize_markdown(before) != before, repr(before))
 
     saved = (_gd.get_service, _gd.get_docs_service)
     _gd.get_service = lambda *a, **k: fake
@@ -1714,7 +1773,7 @@ def _the_push_says_what_it_did_to_the_file(root: Path) -> None:
     after = (ms / "solo.md").read_text()
     check("P2b the push DID rewrite the file — this is the case the old "
           "message lied about",
-          after != before and after == gdocs.normalize_markdown(before),
+          after != before and after == normalize_markdown(before),
           repr(after))
     check("P2b ...and the verb says so instead of claiming the file is "
           "as it was: it names what moved (markers, spacing) and what "
@@ -2174,7 +2233,7 @@ def _md_table_rows(block: str) -> list[list[str]] | None:
     if not all(line.strip().startswith("|") for line in lines):
         return None
     return [[c.strip() for c in line.strip().strip("|").split("|")]
-            for line in lines if not gdocs._TABLE_DELIM.match(line.strip())]
+            for line in lines if not _TABLE_DELIM.match(line.strip())]
 
 
 def _table_str(rows: list[list[str]]) -> str:
@@ -2379,7 +2438,7 @@ def _table_fixture(root: Path, name: str, fake_of, text: str = _TBL_DOC):
 
 
 def _tab_md(fake, title: str = "agency.md") -> str:
-    return gdocs.normalize_markdown(fake.export_tab(
+    return normalize_markdown(fake.export_tab(
         next(t for t in fake.tabs if t["title"] == title)))
 
 
@@ -2413,7 +2472,7 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
     check("the table is untouched and the tab matches the file",
           tab.split(_TS)[1].split(_TE)[0] == table_before
           and len(fake.temps) == temps + 1
-          and _tab_md(fake) == gdocs.normalize_markdown(
+          and _tab_md(fake) == normalize_markdown(
               (ms / "agency.md").read_text()), _tab_md(fake))
 
     # 2. A table edit, the comment on prose: the table alone is replaced.
@@ -2423,7 +2482,7 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
                           docs_service=fake)
     check("a table edit replaces the table as one unit, surgically",
           push.get("mode") == "diff" and push.get("ops") == 1
-          and _tab_md(fake) == gdocs.normalize_markdown(
+          and _tab_md(fake) == normalize_markdown(
               (ms / "agency.md").read_text()), f"{push}\n{_tab_md(fake)}")
     check("and the prose comment survives it",
           not fake.orphaned and fake.anchored_text() == _TBL_C)
@@ -2436,7 +2495,7 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
                           docs_service=fake)
     check("a paragraph inserted before a kept table lands before it",
           push.get("mode") == "diff" and _tab_md(fake)
-          == gdocs.normalize_markdown(grown) and not fake.orphaned,
+          == normalize_markdown(grown) and not fake.orphaned,
           _tab_md(fake))
     ends = "# Agency\n\n" + _TBL_C + "\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
     _, db4, man4, ms4, fake4 = _table_fixture(
@@ -2446,13 +2505,14 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
                           docs_service=fake4)
     check("a paragraph appended after a closing table lands after it",
           push.get("mode") == "diff" and _tab_md(fake4)
-          == gdocs.normalize_markdown(ends + "\nA closing line.\n")
+          == normalize_markdown(ends + "\nA closing line.\n")
           and not fake4.orphaned, _tab_md(fake4))
 
     # 4. A comment INSIDE the table: the changed table is held at its
     #    old text and reported (it-e26a44f924be holds any changed unit
-    #    an open comment is anchored in); --rebuild is the knowing
-    #    opt-in.
+    #    an open comment is anchored in); --rebuild over it is refused
+    #    (2026-10-26, the author: "make --rebuild refuse while open
+    #    comments anchor in the tab").
     _, db2, man2, ms2, fake2 = _table_fixture(
         root, "tbl-cell-ws", commented("Choice scores"))
     before = fake2.tab_text("agency.md")
@@ -2466,12 +2526,16 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
           == "Choice scores", str(push))
     check("and leaves the tab and the comment untouched",
           fake2.tab_text("agency.md") == before and not fake2.orphaned)
-    push = gdocs.push_doc(db2, man2, "agency.md", service=fake2,
-                          docs_service=fake2, rebuild=True)
-    check("rebuild=True rebuilds the tab, accepting the orphan",
-          push.get("mode") is None and fake2.orphaned
-          and _tab_md(fake2) == gdocs.normalize_markdown(changed),
-          f"{push}\n{_tab_md(fake2)}")
+    try:
+        gdocs.push_doc(db2, man2, "agency.md", service=fake2,
+                       docs_service=fake2, rebuild=True)
+        check("rebuild=True over an anchored comment is refused", False)
+    except LookupError as err:
+        check("rebuild=True over an anchored comment is refused by name, "
+              "the tab and the comment untouched",
+              "rebuild refused" in str(err) and "Choice scores" in str(err)
+              and fake2.tab_text("agency.md") == before and not fake2.orphaned,
+              str(err))
 
     # 5. A table tab with no comments still pushes, by rebuild as before.
     _, db3, man3, ms3, fake3 = _table_fixture(
@@ -2481,7 +2545,7 @@ def _a_table_tab_keeps_its_comments(root: Path) -> None:
                           docs_service=fake3)
     check("a table tab with no comments still pushes (rebuild)",
           push.get("mode") is None
-          and _tab_md(fake3) == gdocs.normalize_markdown(changed),
+          and _tab_md(fake3) == normalize_markdown(changed),
           f"{push}\n{_tab_md(fake3)}")
 
     # 6. The CLI: --rebuild reaches push_doc for the named file only, and
@@ -2591,7 +2655,7 @@ def _a_commented_paragraph_is_held(root: Path) -> None:
     check("after the comment is resolved the next push lands the held "
           "paragraph",
           not done.get("held") and _tab_md(fake)
-          == gdocs.normalize_markdown(_HOLD_LOCAL), _tab_md(fake))
+          == normalize_markdown(_HOLD_LOCAL), _tab_md(fake))
 
     # 5. An unlocatable comment holds nothing.
     _, db2, man2, ms2, fake2 = _table_fixture(
@@ -2602,19 +2666,24 @@ def _a_commented_paragraph_is_held(root: Path) -> None:
                           docs_service=fake2)
     check("a comment whose anchor is not in the tab holds nothing",
           push.get("mode") == "diff" and not push.get("held")
-          and _tab_md(fake2) == gdocs.normalize_markdown(_HOLD_LOCAL),
+          and _tab_md(fake2) == normalize_markdown(_HOLD_LOCAL),
           f"{push}\n{_tab_md(fake2)}")
 
-    # 6. --rebuild still overrides, as the author's explicit opt-in.
+    # 6. --rebuild no longer overrides the hold: it is refused while the
+    #    comment anchors in the tab (2026-10-26).
     _, db3, man3, ms3, fake3 = _table_fixture(
         root, "hold-rebuild-ws", commented("escape"), text=_HOLD_DOC)
     (ms3 / "agency.md").write_text(_HOLD_LOCAL)
-    push = gdocs.push_doc(db3, man3, "agency.md", service=fake3,
-                          docs_service=fake3, rebuild=True)
-    check("rebuild=True overrides the hold",
-          push.get("mode") is None and not push.get("held")
-          and _tab_md(fake3) == gdocs.normalize_markdown(_HOLD_LOCAL),
-          f"{push}\n{_tab_md(fake3)}")
+    before3 = fake3.tab_text("agency.md")
+    try:
+        gdocs.push_doc(db3, man3, "agency.md", service=fake3,
+                       docs_service=fake3, rebuild=True)
+        check("rebuild=True does not override the hold", False)
+    except LookupError as err:
+        check("rebuild=True does not override the hold: refused, tab untouched",
+              "rebuild refused" in str(err)
+              and fake3.tab_text("agency.md") == before3 and not fake3.orphaned,
+              str(err))
 
     # 7. The CLI names each held paragraph and its comment.
     ws4, db4, man4, ms4, fake4 = _table_fixture(
@@ -3904,8 +3973,6 @@ def _braces_are_the_authors(root: Path) -> None:
 
     from authorlm import revisions as _rev
     from authorlm import staging as _staging
-    from authorlm import threads as _th
-    from authorlm.gdocs import normalize_markdown
 
     print("AQ/FU-A: a brace the AUTHOR wrote is not this grammar's:")
 
@@ -3929,20 +3996,20 @@ def _braces_are_the_authors(root: Path) -> None:
           "nothing wrong: a warning on every templating example would be "
           "noise that trains the author to ignore the warnings that "
           "matter",
-          _th.strip_replacements(TEMPLATE_ESSAY)[1] == [],
-          _th.strip_replacements(TEMPLATE_ESSAY)[1])
-    doc_stripped, doc_warns = _th.strip_pending(TEMPLATE_ESSAY)
+          form_grammar.strip_replacements(TEMPLATE_ESSAY)[1] == [],
+          form_grammar.strip_replacements(TEMPLATE_ESSAY)[1])
+    doc_stripped, doc_warns = form_grammar.strip_pending(TEMPLATE_ESSAY)
     check("strip_pending (Doc pull/reconcile) leaves author braces intact "
           "— the tab holds the pushed essay, not only AuthorLM forms",
           doc_stripped == TEMPLATE_ESSAY and doc_warns == [],
           repr((doc_stripped, doc_warns)))
     with_math = TEMPLATE_ESSAY + "Energy $E={{mc}}^2$.\n"
-    math_stripped, _ = _th.strip_pending(with_math)
+    math_stripped, _ = form_grammar.strip_pending(with_math)
     check("...including TeX grouping braces that math push carries intact",
           "$E={{mc}}^2$" in math_stripped, repr(math_stripped))
     mixed = (TEMPLATE_ESSAY.rstrip() + "\n\n{{critique insertion}}\n\n"
              "Trailing prose.\n")
-    mixed_stripped, _ = _th.strip_pending(mixed)
+    mixed_stripped, _ = form_grammar.strip_pending(mixed)
     check("...while still dropping a critique paragraph insertion "
           "byte-clean, braces in the surrounding prose untouched",
           "{{title}}" in mixed_stripped
@@ -3954,7 +4021,7 @@ def _braces_are_the_authors(root: Path) -> None:
     # stripped tab differs. After a clean push those two sides must agree.
     pushed = normalize_markdown(TEMPLATE_ESSAY)
     base = hashlib.sha256(pushed.encode()).hexdigest()[:16]
-    tab_canon = _th.strip_pending(pushed)[0]
+    tab_canon = form_grammar.strip_pending(pushed)[0]
     local_hash = hashlib.sha256(pushed.encode()).hexdigest()[:16]
     check("reconcile would NOT auto-pull after a clean brace-bearing push "
           "— stripped tab equals local, so session-start cannot gut "
@@ -3962,6 +4029,118 @@ def _braces_are_the_authors(root: Path) -> None:
           local_hash == base and tab_canon == pushed, repr(tab_canon))
     check("staging.is_marked says NO — the file is not mid-settle",
           not _staging.is_marked(TEMPLATE_ESSAY))
+
+    # Doc-road twin: pending_forms + final_text_from_marked must not treat
+    # inline author braces as insert forms (closed #65 / FIFO steal).
+    # Own-line plants (critique insert, stacked footnote defs) still match.
+    # Pure text — no Drive — so it stays hermetic without googleapiclient.
+    print("AQ/FU-A Doc-road: critique resolve keeps author braces:")
+    marked_doc = (
+        TEMPLATE_ESSAY.replace(
+            "The point is that a brace is only a brace.",
+            form_grammar.render_pending("The point is that a brace is only a brace.",
+                               "A brace is only a brace."))
+        + "\n{{A bridging paragraph, new.}}\n")
+    written = [
+        {"id": "t-rep", "proposed_old":
+         "The point is that a brace is only a brace.",
+         "proposed_new": "A brace is only a brace.", "metadata": "{}"},
+        {"id": "t-ins", "proposed_old": "",
+         "proposed_new": "A bridging paragraph, new.", "metadata":
+         json.dumps({"kind": "insert"})},
+    ]
+    pf = form_grammar.pending_forms(marked_doc)
+    check("pending_forms lists the replace + own-line insert only — not "
+          "inline {{title}} / {{a, b}} / {{author.name}}",
+          [(f["kind"], f["new"][:40]) for f in pf]
+          == [("replace", "A brace is only a brace."),
+              ("insert", "A bridging paragraph, new.")],
+          str([(f["kind"], f["new"][:40]) for f in pf]))
+    final, matched = passes.final_text_from_marked(marked_doc,
+                                                   written=written)
+    check("critique resolve keeps author {{title}} / {{a, b}} on the Doc "
+          "road — they are prose, not unmatched insertions",
+          "{{title}}" in final and "{{author.name}}" in final
+          and "{{a, b}}" in final
+          and "A brace is only a brace." in final
+          and "A bridging paragraph, new." in final
+          and "<<" not in final, repr(final))
+    edited = marked_doc.replace("{{A bridging paragraph, new.}}",
+                                "{{A bridging paragraph, in my voice.}}")
+    final2, matched2 = passes.final_text_from_marked(edited,
+                                                     written=written)
+    check("a post-edited paragraph insertion still resolves, and inline "
+          "author braces still survive (no FIFO steal)",
+          "{{title}}" in final2 and "{{a, b}}" in final2
+          and "A bridging paragraph, in my voice." in final2
+          and "A bridging paragraph, new." not in final2
+          and any(f["kind"] == "insert"
+                  and f["new"] == "A bridging paragraph, in my voice."
+                  for f in matched2),
+          repr(final2))
+    # Footnote defs stacked with single newlines (Docs export / #65 reject
+    # shape): own-line must still see each insert; paragraph-isolation
+    # would not.
+    footnote_stack = (
+        "Body cites[^1] and[^2] and mentions {{a, b}}.\n"
+        "[^old]: earlier.\n"
+        "{{[^1]: First definition.}}\n"
+        "{{[^2]: Second definition.}}\n")
+    fn_forms = [f for f in form_grammar.pending_forms(footnote_stack)
+                if f["kind"] == "insert"]
+    check("stacked footnote-definition inserts (single newlines) are "
+          "still pending_forms inserts — the #65 false-negative shape",
+          [f["new"] for f in fn_forms]
+          == ["[^1]: First definition.", "[^2]: Second definition."],
+          str([f["new"] for f in fn_forms]))
+    fn_written = [
+        {"id": "f1", "proposed_old": "",
+         "proposed_new": "[^1]: First definition."},
+        {"id": "f2", "proposed_old": "",
+         "proposed_new": "[^2]: Second definition."},
+    ]
+    fn_final, fn_matched = passes.final_text_from_marked(
+        footnote_stack, written=fn_written)
+    check("footnote resolve unwraps both defs and leaves inline {{a, b}}",
+          "[^1]: First definition." in fn_final
+          and "[^2]: Second definition." in fn_final
+          and "{{a, b}}" in fn_final
+          and "{{[^" not in fn_final
+          and len(fn_matched) == 2, repr(fn_final))
+    # Set notation inside TeX math is never a form, own line or not: an
+    # inline `${{a,b},{c}}$` shares a line with prose anyway, but a
+    # display `$$…$$` block puts its braces on their own line, and the
+    # own-line rule alone would read that as a planted insertion.
+    math_text = (
+        "The charge pairs are ${{a,b},{c}}$ in the plane.\n\n"
+        "$$\n{{a,b},{c}}\n$$\n\n"
+        "Then the prose resumes.\n\n"
+        "{{A real insertion, planted.}}\n")
+    math_forms = form_grammar.pending_forms(math_text)
+    check("pending_forms skips braces inside $…$ and $$…$$ — only the "
+          "real own-line insertion is a form",
+          [(f["kind"], f["new"]) for f in math_forms]
+          == [("insert", "A real insertion, planted.")],
+          str([(f["kind"], f["new"]) for f in math_forms]))
+    math_written = [{"id": "m1", "proposed_old": "",
+                     "proposed_new": "A real insertion, planted.",
+                     "metadata": json.dumps({"kind": "insert"})}]
+    math_final, math_matched = passes.final_text_from_marked(
+        math_text, written=math_written)
+    check("resolve leaves both math spans byte-intact and unwraps the "
+          "real form",
+          "${{a,b},{c}}$" in math_final
+          and "$$\n{{a,b},{c}}\n$$" in math_final
+          and "A real insertion, planted." in math_final
+          and "{{A real" not in math_final
+          and len(math_matched) == 1, repr(math_final))
+    math_stripped, math_warns = form_grammar.strip_pending(math_text)
+    check("strip_pending (Doc pull) drops the insertion and keeps both "
+          "math spans, no warnings",
+          "${{a,b},{c}}$" in math_stripped
+          and "$$\n{{a,b},{c}}\n$$" in math_stripped
+          and "A real insertion" not in math_stripped
+          and math_warns == [], repr((math_stripped, math_warns)))
 
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
@@ -3987,7 +4166,7 @@ def _braces_are_the_authors(root: Path) -> None:
     # replace form and every one of those answers flips.
     marked = TEMPLATE_ESSAY.replace(
         "The point is that a brace is only a brace.",
-        _th.render_pending("The point is that a brace is only a brace.",
+        form_grammar.render_pending("The point is that a brace is only a brace.",
                            "A brace is only a brace."))
     (ms / "templating.md").write_text(marked)
     check("a REAL <<old>>{{new}} form still marks the file",
@@ -4024,10 +4203,9 @@ def _pull_writes_when_unmarked(db, manuscript, ms: Path, fake) -> bool:
     """Discrimination for the pull guard: unmark the file and prove the
     very same stubbed pull overwrites it. Without this the assertion
     above would pass just as well against a pull that never writes."""
-    from authorlm import threads as _th
 
     (ms / "solo.md").write_text(
-        _th.strip_pending((ms / "solo.md").read_text())[0])
+        form_grammar.strip_pending((ms / "solo.md").read_text())[0])
     gdocs.pull_doc(db, manuscript, "solo.md", service=fake, force=True,
                    with_comments=False, docs_service=fake)
     return ("A sentence the Doc has and local does not."
@@ -4044,9 +4222,12 @@ class Stub(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         system = body["messages"][0]["content"]
         user = body["messages"][-1]["content"]
+        stub = _summary_stubs.reply(system, user)
         if "THE UNIT: " in user:
             unit = user.split("THE UNIT: ", 1)[1].split("\n", 1)[0]
-            content = f"MOVES: summary of {unit}."
+            content = f"MOVES: [1] summary of {unit}."
+        elif stub is not None:
+            content = stub
         elif "Essay editor" in system:
             Stub.editor_calls.append(user)
             content = json.dumps(Stub.editor_replies.pop(0))
@@ -4110,7 +4291,6 @@ def pronunciation_purity() -> None:
     import unicodedata
 
     from authorlm import pronunciations as pron
-    from authorlm.gdocs import normalize_markdown
 
     print("\npronunciation dictionary — the pure layer:")
 
@@ -4285,7 +4465,7 @@ def _directives_on_the_doc_road(root: Path) -> None:
     from authorlm import directives as dv
 
     db, manuscript, ms, fake = _twin_fixture(root, "directive-ws",
-                                             essay=DIRECTIVE_ESSAY)
+                                             essay=DIRECTIVE_ESSAY, render=True)
     mid = manuscript["id"]
     meta = gdocs._mapping(db, manuscript)
     meta["gdocs"]["solo.md"]["checked_out"] = True
@@ -4363,12 +4543,6 @@ def _directives_on_the_doc_road(root: Path) -> None:
           str(dv.open_report(ms)))
 
     # Explain on the same road: inline and standalone, resolve accepts.
-    # (The fake's export flattened the paragraph gaps into the local
-    # file above; a real export keeps them. Restore them so the anchor
-    # paragraphs the staging computes are the tab's paragraphs.)
-    flat = (ms / "solo.md").read_text()
-    (ms / "solo.md").write_text(
-        "\n\n".join(ln for ln in flat.split("\n") if ln.strip()) + "\n")
     rep = dv.apply(db, manuscript, {}, "explain", "solo.md",
                    [(1, "Holding means refusing the easier story."),
                     (2, "A wall that holds forever is a tomb.",
@@ -4388,12 +4562,10 @@ def _directives_on_the_doc_road(root: Path) -> None:
     res = dv.resolve(db, manuscript, {}, "explain", "solo.md",
                      services=services)
     local = (ms / "solo.md").read_text()
-    # (The Doc fake's export flattens paragraph gaps, so this reads the
-    # landed prose line by line rather than by blank-line separation.)
     check("resolve lands both passages in place — inline continuing its "
-          "sentence, standalone as its own line",
+          "sentence, standalone as its own paragraph",
           "Beta holds the line. Holding means refusing the easier story. "
-          "Then on.\nA wall that holds forever is a tomb.[^W3]\n" in local
+          "Then on.\n\nA wall that holds forever is a tomb.[^W3]\n" in local
           and "[^W3]: Cf. the Sermons' wall, which is also a door." in local
           and "[Explain:" not in local
           and res["accepted"] == 3 and res["declined"] == 0, local)
@@ -4401,6 +4573,75 @@ def _directives_on_the_doc_road(root: Path) -> None:
           db.one("SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id = ? "
                  "AND evidence_type IN ('footnote_edit', 'explain_edit')",
                  (mid,))["n"] == 7)
+
+
+def _directives_pull_first(root: Path) -> None:
+    """#248's hazard, fixed the way lens and morph already are: a
+    directive applied to a CHECKED-OUT file pulls the tab down first
+    (gdocs.level_from_doc), so the levelling push in
+    write_pending_forms never wipes prose the author typed only in the
+    Doc. A two-sided edit stops before anything reaches the tab."""
+    print("directives pull the Doc down before staging:")
+    from authorlm import directives as dv
+
+    def fixture(subdir: str):
+        db, manuscript, ms, fake = _twin_fixture(root, subdir,
+                                                 essay=DIRECTIVE_ESSAY,
+                                                 render=True)
+        meta = gdocs._mapping(db, manuscript)
+        meta["gdocs"]["solo.md"]["checked_out"] = True
+        meta["gdocs"]["solo.md"]["pushed_hash"] = gdocs.text_hash(
+            normalize_markdown(DIRECTIVE_ESSAY))
+        gdocs._save_mapping(db, manuscript, meta)
+        # The author edits one paragraph in the tab only.
+        fake.edit("tab-2", "Beta holds the line.",
+                  "Beta holds the line firmly.")
+        return db, manuscript, ms, fake, (lambda: (fake, fake))
+
+    # (a) Doc-ahead: only the tab moved since the push.
+    db, manuscript, ms, fake, services = fixture("pull-first-ws")
+    rep = dv.apply(db, manuscript, {}, "footnote", "solo.md",
+                   [(1, "Ernest Becker, *The Denial of Death* (1973).")],
+                   services=services)
+    tab = fake.tab_text("solo.md")
+    local = (ms / "solo.md").read_text()
+    check("the Doc's edit came down into the local file before staging",
+          "Beta holds the line firmly." in local, local)
+    check("...the forms are planted and the Doc-side edit is still in "
+          "the tab — nothing wiped by the levelling push",
+          rep["mode"] == "marked" and not rep["failed"]
+          and "<<[Footnote: cite Becker]>>{{[^W2]}}" in tab
+          and "{{[^W2]: Ernest Becker" in tab
+          and "Beta holds the line firmly." in tab, tab)
+    check("...and the file is checked out again: the levelling push "
+          "made the tab the working copy, forms out",
+          gdocs.doc_status(db, manuscript)["solo.md"].get("checked_out"))
+
+    # (b) Two-sided: local and the tab both moved since the push.
+    db, manuscript, ms, fake, services = fixture("two-sided-ws")
+    (ms / "solo.md").write_text(DIRECTIVE_ESSAY.replace(
+        "Omega closes the essay.", "Omega closes the essay at last."))
+    before_tab = fake.tab_text("solo.md")
+    before_local = (ms / "solo.md").read_text()
+    try:
+        dv.apply(db, manuscript, {}, "footnote", "solo.md",
+                 [(1, "Ernest Becker, *The Denial of Death* (1973).")],
+                 services=services)
+        err = None
+    except LookupError as e:
+        err = str(e)
+    check("a two-sided edit stops apply with the conflict message",
+          err is not None and "changed both locally and in the Doc" in err
+          and "settle that by hand" in err, str(err))
+    check("...and nothing reached the tab or the local file",
+          fake.tab_text("solo.md") == before_tab
+          and (ms / "solo.md").read_text() == before_local
+          and not db.all("SELECT id FROM doc_threads WHERE manuscript_id = ?",
+                         (manuscript["id"],)),
+          fake.tab_text("solo.md"))
+    check("...and the file stays checked out: the Doc is still the "
+          "working copy",
+          gdocs.doc_status(db, manuscript)["solo.md"].get("checked_out"))
 
 
 SUGGESTION_ESSAY = "\n\n".join([
@@ -4427,6 +4668,8 @@ def _suggestions_on_the_doc_road(root: Path) -> None:
 
     # A note on the next line (no blank) shares a blank-line unit with the
     # prose above; the form must wrap THAT prose, not an earlier unit.
+    # Render mode: apply levels from the Doc first, and a real export
+    # keeps paragraph gaps (the plain fake collapses them into one unit).
     tight = ("# The Wall\n\n"
              "First real paragraph.\n\n"
              "Second paragraph that should be edited.\n"
@@ -4434,7 +4677,7 @@ def _suggestions_on_the_doc_road(root: Path) -> None:
              "Third paragraph that must survive.\n\n"
              "Fourth.\n")
     tdb, tmanuscript, _tdir, tfake = _twin_fixture(
-        root, "suggestion-tight-ws", essay=tight)
+        root, "suggestion-tight-ws", essay=tight, render=True)
     tmeta = gdocs._mapping(tdb, tmanuscript)
     tmeta["gdocs"]["solo.md"]["checked_out"] = True
     gdocs._save_mapping(tdb, tmanuscript, tmeta)
@@ -4451,7 +4694,7 @@ def _suggestions_on_the_doc_road(root: Path) -> None:
           and "<<First" not in ttab, ttab)
 
     db, manuscript, ms, fake = _twin_fixture(root, "suggestion-ws",
-                                             essay=SUGGESTION_ESSAY)
+                                             essay=SUGGESTION_ESSAY, render=True)
     mid = manuscript["id"]
     meta = gdocs._mapping(db, manuscript)
     meta["gdocs"]["solo.md"]["checked_out"] = True
@@ -4522,10 +4765,10 @@ def _suggestions_on_the_doc_road(root: Path) -> None:
           "the tag and keeps the paragraph; an accepted standalone "
           "suggestion lands and its tag line is consumed",
           "Alpha opens, and opens well. Then on.\n" in local
-          and "Beta states the claim without a case.\n"
+          and "Beta states the claim without a case.\n\n"
               "[Suggestion: add an example]\n" in local
           and "Gamma hedges every clause. More.\n" in local
-          and "Delta is fine.\nEpsilon is short.\n" in local
+          and "Delta is fine.\n\nEpsilon is short.\n" in local
           and "[Suggestion: split it]" not in local
           and "[Suggestion: reconsider" not in local
           and "[Suggestion: cut" not in local
@@ -4588,8 +4831,12 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
           and tab.index(shown_tag) < tab.index("{{[^S1]: Psalm 121.}}")
           < tab.index("{{[^S2]: Job 38.}}")
           and "_illustrations/" not in tab, f"{rep}\n{tab}")
-    check("...and the local file is PRISTINE, embed line and all",
-          (ms / "solo.md").read_text() == SKY_ESSAY)
+    local = (ms / "solo.md").read_text()
+    check("...and the local file is PRISTINE, embed line and all (the "
+          "pull-first only canonicalized the embed line's spacing)",
+          gdocs.strip_embed_lines(local).strip()
+          == gdocs.strip_embed_lines(SKY_ESSAY).strip()
+          and SKY_EMBED in local and "<<" not in local, local)
 
     # Atomicity: when a definition cannot be placed, NOTHING is written —
     # never anchors without definitions.
@@ -4600,10 +4847,12 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
     gdocs._save_mapping(db2, ms2, meta)
     real_locate = gdocs._locate_in_tab
 
-    def blind_to_the_tag(docs, master, tab_id, needle, occurrence=0):
+    def blind_to_the_tag(docs, master, tab_id, needle, occurrence=0,
+                         runs=None):
         if "Illustration" in needle and "<<" not in needle:
             return None
-        return real_locate(docs, master, tab_id, needle, occurrence)
+        return real_locate(docs, master, tab_id, needle, occurrence,
+                           runs=runs)
 
     gdocs._locate_in_tab = blind_to_the_tag
     try:
@@ -4626,7 +4875,11 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
           "the local file is pristine",
           states == {"withdrawn"}
           and gdocs.forms_pending(db2, ms2["id"], "solo.md") is None
-          and (msdir2 / "solo.md").read_text() == SKY_ESSAY, str(states))
+          and gdocs.strip_embed_lines(
+              (msdir2 / "solo.md").read_text()).strip()
+          == gdocs.strip_embed_lines(SKY_ESSAY).strip()
+          and SKY_EMBED in (msdir2 / "solo.md").read_text(),
+          f"{states}\n{(msdir2 / 'solo.md').read_text()}")
 
     # A failure AFTER writing (here: one definition's read-back) takes
     # every planted form back out IN PLACE — never a rebuild, so a margin
@@ -4639,19 +4892,19 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
     gdocs._save_mapping(db3, ms3, meta)
     fake3 = _CommentedDocFake([("book", ""), ("solo.md", SKY_ESSAY)],
                               "Beta holds.", "solo.md", render=True)
-    real_insertion = gdocs.threads_mod.render_insertion
+    real_insertion = gdocs.form_grammar.render_insertion
 
     def job_never_reads_back(new):
         return ("never in the tab" if "Job 38." in new
                 else real_insertion(new))
 
-    gdocs.threads_mod.render_insertion = job_never_reads_back
+    gdocs.form_grammar.render_insertion = job_never_reads_back
     try:
         rep = dv.apply(db3, ms3, {}, "footnote", "solo.md",
                        [(1, "Psalm 121."), (2, "Job 38.")],
                        services=lambda: (fake3, fake3))
     finally:
-        gdocs.threads_mod.render_insertion = real_insertion
+        gdocs.form_grammar.render_insertion = real_insertion
     tab = fake3.tab_text("solo.md")
     states = {r["state"] for r in db3.all(
         "SELECT state FROM doc_threads WHERE manuscript_id = ? AND "
@@ -4672,6 +4925,57 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
           f"temps={len(fake3.temps)} orphaned={fake3.orphaned} "
           f"anchored={fake3.anchored_text()!r}")
 
+    # Atomic rollback must not re-record the local file as the pushed
+    # base: a levelling push that HELD a commented paragraph left the tab
+    # on old text while local kept the author's edit. Hashing local as
+    # the base would make the next pull read doc-ahead and wipe that edit.
+    hold_doc = ("# Sky\n\nAlpha stays.\n\n"
+                "Beta holds.[Footnote: cite Job]\n\nOmega closes.\n")
+    hold_local = hold_doc.replace("Beta holds.", "Beta holds firmly.")
+    db4, ms4, msdir4, _ = _outside_fixture(root, "sky-ws-4", essay=hold_doc)
+    (msdir4 / "solo.md").write_text(hold_local)
+    meta = gdocs._mapping(db4, ms4)
+    meta["gdocs"]["solo.md"]["checked_out"] = True
+    # The base the push that checked the file out would have recorded:
+    # apply pulls first (level_from_doc), and against this base the pull
+    # reads local as ahead and keeps the author's edit.
+    meta["gdocs"]["solo.md"]["pushed_hash"] = gdocs.text_hash(
+        normalize_markdown(hold_doc))
+    gdocs._save_mapping(db4, ms4, meta)
+    fake4 = _CommentedDocFake([("book", ""), ("solo.md", hold_doc)],
+                              "Beta holds.", "solo.md", render=True)
+    real_insertion = gdocs.form_grammar.render_insertion
+
+    def never_reads_back(new):
+        return "never in the tab"
+
+    gdocs.form_grammar.render_insertion = never_reads_back
+    try:
+        rep = dv.apply(db4, ms4, {}, "footnote", "solo.md",
+                       [(1, "Job 38.")],
+                       services=lambda: (fake4, fake4))
+    finally:
+        gdocs.form_grammar.render_insertion = real_insertion
+    links = gdocs._mapping(db4, ms4).get("gdocs", {})
+    local = gdocs.strip_embed_lines(normalize_markdown(
+        (msdir4 / "solo.md").read_text(encoding="utf-8")))
+    # pushed_hash is the export's markdown (fetch_tab_markdown), not the
+    # Docs body runs — same side pull/three_way read.
+    tab = gdocs.form_grammar.strip_pending(gdocs.fetch_tab_markdown(
+        fake4, fake4, links["_master_id"], links,
+        gdocs.manuscript_bridge(ms4), "solo.md"))[0]
+    base_hash = (links.get("solo.md") or {}).get("pushed_hash")
+    state = gdocs.three_way(tab, local, base_hash)
+    check("atomic rollback after a held push keeps the tab's base: pull "
+          "still sees local ahead, and the author's held edit stays",
+          rep["landed"] == [] and rep["failed"]
+          and "Beta holds firmly." in local and "Beta holds." in tab
+          and "firmly" not in tab
+          and state == "local_ahead"
+          and (msdir4 / "solo.md").read_text() == hold_local,
+          f"state={state} hash={base_hash}\nlocal={local!r}\ntab={tab!r}\n"
+          f"{rep}")
+
 
 OUTSIDE_ESSAY = (
     "# Topic\n\n"
@@ -4682,7 +4986,8 @@ OUTSIDE_ESSAY = (
     "Omega closes.\n")
 
 
-def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY):
+def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY,
+                     fake_class=None):
     """`_twin_fixture` with a RENDERING fake: its export gives each tab
     paragraph back as its own markdown paragraph, which a resolve that
     writes the tab's text to disk needs."""
@@ -4697,7 +5002,8 @@ def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY):
     manuscript = api.get_manuscript(db)
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, {})
-    fake = _SurgicalDocFake([("book", ""), ("solo.md", essay)], render=True)
+    fake = (fake_class or _SurgicalDocFake)(
+        [("book", ""), ("solo.md", essay)], render=True)
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
@@ -4959,6 +5265,211 @@ def _an_outside_caller_resolves_one_tab(root: Path) -> None:
           str(res))
 
 
+REWRITE_ESSAY = (
+    "# Field\n\n"
+    "The world we stand in is not neutral ground, which the Sermons call "
+    "the Field of Choice.\n\n"
+    "Omega closes.\n")
+
+_ADDED = (
+    "Choice is the hinge of the whole account, and the Sermons insist on "
+    "it: every person stands where two roads part, and the parting is not "
+    "a metaphor but the shape of a life.[Footnote: Sermon 4] What looks "
+    "like fate is a long run of small choices, each one made in the dark.")
+_ADDED_REWORDED = (
+    "Every life turns on a hinge, and the Sermons will not let us forget "
+    "it: each person stands where two roads part, and the parting is not "
+    "a figure of speech but the very shape of a life.[Footnote: Sermon 5] "
+    "What we call fate is only a long run of small choices, each made "
+    "half in the dark.")
+_FIELD_OLD = "which the Sermons call the Field of Choice."
+_FIELD_NEW = (
+    _FIELD_OLD + " The Field is not a place but a condition: it is wherever "
+    "a person must answer for what they do next. No one enters it by "
+    "consent, and no one leaves it by declining to choose, since declining "
+    "is itself a choice. The Sermons call the declining sleep. They call "
+    "the answer waking. Between them lies the whole of the moral life. "
+    "The Field asks nothing of the sleeper. It asks everything of the one "
+    "who wakes. That is the hardness of the teaching.")
+_FIELD_PART1 = (
+    "which the Sermons name the Field of Choice. The Field is no place "
+    "at all but a condition: it is wherever a person has to answer for "
+    "what comes next. No one walks into it by consent, and no one walks "
+    "out of it by holding back, since holding back is a choice too.")
+_FIELD_PART2 = (
+    "The Sermons call that holding back sleep, and the answer waking. "
+    "Between the two lies the whole moral life: the Field asks nothing "
+    "of the sleeper and everything of the one who wakes.")
+
+
+def _an_outside_caller_rewrites_its_green_half(root: Path) -> None:
+    """it-9844aefae138: a green half the author rewrote is a MODIFIED
+    acceptance, with their words as the final text, however far they
+    took it — reworded past a character-ratio heuristic, split into two
+    paragraphs, or with the old half struck again by hand. Each was
+    recorded declined while the reworded text landed."""
+    print("outside callers: a rewritten green half is a modification:")
+
+    # --- the marked text → the additions' verdicts ----------------------
+    marked = ("# Field\n\nThe world stands.\n\n{{" + _ADDED_REWORDED
+              + "}}\n\nOmega closes.\n")
+    thread = {"id": "dt-1", "proposed_old": "", "proposed_new": _ADDED}
+    landed, ruled = api._rule_external_marked(marked, [], [thread])
+    check("an addition whose long green paragraph the author rewrote "
+          "substantially is modified, with their text as final",
+          ruled["dt-1"] == ("modified", _ADDED_REWORDED)
+          and _ADDED_REWORDED in landed and "{{" not in landed,
+          f"{ruled}\n{landed}")
+    _, ruled = api._rule_external_marked(
+        "# Field\n\nThe world stands.\n\nOmega closes.\n", [], [thread])
+    check("...while an addition whose form is gone is still a decline",
+          ruled["dt-1"] == ("declined", None), str(ruled))
+    foreign = ("{{The river had no name in the old maps, only a line of "
+               "blue that the surveyors drew from memory, and the villagers "
+               "called it whatever their grandmothers had called it.}}")
+    _, ruled = api._rule_external_marked(
+        "# Field\n\nThe world stands.\n\n" + foreign + "\n\nOmega.\n",
+        [], [thread])
+    check("...and an unrelated insertion in the tab is not mistaken for "
+          "its rewording", ruled["dt-1"] == ("declined", None), str(ruled))
+
+    # --- the marked text → the replacement's form -----------------------
+    struck = ("A ~~~~<<" + _FIELD_OLD + ">>~~~~{{" + _FIELD_PART1
+              + "}} B.")
+    forms = form_grammar.pending_forms(struck)
+    check("an old half struck once by the writer and once more by hand "
+          "is still one form, its old half bare",
+          len(forms) == 1 and forms[0]["kind"] == "replace"
+          and forms[0]["old"] == _FIELD_OLD
+          and forms[0]["new"] == _FIELD_PART1
+          and form_grammar.strip_pending(struck)[0] == "A " + _FIELD_OLD + " B.",
+          str(forms))
+
+    # --- end to end: stage, the author rewrites, resolve ----------------
+    def staged(subdir: str, revisions: list[dict]):
+        db, manuscript, ms, fake = _outside_fixture(root, subdir,
+                                                    essay=REWRITE_ESSAY)
+        out = api.stage_revisions(db, manuscript, "solo.md", revisions,
+                                  "ytlm", fake, fake)
+        assert len(out["written"]) == len(revisions), out
+        return db, manuscript, ms, fake
+
+    def landed_clean(text: str) -> bool:
+        return not any(m in text for m in ("<<", ">>", "{{", "}}", "~~"))
+
+    # Case 1: the addition, rewritten.
+    db, manuscript, ms, fake = staged("rewrite-add-ws", [
+        {"old": "", "new": _ADDED, "anchor_paragraph": 2, "note": "c-1"}])
+    fake.edit("tab-2", "{{" + _ADDED + "}}", "{{" + _ADDED_REWORDED + "}}")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    row = res["revisions"][0]
+    check("a substantially rewritten addition resolves modified, its final "
+          "the author's paragraph, and lands as written",
+          row["verdict"] == "modified" and row["final"] == _ADDED_REWORDED
+          and (res["accepted"], res["modified"], res["declined"])
+          == (0, 1, 0)
+          and _ADDED_REWORDED in local and _ADDED not in local
+          and landed_clean(local), str(res) + local)
+
+    # Case 2: the replacement, rewritten and split in two.
+    db, manuscript, ms, fake = staged("rewrite-split-ws", [
+        {"old": _FIELD_OLD, "new": _FIELD_NEW, "note": "c-2"}])
+    fake.edit("tab-2", "{{" + _FIELD_NEW + "}}",
+              "{{" + _FIELD_PART1 + "\n" + _FIELD_PART2 + "}}")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    row = res["revisions"][0]
+    check("a replacement whose green half was rewritten and split into "
+          "two paragraphs resolves modified, both paragraphs its final",
+          row["verdict"] == "modified"
+          and _FIELD_PART1 in (row["final"] or "")
+          and _FIELD_PART2 in (row["final"] or "")
+          and _FIELD_PART1 in local and _FIELD_PART2 in local
+          and "is itself a choice" not in local and landed_clean(local),
+          str(res) + local)
+
+    # Case 3: the replacement, with the old half struck again by hand.
+    # The writer strikes `<<old>>`, so a real export reads `~~<<old>>~~`;
+    # tildes the author types round it come back as well (unescaped by
+    # normalize_markdown). The fake exports no strike, so the author's
+    # edit here carries both pairs.
+    db, manuscript, ms, fake = staged("rewrite-struck-ws", [
+        {"old": _FIELD_OLD, "new": _FIELD_NEW, "note": "c-3"}])
+    fake.edit("tab-2", "<<" + _FIELD_OLD + ">>{{" + _FIELD_NEW + "}}",
+              "~~~~<<" + _FIELD_OLD + ">>~~~~{{" + _FIELD_PART1 + "}}")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    row = res["revisions"][0]
+    check("a replacement with its old half struck again by hand and its "
+          "green half reworded resolves modified, and no marker lands",
+          row["verdict"] == "modified" and row["final"] == _FIELD_PART1
+          and _FIELD_PART1 in local and _FIELD_OLD not in local
+          and landed_clean(local), str(res) + local)
+
+    # A genuine decline in the same shape still reads as one.
+    db, manuscript, ms, fake = staged("rewrite-decline-ws", [
+        {"old": _FIELD_OLD, "new": _FIELD_NEW, "note": "c-4"}])
+    fake.edit("tab-2", "<<" + _FIELD_OLD + ">>{{" + _FIELD_NEW + "}}",
+              "~~~~<<" + _FIELD_OLD + ">>~~~~{{}}")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    local = (ms / "solo.md").read_text()
+    check("...while a struck-by-hand form whose green half was emptied is "
+          "still a decline, the old text standing",
+          [r["verdict"] for r in res["revisions"]] == ["declined"]
+          and _FIELD_OLD in local and landed_clean(local),
+          str(res) + local)
+
+
+def _similarity_has_no_autojunk() -> None:
+    """difflib's autojunk, on by default, junks every element seen in
+    more than 1% of a sequence once it passes 200 — every common letter
+    of a paragraph, every "the" of a long passage. Each reader that
+    scores or diffs prose turns it off; these pin that down."""
+    print("similarity: autojunk stays off:")
+    from authorlm import lint
+
+    flat = lambda s: " ".join(s.split())  # noqa: E731
+    short = "The hinge is a door."
+    k, ratio = lint.closest_by_ratio(_ADDED, [short, _ADDED_REWORDED],
+                                     flat, floor=0.5)
+    check("the shared helper scores a long rewording as its source's "
+          "closest, far above the floor (it fell under 0.5 with autojunk)",
+          k == 1 and ratio > 0.7, str((k, ratio)))
+    check("...returns no index below the floor, with the best ratio, and "
+          "a strict floor excludes a tie",
+          lint.closest_by_ratio("abc", ["xyz"], flat, floor=0.5)
+          == (None, 0.0)
+          and lint.closest_by_ratio("ab", ["ab", "ab"], flat, floor=1.0)
+          == (0, 1.0)
+          and lint.closest_by_ratio("ab", ["ab"], flat, floor=1.0,
+                                    strict=True) == (None, 1.0))
+
+    text = short + "\n\n" + _ADDED_REWORDED + "\n\nOmega closes."
+    check("_closest_paragraph picks a reworded paragraph over 200 "
+          "characters, not None and not the short one beside it",
+          passes._closest_paragraph(text, _ADDED) == _ADDED_REWORDED,
+          str(passes._closest_paragraph(text, _ADDED)))
+
+    base = ("the world is the field and the field is the place where the "
+            "person must choose what the next step is").split()
+    old = " ".join((base * 11)[:220])
+    words = old.split()
+    at = sum(len(w) + 1 for w in words[:110])
+    was = words[110]
+    words[110] = "CHANGED"
+    new = " ".join(words)
+    gone, came = gdocs._word_diff_spans(old, new)
+    check("a one-word change in a 220-word form highlights that one word "
+          "on each side, not a run of hundreds",
+          gone == [(at, at + len(was))]
+          and came == [(at, at + len("CHANGED"))], str((gone, came, at)))
+
+
 def _an_outside_caller_keeps_its_settings_and_withdraws(root: Path) -> None:
     """The two doors an outside caller lacked, so that it never writes
     AuthorLM's tables itself (nagarkar/ytlm#23): its own settings on a
@@ -5067,12 +5578,165 @@ def _an_outside_caller_keeps_its_settings_and_withdraws(root: Path) -> None:
               db, manuscript, "no-such.md", "ytlm"), "no document matching"))
 
 
+EXTENDS_ESSAY = (
+    "# Topic\n\n"
+    "The answer is not a place; it is the pursuit.\n\n"
+    "To give a thing a figure is to mark where it is not.\n\n"
+    "Böhme’s account of Nothing, abyss, will.\n\n"
+    "Its consequences may change, but the act remains.\n\n"
+    "Omega closes.\n")
+
+
+def _a_new_half_that_extends_its_old(root: Path) -> None:
+    """A revision whose new text CONTAINS its old (a sentence appended
+    or prepended) leaves the old text standing inside the new once it
+    lands. When the forms come back without their markers (resolved by
+    hand, or anything else that leaves the form unmatched), the verdict
+    is inferred from the prose — and the old text found inside the
+    landed new is no decline (SMSTTD recapitulation.md, 2026-10-18:
+    7 accepted forms recorded `declined`)."""
+    print("outside callers: a new half that extends its old:")
+    db, manuscript, ms, fake = _outside_fixture(root, "extends-ws",
+                                                EXTENDS_ESSAY)
+    revisions = [
+        ("it is the pursuit.",
+         "it is the pursuit. The verdict is given from within."),
+        ("To give a thing a figure is to mark where it is not.",
+         "To give a thing a figure is to mark where it is not. Spinoza "
+         "drew the opposite conclusion."),
+        ("Böhme’s account of Nothing, abyss, will.",
+         "Trans. Ellistone (1651). Böhme’s account of Nothing, abyss, "
+         "will."),
+        ("Its consequences may change, but the act remains.",
+         "Its consequences may change, but the act remains. The balance "
+         "is conserved."),
+    ]
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": old, "new": new, "note": f"x-{n}"}
+        for n, (old, new) in enumerate(revisions)], "ytlm", fake, fake)
+    check("the fixture: four replacements out",
+          len(staged["written"]) == 4 and not staged["failed"],
+          str(staged))
+    # The author takes the markers off by hand: the first three keep the
+    # new text (acceptances), the last is put back to its old (a decline).
+    for old, new in revisions[:3]:
+        fake.edit("tab-2", f"<<{old}>>{{{{{new}}}}}", new)
+    old, new = revisions[3]
+    fake.edit("tab-2", f"<<{old}>>{{{{{new}}}}}", old)
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    by_note = {r["note"]: r["verdict"] for r in res["revisions"]}
+    check("a landed new that contains its old is accepted — appended "
+          "or prepended",
+          [by_note[f"x-{n}"] for n in range(3)] == ["accepted"] * 3,
+          str(res["revisions"]))
+    check("...and the old text put back is still a decline",
+          by_note["x-3"] == "declined"
+          and (res["accepted"], res["modified"], res["declined"])
+          == (3, 0, 1), str(res))
+    text = (ms / "solo.md").read_text()
+    check("the file carries what was ruled",
+          all(new in text for _, new in revisions[:3])
+          and "The balance is conserved." not in text, text)
+    rows = {r["note"]: r["state"] for r in db.all(
+        "SELECT note, state FROM doc_threads WHERE manuscript_id = ?",
+        (manuscript["id"],))}
+    signals = sorted(r["signal"] for r in db.all(
+        "SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+        "evidence_type = ?", (manuscript["id"], api.EXTERNAL_EVIDENCE)))
+    check("the evidence agrees: three resolved, one declined",
+          [rows[f"x-{n}"] for n in range(4)] == ["cleaned"] * 3
+          + ["declined"]
+          and signals == ["declined"] + ["resolved"] * 3,
+          str((rows, signals)))
+
+
 def _refuses(fn, fragment: str) -> bool:
     try:
         fn()
     except Exception as err:  # noqa: BLE001
         return fragment in str(err)
     return False
+
+
+class _EscapingDocFake(_SurgicalDocFake):
+    """`_SurgicalDocFake` with Google's backslash escapes on both ends:
+    the importer consumes one backslash before any ASCII punctuation
+    (`\{` imports as `{`, which is why push runs escape_math), and the
+    markdown export escapes the characters it was measured escaping
+    around math — `\`, `$`, `_`, `=`, `<`, `>` (#152,
+    margin-threads-design.md "Export encodings")."""
+
+    _IMPORT_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+    def _paras(self, markdown):
+        return [self._IMPORT_ESCAPE.sub(r"\1", p)
+                for p in super()._paras(markdown)]
+
+    def _markdown_of_tab(self, tab):
+        saved = tab["body"]
+        tab["body"] = "".join("\\" + c if c in "\\$_=<>" else c
+                              for c in saved)
+        # One character for one: the style map's indices still hold.
+        assert len(tab["body"]) == len(saved) or not self.styled, \
+            "escaping fake: emphasis and escapes in one tab"
+        try:
+            return super()._markdown_of_tab(tab)
+        finally:
+            tab["body"] = saved
+
+
+MATH_ESSAY = (
+    "# Topic\n\n"
+    "Formally, let $N=\\bigcup\\limits_{A}\\{A,\\neg A\\}$, where $A$ "
+    "ranges over all things. Define negation of the whole element by "
+    "element:$\\neg N:=\\{\\neg x:x\\in N\\}$. Assuming "
+    "$\\neg \\neg A=A$, negation leaves the whole unchanged: "
+    "$\\neg N=N$.\n\n"
+    "Omega closes.\n")
+
+
+def _a_resolve_keeps_math_a_form_cuts_through(root: Path) -> None:
+    r"""2026-10-18, SMSTTD recapitulation.md R10: a revision that moved a
+    math span's opening `$` (`element:$\neg` → `element: $\neg`) put a
+    `$` in each half of its form. Pairing the export's delimiters on the
+    marked text left the new half's `\$` escaped; the resolve landed
+    `\$\neg N:=\{…\}$`, the push took the span for prose so the importer
+    ate `\{` `\}`, and normalize stripped them from the local file too."""
+    print("math a form cuts through survives resolve, push and pull:")
+    # The tab as a push leaves it: the essay through escape_math.
+    db, manuscript, ms, fake = _outside_fixture(
+        root, "math-form-ws", gdocs.escape_math(MATH_ESSAY),
+        fake_class=_EscapingDocFake)
+    (ms / "solo.md").write_text(MATH_ESSAY)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    tab = next(t for t in fake.tabs if t["title"] == "solo.md")
+    check("the fixture: the tab holds the TeX the file does",
+          "element:$\\neg N:=\\{\\neg x:x\\in N\\}$" in tab["body"],
+          tab["body"])
+    staged = api.stage_revisions(db, manuscript, "solo.md", [
+        {"old": "element:$\\neg", "new": "element: $\\neg", "note": "c-1"},
+    ], "ytlm", fake, fake)
+    check("the form is out, a `$` in each half",
+          len(staged["written"]) == 1 and not staged["failed"]
+          and "<<element:$\\neg>>{{element: $\\neg}}" in tab["body"],
+          tab["body"])
+
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake)
+    want = MATH_ESSAY.replace("element:$", "element: $")
+    local = (ms / "solo.md").read_text()
+    check("the resolve lands the TeX byte for byte",
+          res["accepted"] == 1 and local == want, repr(local))
+    check("the tab holds the escaped braces after the resolve's push",
+          not res["tab_still_marked"]
+          and "element: $\\neg N:=\\{\\neg x:x\\in N\\}$" in tab["body"],
+          tab["body"])
+    gdocs.pull_doc(db, manuscript, "solo.md", service=fake,
+                   docs_service=fake, with_comments=False)
+    local = (ms / "solo.md").read_text()
+    check("a pull gives the same bytes back", local == want, repr(local))
 
 
 def main_test() -> None:
@@ -5360,7 +6024,7 @@ def main_test() -> None:
             raised = "drifted" in str(err)
         check("drifted paragraph fails loudly before any Doc write", raised)
         check("strip_pending on the marked text gives back the pristine essay",
-              th.strip_pending(marked)[0].strip() == ESSAY.strip())
+              form_grammar.strip_pending(marked)[0].strip() == ESSAY.strip())
 
         # Local road: observation strips embed lines, but on disk the
         # embed glues under the illustration tag as one paragraph. Compose
@@ -5740,7 +6404,7 @@ def main_test() -> None:
 
                 class _Documents:
                     def get(self, documentId=None,
-                           includeTabsContent=None):
+                           includeTabsContent=None, fields=None):
                         tabs = [{"tabProperties": {"tabId": t["id"],
                                                    "title": t["title"]},
                                 "childTabs": []} for t in outer.tabs]
@@ -6072,6 +6736,31 @@ def main_test() -> None:
         check("doc pull snapshots the uncollected local edit into history "
               "before the Doc overwrites it (BUG-1 / A2)", recovered)
 
+        # A tab the export does not carry: the pull says so and EXITS
+        # NON-ZERO (2026-10-26: every pull exited 0 while nothing came down).
+        def _missing_pull_doc(db, manuscript, query=None, service=None,
+                              force=False, with_comments=True,
+                              docs_service=None, bridge=None):
+            return {"changed": [], "unchanged": [], "conflicts": [],
+                    "local_ahead": [], "missing": ["solo.md"], "doc_id": "doc-1"}
+        _gdocs_mod.get_service = _fake_service2
+        _gdocs_mod.get_docs_service = _fake_service2
+        _gdocs_mod.pull_doc = _missing_pull_doc
+        out_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out_buf):
+                cli_main(["--workspace", str(dp_ws), "doc", "pull", "solo.md"])
+            exit_msg = None
+        except SystemExit as err:
+            exit_msg = str(err.code)
+        finally:
+            (_gdocs_mod.get_service, _gdocs_mod.get_docs_service,
+             _gdocs_mod.pull_doc) = _orig2
+        check("a pull whose tab is missing exits with an error naming it",
+              exit_msg is not None and "nothing pulled for solo.md" in exit_msg
+              and "clean round trip" not in out_buf.getvalue(),
+              f"{exit_msg!r} / {out_buf.getvalue()[-200:]!r}")
+
         _local_transport_guards(root)
         _identical_old_halves(root)
         _inline_markup_forms(root)
@@ -6082,6 +6771,7 @@ def main_test() -> None:
         _mixed_push_set_membership(root)
         _failed_writes_keep_their_own_state(root)
         _the_doc_transport_push(root)
+        _critique_write_refuses_checked_out(root)
         _the_push_says_what_it_did_to_the_file(root)
         _the_push_is_partial_or_nothing(root)
         _twins_go_to_the_doc(root)
@@ -6106,9 +6796,14 @@ def main_test() -> None:
         _awkward_new_halves_through_the_doc(root)
         _the_doc_road_through_the_cli(root)
         _directives_on_the_doc_road(root)
+        _directives_pull_first(root)
         _suggestions_on_the_doc_road(root)
         _footnotes_after_a_closing_illustration(root)
         _an_outside_caller_resolves_one_tab(root)
+        _an_outside_caller_rewrites_its_green_half(root)
+        _similarity_has_no_autojunk()
+        _a_resolve_keeps_math_a_form_cuts_through(root)
+        _a_new_half_that_extends_its_old(root)
         _an_outside_caller_keeps_its_settings_and_withdraws(root)
     finally:
         server.shutdown()

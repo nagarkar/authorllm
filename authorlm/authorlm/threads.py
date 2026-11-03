@@ -1,29 +1,20 @@
 """Margin threads — in-context Doc comment conversations
 (docs/margin-threads-design.md).
 
-This module owns the deterministic core: the pending-change grammar,
-the verdict grammar, and the thread records. The Docs/Drive API calls
-live in gdocs.py; prose proposals are drafted in chat (the beat-loop
-division of labor: the collaborator drafts, the CLI is the state
-machine and evidence channel).
-
-The pending-change grammar, reserved in Doc tabs:
-
-    <<old text>>{{new text}}
-
-Boundary insertions leave the author's comment anchored on the old
-span. While a thread is pending, the CANONICAL text is the old text —
-ratified content changes only at approval — so the pull-strip unwraps
-`<<old>>` and drops `{{new}}`. Observation never sees markers.
+This module owns the deterministic core: the verdict grammar and the
+thread records. The pending-change forms a thread writes are in
+`form_grammar`; the Docs/Drive API calls live in gdocs.py; prose proposals
+are drafted in chat (the beat-loop division of labor: the collaborator
+drafts, the CLI is the state machine and evidence channel).
 """
 
 from __future__ import annotations
 
 import json
-import re
 import string
 
 from .db import Database, ko_fields, loads
+from .normalize import clamp
 
 PREFIX = "AuthorLM: "
 
@@ -34,27 +25,6 @@ APPROVE_KEYWORDS = {"go ahead", "make the change", "apply", "yes", "ok",
                     "okay", "lgtm"}
 DECLINE_KEYWORDS = {"no", "dont", "don't", "revert", "reject"}
 
-# The reserved pending-change grammar in a Doc tab (margin-threads design,
-# extended by the critique-pass design §6.3):
-#   replace:   <<old>>{{new}}   — old struck through, new in green
-#   insertion: {{new}}          — new text with no old half (critique
-#                                 passes propose new paragraphs this way)
-# Both resolve the same way: the author may edit the {{new}} half; the
-# local file keeps the OLD text (nothing, for an insertion) until resolve.
-PENDING = re.compile(
-    r"(?:~~)?<<(?P<old>.*?)>>(?:~~)?\{\{(?P<new>.*?)\}\}",
-    re.DOTALL)
-INSERTION = re.compile(r"(?<![>}])\{\{(?P<new>.*?)\}\}", re.DOTALL)
-_ANY_MARKER = re.compile(r"<<|>>|\{\{|\}\}")
-# The markdown export closes and reopens strikethrough at every hard line
-# break inside a struck span, so a verse stanza's old half comes back as
-# `~~line one,~~\ ~~line two~~` (found 2026-09-27, first lens push on a
-# verse file). The fragments are the exporter's, not the record's.
-_STRIKE_AT_BREAK = re.compile(r"~~(\\\n|  \n)~~")
-
-
-def _unstrike(old: str) -> str:
-    return _STRIKE_AT_BREAK.sub(r"\1", old)
 
 
 def classify_reply(content: str) -> str:
@@ -73,194 +43,6 @@ def is_ours(content: str) -> bool:
     """Replies posted through the author's OAuth carry their identity;
     the prefix is the only authorship signal there is."""
     return content.lstrip().startswith(PREFIX)
-
-
-_RESERVED_MARKERS = ("<<", ">>", "{{", "}}")
-
-
-def assert_no_pending_markers(old: str, new: str) -> None:
-    """Reject proposal text that would break the <<old>>{{new}} grammar.
-    Non-greedy parsers and find('}}') close at the first delimiter, so a
-    new half containing `}}` (e.g. nested braces) truncates the span and
-    corrupts both pull-strip and approve."""
-    for label, part in (("old", old), ("new", new)):
-        for marker in _RESERVED_MARKERS:
-            if marker in part:
-                raise ValueError(
-                    f"proposal {label} text cannot contain {marker!r} "
-                    "(reserved by the pending-change grammar)")
-
-
-def render_pending(old: str, new: str) -> str:
-    """The pending form for a span. An empty `old` renders the insertion
-    form ({{new}} only) — the critique pass's new-paragraph proposals."""
-    assert_no_pending_markers(old, new)
-    if old == "":
-        return render_insertion(new)
-    return f"<<{old}>>{{{{{new}}}}}"
-
-
-def render_insertion(new: str) -> str:
-    # The insertion form is the same reserved grammar, and the critique
-    # pass reaches it directly — guarding only render_pending would leave
-    # the new-paragraph path unchecked.
-    assert_no_pending_markers("", new)
-    return f"{{{{{new}}}}}"
-
-
-# Critique insertions are paragraph forms (compose joins with blank
-# lines; head inserts sit at the start of the marked text). Inline
-# `{{…}}` is author prose once a manuscript has been pushed into a tab.
-_INSERTION_PARA = re.compile(r"\n\s*\n(?<![>}])\{\{(?P<new>.*?)\}\}(?=\s*\n|\Z)",
-                             re.DOTALL)
-# Start-of-text insertions include the following blank-line separator
-# so dropping them leaves no leading `\n\n` residue (compose may stack
-# several head inserts before the first live paragraph).
-_INSERTION_START = re.compile(
-    r"\A\s*\{\{(?P<new>.*?)\}\}(?:(?:\s*\n)+|\Z)", re.DOTALL)
-
-_REPLACE_MARKER = re.compile(r"<<|>>")
-
-
-def _collapse(text: str, keep: str) -> str:
-    """Resolve every pending form to one half. Replaces first (their
-    {{new}} halves are consumed by the PENDING match), then
-    paragraph-scoped insertions only.
-
-    Bare inline `{{…}}` is left alone. Author prose (`{{title}}`, set
-    notation, TeX grouping) reaches Doc tabs through `doc push`, and the
-    older bare-INSERTION collapse deleted it on every pull/reconcile —
-    silently, because local still matched `pushed_hash` while the
-    stripped tab looked like a Doc-only edit."""
-    text = PENDING.sub(lambda m: m.group(keep), text)
-    if keep == "old":
-        while True:
-            nxt = _INSERTION_START.sub("", text, count=1)
-            if nxt == text:
-                break
-            text = nxt
-        return _INSERTION_PARA.sub("", text)
-    while True:
-        m = _INSERTION_START.match(text)
-        if not m:
-            break
-        # Keep a blank-line separator when more content follows so the
-        # unwrapped insertion stays its own paragraph.
-        rest = text[m.end():]
-        text = m.group("new") + ("\n\n" + rest if rest else "")
-    return _INSERTION_PARA.sub(lambda m: "\n\n" + m.group("new"), text)
-
-
-def strip_pending(text: str) -> tuple[str, list[str]]:
-    """Canonical text from a Doc tab: replace forms collapse to their
-    OLD half; critique paragraph insertions vanish; author `{{…}}`
-    prose is left intact. Returns (canonical, warnings).
-
-    Stray `<<` / `>>` surviving the collapse are warned about rather
-    than guessed at. Surviving `{{` / `}}` are not warned about — they
-    are ordinary manuscript content once the tab holds a pushed essay."""
-    stripped = _collapse(text, "old")
-    warnings = []
-    if _REPLACE_MARKER.search(stripped):
-        warnings.append(
-            "stray or unbalanced pending-change markers (<<, >>) "
-            "— left untouched; fix in the Doc or ask in chat")
-    return stripped, warnings
-
-
-def form_remnants(text: str, news) -> list[tuple[int, str]]:
-    """Where `text` carries the `}}` a hand-resolved form left behind:
-    the author deleted `<<old>>{{` in the Doc and kept the new half with
-    its closing braces (it-459f2c04ef77). `news` are the new halves of
-    the file's OWN forms (its thread rows); a `}}` counts only when it
-    directly follows one of them and that half is not itself opened by
-    `{{` — any other `}}` is the author's prose and is not touched.
-    Returns (offset of the `}}`, the half it closes), in text order."""
-    found: dict[int, str] = {}
-    for new in sorted({n for n in news if n}, key=len, reverse=True):
-        at = text.find(new + "}}")
-        while at >= 0:
-            close = at + len(new)
-            if text[max(0, at - 2):at] != "{{" and close not in found:
-                found[close] = new
-            at = text.find(new + "}}", at + 1)
-    return sorted(found.items())
-
-
-def strip_form_remnants(text: str, news) -> tuple[str, list[str]]:
-    """`text` without the `}}` remnants `form_remnants` finds. Returns
-    (text, the new halves whose remnant was taken out)."""
-    spots = form_remnants(text, news)
-    for close, _ in reversed(spots):
-        text = text[:close] + text[close + 2:]
-    return text, [new for _, new in spots]
-
-
-def strip_replacements(text: str) -> tuple[str, list[str]]:
-    """`strip_pending` narrowed to the REPLACE form alone.
-
-    The canonicalizer for LOCAL files (filter-pass design §2.3), and it is
-    deliberately not `strip_pending`.
-
-    Local observation must never run the Doc insertion strip: a filter
-    never stages an insertion, and `{{title}}` / `{{a, b}}` / Handlebars
-    samples in an essay ABOUT templating are the author's own prose.
-    Running a broad insertion collapse over local files deleted every
-    one of them from what the system observes — silently, with no
-    warning, because once they were gone there was nothing left to warn
-    about.
-
-    Doc pull/reconcile uses `strip_pending`, which still drops
-    paragraph-scoped critique insertions but now leaves inline author
-    braces alone for the same reason (they arrive in the tab via push).
-
-    So: only `<<old>>{{new}}` collapses here, and only to its old half.
-    Stray `<<` or `>>` surviving the collapse is an unbalanced replace
-    form and is warned about rather than guessed at. A surviving `{{` or
-    `}}` is NOT warned about: it is not this grammar's business, and a
-    warning on every templating example would be noise that trained the
-    author to ignore the warnings that matter."""
-    stripped = PENDING.sub(lambda m: m.group("old"), text)
-    warnings = []
-    if _REPLACE_MARKER.search(stripped):
-        warnings.append(
-            "stray or unbalanced pending-change markers (<<, >>) — left "
-            "untouched; settle them in the file or ask in chat")
-    return stripped, warnings
-
-
-def has_replacement(text: str) -> bool:
-    """True when the text carries a `<<old>>{{new}}` form.
-
-    The predicate `staging.is_marked` is built on, and narrow for the same
-    reason `strip_replacements` is: a file containing `{{title}}` is not
-    mid-settle, and treating it as such refused its Doc push forever with
-    a message about a resolve that does not exist."""
-    return PENDING.search(text) is not None
-
-
-def approved_text(text: str) -> str:
-    """What a tab's text becomes when every pending form is approved —
-    used by the cleanup path and by equivalence checks."""
-    return _collapse(text, "new")
-
-
-def pending_forms(text: str) -> list[dict]:
-    """Every pending form in a tab, in document order: {kind, old, new,
-    start, end}. The resolve verb reads the author's post-edits from the
-    {{new}} halves here."""
-    found = []
-    for m in PENDING.finditer(text):
-        found.append({"kind": "replace", "old": _unstrike(m.group("old")),
-                      "new": m.group("new"), "start": m.start(),
-                      "end": m.end()})
-    consumed = [(f["start"], f["end"]) for f in found]
-    for m in INSERTION.finditer(text):
-        if any(s <= m.start() < e for s, e in consumed):
-            continue
-        found.append({"kind": "insert", "old": "", "new": m.group("new"),
-                      "start": m.start(), "end": m.end()})
-    return sorted(found, key=lambda f: f["start"])
 
 
 # ------------------------------------------------------------- records
@@ -344,8 +126,6 @@ def record_margin_verdict(db: Database, manuscript_id: str, thread: dict,
     """Terminal margin verdicts are the third evidence channel: always
     recorded as evidence; candidate beliefs only through the scoped,
     decline-capable distiller (never by force of habit)."""
-    from .gdocs import clamp
-
     target = f"{thread['file']}: «{clamp(thread['proposed_old'] or '')}»"
     if signal == "modified":
         original = (loads(thread.get("metadata"), {}) or {}).get(

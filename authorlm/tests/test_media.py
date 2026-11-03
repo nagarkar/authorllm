@@ -11,12 +11,13 @@ os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-media/config.toml"
 os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-media/.env"
 os.environ["AUTHORLM_CLIENT"] = "none"
 
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from authorlm import audio, export, media, media_gen
+from authorlm import audio, export, media, media_gen, media_tags
 
 TOC = '[[chapter]]\nfile = "ecce.md"\n'
 FILL = " ".join(["word"] * 120)
@@ -538,6 +539,162 @@ class MediaTests(unittest.TestCase):
         entry = media.list_media(self.root, None, key)["media"][0]
         self.assertIn("stale-desc", entry["takes"][0]["stale"])
 
+    def test_omni_start_poll(self):
+        """Omni: timecode sets the length, one background interaction,
+        the video inline in steps[] (shapes from the live probe, 2026-10-22)."""
+        import base64
+
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        key = self._generated_clip(words=10)
+        ms = {"path": str(self.root), "id": "m"}
+        model = "gemini-omni-1.1-flash"
+        p = media_gen.plan(self._DB(), ms, key, model)
+        self.assertEqual(p["reasons"], [])
+        self.assertEqual(p["duration"], 4)
+        self.assertEqual(p["est_usd"], 0.40)
+        self.assertTrue(p["prompt"].startswith("[0-4s]"))
+        calls = []
+        polls = iter([{"id": "v1_x", "status": "in_progress"},
+                      {"id": "v1_x", "status": "completed",
+                       "usage": {"total_input_tokens": 28,
+                                 "total_output_tokens": 23168,
+                                 "total_thought_tokens": 259,
+                                 "output_tokens_by_modality": [
+                                     {"modality": "video", "tokens": 23168}]},
+                       "steps": [{"type": "user_input"}, {"type": "thought"},
+                                 {"type": "model_output", "content": [
+                                     {"type": "video", "mime_type": "video/mp4",
+                                      "data": base64.b64encode(b"OMNI").decode()}]}]}])
+
+        def http(method, url, k, body=None, raw=False, timeout=120):
+            calls.append((method, url, body))
+            if method == "POST":
+                return {"id": "v1_x", "status": "in_progress"}
+            return next(polls)
+        job = media_gen.start(self._DB(), ms, key, model, http=http)
+        body = calls[0][2]
+        self.assertTrue(calls[0][1].endswith("/interactions"))
+        self.assertTrue(body["background"])
+        self.assertEqual(body["response_format"]["resolution"], "720p")
+        self.assertEqual(job["operation"], "interactions/v1_x")
+        self.assertEqual(media_gen.poll(ms, job["id"], http=http)["state"],
+                         "running")
+        done = media_gen.poll(ms, job["id"], http=http)
+        self.assertEqual(done["state"], "done")
+        self.assertEqual((self.root / done["take"]).read_bytes(), b"OMNI")
+        self.assertEqual(done["usd"], 0.41)
+        saved = (self.root / "_clips/jobs" / f"{job['id']}.response.json"
+                 ).read_text(encoding="utf-8")
+        self.assertIn("base64 chars", saved)
+
+    def test_omni_edit(self):
+        """A revision continues the take's interaction and lands as eNN with
+        its parent's hashes; a Veo take cannot be revised."""
+        import base64
+
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        key = self._generated_clip(words=10)
+        ms = {"path": str(self.root), "id": "m"}
+        video = {"id": "v1_y", "status": "completed", "usage": {},
+                 "steps": [{"type": "model_output", "content": [
+                     {"type": "video",
+                      "data": base64.b64encode(b"V").decode()}]}]}
+        calls = []
+
+        def http(method, url, k, body=None, raw=False, timeout=120):
+            calls.append((method, url, body))
+            if method == "POST":
+                return {"id": "v1_y" if body.get("previous_interaction_id")
+                        else "v1_x", "status": "in_progress"}
+            return video
+        job = media_gen.start(self._DB(), ms, key, "gemini-omni-1.1-flash",
+                              http=http)
+        first = media_gen.poll(ms, job["id"], http=http)["take"]
+        with self.assertRaises(ValueError):
+            media_gen.edit_start(ms, key, "01", "  ", http=http)
+        p = media_gen.edit_plan(ms, key, "01", "warmer light")
+        self.assertEqual(p["previous_interaction_id"], "v1_x")
+        self.assertEqual(p["est_usd"], 0.43)      # $0.40 out + $0.03 re-read
+        self.assertTrue(p["prompt"].endswith("Keep everything else the same."))
+        edit = media_gen.edit_start(ms, key, "01", "warmer light", http=http)
+        self.assertEqual(calls[-1][2]["previous_interaction_id"], "v1_x")
+        self.assertEqual(edit["edit_of"], first)
+        done = media_gen.poll(ms, edit["id"], http=http)
+        self.assertTrue(done["take"].endswith("-e02.mp4"))
+        self.assertEqual(done["take"].split("-")[-3:-1],
+                         first.split("-")[-3:-1])     # parent's hashes
+        entry = media.list_media(self.root, None, key)["media"][0]
+        self.assertEqual(entry["chosen"], first)      # an edit is not chosen
+        self.assertEqual(media_gen.pick(self.root, key, "e02")["chosen"],
+                         done["take"])
+        # An edit of the edit continues the edit's interaction.
+        self.assertEqual(media_gen.edit_plan(ms, key, "e02", "x")
+                         ["previous_interaction_id"], "v1_y")
+        # An attached (non-Omni) take cannot be revised.
+        src = self.root / "own.mp4"
+        src.write_bytes(b"OWN")
+        media_gen.attach(self.root, key, src)
+        self.assertTrue(any("not made by Omni" in r for r in
+                            media_gen.edit_plan(ms, key, "i03", "x")["reasons"]))
+
+    def test_omni_images_and_resolution(self):
+        key = self._generated_clip(words=40)
+        ms = {"path": str(self.root), "id": "m"}
+        p = media_gen.plan(self._DB(), ms, key, "gemini-omni-1.1-flash")
+        self.assertEqual(p["duration"], 10)            # capped at 10 s
+        p.update(first_frame=None, last_frame=None, references=[])
+        self.assertIsInstance(media_gen.omni_body(p)["input"], str)
+        prompt = media_gen.omni_prompt("X", 5, True, True, 2)
+        self.assertIn("Begin on <IMAGE_REF_0>", prompt)
+        self.assertIn("End on <IMAGE_REF_1>", prompt)
+        self.assertIn("<IMAGE_REF_2>, <IMAGE_REF_3>", prompt)
+        (self.root / "_clips" / "settings.toml").write_text(
+            'resolution = "1080p"\n', encoding="utf-8")
+        p = media_gen.plan(self._DB(), ms, key, "gemini-omni-1.1-flash")
+        self.assertTrue(any("no 1080p" in r for r in p["reasons"]))
+
+    def test_job_ids_do_not_overwrite_same_second(self):
+        """Two starts in the same second keep both billed jobs."""
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        key = self._generated_clip(words=10)
+        ms = {"path": str(self.root), "id": "m"}
+        n = {"i": 0}
+
+        def http(method, url, k, body=None, raw=False, timeout=120):
+            n["i"] += 1
+            return {"id": f"v1_{n['i']}", "status": "in_progress"}
+
+        a = media_gen.start(self._DB(), ms, key, "gemini-omni-1.1-flash",
+                            http=http)
+        b = media_gen.start(self._DB(), ms, key, "gemini-omni-1.1-flash",
+                            http=http)
+        self.assertNotEqual(a["id"], b["id"])
+        jobs = self.root / "_clips" / "jobs"
+        self.assertEqual(
+            json.loads((jobs / f"{a['id']}.json").read_text())["operation"],
+            "interactions/v1_1")
+        self.assertEqual(
+            json.loads((jobs / f"{b['id']}.json").read_text())["operation"],
+            "interactions/v1_2")
+
+    def test_take_overflow_refuses_instead_of_overwrite(self):
+        """After 99 listed takes, another save must not clobber paid bytes."""
+        key = "clip1"
+        desc, law = "abcd1234", "ef01"
+        clips = self.root / "_clips"
+        clips.mkdir(parents=True, exist_ok=True)
+        for i in range(1, 100):
+            (clips / f"{key}-{desc}-{law}-{i:02d}.mp4").write_bytes(
+                b"GOOD-%d" % i)
+        with self.assertRaises(RuntimeError) as ctx:
+            media_gen._next_n(self.root, key)
+        self.assertIn("99 takes", str(ctx.exception))
+        job = {"key": key, "desc": desc, "law": law}
+        with self.assertRaises(RuntimeError):
+            media_gen._save_take(self.root, job, b"WOULD-WIPE")
+        self.assertEqual(
+            (clips / f"{key}-{desc}-{law}-99.mp4").read_bytes(), b"GOOD-99")
+
     # -- exports
 
     def test_strip_for_book(self):
@@ -545,7 +702,7 @@ class MediaTests(unittest.TestCase):
                 "[Montage: c]\nMontage prose kept.\n[Clip: y | use: a.mp4]\n"
                 "[/Montage]\n\n[Collage: cut]\n[Clip: z | use: a.mp4]\n"
                 "[/Collage]\n\nAfter.\n")
-        out, removed = media.strip_for_book(text, "ecce.md")
+        out, removed = media_tags.strip_for_book(text, "ecce.md")
         for kept in ("Intro.", "Kept prose.", "Montage prose kept.", "After."):
             self.assertIn(kept, out)
         self.assertNotIn("[Clip", out)

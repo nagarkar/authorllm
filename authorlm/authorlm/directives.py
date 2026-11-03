@@ -46,103 +46,14 @@ import json
 import re
 from pathlib import Path
 
-from .revisions import iter_manuscript_paths
+from .directive_tags import (KINDS, TAGS, check_kind, is_standalone,
+                             remove_tag, scan_text)
+from .docs import _resolve_relpath
+from .revisions import is_placeholder, iter_manuscript_paths
+from .sessions import NO_EPISODE
 
-KINDS = ("footnote", "explain", "suggestion", "judgment")
-_TAGS = {
-    # Keyword case-insensitive; the body never spans a line and never
-    # nests a bracket; an empty body is not a tag at all.
-    "footnote": re.compile(r"\[Footnote:\s*(?P<body>[^\[\]\n]+?)\s*\]", re.IGNORECASE),
-    "explain": re.compile(r"\[Explain:\s*(?P<body>[^\[\]\n]+?)\s*\]", re.IGNORECASE),
-    "suggestion": re.compile(r"\[Suggestion:\s*(?P<body>[^\[\]\n]+?)\s*\]",
-                             re.IGNORECASE),
-    # A lens finding the author ACCEPTED in the tab: a work order at its
-    # anchor, resolved by `lens repair` (a rewrite, a question, or an
-    # intent), never by `apply`. Deleting it in the tab rejects it.
-    "judgment": re.compile(r"\[Judgment:\s*(?P<body>[^\[\]\n]+?)\s*\]", re.IGNORECASE),
-}
-_LABEL_OPT = re.compile(r"\s*\|\s*label:\s*(?P<label>[A-Za-z]+)\s*$", re.IGNORECASE)
 _DEFINITION = re.compile(r"^\[\^(?P<letters>[A-Za-z]+)(?P<n>\d+)\]:", re.MULTILINE)
-_PARAGRAPH = re.compile(r"[^\n]+(?:\n[^\n]+)*")
 _RESERVED = ("<<", ">>", "{{", "}}")
-
-
-def _kind(kind: str) -> str:
-    if kind not in KINDS:
-        raise ValueError(f"unknown directive kind '{kind}' (one of: {', '.join(KINDS)})")
-    return kind
-
-
-# ------------------------------------------------------------------ grammar
-
-def _standalone(text: str, start: int, end: int) -> bool:
-    """True when the tag is the whole of its line (whitespace aside)."""
-    line_start = text.rfind("\n", 0, start) + 1
-    line_end = text.find("\n", end)
-    if line_end == -1:
-        line_end = len(text)
-    return not text[line_start:start].strip() and not text[end:line_end].strip()
-
-
-def scan_text(text: str, kind: str) -> list[dict]:
-    """Every open tag of one kind in one file's text, in document order:
-    the ordinal `n` (1-based within the file — the `--tag` handle), the
-    line, the character span, the gist, the raw tag, whether it stands
-    alone on its line, the paragraph that holds it, the TARGET paragraph
-    a suggestion acts on (`target`, `target_start`, `target_end`: the
-    holding paragraph inline, the paragraph BEFORE a standalone tag,
-    None when nothing precedes it), and — footnotes — the `| label:`
-    override when the author gave one.
-
-    A standalone suggestion's "paragraph before" follows how the author
-    writes the note under what it comments on (design §1). Blank-line
-    units are the paragraph grammar elsewhere; when the tag shares a
-    unit with lines above it (the common `para\\n[Suggestion: …]` with
-    no blank line), those preceding lines ARE the target — never an
-    earlier unit. Taking the previous blank-line unit instead silently
-    destroyed every intervening paragraph on apply."""
-    pattern = _TAGS[_kind(kind)]
-    paragraphs = [(m.start(), m.end(), m.group(0))
-                  for m in _PARAGRAPH.finditer(text)]
-    tags = []
-    for n, m in enumerate(pattern.finditer(text), 1):
-        start, end = m.span()
-        body = m.group("body")
-        label = None
-        if kind == "footnote":
-            opt = _LABEL_OPT.search(body)
-            if opt:
-                label = opt.group("label").upper()
-                body = body[:opt.start()].strip()
-        here = next(((a, b, p) for a, b, p in paragraphs if a <= start < b),
-                    (start, end, ""))
-        standalone = _standalone(text, start, end)
-        if standalone:
-            holding_start, _holding_end, _holding = here
-            line_start = text.rfind("\n", 0, start) + 1
-            if holding_start < line_start:
-                # Note on the next line of the same unit: the lines above
-                # the tag, not the previous blank-line paragraph.
-                chunk = text[holding_start:line_start].rstrip("\n")
-                target = ((holding_start, holding_start + len(chunk), chunk)
-                          if chunk.strip() else None)
-            else:
-                target = next(((a, b, p) for a, b, p in reversed(paragraphs)
-                               if b <= start), None)
-        else:
-            target = here
-        tags.append({
-            "kind": kind, "n": n,
-            "line": text.count("\n", 0, start) + 1,
-            "start": start, "end": end,
-            "gist": body, "raw": m.group(0), "label": label,
-            "standalone": standalone,
-            "paragraph": here[2],
-            "target": target[2] if target else None,
-            "target_start": target[0] if target else None,
-            "target_end": target[1] if target else None,
-        })
-    return tags
 
 
 def _read(path: Path) -> str:
@@ -157,10 +68,9 @@ def scan(root: Path, kind: str, files: list[str] | None = None
     """Open tags of one kind by file (or the named files only). Files
     with no tag are absent. The TOC and a file holding only the
     mid-rewrite placeholder are never scanned."""
-    from .api import is_placeholder
     from .structure import TOC_FILENAME
 
-    _kind(kind)
+    check_kind(kind)
     root = Path(root)
     wanted = set(files or [])
     found: dict[str, list[dict]] = {}
@@ -187,43 +97,6 @@ def open_report(root: Path, kinds: tuple[str, ...] = KINDS,
                          "line": t["line"], "gist": t["gist"],
                          "label": t["label"]} for t in tags)
     return rows
-
-
-def strip_tags(text: str) -> tuple[str, list[dict]]:
-    """Exports: an unresolved tag never reaches a reader. A standalone
-    tag takes its line with it; an inline tag leaves the sentence's
-    spacing as it was. Returns (text, [{kind, gist}] removed)."""
-    removed: list[dict] = []
-    out = text
-    tags = sorted((t for kind in KINDS for t in scan_text(text, kind)),
-                  key=lambda t: t["start"], reverse=True)
-    for tag in tags:
-        removed.append({"kind": tag["kind"], "gist": tag["gist"]})
-        out = remove_tag(out, tag)
-    removed.reverse()
-    return out, removed
-
-
-def remove_tag(text: str, tag: dict) -> str:
-    """The text with ONE tag gone: a standalone tag takes its line with
-    it (and the blank line that separated it); an inline tag leaves the
-    sentence's spacing as it was. Offsets are the tag's in `text`."""
-    start, end = tag["start"], tag["end"]
-    if tag["standalone"]:
-        line_start = text.rfind("\n", 0, start) + 1
-        line_end = text.find("\n", end)
-        line_end = len(text) if line_end == -1 else line_end + 1
-        out = text[:line_start] + text[line_end:]
-        if line_start > 0 and out[line_start - 1:line_start + 1] == "\n\n":
-            out = out[:line_start] + out[line_start + 1:]
-        elif line_start >= len(out) and out.endswith("\n\n"):
-            out = out[:-1]      # the file's last line went: one newline stays
-        return out
-    before = text[start - 1] if start > 0 else ""
-    after = text[end] if end < len(text) else ""
-    if before == " " and (after == " " or after in ".,;:!?)"):
-        start -= 1
-    return text[:start] + text[end:]
 
 
 def find_tag(tags: list[dict], handle) -> dict:
@@ -300,11 +173,15 @@ def _land_explain(text: str, tag: dict, draft: str) -> str:
 def _land_suggestion(text: str, tag: dict, draft: str) -> str:
     """The agreed text REPLACES the target paragraph. Inline, that
     paragraph holds the tag, so the tag goes with it; standalone, the
-    tag's own line goes too."""
+    tag's own line goes too — and any units BETWEEN the target and the
+    tag (an illustration, a clip, …) stay put."""
     if tag["standalone"]:
-        line_end = text.find("\n", tag["end"])
-        line_end = len(text) if line_end == -1 else line_end
-        return text[:tag["target_start"]] + draft + text[line_end:]
+        body = text[:tag["target_start"]] + draft + text[tag["target_end"]:]
+        shift = len(draft) - (tag["target_end"] - tag["target_start"])
+        moved = dict(tag)
+        moved["start"] = tag["start"] + shift
+        moved["end"] = tag["end"] + shift
+        return remove_tag(body, moved)
     return text[:tag["target_start"]] + draft + text[tag["target_end"]:]
 
 
@@ -416,7 +293,7 @@ def _clean(n: int, what: str, draft: str | None) -> str:
     if any(mark in draft for mark in _RESERVED):
         raise ValueError(f"tag #{n}: the {what} carries reserved grammar "
                          "(<<, >>, {{, }})")
-    if any(p.search(draft) for p in _TAGS.values()):
+    if any(p.search(draft) for p in TAGS.values()):
         raise ValueError(f"tag #{n}: the {what} carries a tag of its own")
     return draft
 
@@ -551,7 +428,7 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
     url, failed}."""
     from . import api
 
-    _kind(kind)
+    check_kind(kind)
     if kind == "judgment":
         raise ValueError("a [Judgment: …] tag is resolved by 'lens repair "
                          f"{file}' (a rewrite, a question, or an intent), or "
@@ -559,15 +436,37 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
                          "applied as text.")
     if not pairs:
         raise ValueError("nothing to apply — give at least one --tag/--text pair")
+    # Confinement: the Doc-mapping key and the write path are the same
+    # manuscript-relative name. An absolute (or `..`-escaping) argument
+    # that skipped this step missed `checked_out` and wrote locally while
+    # the Doc was still the working copy (found 2026-10-01 / confirmed
+    # 2026-10-04).
+    try:
+        file = _resolve_relpath(manuscript, file)
+    except LookupError:
+        raise LookupError(f"no manuscript file '{file}'") from None
     root = Path(manuscript["path"])
     path = root / file
     if not path.is_file():
         raise LookupError(f"no manuscript file '{file}'")
+    doc_road = _checked_out(db, manuscript, file)
+    if doc_road:
+        # The Doc is the working copy: bring its text down before reading
+        # local, or the levelling push in write_pending_forms would wipe
+        # what the author typed only in the tab (#248's hazard). A
+        # two-sided edit stops here with the helper's message. The
+        # forms-out refusal comes first: a state refusal costs no
+        # network and must not pull (which clears the checkout).
+        from . import gdocs
+
+        _no_forms_out(db, manuscript["id"], file)
+        service, docs_service = _services(services, file, "apply")
+        gdocs.level_from_doc(db, manuscript, file, service, docs_service)
     text = _read(path)
     chosen = _choose(text, kind, file, pairs)
     labels = _mint_labels(text, file, chosen, kind)
 
-    if _checked_out(db, manuscript, file):
+    if doc_road:
         return _stage_doc(db, manuscript, kind, file, text, chosen, labels,
                           services)
 
@@ -618,7 +517,7 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
 
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source=f"{kind}-apply",
-                            episode=api.NO_EPISODE)
+                            episode=NO_EPISODE)
     return {"kind": kind, "file": file, "mode": "applied", "landed": landed,
             "version_no": after.get("version_no"), "url": None, "failed": []}
 
@@ -647,6 +546,19 @@ def _thread_row(db, manuscript_id: str, kind: str, file: str, tag: dict,
     return row
 
 
+def _no_forms_out(db, mid: str, file: str) -> None:
+    """Refuse to stage into a tab that already carries one producer's
+    forms (one producer's forms per tab, resolved before the next)."""
+    from . import gdocs
+
+    pending = gdocs.forms_pending(db, mid, file)
+    if pending:
+        remedy = gdocs._SETTLE_REMEDY.get(pending, "settle the staged edits")
+        raise ValueError(
+            f"{file} already carries {pending} forms in its tab — run "
+            f"'{remedy.format(file=file)}' before staging more.")
+
+
 def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
                chosen: list[dict], labels: dict[int, str],
                services) -> dict:
@@ -655,12 +567,7 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
     from .revisions import _paragraphs
 
     mid = manuscript["id"]
-    pending = gdocs.forms_pending(db, mid, file)
-    if pending:
-        remedy = gdocs._SETTLE_REMEDY.get(pending, "settle the staged edits")
-        raise ValueError(
-            f"{file} already carries {pending} forms in its tab — run "
-            f"'{remedy.format(file=file)}' before staging more.")
+    _no_forms_out(db, mid, file)
     paragraphs = _paragraphs(text)
 
     def paragraph_of(tag: dict) -> int:
@@ -675,13 +582,15 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
         old, anchor, definition = tag["raw"], paragraph_of(tag), None
         if kind == "suggestion":
             # The form wraps the TARGET paragraph — inline, tag and all;
-            # standalone, the paragraph before it, the tag line left
-            # standing until resolve consumes it on acceptance. A decline
-            # wraps the tag itself: the author sees it going and the
-            # paragraph staying. The replace form's anchor is the TARGET's
-            # blank-line unit: a note on the next line shares the tag's
-            # unit, while a blank line between puts the target one unit
-            # earlier — `anchor -= 1` always was wrong for the first case.
+            # standalone, the prose unit before it (skipping intervening
+            # markup), the tag line left standing until resolve consumes
+            # it on acceptance. A decline wraps the tag itself: the
+            # author sees it going and the paragraph staying. Anchor from
+            # target_start so an intervening illustration/clip is not the
+            # planted unit, and a note on the next line (no blank) anchors
+            # on the unit it shares with its prose (`anchor -= 1` only
+            # worked when the target was the immediate previous
+            # blank-line paragraph).
             if c["decline"]:
                 old = tag["raw"] if tag["standalone"] else tag["target"]
                 new = "" if tag["standalone"] else _target_without_tag(tag)
@@ -743,7 +652,7 @@ def _settle_empty_declines(db, manuscript_id: str, marked: str,
     evidence written here. A green half the author typed into, or a
     deleted form (the tag standing again), is left to the generic
     resolve. Returns (marked, the threads still to resolve, settled)."""
-    from . import passes, threads as th
+    from . import form_grammar, passes
 
     remaining, settled = [], 0
     for t in written:
@@ -752,9 +661,9 @@ def _settle_empty_declines(db, manuscript_id: str, marked: str,
                 and t["proposed_old"] and t["proposed_new"] == ""):
             remaining.append(t)
             continue
-        form = th.render_pending(t["proposed_old"], "")
+        form = form_grammar.render_pending(t["proposed_old"], "")
         at = marked.find(form)
-        if at < 0 or not _standalone(marked, at, at + len(form)):
+        if at < 0 or not is_standalone(marked, at, at + len(form)):
             remaining.append(t)
             continue
         line_start = marked.rfind("\n", 0, at) + 1
@@ -840,8 +749,12 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
     url, warnings}."""
     from . import api, gdocs, passes
 
-    _kind(kind)
+    check_kind(kind)
     mid = manuscript["id"]
+    try:
+        file = _resolve_relpath(manuscript, file)
+    except LookupError:
+        raise LookupError(f"no manuscript file '{file}'") from None
     written = passes.staged_threads(db, mid, file, states=("written",),
                                     origin_type=kind)
     if not written:
@@ -880,10 +793,10 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
     n_forms = len(forms) + settled
     if kind == "suggestion":
         final = _consume_standalone_tags(db, final, written)
-    api._write_resolved_text(path, Path(manuscript["path"]), final)
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source=f"{kind}-resolve",
-                            episode=api.NO_EPISODE)
+                            episode=NO_EPISODE)
     states = [db.one("SELECT state FROM doc_threads WHERE id = ?",
                      (t["id"],))["state"] for t in written]
     url = None

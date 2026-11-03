@@ -962,8 +962,11 @@ export function TriageApp({transport, manuscript}: {transport: Transport; manusc
     <main className="app-shell">
       <header className="masthead">
         <div className="brand-block">
-          <span className="kicker">AUTHORLM / EDITORIAL WORKBENCH</span>
-          <h1>Triage <i>App</i></h1>
+          <img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />
+          <div>
+            <span className="kicker">AUTHORLM / EDITORIAL WORKBENCH</span>
+            <h1>Triage <i>App</i></h1>
+          </div>
         </div>
         <div className="manuscript-stamp">
           <span>MANUSCRIPT</span>

@@ -28,6 +28,9 @@ uses for one optional lookup (the dictionary version by name) and the
 audition / dictionary verbs use deliberately.
 
 Decisions:
+- Mac say previews and export do not require an ElevenLabs Voice ID;
+  paid synthesis does. Explicit cast roles remain required. Enforced by
+  tests/test_audio_preview_without_paid_voice.py. (owner)
 - Export resolves explicitly configured per-paragraph voices from the manuscript's
   `_audio/audiobook.toml` and cast into the shared manifest; both consumers
   use those resolved parameters. Enforced by: tests/test_audio_voice_config.py::VoiceConfigTests::test_required_voice_fields_are_not_filled_in
@@ -52,13 +55,13 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import directives
+from . import directive_tags
 from . import pronunciations as pron
 from .export import (VOICE_LINE, load_settings, resolve_regions,
                      strip_display_math)
-from .gdocs import normalize_markdown
+from .normalize import normalize_markdown
 from .illus import parse_tag as parse_illustration_tag
-from .revisions import read_manuscript_files
+from .revisions import is_placeholder, read_manuscript_files
 from .structure import is_continuation, reading_order, toc_attrs
 
 AUDIO_DIR = "_audio"
@@ -144,9 +147,6 @@ SEED_CAST = (
     "| narrator |  |  |  | 0.5 | 0.75 | 1.0 | The default for every essay and heading |\n"
 )
 
-CAST_COLUMNS = ("key", "voice", "voice_id", "model", "stability",
-                "similarity", "speed", "note")
-_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 class AudioError(ValueError):
@@ -242,7 +242,7 @@ def _validate_config(data: dict, where: str) -> None:
 
 
 def _validate_voice_key(value: object, where: str) -> None:
-    if not isinstance(value, str) or not _KEY_RE.fullmatch(value):
+    if not isinstance(value, str) or not pron.CAST_KEY_RE.fullmatch(value):
         raise AudioError(f"{where} must be a nonempty cast key "
                          "([a-z][a-z0-9_-]*)")
 
@@ -283,7 +283,11 @@ def init(manuscript: dict) -> dict:
     root.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
     unchanged: list[str] = []
-    for path, content in ((config, DEFAULT_CONFIG_TEXT), (cast, SEED_CAST)):
+    # Every book that renders audio has a dictionary, named after the
+    # manuscript (ruling 2026-10-18); the author never makes one by hand.
+    seed_config = DEFAULT_CONFIG_TEXT.replace(
+        'dictionary = ""', f"dictionary = {json.dumps(manuscript['name'])}", 1)
+    for path, content in ((config, seed_config), (cast, SEED_CAST)):
         if path.exists():
             unchanged.append(str(path))
             continue
@@ -296,67 +300,20 @@ def init(manuscript: dict) -> dict:
 
 # ------------------------------------------------------------------ cast
 
-def _cast_cells(line: str) -> list[str]:
-    return pron._cells(line)
-
-
-def parse_cast(text: str) -> tuple[list[dict], list[str]]:
-    """`(rows, warnings)` from `cast.md`. Same pipe-table discipline as
-    the pronunciation table: prose around the table is ignored, a
-    shifted row is skipped and named, never guessed at."""
-    rows: list[dict] = []
-    warnings: list[str] = []
-    seen: set[str] = set()
-    in_table = False
-    for line in (text or "").replace("\r\n", "\n").split("\n"):
-        cells = _cast_cells(line)
-        if not cells:
-            if in_table:
-                break
-            continue
-        if not in_table:
-            if cells and cells[0].strip().casefold() == "key":
-                in_table = True
-            continue
-        if pron._is_delimiter(cells):
-            continue
-        key = cells[0].strip()
-        if not key:
-            continue
-        if len([c for c in cells[len(CAST_COLUMNS):] if c]) or any(
-                "|" in c for c in cells[:len(CAST_COLUMNS)]):
-            warnings.append(f"cast row '{key}' carries a '|' and cannot be "
-                            f"read as one row — skipped")
-            continue
-        if not _KEY_RE.match(key):
-            warnings.append(f"cast key '{key}' is not a key ([a-z][a-z0-9_-]*)"
-                            " — skipped")
-            continue
-        if key in seen:
-            warnings.append(f"cast key '{key}' appears twice — the first "
-                            "row wins")
-            continue
-        seen.add(key)
-        padded = cells + [""] * (len(CAST_COLUMNS) - len(cells))
-        row = dict(zip(CAST_COLUMNS, (c.strip() for c in padded)))
-        rows.append(row)
-    return rows, warnings
-
-
 def render_cast_row(row: dict) -> str:
-    for field in CAST_COLUMNS:
+    for field in pron.CAST_COLUMNS:
         value = str(row.get(field) or "")
         if "|" in value or "\n" in value:
             raise AudioError(f"a cast row's `{field}` carries a '|' or a "
                              "newline; a row is one line")
-    return "| " + " | ".join(str(row.get(f) or "") for f in CAST_COLUMNS) + " |"
+    return "| " + " | ".join(str(row.get(f) or "") for f in pron.CAST_COLUMNS) + " |"
 
 
 def set_cast_row(text: str, row: dict) -> str:
     """Write one row: replace the row with the same key, else append
     after the table's last row. Rewrites no other line."""
     key = (row.get("key") or "").strip()
-    if not _KEY_RE.match(key):
+    if not pron.CAST_KEY_RE.match(key):
         raise AudioError(f"'{key}' is not a cast key ([a-z][a-z0-9_-]*)")
     line = render_cast_row(row)
     if not (text or "").strip():
@@ -367,7 +324,7 @@ def set_cast_row(text: str, row: dict) -> str:
     last_row = None
     in_table = False
     for i, raw in enumerate(lines):
-        cells = _cast_cells(raw)
+        cells = pron._cells(raw)
         if not cells:
             if in_table:
                 break
@@ -406,7 +363,7 @@ def load_cast(root: Path, config: dict) -> tuple[dict[str, dict], list[str]]:
     """key → resolved voice (voice_id, voice_name, model, stability,
     similarity, speed, note) with the defaults applied."""
     path = root / AUDIO_DIR / CAST_FILENAME
-    rows, warnings = parse_cast(path.read_text(encoding="utf-8")
+    rows, warnings = pron.parse_cast(path.read_text(encoding="utf-8")
                                 if path.exists() else "")
     cast: dict[str, dict] = {}
     for row in rows:
@@ -440,7 +397,7 @@ def parse_voice_tag(line: str) -> dict | None:
         return None
     parts = [p.strip() for p in m.group("body").split("|")]
     key = parts[0]
-    if not _KEY_RE.match(key):
+    if not pron.CAST_KEY_RE.match(key):
         raise AudioError(f"[Voice: {key}] — '{key}' is not a cast key "
                          "([a-z][a-z0-9_-]*)")
     overrides: dict = {}
@@ -618,11 +575,11 @@ def audio_source(name: str, raw: str) -> str:
     `audio` regions, strip the media tag lines (prose stays), the
     inline directive tags and display math.
     Illustration and image lines fall out in `blocks_of`."""
-    from .media import strip_for_book
+    from .media_tags import strip_for_book
 
     text = resolve_regions(normalize_markdown(raw), {"audio"}, name)
     text, _media_tags = strip_for_book(text, name)
-    text, _unresolved = directives.strip_tags(text)
+    text, _unresolved = directive_tags.strip_tags(text)
     text = strip_display_math(text)
     return normalize_markdown(text)
 
@@ -681,13 +638,19 @@ def _resolve_voice(cast: dict[str, dict], key: str, overrides: dict,
             f"{where}: cast key '{key}' is not a row in {AUDIO_DIR}/"
             f"{CAST_FILENAME} (rows: {', '.join(sorted(cast)) or 'none'})")
     row = cast[key]
-    if not row["voice_id"]:
-        raise AudioError(f"{where}: cast '{key}' has no Voice ID yet — "
-                         "audition one and `audio cast set` it")
     voice = dict(row)
     voice.update(overrides)
     voice["key"] = key
     return voice
+
+
+def require_paid_voice(voice_id: str, cast_key: str) -> None:
+    """Validate the paid provider's prerequisite without blocking free previews."""
+    if not voice_id.strip():
+        raise AudioError(
+            f"cast '{cast_key}' has no ElevenLabs Voice ID for paid synthesis; "
+            f"select one with 'audio cast set {cast_key} --voice-id ID', "
+            "then run 'audio export'. Mac say previews need no ElevenLabs voice.")
 
 
 def chapter_sections(name: str, source: str, config: dict,
@@ -830,6 +793,77 @@ def chapter_sections(name: str, source: str, config: dict,
         if s["type"] == "silence":
             s["id"] = silence_id(s["durationMs"], i)
     return sections, warnings, title
+
+
+# ---------------------------------------------------- editing on the page
+
+def locate_block(root: Path, names: list[str], config: dict, spoken: str,
+                 kind: str) -> dict | None:
+    """The raw markdown block behind one speech section, for the page's
+    on-the-spot edit (author's ask 2026-10-26: "fix problems while I'm
+    listening"). The export's line numbers count the pre-passed text
+    (regions resolved, tag lines gone), so a section is found by what it
+    says: the first block of `names` (the chapter file and its
+    continuations) whose spoken form is `spoken`. Returns
+    `{file, line, lines, markdown}` or None when no block says it whole
+    — a paragraph carrying an inline tag the audio strips, a list read
+    one item at a time."""
+    from .export import _REGION_CLOSE, _REGION_OPEN
+
+    def is_tag(line: str) -> bool:
+        return bool(_REGION_OPEN.match(line) or _REGION_CLOSE.match(line))
+
+    for name in names:
+        path = root / name
+        if not path.exists():
+            continue
+        raw_lines = path.read_text(encoding="utf-8").split("\n")
+        for block in blocks_of("\n".join(raw_lines)):
+            if block["kind"] in ("voice", "footnote", "illustration", "rule"):
+                continue
+            count = block["text"].count("\n") + 1
+            raw = raw_lines[block["line"] - 1:block["line"] - 1 + count]
+            # A region tag written against its paragraph ([Only: audio]
+            # on the line above) is part of the block here but not of
+            # what is said: match on the prose, offer the whole block.
+            prose = "\n".join(ln for ln in raw if not is_tag(ln)).strip("\n")
+            if not prose.strip():
+                continue
+            inner_kind, extra = _block_kind(prose)
+            inner = {"kind": inner_kind, "line": block["line"], "text": prose, **extra}
+            if (inner["kind"] == "heading") != (kind == "heading"):
+                continue
+            if inner["kind"] == "heading":
+                inner["text_heading"] = inner["text"]
+            try:
+                said, _w = _spoken(inner, config)
+            except AudioError:
+                continue
+            if said == spoken:
+                return {"file": name, "line": block["line"], "lines": count,
+                        "markdown": "\n".join(raw)}
+    return None
+
+
+def replace_block(root: Path, found: dict, markdown: str) -> Path:
+    """Write `markdown` over the block `locate_block` found, and nothing
+    else of the file: the lines before and after are kept byte for byte.
+    Refuses when the block has moved since it was located (a save from
+    another editor in between), or when the new text is blank."""
+    new = markdown.replace("\r\n", "\n").strip("\n")
+    if not new.strip():
+        raise AudioError("the paragraph would be empty — delete it in the "
+                         "file instead")
+    path = root / found["file"]
+    text = path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    start, count = found["line"] - 1, found["lines"]
+    if "\n".join(lines[start:start + count]) != found["markdown"]:
+        raise AudioError(f"{found['file']}:{found['line']} changed since it "
+                         "was opened — reload and edit again")
+    lines[start:start + count] = new.split("\n")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
 
 
 # ---------------------------------------------------------- metadata
@@ -1042,7 +1076,6 @@ def build(manuscript: dict, files: dict[str, str] | None = None,
     from .export import continuation_level
     level = continuation_level(manuscript)
     previous: dict | None = None
-    from .api import is_placeholder
     for name in order:
         if name == TITLE_FILE or name == pron.FILENAME:
             continue
@@ -1158,37 +1191,40 @@ def _retail_sample(config: dict, chapters: dict, order: list[dict],
 
 
 def export(db, manuscript: dict, only: list[str] | None = None,
-           resolve_dictionary: bool = True) -> dict:
+           resolve_dictionary: bool = True,
+           client: "ElevenLabs | None" = None) -> dict:
     """Write `audiobook.json` and `chapters/*.json`, each only when its
     content changed. `only` limits which chapter files are (re)written;
     the book file always reflects every chapter. The dictionary is
-    resolved by name when a key is present (design §7); offline, the
-    locator is written without an id and the export says so."""
+    resolved by name when a key is present and CREATED from the table
+    when the account does not have it yet (design §7, ruling
+    2026-10-18); offline, the locator is written without an id and the
+    export says so. `client` replaces the key-built client (tests)."""
     root = Path(manuscript["path"])
     out_dir = root / AUDIO_DIR
     config = load_config(root)
-    dictionary = None
-    name = (config["tts"]["dictionary"] or "").strip()
+    name = dictionary_name(manuscript, config)
+    dictionary = {"name": name, "id": None, "versionId": None}
     warnings: list[str] = []
-    if name:
-        dictionary = {"name": name, "id": None, "versionId": None}
-        key = api_key(required=False) if resolve_dictionary else None
-        if key:
-            try:
-                found = ElevenLabs(key).dictionary_by_name(name)
-            except AudioError as err:
-                warnings.append(f"dictionary '{name}': {err}")
-                found = None
-            if found:
-                dictionary.update(id=found["id"],
-                                  versionId=found["latest_version_id"])
-            else:
-                warnings.append(f"dictionary '{name}' is not on the "
-                                "ElevenLabs account yet — 'audio dictionary "
-                                "push' creates it")
-        else:
-            warnings.append(f"dictionary '{name}': no {KEY_ENV} in the "
-                            "environment — locator written without a version")
+    notes: list[str] = []
+    if client is None and resolve_dictionary:
+        key = api_key(required=False)
+        client = ElevenLabs(key) if key else None
+    if client is not None:
+        try:
+            found = ensure_dictionary(manuscript, client, config)
+        except AudioError as err:
+            warnings.append(f"dictionary '{name}': {err}")
+            found = None
+        if found:
+            dictionary.update(id=found["id"],
+                              versionId=found["latest_version_id"])
+            if found["created"]:
+                notes.append(f"dictionary '{name}' created on ElevenLabs "
+                             f"with {found['rules']} rule(s)")
+    elif resolve_dictionary:
+        warnings.append(f"dictionary '{name}': no {KEY_ENV} in the "
+                        "environment — locator written without a version")
     built = build(manuscript, dictionary=dictionary)
     warnings = built["warnings"] + warnings
     wanted = {_stem(o) for o in only} if only else None
@@ -1217,7 +1253,7 @@ def export(db, manuscript: dict, only: list[str] | None = None,
     return {"written": written, "unchanged": unchanged,
             "chapters": [c["stem"] for c in built["book"]["chapters"]],
             "sections": speech, "characters": chars,
-            "warnings": warnings, "book": str(book_path)}
+            "warnings": warnings, "notes": notes, "book": str(book_path)}
 
 
 # ------------------------------------------------------------- state
@@ -1311,17 +1347,13 @@ def check(db, manuscript: dict) -> dict:
     for name, text in files.items():
         if not name.endswith(".md") or name == pron.FILENAME:
             continue
-        _t, unresolved = directives.strip_tags(normalize_markdown(text))
+        _t, unresolved = directive_tags.strip_tags(normalize_markdown(text))
         for tag in unresolved:
             problems.append(f"{name}: unresolved [{tag['kind'].title()}: "
                             f"{tag['gist'][:50]}]")
     # Dictionary.
-    dname = (config["tts"]["dictionary"] or "").strip()
-    rules = pronunciation_rules(files.get(pron.FILENAME) or "")
-    if rules and not dname:
-        problems.append(f"{pron.FILENAME} has {len(rules)} rows and "
-                        "tts.dictionary is empty in audiobook.toml")
-    elif dname:
+    dname = dictionary_name(manuscript, config)
+    if dname:
         key = api_key(required=False)
         if not key:
             warnings.append(f"dictionary '{dname}': no {KEY_ENV} — remote "
@@ -1331,7 +1363,7 @@ def check(db, manuscript: dict) -> dict:
                 plan = dictionary_plan(manuscript, ElevenLabs(key))
                 if plan["create"]:
                     problems.append(f"dictionary '{dname}' does not exist on "
-                                    "ElevenLabs — 'audio dictionary push'")
+                                    "ElevenLabs — 'audio export' creates it")
                 elif plan["add"] or plan["change"] or plan["remove"]:
                     problems.append(
                         f"{pron.FILENAME} and dictionary '{dname}' differ: "
@@ -1406,7 +1438,7 @@ def api_key(required: bool = True) -> str | None:
     key = os.environ.get(KEY_ENV, "").strip()
     if not key and required:
         raise AudioError(f"{KEY_ENV} is not set — put it in the checkout's "
-                         ".env (see .env.example)")
+                         ".env (see env.example)")
     return key or None
 
 
@@ -1479,6 +1511,7 @@ class ElevenLabs:
         """One render. The neighbour request ids are request stitching
         (pipeline §8): at most three each, honoured for two hours, not
         on v3 — the caller decides what to send."""
+        require_paid_voice(voice["voice_id"], voice.get("key", "selected voice"))
         body: dict = {"text": text, "model_id": voice["model"],
                       "voice_settings": {"stability": voice["stability"],
                                          "similarity_boost": voice["similarity"],
@@ -1612,14 +1645,45 @@ def _rule_target(rule: dict) -> str:
     return rule.get("alias") or rule.get("phoneme") or ""
 
 
+def dictionary_name(manuscript: dict, config: dict | None = None) -> str:
+    """The ElevenLabs dictionary this book uses: `[tts].dictionary`, or
+    the manuscript's name when that key is empty. Every book that renders
+    audio has one (ruling 2026-10-18: the author never makes a dictionary
+    by hand; the Pronunciations tab works from the first row)."""
+    if config is None:
+        config = load_config(Path(manuscript["path"]))
+    return (config["tts"]["dictionary"] or "").strip() or \
+        (manuscript.get("name") or "").strip()
+
+
+def ensure_dictionary(manuscript: dict, client: ElevenLabs,
+                      config: dict | None = None) -> dict:
+    """The book's dictionary on ElevenLabs, created from the table when it
+    is not there yet (an empty table makes an empty dictionary — the API
+    allows it, verified 2026-10-18). Export and generation call this, so
+    the first render of any book finds its dictionary in place.
+    Returns {name, id, latest_version_id, created, rules}."""
+    if config is None:
+        config = load_config(Path(manuscript["path"]))
+    name = dictionary_name(manuscript, config)
+    found = client.dictionary_by_name(name)
+    if found:
+        return {"name": name, "id": found["id"],
+                "latest_version_id": found["latest_version_id"],
+                "created": False, "rules": None}
+    rules = sorted(desired_rules(manuscript, config).values(),
+                   key=lambda r: r["string_to_replace"])
+    made = client.create_dictionary(name, rules)
+    return {"name": name, "id": made["id"],
+            "latest_version_id": made["latest_version_id"],
+            "created": True, "rules": len(rules)}
+
+
 def dictionary_plan(manuscript: dict, client: ElevenLabs) -> dict:
     """What a push would do, without doing it (design §7)."""
     root = Path(manuscript["path"])
     config = load_config(root)
-    name = (config["tts"]["dictionary"] or "").strip()
-    if not name:
-        raise AudioError("tts.dictionary is empty in audiobook.toml — name "
-                         "the ElevenLabs dictionary this book uses")
+    name = dictionary_name(manuscript, config)
     wanted = desired_rules(manuscript, config)
     remote = client.dictionary_by_name(name)
     if remote is None:
@@ -1789,13 +1853,9 @@ def render_context(manuscript: dict, client: ElevenLabs, ctx: dict, term: str,
 
 
 def dictionary_locators(manuscript: dict, client: ElevenLabs) -> list[dict]:
-    """The pushed dictionary's locator, by name, or a named refusal."""
-    config = load_config(Path(manuscript["path"]))
-    name = (config["tts"]["dictionary"] or "").strip()
-    found = client.dictionary_by_name(name) if name else None
-    if not found:
-        raise AudioError(f"'{name or '(unnamed)'}' is not on ElevenLabs — "
-                         "'audio dictionary push' first")
+    """The book's dictionary locator, by name; the dictionary is created
+    from the table when the account does not have it yet."""
+    found = ensure_dictionary(manuscript, client)
     return [{"pronunciation_dictionary_id": found["id"],
              "version_id": found["latest_version_id"]}]
 
@@ -1888,8 +1948,7 @@ def _remove_remote_rules(manuscript: dict, term: str,
     dictionary. (removed?, new version id)."""
     if client is None:
         return False, None
-    config = load_config(Path(manuscript["path"]))
-    name = (config["tts"]["dictionary"] or "").strip()
+    name = dictionary_name(manuscript)
     remote = client.dictionary_by_name(name) if name else None
     if not remote:
         return False, None

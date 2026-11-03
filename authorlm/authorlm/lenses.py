@@ -42,13 +42,14 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .concepts import concept_pattern, node_names
+from .concepts import concept_pattern, node_names, scoped_concepts
 from .db import Database, ko_fields, loads, new_id
 from .findings import flag_rules  # re-exported: lenses.flag_rules is public
                                    # API (tests call it directly); the
                                    # implementation lives once, in
                                    # findings.py, shared with morph.
 from .revisions import read_manuscript_files
+from .structure import find_file, title_of
 
 LENS_DIR = "_lenses"
 LENS_KIND = "lens"
@@ -374,24 +375,8 @@ def _section(label: str, body: str) -> str:
     return f"{label}\n{body or '(none)'}\n"
 
 
-def _title_of(text: str) -> str:
-    for line in (text or "").split("\n"):
-        s = line.strip()
-        if s.startswith("#"):
-            return s.lstrip("#").strip().strip("*").strip()
-    return ""
-
-
 def _words(text: str) -> int:
     return len((text or "").split())
-
-
-def _resolve(files: dict[str, str], file: str) -> str:
-    rel = next((r for r in files if r == file or r.endswith("/" + file)
-                or Path(r).name == file), None)
-    if rel is None:
-        raise LookupError(f"'{file}' is not a manuscript file")
-    return rel
 
 
 def _order(files: dict[str, str]) -> tuple[list[str], dict[str, dict],
@@ -425,9 +410,8 @@ def _glossary(db: Database, manuscript: dict, rel: str, text: str) -> str:
     """GLOSSARY: the concepts this essay names or introduced — name,
     aliases, notes, and WHERE INTRODUCED (the fact that makes the ramp
     check a lookup rather than a summary read)."""
-    from . import api
     try:
-        graph = api.scoped_concepts(db, manuscript, file=rel, text=text)
+        graph = scoped_concepts(db, manuscript, file=rel, text=text)
     except LookupError:
         return ""
     lines = []
@@ -457,7 +441,7 @@ def _registers(files: dict[str, str]) -> str:
     if not prot:
         return ("(no chapter is marked protected — put register = "
                 "\"protected\" on a toc.toml entry to exempt its voice)")
-    return "\n".join(f"- {f} — {_title_of(files.get(f, ''))}" for f in prot)
+    return "\n".join(f"- {f} — {title_of(files.get(f, ''))}" for f in prot)
 
 
 def _passes(manuscript: dict) -> str:
@@ -481,7 +465,7 @@ def _reading_order(files: dict[str, str], rel: str) -> str:
         if name == rel:
             marks.append("THIS CHAPTER")
         tag = f"  [{', '.join(marks)}]" if marks else ""
-        lines.append(f"{i:2d}. {name} — {_title_of(files[name])}{tag}")
+        lines.append(f"{i:2d}. {name} — {title_of(files[name])}{tag}")
     return "\n".join(lines)
 
 
@@ -538,7 +522,7 @@ def chapter_names(files: dict[str, str], manuscript: dict | None = None
     for name, text in files.items():
         if structure.is_structural(name):
             continue
-        title = _title_of(text)
+        title = title_of(text)
         names = []
         if title:
             names.append(title)
@@ -759,7 +743,7 @@ def _targets_block(db: Database, manuscript: dict, files: dict[str, str],
             if real else "(none)"))
     texts = []
     for f, t in chosen.items():
-        texts.append(f"--- {f} — {_title_of(t)} — sha256 {_sha(t)} ---\n"
+        texts.append(f"--- {f} — {title_of(t)} — sha256 {_sha(t)} ---\n"
                      f"{t.rstrip()}\n")
     head = ("TARGETS — the only authority on any other chapter. Read these "
             "texts; nothing else about the book is available.\n")
@@ -781,7 +765,7 @@ def assemble(db: Database, manuscript: dict, name: str, file: str,
     refuse_sidecar(Path(file).name)
     if files is None:
         files = read_manuscript_files(Path(manuscript["path"]))
-    rel = _resolve(files, file)
+    rel = find_file(files, file)
     text = files[rel]
     if rel in protected_files(files):
         raise ValueError(f"{rel} is a protected register — no lens runs on "
@@ -851,7 +835,7 @@ def assemble_poems(db: Database, manuscript: dict, name: str, file: str
     from .verse import poems_of
 
     files = read_manuscript_files(Path(manuscript["path"]))
-    rel = _resolve(files, file)
+    rel = find_file(files, file)
     cache: dict = {}
     from .verse import poem_level as _plevel
 
@@ -949,7 +933,7 @@ def forms_out(db: Database, manuscript: dict, file: str) -> int:
     """How many lens forms are out in this file's tab right now."""
     from . import staging
     files = read_manuscript_files(Path(manuscript["path"]))
-    rel = _resolve(files, file)
+    rel = find_file(files, file)
     return len(staging.door_threads(db, manuscript["id"], rel,
                                     states=("written",),
                                     origin_type=LENS_ORIGIN))
@@ -1065,11 +1049,11 @@ def judgment_tags(db: Database, manuscript: dict, files: dict[str, str],
     """Every open [Judgment: …] tag in the file, with the unit that
     carries it and the finding its id names (None when the id is
     missing or unknown — a hand-written tag is still a work order)."""
-    from . import directives, passes
+    from . import directive_tags, passes
     text = files[rel]
     units = passes.paragraphs_of(text)
     out = []
-    for tag in directives.scan_text(text, "judgment"):
+    for tag in directive_tags.scan_text(text, "judgment"):
         m = JUDGMENT_ID.search(tag["gist"])
         finding = None
         fid = m.group(1) if m else None
@@ -1091,7 +1075,7 @@ def assemble_repair(db: Database, manuscript: dict, file: str,
     refuse_sidecar(Path(file).name)
     if files is None:
         files = read_manuscript_files(Path(manuscript["path"]))
-    rel = _resolve(files, file)
+    rel = find_file(files, file)
     text = files[rel]
     tags = judgment_tags(db, manuscript, files, rel)
     if not tags:
@@ -1135,7 +1119,7 @@ def record_repairs(db: Database, manuscript: dict, session: dict, file: str,
     intents are declared scoped to the essay and their tag removal is
     staged. A `new` that still carries the tag, carries reserved
     markers, or is empty is refused by id."""
-    from . import api, staging
+    from . import docs, sessions, staging
     if payload is None:
         payload = assemble_repair(db, manuscript, file)
     files = read_manuscript_files(Path(manuscript["path"]))
@@ -1174,12 +1158,14 @@ def record_repairs(db: Database, manuscript: dict, session: dict, file: str,
             if not statement:
                 refused.append({"id": fid, "reason": "intent without a statement"})
                 continue
-            declared = api.declare_intent(db, manuscript, statement, scope=rel)
-            intents.append({"id": fid, "intent": declared["intent"]["id"],
+            declared = sessions.declare_intent(
+                db, manuscript["id"], statement,
+                scope=docs._resolve_relpath(manuscript, rel))
+            intents.append({"id": fid, "intent": declared["id"],
                             "text": statement})
             entries.append({"n": tag["n"], "new": _remove_tag(tag["unit"], tag["raw"]),
                             "why": f"{fid} filed as intent "
-                                   f"{declared['intent']['id']}: {statement}"})
+                                   f"{declared['id']}: {statement}"})
         else:
             refused.append({"id": fid, "reason": f"unknown action {action!r}"})
     staged = []
@@ -1202,7 +1188,7 @@ def dismiss_judgments(db: Database, manuscript: dict, file: str,
     the reason verbatim and the tag's removal is staged as a form."""
     from . import beliefs as bel, staging
     files = read_manuscript_files(Path(manuscript["path"]))
-    rel = _resolve(files, file)
+    rel = find_file(files, file)
     tags = judgment_tags(db, manuscript, files, rel)
     entries, done, missing = [], [], []
     for want in ids:
@@ -1230,7 +1216,7 @@ def status(db: Database, manuscript: dict, file: str) -> list[dict]:
     tallies, unverified target quotes, and STALE when the essay or any
     target has changed since (byte comparison of the recorded shas)."""
     files = read_manuscript_files(Path(manuscript["path"]))
-    rel = _resolve(files, file)
+    rel = find_file(files, file)
     now_sha = _sha(files[rel])
     rows = db.all(
         "SELECT * FROM guidance_history WHERE manuscript_id = ? "
@@ -1284,7 +1270,7 @@ def findings(db: Database, manuscript: dict, file: str,
     is what makes a sweep's eight batches reviewable — `review <n>` sees
     only the latest batch."""
     files = read_manuscript_files(Path(manuscript["path"]))
-    rel = _resolve(files, file)
+    rel = find_file(files, file)
     flat = " ".join(files[rel].split()).lower()
     out = []
     for r in (dict(x) for x in db.all(

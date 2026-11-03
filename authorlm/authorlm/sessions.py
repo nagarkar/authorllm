@@ -14,6 +14,17 @@ from . import backup
 from .db import Database, ko_fields, loads, now_iso
 
 
+# The third value of `collect(episode=…)`.
+#
+# `None` already means AMBIENT — attach to the session's most recently
+# created open episode — so there was no way to say "attach to nothing"
+# without inventing a value that is neither a row nor None. A sentinel
+# object is that value: it can never collide with an episode dict, it
+# cannot be produced by a database read, and `is` comparison makes the
+# branch unmistakable at the call site.
+NO_EPISODE = object()
+
+
 def active_session(db: Database, manuscript_id: str):
     return db.one(
         "SELECT * FROM sessions WHERE manuscript_id = ? AND status = 'active' "
@@ -188,3 +199,35 @@ def attach_transitions(db: Database, episode: dict, transitions: list[dict]) -> 
     ids = loads(episode["transition_ids"], [])
     ids.extend(t["id"] for t in transitions)
     db.update("editorial_episodes", episode["id"], {"transition_ids": json.dumps(ids)})
+
+
+def critic_tallies(db: Database, manuscript_id: str) -> list[dict]:
+    """Per-critic counts of proposed, accepted and rejected intents and style
+    laws: what the briefing badges and `critique status` show. A read-only
+    tally over the rows each critic sourced."""
+    rows = db.all(
+        """SELECT s.id AS source_id, s.name,
+                  SUM(CASE WHEN i.status = 'proposed' THEN 1 ELSE 0 END) AS proposed,
+                  SUM(CASE WHEN i.status IN ('active', 'completed') THEN 1 ELSE 0 END) AS accepted,
+                  SUM(CASE WHEN i.status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+           FROM sources s JOIN declared_intents i ON i.source_id = s.id
+           WHERE s.kind = 'critic' AND i.manuscript_id = ?
+           GROUP BY s.id""", (manuscript_id,))
+    result = []
+    for r in rows:
+        el = db.one(
+            """SELECT SUM(CASE WHEN status = 'proposed' THEN 1 ELSE 0 END) AS proposed,
+                      SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS accepted,
+                      SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+               FROM style_laws WHERE manuscript_id = ? AND source_id = ?""",
+            (manuscript_id, r["source_id"]))
+        result.append({
+            "source_id": r["source_id"], "name": r["name"],
+            "intents": {"proposed": r["proposed"] or 0,
+                        "accepted": r["accepted"] or 0,
+                        "rejected": r["rejected"] or 0},
+            "elements": {"proposed": el["proposed"] or 0,
+                         "accepted": el["accepted"] or 0,
+                         "rejected": el["rejected"] or 0},
+        })
+    return result

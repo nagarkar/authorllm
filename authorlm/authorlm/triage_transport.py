@@ -42,10 +42,10 @@ def _reconcile(db: Database, manuscript: dict, workspace: str | None) -> dict[st
     # a base-less mapped file's pull is destructive, and this is the
     # recovery point. The post-reconcile collect below is conditional on
     # something having been pulled; this one is not.
-    api.collect(db, manuscript, config, analyze=False)
+    api.collect(db, manuscript, config)
     report = gdocs.reconcile(db, manuscript, service, docs_service=docs_service)
     if report["pulled"]:
-        report["collection"] = api.collect(db, manuscript, config, analyze=False)
+        report["collection"] = api.collect(db, manuscript, config)
     return report
 
 

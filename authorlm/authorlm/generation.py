@@ -6,9 +6,12 @@ and `stitch.rs`. Both programs read `chapters/<stem>.json` and write
 `state/<stem>.json` in the same schema (`src-tauri/src/types.rs`), the
 same `audio/<id>.<quality>.mp3` take files and the same
 `audio/<stem>.<quality>.mp3` stitched file, so a take made by either is
-done for both. "Done" is: the id has a state entry whose file exists at
-the book's quality. Same id, same audio; nothing here ever re-renders a
-done id except `retake`, on the author's word.
+done for both. Takes and stitched chapter files are written via a sibling
+`.tmp` then renamed into place so a failed or killed write cannot destroy
+a previously good file while state still names that path. "Done" is: the
+id has a state entry whose file exists at the book's quality. Same id,
+same audio; nothing here ever re-renders a done id except `retake`, on
+the author's word.
 
 Guard against double renders with two writers on one state (§5): the
 chapter's state is re-read from disk immediately before every render,
@@ -169,6 +172,25 @@ def save_state(root: Path, stem: str, state: dict) -> Path:
     return path
 
 
+def write_take_bytes(root: Path, rel: str, audio_bytes: bytes) -> Path:
+    """Write a paragraph take via sibling `.tmp` + rename.
+
+    A retake that fails or is killed mid-write must not destroy a previously
+    good file while `state.sections[id].audioFiles[quality]` still names that
+    path (the twin of stitch's atomic encode; audiostation's `generate_one`
+    uses the same pattern)."""
+    dest = root / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    try:
+        tmp.write_bytes(audio_bytes)
+        os.replace(tmp, dest)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    return dest
+
+
 def take_of(root: Path, state: dict, section_id: str, quality: str) -> str | None:
     """The take's path relative to the folder when the id is done at
     `quality`, else None."""
@@ -313,6 +335,7 @@ def build_request(book: dict, chapter: dict, state: dict, section_id: str,
     speech = next((s for s in speech_of(chapter) if s["id"] == section_id), None)
     if speech is None:
         raise AudioError(f"section {section_id} is not speech in {chapter.get('stem')}")
+    audio.require_paid_voice(speech["voiceId"], speech["cast"])
     now = now or datetime.now(timezone.utc)
     prev, nxt = neighbours(chapter, section_id)
     stitchable = not speech["model"].startswith("eleven_v3")
@@ -379,7 +402,7 @@ def render_one(root: Path, book: dict, chapter: dict, section_id: str,
     takes = root / TAKES_DIR
     takes.mkdir(parents=True, exist_ok=True)
     rel = f"{TAKES_DIR}/{section_id}.{quality}.mp3"
-    (root / rel).write_bytes(audio_bytes)
+    write_take_bytes(root, rel, audio_bytes)
     state = load_state(root, stem)
     entry = state["sections"].setdefault(section_id, {})
     entry.setdefault("audioFiles", {})[quality] = rel
@@ -408,6 +431,10 @@ def generate(manuscript: dict, stem: str, spec: str | None = None,
     book = load_book(root)
     chapter = load_chapter(root, book, stem)
     p = plan(root, book, chapter, spec, remaining, retake)
+    selected_ids = set(p["ids"])
+    for speech in speech_of(chapter):
+        if speech["id"] in selected_ids:
+            audio.require_paid_voice(speech["voiceId"], speech["cast"])
     result = {"stem": stem, "quality": p["quality"], "characters": p["characters"],
               "planned": [{"id": sid, "ordinal": ordinal_of(chapter, sid),
                            "characters": len(next(s["text"] for s in speech_of(chapter)
@@ -665,9 +692,21 @@ def render_preview(root: Path, speech: dict, voice: str, rate: int,
     with tempfile.TemporaryDirectory(prefix="authorlm-preview-") as tmp:
         text_file = Path(tmp) / "text.txt"
         aiff = Path(tmp) / "take.aiff"
-        text_file.write_text(preview_text(speech) + "\n", encoding="utf-8")
+        text = preview_text(speech)
+        text_file.write_text(text + "\n", encoding="utf-8")
         _run([say, "-v", voice, "-r", str(wpm), "-f", str(text_file),
               "-o", str(aiff)], f"say ({voice})")
+        if _silent(aiff) and re.search(r"[-–—]", text):
+            # A macOS voice bug (2026-10-26, Jamie (Premium)): a date then
+            # a dash, "Thursday, February 2nd - day after day.", renders
+            # silence and the page skipped the paragraph. Read the dashes
+            # as commas; the preview is only a listen, the take is not.
+            text_file.write_text(re.sub(r"\s*[-–—]+\s*(?=\D)", ", ", text)
+                                 + "\n", encoding="utf-8")
+            _run([say, "-v", voice, "-r", str(wpm), "-f", str(text_file),
+                  "-o", str(aiff)], f"say ({voice})")
+        if _silent(aiff) and re.search(r"\w", text):
+            raise AudioError(f"say ({voice}) rendered silence for: {text[:80]}")
         # The part file is unique to this render: two renderers on the
         # same id (a CLI run beside the server's job) must not race on
         # one temporary name. The last replace wins, with the same bytes.
@@ -676,6 +715,12 @@ def render_preview(root: Path, speech: dict, voice: str, rate: int,
               "-b:a", "48k", str(part)], "ffmpeg preview")
         os.replace(part, out)
     return out
+
+
+def _silent(aiff: Path) -> bool:
+    """`say` writes a header and no samples when a voice gives up: about
+    4.6 KB, where a single word runs past 30 KB."""
+    return not aiff.exists() or aiff.stat().st_size < 8192
 
 
 PREVIEW_STAMP = ".voice"
@@ -808,6 +853,86 @@ def preview(manuscript: dict, stem: str | None = None, spec: str | None = None,
     swept = sweep_previews(root, book)
     return {"rendered": rendered, "kept": kept, "swept": swept, "voice": voice,
             "rate": rate, "chapters": stems, "errors": errors}
+
+
+PREVIEW_CHAPTERS_DIR = f"{PREVIEW_DIR}/chapters"
+_PCM_RATE = 44100
+
+
+def stitch_preview(manuscript: dict, stem: str,
+                   renderer: Callable[[Path, dict, str, int], Path] | None = None,
+                   progress: Progress | None = None) -> dict:
+    """The free stand-in narration of one chapter (owner, 2026-10-26):
+    render the chapter's missing previews (`preview`'s rule, macOS say
+    only, never ElevenLabs), then join the clips in manifest order with
+    each silence section's duration into `preview/chapters/<stem>.mp3`
+    (44.1 kHz mono, single-pass loudnorm). Every piece is decoded to
+    44.1 kHz mono PCM first, so the spans in `<stem>.sections.json` are
+    counted in samples, not guessed from mp3 headers. Returns `{path,
+    duration_s, sections, rendered}`."""
+    import wave
+
+    root = audio.audio_dir(manuscript)
+    ffmpeg = find_tool("ffmpeg")
+    if not ffmpeg:
+        raise AudioError("ffmpeg not found on PATH — install ffmpeg to stitch")
+    pv = preview(manuscript, stem, renderer=renderer, progress=progress)
+    if pv["errors"]:
+        raise AudioError("preview render failed: " + "; ".join(pv["errors"]))
+    chapter = load_chapter(root, load_book(root), stem)
+    out_dir = root / PREVIEW_CHAPTERS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = sanitise_filename(stem)
+    out = out_dir / f"{name}.mp3"
+    spans: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="authorlm-pstitch-") as tmp:
+        tmpd = Path(tmp)
+        pieces: list[str] = []
+        cursor = 0  # samples
+        for i, s in enumerate(chapter.get("sections", [])):
+            wav = tmpd / f"{i:05d}.wav"
+            if s.get("type") == "speech":
+                clip = preview_path(root, s["id"])
+                if not clip.exists():
+                    raise AudioError(f"no preview for {s['id'][:8]}…")
+                _run([ffmpeg, "-y", "-loglevel", "error", "-i", str(clip),
+                      "-ar", str(_PCM_RATE), "-ac", "1", "-c:a", "pcm_s16le",
+                      str(wav)], "ffmpeg decode")
+            else:
+                n = round(s["durationMs"] * _PCM_RATE / 1000)
+                with wave.open(str(wav), "wb") as w:
+                    w.setnchannels(1)
+                    w.setsampwidth(2)
+                    w.setframerate(_PCM_RATE)
+                    w.writeframes(b"\x00\x00" * n)
+            with wave.open(str(wav), "rb") as w:
+                frames = w.getnframes()
+            if s.get("type") == "speech":
+                spans.append({"id": s["id"],
+                              "line": (s.get("source") or {}).get("line"),
+                              "text": s["text"],
+                              "start_s": round(cursor / _PCM_RATE, 3),
+                              "end_s": round((cursor + frames) / _PCM_RATE, 3)})
+            cursor += frames
+            pieces.append(str(wav))
+        if not pieces:
+            raise AudioError("no sections to stitch")
+        if progress:
+            progress(f"{stem}: mixing {len(pieces)} sections")
+        lst = _concat_list(tmpd, "list.txt", pieces)
+        part = out_dir / f"{name}.{os.getpid()}.part.mp3"
+        _run([ffmpeg, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+              "-i", str(lst), "-af", f"{_LOUDNORM},aresample={_PCM_RATE}",
+              "-ar", str(_PCM_RATE), "-ac", "1", "-c:a", "libmp3lame",
+              "-b:a", "128k", str(part)], "ffmpeg stitch preview")
+        os.replace(part, out)
+    duration = round(cursor / _PCM_RATE, 3)
+    (out_dir / f"{name}.sections.json").write_text(json.dumps(
+        {"stem": stem, "path": str(out), "duration_s": duration,
+         "voice": pv["voice"], "rate": pv["rate"], "sections": spans},
+        indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return {"path": str(out), "duration_s": duration, "sections": len(spans),
+            "rendered": len(pv["rendered"])}
 
 
 # --------------------------------------------------------- staleness

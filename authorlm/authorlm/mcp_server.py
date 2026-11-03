@@ -686,17 +686,17 @@ def _critique_by_prefix(db, mid: str, prefix: str):
 @mcp.tool()
 def collect_revision(manuscript: str | None = None,
                      verbose: bool = False) -> dict:
-    """Snapshot the manuscript now: detects transitions, realizes concepts,
-    runs incremental extraction (concepts, links, aliasing statements) when
-    an LLM is configured, and reports the prerequisite-gap delta. Call
-    after the author says they saved/finished edits. Compact by default
-    (gap counts + resolved/new deltas); verbose=True returns the full
-    gaps_before/gaps_after rows."""
+    """Snapshot the manuscript now: detects transitions, realizes concepts
+    and reports the prerequisite-gap delta. No model call: the Concept
+    Graph is mined on request (extract_concepts), never as a side effect
+    of a collect. Call after the author says they saved/finished edits.
+    Compact by default (gap counts + resolved/new deltas); verbose=True
+    returns the full gaps_before/gaps_after rows."""
     def run():
         db = _db()
         ms = _manuscript(db, manuscript)
         api.ensure_session(db, ms)
-        report = api.collect(db, ms, api.load_config(_WORKSPACE), analyze=True)
+        report = api.collect(db, ms, api.load_config(_WORKSPACE))
         return report if verbose else api.compact_collect(report)
     return _guard(run)
 
@@ -874,7 +874,7 @@ def clip_ensure(key: str, generate: bool = False, dry_run: bool = True,
     """A generated clip's takes (docs/video-clips-design.md §8c, §8f). By
     default a DRY RUN: the model, length, estimated cost, the exact prompt,
     the gate's reasons, and any fresh takes' paths — nothing spent. With
-    generate=True and dry_run=False it starts a Veo generation (BILLED) and
+    generate=True and dry_run=False it starts a Veo or Omni generation (BILLED) and
     returns the job; poll it with clip_job. Only with the author's yes for
     the stated cost. `confirm` passes a per-call or per-day cap. Paths
     only."""
@@ -892,13 +892,32 @@ def clip_ensure(key: str, generate: bool = False, dry_run: bool = True,
 
 @mcp.tool()
 def clip_job(job_id: str, manuscript: str | None = None) -> dict:
-    """Check a clip generation job; when Veo is done it downloads the take
+    """Check a clip generation job; when the model is done it downloads the take
     (paths only) and, if the clip has no chosen take yet, chooses it."""
     def run():
         from . import media_gen
 
         db = _db()
         return media_gen.poll(_manuscript(db, manuscript), job_id)
+    return _guard(run)
+
+
+@mcp.tool()
+def clip_edit(key: str, take: str, instruction: str, generate: bool = False,
+              confirm: bool = False, manuscript: str | None = None) -> dict:
+    """Revise a take Omni made, by instruction ("warmer light, slower
+    push-in"). By default a DRY RUN: the cost, the prompt and the gate's
+    reasons. With generate=True it starts the revision (BILLED) — only
+    with the author's yes for the stated cost; poll it with clip_job. The
+    revision lands as take eNN beside the original, which is kept."""
+    def run():
+        from . import media_gen
+
+        ms = _manuscript(_db(), manuscript)
+        if not generate:
+            return {"plan": media_gen.edit_plan(ms, key, take, instruction)}
+        return {"job": media_gen.edit_start(ms, key, take, instruction,
+                                            confirm=confirm)}
     return _guard(run)
 
 
@@ -1786,19 +1805,23 @@ def close_session(manuscript: str | None = None) -> dict:
 
 @mcp.tool()
 def extract_concepts(files: list[str] | None = None, full: bool = False,
-                     edges_only: bool = False, aliases_only: bool = False,
+                     adjudicator: str | None = None,
                      manuscript: str | None = None) -> dict:
-    """LLM-mine the manuscript for concepts and relationships (incremental
-    by default: only files changed since the last extraction). New items
-    arrive as hypotheses for the author to triage. aliases_only sweeps the
-    full text for aliasing statements (naming/defining sentences) and files
-    merge proposals; it extracts nothing else."""
+    """Mine the Concept Graph afresh (docs/extraction-redesign.md) over
+    the sections changed since the last run — or `files`, or the whole
+    book with `full`. Extraction is LAZY: this is the chat's one road to
+    it, taken when the author wants a fresh graph; collect, init and the
+    writeup close never extract. Candidates reach the author's triage only
+    past the eight gates and the per-essay adjudicator, each with its span
+    and reason. The adjudicator is the shipped default unless `adjudicator`
+    names another; with `[extraction] adjudicator_prompt = "ask"` and no
+    name, the result is {"stopped": …} and the author runs `authorlm
+    extract --native` to be asked."""
     def run():
         db = _db()
         return api.run_extraction(db, _manuscript(db, manuscript), _llm(),
                                   files=files, full=full,
-                                  edges_only=edges_only,
-                                  aliases_only=aliases_only)
+                                  adjudicator=adjudicator)
     return _guard(run)
 
 
@@ -1955,13 +1978,13 @@ def set_cast(key: str, voice_id: str, voice: str | None = None,
     author has heard the clip and said so. Replaces the row with the same
     key; fields left None keep their current value."""
     def run():
-        from . import audio
+        from . import audio, pronunciations
         db = _db()
         selected = _manuscript(db, manuscript)
         root = audio.audio_dir(selected)
         path = root / audio.CAST_FILENAME
         current = path.read_text(encoding="utf-8") if path.exists() else ""
-        existing, _w = audio.parse_cast(current)
+        existing, _w = pronunciations.parse_cast(current)
         row = next((r for r in existing if r["key"] == key), {})
         new = {"key": key,
                "voice": voice if voice is not None else row.get("voice", ""),

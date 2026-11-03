@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE.parent))
 # test_passes pins the config/.env/client lookups away from the real ones.
 import test_passes  # noqa: E402,F401
 
-from authorlm import api, export, gdocs, media  # noqa: E402
+from authorlm import api, export, gdocs, media, media_tags  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 
 # The shape of the SpiritualHindu monologues: a spoken intro and outro,
@@ -163,7 +163,7 @@ class ExportTests(unittest.TestCase):
     # -- the voice: field
 
     def test_voice_author_is_a_clip_field(self):
-        parsed = media.parse_fields("x | use: a.mp4 | voice: author")
+        parsed = media_tags.parse_fields("x | use: a.mp4 | voice: author")
         self.assertEqual(parsed["fields"].get("voice"), "author")
         self.assertEqual(parsed["errors"], [])
 
@@ -222,6 +222,32 @@ class ExportTests(unittest.TestCase):
         self.assertNotIn("casual conversation", body)
         self.assertIn('w:sz w:val="64"', styles)   # 32pt body
         self.assertIn('w:line="360"', styles)       # 1.5 line spacing
+
+    def test_teleprompter_whole_puts_the_body_between_the_clips(self):
+        db = api.open_db(str(self.ws))
+        passages = export.teleprompter_passages(
+            api.get_manuscript(db), "picture-story.md", whole=True)
+        labels = [p["label"] for p in passages]
+        self.assertEqual(labels[0], "Intro")
+        self.assertEqual(labels[-1], "Outro")
+        self.assertIn("Body", labels)
+        body = " ".join(" ".join(p["paragraphs"]) for p in passages
+                        if p["label"] == "Body")
+        self.assertIn("casual conversation", body)
+        self.assertNotIn("[", body)
+        code, out, err = self.cli("export", "teleprompter", "--file",
+                                  "picture-story.md", "--whole")
+        self.assertEqual(code, 0, err)
+
+    def test_teleprompter_whole_reads_an_omit_audio_intro(self):
+        (self.ms / "plain.md").write_text(
+            "# P\n\n[Omit: audio]\n\nNamaste, said on camera.\n\n"
+            "[/Omit]\n\nJust prose.\n", encoding="utf-8")
+        db = api.open_db(str(self.ws))
+        passages = export.teleprompter_passages(
+            api.get_manuscript(db), "plain.md", whole=True)
+        self.assertEqual(passages[0]["paragraphs"],
+                         ["Namaste, said on camera.", "Just prose."])
 
     def test_teleprompter_needs_a_file_and_an_author_passage(self):
         code, _out, err = self.cli("export", "teleprompter")

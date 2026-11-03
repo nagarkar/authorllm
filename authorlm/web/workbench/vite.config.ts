@@ -6,10 +6,15 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 // `authorlm workbench` serves from authorlm/workbench_dist/.
 export default defineConfig({
   base: "./",
+  // The brand icons (authorlm/brand/, copied from metalm) are served by the
+  // Python server at the site root; the dev server serves them from here too,
+  // and the build leaves them out of the dist (the page links them by url).
+  publicDir: "../../authorlm/brand",
   plugins: [react(), viteSingleFile()],
   build: {
     outDir: "../../authorlm/workbench_dist",
     emptyOutDir: true,
     cssCodeSplit: false,
+    copyPublicDir: false,
   },
 });

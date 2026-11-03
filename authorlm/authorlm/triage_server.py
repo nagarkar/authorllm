@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import triage_transport
+from . import branding, triage_transport
 from .triage import TriageConflict
 
 
@@ -42,6 +42,8 @@ def make_handler(workspace: str | None, manuscript: str | None):
                 return
             if self.path == "/health":
                 self._json(200, {"ok": True})
+                return
+            if branding.send(self, self.path):
                 return
             self.send_error(404)
 

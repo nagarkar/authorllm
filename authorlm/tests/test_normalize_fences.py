@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from authorlm.gdocs import _TABLE_DELIM, _lift_fences, normalize_markdown
+from authorlm.normalize import _TABLE_DELIM, _lift_fences, normalize_markdown
 
 
 def check(label: str, cond: bool, detail: object = "") -> None:
