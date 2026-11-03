@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import proposals
-from .concepts import (primary_location, NODE_KINDS, add_concept, concept_pattern, get_concept,
+from .concepts import (primary_location, NODE_KINDS, VALID_RELATIONS, add_concept, concept_pattern, get_concept,
                        link_concepts, mention_pattern, node_names,
                        scan_realizations, scoped_concepts)
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
@@ -33,11 +33,6 @@ from .llm import LLMClient
 from .loop import similarity as _similarity
 from .revisions import _paragraphs, is_placeholder, read_manuscript_files
 
-VALID_RELATIONS = {
-    "depends_on", "motivates", "contrasts_with", "elaborates", "generalizes",
-    "specializes", "answers", "foreshadows", "illustrates", "permits",
-    "creates", "distinguishes", "defines", "leads_to", "refutes",
-}
 # Materiality floor (Q/note-materiality): a note_update that says the same
 # thing in different words is not new information — see _note_update_blocked.
 # Measured (proposal-learning-loop design doc), not guessed: 0.72 is the

@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401
 
 from authorlm import api, summaries as sums  # noqa: E402
-from authorlm.extraction import VALID_RELATIONS  # noqa: E402
+from authorlm.concepts import VALID_RELATIONS  # noqa: E402
 from test_summary_hierarchy import ESSAY, POEMS, REFRAIN  # noqa: E402
 
 PASSED = 0

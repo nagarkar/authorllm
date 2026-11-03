@@ -2317,7 +2317,7 @@ def _run_triage(db: Database, mid: str) -> None:
 
 
 def _run_edge_triage(db: Database, mid: str) -> None:
-    from .extraction import VALID_RELATIONS
+    from .concepts import VALID_RELATIONS
 
     relations = sorted(VALID_RELATIONS)
     edges = [dict(e) for e in db.all(

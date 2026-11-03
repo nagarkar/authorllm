@@ -568,7 +568,7 @@ def measure(replay: Replay, knob: dict, configured: dict) -> dict:
     # §4.6 — the proposable set
     proposable = set(knob["proposable_relations"])
     moved: list[str] = []
-    from .extraction import VALID_RELATIONS
+    from .concepts import VALID_RELATIONS
 
     if adjudicated:
         for relation, cells in by_relation.items():

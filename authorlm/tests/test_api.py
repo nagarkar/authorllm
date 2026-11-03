@@ -7034,7 +7034,7 @@ def main_test() -> None:
         check("definition is not a concept-node kind",
               "definition" not in concepts.NODE_KINDS)
         check("defines remains a graph relation",
-              "defines" in extraction.VALID_RELATIONS)
+              "defines" in concepts.VALID_RELATIONS)
         check("definition remains a guidance kind",
               "definition" in guidance_module.GUIDANCE_KINDS)
         try:

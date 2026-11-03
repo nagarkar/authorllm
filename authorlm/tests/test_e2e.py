@@ -665,7 +665,7 @@ def scenario_prerequisite_gap(root: Path) -> None:
 
     # Guidance ordering must only ever use relations the shared vocabulary
     # accepts — every surface (extraction, triage, guidance) reads one set.
-    from authorlm.extraction import VALID_RELATIONS
+    from authorlm.concepts import VALID_RELATIONS
     from authorlm.guidance import PREREQUISITE_FIRST, PREREQUISITE_SECOND
     check("ordering relations all belong to the shared relation vocabulary",
           (PREREQUISITE_FIRST | PREREQUISITE_SECOND) <= VALID_RELATIONS,
