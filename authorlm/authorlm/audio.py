@@ -147,9 +147,6 @@ SEED_CAST = (
     "| narrator |  |  |  | 0.5 | 0.75 | 1.0 | The default for every essay and heading |\n"
 )
 
-CAST_COLUMNS = ("key", "voice", "voice_id", "model", "stability",
-                "similarity", "speed", "note")
-_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 class AudioError(ValueError):
@@ -245,7 +242,7 @@ def _validate_config(data: dict, where: str) -> None:
 
 
 def _validate_voice_key(value: object, where: str) -> None:
-    if not isinstance(value, str) or not _KEY_RE.fullmatch(value):
+    if not isinstance(value, str) or not pron.CAST_KEY_RE.fullmatch(value):
         raise AudioError(f"{where} must be a nonempty cast key "
                          "([a-z][a-z0-9_-]*)")
 
@@ -303,67 +300,20 @@ def init(manuscript: dict) -> dict:
 
 # ------------------------------------------------------------------ cast
 
-def _cast_cells(line: str) -> list[str]:
-    return pron._cells(line)
-
-
-def parse_cast(text: str) -> tuple[list[dict], list[str]]:
-    """`(rows, warnings)` from `cast.md`. Same pipe-table discipline as
-    the pronunciation table: prose around the table is ignored, a
-    shifted row is skipped and named, never guessed at."""
-    rows: list[dict] = []
-    warnings: list[str] = []
-    seen: set[str] = set()
-    in_table = False
-    for line in (text or "").replace("\r\n", "\n").split("\n"):
-        cells = _cast_cells(line)
-        if not cells:
-            if in_table:
-                break
-            continue
-        if not in_table:
-            if cells and cells[0].strip().casefold() == "key":
-                in_table = True
-            continue
-        if pron._is_delimiter(cells):
-            continue
-        key = cells[0].strip()
-        if not key:
-            continue
-        if len([c for c in cells[len(CAST_COLUMNS):] if c]) or any(
-                "|" in c for c in cells[:len(CAST_COLUMNS)]):
-            warnings.append(f"cast row '{key}' carries a '|' and cannot be "
-                            f"read as one row — skipped")
-            continue
-        if not _KEY_RE.match(key):
-            warnings.append(f"cast key '{key}' is not a key ([a-z][a-z0-9_-]*)"
-                            " — skipped")
-            continue
-        if key in seen:
-            warnings.append(f"cast key '{key}' appears twice — the first "
-                            "row wins")
-            continue
-        seen.add(key)
-        padded = cells + [""] * (len(CAST_COLUMNS) - len(cells))
-        row = dict(zip(CAST_COLUMNS, (c.strip() for c in padded)))
-        rows.append(row)
-    return rows, warnings
-
-
 def render_cast_row(row: dict) -> str:
-    for field in CAST_COLUMNS:
+    for field in pron.CAST_COLUMNS:
         value = str(row.get(field) or "")
         if "|" in value or "\n" in value:
             raise AudioError(f"a cast row's `{field}` carries a '|' or a "
                              "newline; a row is one line")
-    return "| " + " | ".join(str(row.get(f) or "") for f in CAST_COLUMNS) + " |"
+    return "| " + " | ".join(str(row.get(f) or "") for f in pron.CAST_COLUMNS) + " |"
 
 
 def set_cast_row(text: str, row: dict) -> str:
     """Write one row: replace the row with the same key, else append
     after the table's last row. Rewrites no other line."""
     key = (row.get("key") or "").strip()
-    if not _KEY_RE.match(key):
+    if not pron.CAST_KEY_RE.match(key):
         raise AudioError(f"'{key}' is not a cast key ([a-z][a-z0-9_-]*)")
     line = render_cast_row(row)
     if not (text or "").strip():
@@ -374,7 +324,7 @@ def set_cast_row(text: str, row: dict) -> str:
     last_row = None
     in_table = False
     for i, raw in enumerate(lines):
-        cells = _cast_cells(raw)
+        cells = pron._cells(raw)
         if not cells:
             if in_table:
                 break
@@ -413,7 +363,7 @@ def load_cast(root: Path, config: dict) -> tuple[dict[str, dict], list[str]]:
     """key → resolved voice (voice_id, voice_name, model, stability,
     similarity, speed, note) with the defaults applied."""
     path = root / AUDIO_DIR / CAST_FILENAME
-    rows, warnings = parse_cast(path.read_text(encoding="utf-8")
+    rows, warnings = pron.parse_cast(path.read_text(encoding="utf-8")
                                 if path.exists() else "")
     cast: dict[str, dict] = {}
     for row in rows:
@@ -447,7 +397,7 @@ def parse_voice_tag(line: str) -> dict | None:
         return None
     parts = [p.strip() for p in m.group("body").split("|")]
     key = parts[0]
-    if not _KEY_RE.match(key):
+    if not pron.CAST_KEY_RE.match(key):
         raise AudioError(f"[Voice: {key}] — '{key}' is not a cast key "
                          "([a-z][a-z0-9_-]*)")
     overrides: dict = {}

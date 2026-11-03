@@ -33,6 +33,7 @@ from .db import Database, ko_fields, loads
 from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
 from .normalize import clamp
+from .pronunciations import parse_cast
 from .revisions import collect_revision, detect_transitions
 
 
@@ -5596,7 +5597,7 @@ def cmd_audio(args):
             root = audio.audio_dir(manuscript)
             path = root / audio.CAST_FILENAME
             text = path.read_text(encoding="utf-8") if path.exists() else ""
-            existing, _w = audio.parse_cast(text)
+            existing, _w = parse_cast(text)
             row = next((r for r in existing if r["key"] == key), {})
             new = {"key": key,
                    "voice": args.voice if args.voice is not None else row.get("voice", ""),

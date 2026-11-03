@@ -17,6 +17,9 @@ internal whitespace. NFC matters — the same Sanskrit term arrives
 precomposed from one editor and decomposed from another, and without
 normalization the dictionary would carry two rows the eye cannot tell
 apart.
+
+The audiobook's `cast.md` is a pipe table under the same discipline, so
+reading it lives here too (`parse_cast`); writing it is `audio`'s.
 """
 
 from __future__ import annotations
@@ -315,3 +318,53 @@ def terms(text: str) -> list[str]:
     by construction a term of art."""
     rows, _warnings = parse(text or "")
     return [r["term"] for r in rows]
+
+
+# ------------------------------------------------------------------ cast
+
+CAST_COLUMNS = ("key", "voice", "voice_id", "model", "stability",
+                "similarity", "speed", "note")
+CAST_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def parse_cast(text: str) -> tuple[list[dict], list[str]]:
+    """`(rows, warnings)` from `cast.md`. Same pipe-table discipline as
+    the pronunciation table: prose around the table is ignored, a
+    shifted row is skipped and named, never guessed at."""
+    rows: list[dict] = []
+    warnings: list[str] = []
+    seen: set[str] = set()
+    in_table = False
+    for line in (text or "").replace("\r\n", "\n").split("\n"):
+        cells = _cells(line)
+        if not cells:
+            if in_table:
+                break
+            continue
+        if not in_table:
+            if cells and cells[0].strip().casefold() == "key":
+                in_table = True
+            continue
+        if _is_delimiter(cells):
+            continue
+        key = cells[0].strip()
+        if not key:
+            continue
+        if len([c for c in cells[len(CAST_COLUMNS):] if c]) or any(
+                "|" in c for c in cells[:len(CAST_COLUMNS)]):
+            warnings.append(f"cast row '{key}' carries a '|' and cannot be "
+                            f"read as one row — skipped")
+            continue
+        if not CAST_KEY_RE.match(key):
+            warnings.append(f"cast key '{key}' is not a key ([a-z][a-z0-9_-]*)"
+                            " — skipped")
+            continue
+        if key in seen:
+            warnings.append(f"cast key '{key}' appears twice — the first "
+                            "row wins")
+            continue
+        seen.add(key)
+        padded = cells + [""] * (len(CAST_COLUMNS) - len(cells))
+        row = dict(zip(CAST_COLUMNS, (c.strip() for c in padded)))
+        rows.append(row)
+    return rows, warnings
