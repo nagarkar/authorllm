@@ -5,7 +5,8 @@ headings in it) at each tab's opening heading, read from the Docs API as
 the first paragraph styled HEADING_n, backed up over the paragraphs that
 precede it (an epigraph). A non-heading line never matches, so a short
 dialogue line that repeats a tab's opener cannot steal the prior chapter's
-tail; the gate stops a pull whose tabs share an opening heading or whose
+tail; the gate stops a pull whose tabs share an opening heading, whose
+later tab opens with a heading an earlier tab holds inside, or whose
 chapter tab opens without one.
 
 `_holds_doc_edits` — the push guard for a hand-settled conflict. Set
@@ -153,6 +154,33 @@ def test_duplicate_opening_heading_stops_the_pull() -> None:
           out.get("b.md") == "## **Alpha**\n\nTwo.\n", out)
 
 
+def test_opening_heading_inside_an_earlier_tab_stops_the_pull() -> None:
+    export = ("# **Alpha**\n\nOne.\n\n## **Sermon One**\n\nInner.\n\n"
+              "## **Sermon One**\n\nTwo.\n")
+    a = _tab("a.md", [(H1, "Alpha"), (P, "One."), (H2, "Sermon One"),
+                      (P, "Inner.")])
+    try:
+        _split(export, a, _tab("b.md", [(H2, "Sermon One"), (P, "Two.")]))
+        check("an opener that is an inner heading of an earlier tab stops",
+              False)
+    except LookupError as err:
+        check("the stop names the earlier tab, the later tab and the heading",
+              "'a.md'" in str(err) and "'b.md'" in str(err)
+              and "## Sermon One" in str(err) and "retitle" in str(err),
+              str(err))
+    out = _split(export.replace("## **Sermon One**\n\nTwo.",
+                                "## **Sermon One: The Error of Specialness**"
+                                "\n\nTwo."),
+                 a, _tab("b.md", [(H2, "Sermon One: The Error of Specialness"),
+                                  (P, "Two.")]))
+    check("a longer heading sharing the words is its own heading",
+          out.get("b.md") == ("## **Sermon One: The Error of Specialness**"
+                              "\n\nTwo.\n")
+          and "Inner." in out.get("a.md", ""), out)
+    # The echo the other way round (a later tab holds an earlier opener
+    # inside it) is allowed: test_later_echo_of_an_opening_heading_does_not_split.
+
+
 def test_tab_without_heading_stops_the_pull() -> None:
     export = "# **Alpha**\n\nOne.\n\nJust prose, no heading.\n\nMore.\n"
     try:
@@ -243,6 +271,7 @@ if __name__ == "__main__":
     test_epigraph_lands_in_its_own_tab()
     test_later_echo_of_an_opening_heading_does_not_split()
     test_duplicate_opening_heading_stops_the_pull()
+    test_opening_heading_inside_an_earlier_tab_stops_the_pull()
     test_tab_without_heading_stops_the_pull()
     test_holds_rejects_duplicate_line_false_positive()
     test_holds_settled_adjacent_edit()

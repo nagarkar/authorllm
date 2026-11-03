@@ -18,7 +18,7 @@ sees files it created. OAuth token cached at ~/.authorlm/gdocs_token.json, or ta
 AUTHORLM_GDOCS_TOKEN when that file is absent (cloud sessions).
 
 Decisions:
-- A tab's anchor in the whole-Doc export is its opening heading (level and text), the split backs up over any epigraph paragraphs before it, and opening headings must be unique across tabs; the pull stops and names the pair otherwise. Why: first-paragraph anchors let a short dialogue line ("Yes.") steal the prior chapter's tail; a uniqueness gate over the whole export dropped tabs whose opener is echoed later. Enforced by: tests/test_anchor_split_and_holds.py::test_dialogue_line_is_not_an_anchor, tests/test_anchor_split_and_holds.py::test_epigraph_lands_in_its_own_tab, tests/test_anchor_split_and_holds.py::test_duplicate_opening_heading_stops_the_pull, tests/test_anchor_split_and_holds.py::test_tab_without_heading_stops_the_pull. (owner)
+- A tab's anchor in the whole-Doc export is its opening heading (level and text), the split backs up over any epigraph paragraphs before it, and opening headings must be unique across tabs and must not recur as a heading in an earlier tab; the pull stops and names the pair otherwise. Why: first-paragraph anchors let a short dialogue line ("Yes.") steal the prior chapter's tail; a uniqueness gate over the whole export dropped tabs whose opener is echoed later. Enforced by: tests/test_anchor_split_and_holds.py::test_dialogue_line_is_not_an_anchor, tests/test_anchor_split_and_holds.py::test_epigraph_lands_in_its_own_tab, tests/test_anchor_split_and_holds.py::test_duplicate_opening_heading_stops_the_pull, tests/test_anchor_split_and_holds.py::test_opening_heading_inside_an_earlier_tab_stops_the_pull, tests/test_anchor_split_and_holds.py::test_tab_without_heading_stops_the_pull. (owner)
 """
 
 from __future__ import annotations
@@ -1218,11 +1218,15 @@ class TabAnchor(NamedTuple):
     or holds no text at all (`text` empty). `before` is the plain text of
     the non-empty paragraphs that precede the heading in the tab: an
     epigraph, an `[Omit: all]` tag. `chapter` marks a `*.md` tab outside
-    the illustrations subtree, the tabs that must open with a heading."""
+    the illustrations subtree, the tabs that must open with a heading.
+    `headings` is every heading in the tab, opener included, as (level,
+    text), for the gate's check that a later tab's opener recurs in no
+    earlier tab."""
     level: int
     text: str
     before: tuple[str, ...]
     chapter: bool
+    headings: tuple[tuple[int, str], ...] = ()
 
 
 def tab_anchors(tab_doc: dict | None) -> dict[str, TabAnchor]:
@@ -1239,6 +1243,7 @@ def tab_anchors(tab_doc: dict | None) -> dict[str, TabAnchor]:
             chapter = title.endswith(".md") and not under_illus
             body = t.get("documentTab", {}).get("body", {}).get("content", [])
             before: list[str] = []
+            headings: list[tuple[int, str]] = []
             anchor: TabAnchor | None = None
             for el in body:
                 para = el.get("paragraph", {})
@@ -1248,13 +1253,17 @@ def tab_anchors(tab_doc: dict | None) -> dict[str, TabAnchor]:
                     continue
                 named = para.get("paragraphStyle", {}).get(
                     "namedStyleType", "")
-                if named.startswith("HEADING_"):
+                if not named.startswith("HEADING_"):
+                    if anchor is None:
+                        before.append(text)
+                    continue
+                headings.append((int(named[-1]), text))
+                if anchor is None:
                     anchor = TabAnchor(int(named[-1]), text, tuple(before),
                                        chapter)
-                    break
-                before.append(text)
-            out[title] = anchor or TabAnchor(
+            out[title] = (anchor or TabAnchor(
                 0, before[0] if before else "", (), chapter)
+            )._replace(headings=tuple(headings))
             walk(t.get("childTabs", []),
                  under_illus or title == ILLUS_TAB_TITLE)
     walk((tab_doc or {}).get("tabs", []), False)
@@ -1282,11 +1291,13 @@ def _heading_level(line: str) -> int:
 def check_tab_anchors(order: list[str], anchors: dict[str, TabAnchor]) -> None:
     """The gate every split of the whole-Doc export runs first (pull,
     reconcile, the marked-text fetches): every opening heading is unique
-    across tabs on (level, text), and every chapter tab that holds text
-    opens with a heading. Stops with a `LookupError` that names the tabs
-    and the heading, or the tab and its first line. Headings further
-    inside a tab are not checked."""
-    seen: dict[tuple[int, str], str] = {}
+    across tabs on (level, text) and recurs as no heading, opening or
+    inner, of an earlier tab in `order` (the forward search would stop at
+    that earlier heading); and every chapter tab that holds text opens
+    with a heading. Stops with a `LookupError` that names the tabs and
+    the heading, or the tab and its first line. A later echo, in a later
+    tab or as prose anywhere, is allowed."""
+    seen: dict[tuple[int, str], tuple[str, bool]] = {}
     for title in order:
         a = anchors.get(title)
         if a is None:
@@ -1294,11 +1305,18 @@ def check_tab_anchors(order: list[str], anchors: dict[str, TabAnchor]) -> None:
         if a.level:
             key = (a.level, a.text)
             if key in seen:
+                earlier, opener = seen[key]
+                where = ("both open with the heading" if opener else
+                         f"share the heading")
                 raise LookupError(
-                    f"tabs '{seen[key]}' and '{title}' both open with the "
-                    f"heading {'#' * a.level} {a.text}; retitle one so "
-                    "every tab's opening heading is unique")
-            seen[key] = title
+                    f"tabs '{earlier}' and '{title}' {where} "
+                    f"{'#' * a.level} {a.text}"
+                    + ("" if opener else f" ('{title}' opens with it; "
+                       f"'{earlier}' holds it as a heading inside)")
+                    + "; retitle one so every tab's opening heading is "
+                    "unique and recurs in no earlier tab")
+            for k, h in enumerate(a.headings):
+                seen.setdefault(h, (title, k == 0))
         elif a.chapter and a.text:
             raise LookupError(
                 f"tab '{title}' opens with plain text, not a heading "
