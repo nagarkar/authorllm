@@ -537,6 +537,40 @@ def drafting_context(db: Database, manuscript: dict, file: str,
         + block(after, AFTER_HEADER))
 
 
+def drafting_context_for_writeup(db: Database, manuscript: dict, writeup: dict,
+                                 capture=None) -> str:
+    """The writeup's L1 book-frame: compressed summaries of the resolved
+    essays before this one and the upcoming ones after it. Recomputed on
+    every read rather than stored — the summaries themselves are the
+    source of truth and a rebuild between beats must show through. The
+    declared placement, however, IS stored, so a resumed writeup on a
+    not-yet-placed essay recomputes the same split without the author
+    repeating the flag.
+
+    `capture` is `write_start`'s own snapshot: the context it prints must
+    be the same text its gate just passed, not a second read that a
+    parallel session could have changed underneath it. Every other caller
+    (the resume view) is a fresh invocation and takes a fresh one."""
+    placement = loads(writeup["metadata"], {}).get("placement")
+    return drafting_context(db, manuscript, writeup["file"],
+                            placement=placement, capture=capture)
+
+
+def drafting_context_for_write_status(db: Database, manuscript: dict,
+                                      writeup: dict) -> str:
+    """`write status` is the resume entry point, so it degrades rather
+    than dies: if the file (or the placement target) has left the disk,
+    the context is replaced by a one-line note and the plan, cursor,
+    pending proposal and tallies still render. write_start does NOT get
+    this treatment — its gate has already proved the context resolves."""
+    try:
+        return drafting_context_for_writeup(db, manuscript, writeup)
+    except LookupError as err:
+        return (f"{WARN_PREFIX}DRAFTING CONTEXT unavailable — {err}. "
+                f"Restore the file, or close the writeup with "
+                f"'write abandon' (it restores the pinned source version).")
+
+
 # ------------------------------------------------------------- building
 
 def _concept_slice(db: Database, manuscript: dict, file: str) -> str:

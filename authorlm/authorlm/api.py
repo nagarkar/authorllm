@@ -32,6 +32,7 @@ from . import sessions as ses
 from .analysis import analyze_pending, find_precedents
 from .briefing import build_briefing
 from .db import Database, ko_fields, loads, now_iso
+from .docs import _resolve_relpath
 from .guidance import (GUIDANCE_KINDS, _GUIDANCE_KINDS_SQL,
                        compute_prerequisite_gaps, generate_guidance,
                        intent_coverage_notes)
@@ -39,8 +40,11 @@ from . import hygiene
 from . import triage as triage_service
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
+from .sessions import NO_EPISODE
+from .summaries import drafting_context_for_write_status, drafting_context_for_writeup
 from .revisions import (
-    collect_revision, detect_transitions, massive_deletions, read_manuscript_files,
+    MARKER, PLACEHOLDER, _version_text, collect_revision, detect_transitions, is_placeholder,
+    marker_present, massive_deletions, read_manuscript_files,
 )
 # The filter pass's two collaborators, at module scope because its
 # verbs are ordinary members of this module rather than a lazily
@@ -262,15 +266,7 @@ def parse_language(value: str) -> str:
     return head.lower() + (f"-{rest}" if rest else "")
 
 
-# KDP's standard paperback trim sizes, inches (width, height). A custom
-# size inside the accepted range still builds; the export only warns
-# that it is off the standard list, because a standard size is what
-# keeps the print run cheapest and the cover template available.
-KDP_TRIM_SIZES = (
-    (5, 8), (5.06, 7.81), (5.25, 8), (5.5, 8.5), (6, 9), (6.14, 9.21),
-    (6.69, 9.61), (7, 10), (7.44, 9.69), (7.5, 9.25), (8, 10),
-    (8.25, 6), (8.25, 8.25), (8.5, 8.5), (8.5, 11), (8.27, 11.69),
-)
+# KDP's accepted trim range, inches (width, height).
 KDP_TRIM_MIN = (4.0, 6.0)
 KDP_TRIM_MAX = (8.5, 11.69)
 
@@ -1227,15 +1223,6 @@ def review(db: Database, manuscript: dict, session: dict, index: int,
 
 BEAT_KIND = "beat"
 
-# The third value of `collect(episode=…)` (filter-pass design §1.8).
-#
-# `None` already means AMBIENT — attach to the session's most recently
-# created open episode — so there was no way to say "attach to nothing"
-# without inventing a value that is neither a row nor None. A sentinel
-# object is that value: it can never collide with an episode dict, it
-# cannot be produced by a database read, and `is` comparison makes the
-# branch unmistakable at the call site.
-NO_EPISODE = object()
 
 # The modeled-rewrite digest (UC-B, design §13.2): the four lists it may
 # carry, mapped to each list's own required text field. The digest is
@@ -1249,78 +1236,10 @@ DIGEST_PROVENANCE = ("source_version_id", "source_file", "recorded_at",
                      "point_count")
 DIGEST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 
-# The mid-rewrite placeholder (design §14.3). `write start` on an
-# EXISTING file leaves this where the essay was, instead of leaving the
-# file empty.
-#
-# Visible text, not an HTML comment: the one path where a hidden marker
-# fails is the one that matters. `export.publish_markdown` used to drop a
-# mid-rewrite essay from the exported book in silence, and an HTML
-# comment is stripped on the way to PDF/EPUB, so the hole would remain.
-# Visible text cannot be shipped by accident, only loudly. The author
-# also opens these files in Obsidian, where a comment is invisible.
-#
-# Bracketed `[AuthorLM: …]`, not the author's literal `<<…>>`: `<<` and
-# `>>` are reserved by the pending-change grammar (threads.PENDING,
-# gdocs.diff_push), so a literal `<<…>>` in a manuscript file would make
-# the next surgical push of it fail with a message about a margin thread
-# that does not exist. The author's WORDS are kept exactly.
-#
-# Deterministic by construction — no id, no timestamp, no file name — so
-# it is written once per writeup and never churns a version or
-# invalidates the prompt-cache prefix on its own.
-MARKER = "[AuthorLM: being presently rewritten]"
-
-PLACEHOLDER = (
-    MARKER + "\n"
-    "\n"
-    "This essay is mid-rewrite and is being drafted one beat at a time. The\n"
-    "previous text is not lost — it is pinned in the database. Run\n"
-    "`authorlm write status` to see the writeup, `authorlm write digest` to\n"
-    "print the pinned original, or `authorlm write abandon` to put the old\n"
-    "essay back. The first accepted beat replaces this placeholder, which is\n"
-    "never part of a finished essay.\n"
-)
-
-
-def is_placeholder(text: str) -> bool:
-    """Whole-file exact match (whitespace-tolerant at the edges). A file
-    the author has HAND-EDITED is not a placeholder — their text is never
-    silently discarded, which is the stronger rule."""
-    return text.strip() == PLACEHOLDER.strip()
-
-
-def marker_present(text: str) -> bool:
-    """The weaker check: the marker line survived inside a file that is
-    no longer just the placeholder. Warned about, never auto-repaired."""
-    return MARKER in text
 # Two values only. A third ("moved", "deferred") is where enum-shaped
 # schemas rot; the nuance belongs in the free-text reason, which is what
 # the "What Was Removed and Why" section quotes anyway.
 DISPOSITIONS = ("kept", "removed")
-
-
-def _resolve_relpath(manuscript: dict, query: str) -> str:
-    """Map a file argument to the manuscript-relative path used as the
-    Doc-mapping key and the on-disk name. Absolute paths that sit under
-    the manuscript root (and relative paths that resolve there) are
-    accepted; anything outside is refused. Bare names still go through
-    `docs._match`'s exact-then-unique-substring forgiveness."""
-    from .docs import _match
-    from .revisions import iter_manuscript_paths
-
-    root = Path(manuscript["path"])
-    candidates = iter_manuscript_paths(root)
-    probe = Path(query).expanduser()
-    try:
-        resolved = (probe if probe.is_absolute() else root / probe).resolve()
-        rel = str(resolved.relative_to(root.resolve()))
-    except (ValueError, OSError):
-        rel = None
-    if rel is not None and rel in candidates:
-        return rel
-    path = _match(candidates, query)
-    return str(path.relative_to(root))
 
 
 def _resolve_or_new(manuscript: dict, query: str, new: bool) -> str:
@@ -1492,44 +1411,6 @@ def _beat_tallies(db: Database, writeup: dict) -> dict:
         (writeup["id"],),
     )
     return {r["state"]: r["n"] for r in rows}
-
-
-def _drafting_context(db: Database, manuscript: dict, writeup: dict,
-                      capture=None) -> str:
-    """The writeup's L1 book-frame (design §12.4 item 1): compressed
-    summaries of the resolved essays before this one and the upcoming
-    ones after it. Recomputed on every read rather than stored — the
-    summaries themselves are the source of truth and a rebuild between
-    beats must show through. The declared placement, however, IS stored
-    (§12.4 item 3), so a resumed writeup on a not-yet-placed essay
-    recomputes the same split without the author repeating the flag.
-
-    `capture` is `write_start`'s own snapshot: the context it prints must
-    be the same text its gate just passed, not a second read that a
-    parallel session could have changed underneath it. Every other caller
-    (the resume view) is a fresh invocation and takes a fresh one."""
-    from . import summaries as sums
-
-    placement = loads(writeup["metadata"], {}).get("placement")
-    return sums.drafting_context(db, manuscript, writeup["file"],
-                                 placement=placement, capture=capture)
-
-
-def _status_drafting_context(db: Database, manuscript: dict,
-                             writeup: dict) -> str:
-    """`write status` is the resume entry point, so it degrades rather
-    than dies: if the file (or the placement target) has left the disk,
-    the context is replaced by a one-line note and the plan, cursor,
-    pending proposal and tallies still render. write_start does NOT get
-    this treatment — its gate has already proved the context resolves."""
-    from . import summaries as sums
-
-    try:
-        return _drafting_context(db, manuscript, writeup)
-    except LookupError as err:
-        return (f"{sums.WARN_PREFIX}DRAFTING CONTEXT unavailable — {err}. "
-                f"Restore the file, or close the writeup with "
-                f"'write abandon' (it restores the pinned source version).")
 
 
 def _resolve_placement(manuscript: dict, after: str | None) -> str | None:
@@ -1941,8 +1822,8 @@ def write_start(db: Database, manuscript: dict, config: dict,
             "source_chars": len(source_text),
             "created": bool(new), "brief": brief or None,
             "style": guide["name"] if guide else None,
-            "drafting_context": _drafting_context(db, manuscript, row,
-                                                  capture=capture)}
+            "drafting_context": drafting_context_for_writeup(db, manuscript, row,
+                                                              capture=capture)}
 
 
 def write_intents(db: Database, manuscript: dict,
@@ -2596,7 +2477,7 @@ def write_status(db: Database, manuscript: dict, prefix: str | None = None) -> d
         "drafting_models": meta.get("drafting_models") or [],
         "marker_present": marker_present(_disk) and not is_placeholder(_disk),
         "accounting": _accounting(writeup),
-        "drafting_context": _status_drafting_context(db, manuscript, writeup),
+        "drafting_context": drafting_context_for_write_status(db, manuscript, writeup),
     }
 
 
@@ -3494,21 +3375,10 @@ def list_concepts(db: Database, manuscript: dict, include_all: bool = False) -> 
     return {"nodes": nodes, "edges": edges}
 
 
+
+
 def show_concept(db: Database, manuscript: dict, name: str) -> dict:
-    node = cg.get_concept(db, manuscript["id"], name)
-    if not node:
-        raise LookupError(f"no concept named '{name}'")
-    edges = [dict(e) for e in db.all(
-        "SELECT ce.*, fn.name AS from_name, tn.name AS to_name "
-        "FROM concept_edges ce "
-        "JOIN concept_nodes fn ON fn.id = ce.from_node "
-        "JOIN concept_nodes tn ON tn.id = ce.to_node "
-        "WHERE ce.manuscript_id = ? "
-        "AND ce.status NOT IN ('rejected', 'retired') "
-        "AND (ce.from_node = ? OR ce.to_node = ?)",
-        (manuscript["id"], node["id"], node["id"]),
-    )]
-    return {"node": dict(node), "edges": edges}
+    return cg.show_concept(db, manuscript, name)
 
 
 def add_concept(db: Database, manuscript: dict, name: str,
@@ -4725,15 +4595,6 @@ def _touched_filter_run(db: Database, row: dict) -> dict:
     return dict(fresh) if fresh is not None else row
 
 
-def _version_text(db: Database, version_id: str | None,
-                  file: str) -> str | None:
-    if not version_id:
-        return None
-    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?",
-                 (version_id,))
-    return loads(row["files"], {}).get(file) if row else None
-
-
 def _latest_version_id(db: Database, manuscript_id: str) -> str | None:
     row = db.one(
         "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
@@ -5816,26 +5677,6 @@ def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
                             warnings, direct=True)
 
 
-def _write_resolved_text(path: Path, root: Path, final: str) -> str:
-    """Write a resolve's final text back to disk WITH its illustration
-    embed lines. The Doc never carries embed lines (push strips them),
-    so the text a filter, lens, or critique resolve reads back from a
-    tab is embed-free — and writing it as-is silently unlinked every
-    rendered illustration in the essay (the tag stayed, the picture
-    under it vanished from Obsidian; 15 slots across SMSTTD,
-    2026-09-02). The ordinary pull re-inserts them; this is the same
-    step, the prior pick winning while its file exists."""
-    from . import gdocs
-    from .illus import capture_embeds, reembed
-
-    prior = path.read_text(encoding="utf-8") if path.exists() else ""
-    normalized = gdocs.normalize_markdown(final)
-    normalized = reembed(normalized, root, capture_embeds(prior))
-    path.write_text(normalized if normalized.endswith("\n")
-                    else normalized + "\n", encoding="utf-8")
-    return normalized
-
-
 def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                      rel: str, path: Path, warnings: list[str],
                      direct: bool = False,
@@ -5881,7 +5722,7 @@ def _filter_finalize(db: Database, manuscript: dict, config: dict, run: dict,
                                          origin_type=FILTER_ORIGIN,
                                          evidence_type=FILTER_EVIDENCE,
                                          final_text=final)
-    normalized = _write_resolved_text(path, Path(manuscript["path"]), final)
+    normalized = gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
 
     # NO episode (§1.8). Hygiene work has no goal to be filed under, and
     # `episode=None` would file it against whatever the author happens to
@@ -6275,7 +6116,7 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
                                      origin_type=_morph.MORPH_ORIGIN,
                                      evidence_type=_morph.MORPH_EVIDENCE,
                                      final_text=landed)
-    _write_resolved_text(path, Path(manuscript["path"]), landed)
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), landed)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="morph-settle",
                 episode=NO_EPISODE)
@@ -6536,7 +6377,7 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
                                      origin_type=LENS_ORIGIN,
                                      evidence_type=LENS_EVIDENCE,
                                      final_text=landed)
-    _write_resolved_text(path, Path(manuscript["path"]), landed)
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), landed)
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="lens-settle",
                 episode=NO_EPISODE)
@@ -7313,7 +7154,7 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
                              origin_type=EXTERNAL_ORIGIN,
                              evidence_type=EXTERNAL_EVIDENCE,
                              final_text=final, threads=replaces)
-    _write_resolved_text(path, Path(manuscript["path"]), final)
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
     # NO episode: landing staged revisions is not work toward whatever
     # goal the author happens to have open (filter-pass design §1.8).
     with contextlib.redirect_stdout(io.StringIO()):

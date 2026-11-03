@@ -1515,7 +1515,7 @@ def _critique_resolve_essay(db: Database, manuscript: dict, args) -> None:
     # rendered plate while leaving the [Illustration:] tag (SMSTTD,
     # 2026-09-02; critique was missed when that writer was shared).
     path = Path(manuscript["path"]) / file
-    api._write_resolved_text(path, Path(manuscript["path"]), final)
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
     diffs = passes.record_resolution(db, mid, file, forms, final_text=final)
     # No push: the author settles these forms in the Doc themselves, in
     # most cases. The Doc keeps them until their next ordinary 'doc push'.

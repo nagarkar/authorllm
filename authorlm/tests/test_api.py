@@ -69,7 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _offline_prices  # noqa: E402,F401  (llmlm prices: no network)
 
-from authorlm import api, concepts, guidance as guidance_module  # noqa: E402
+from authorlm import api, concepts, docs, guidance as guidance_module  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 from authorlm.db import ko_fields, loads  # noqa: E402
 
@@ -5468,7 +5468,7 @@ def check_directives() -> None:
               _raises(lambda: dv.apply(db, ms, {}, "footnote", abs_becker,
                                        [(1, "x")]), "checked out to Google Docs")
               and (ms_dir / "becker.md").read_text() == becker
-              and api._resolve_relpath(ms, abs_becker) == "becker.md")
+              and docs._resolve_relpath(ms, abs_becker) == "becker.md")
         outside = str((root / "other.md").resolve())
         (root / "other.md").write_text("Alpha.[Footnote: leak]\n")
         check("an absolute path outside the manuscript is refused — "

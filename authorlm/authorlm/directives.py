@@ -46,7 +46,9 @@ import json
 import re
 from pathlib import Path
 
-from .revisions import iter_manuscript_paths
+from .docs import _resolve_relpath
+from .revisions import is_placeholder, iter_manuscript_paths
+from .sessions import NO_EPISODE
 
 KINDS = ("footnote", "explain", "suggestion", "judgment")
 _TAGS = {
@@ -140,7 +142,6 @@ def scan(root: Path, kind: str, files: list[str] | None = None
     """Open tags of one kind by file (or the named files only). Files
     with no tag are absent. The TOC and a file holding only the
     mid-rewrite placeholder are never scanned."""
-    from .api import is_placeholder
     from .structure import TOC_FILENAME
 
     _kind(kind)
@@ -548,7 +549,7 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
     # the Doc was still the working copy (found 2026-10-01 / confirmed
     # 2026-10-04).
     try:
-        file = api._resolve_relpath(manuscript, file)
+        file = _resolve_relpath(manuscript, file)
     except LookupError:
         raise LookupError(f"no manuscript file '{file}'") from None
     root = Path(manuscript["path"])
@@ -623,7 +624,7 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
 
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source=f"{kind}-apply",
-                            episode=api.NO_EPISODE)
+                            episode=NO_EPISODE)
     return {"kind": kind, "file": file, "mode": "applied", "landed": landed,
             "version_no": after.get("version_no"), "url": None, "failed": []}
 
@@ -850,7 +851,7 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
     _kind(kind)
     mid = manuscript["id"]
     try:
-        file = api._resolve_relpath(manuscript, file)
+        file = _resolve_relpath(manuscript, file)
     except LookupError:
         raise LookupError(f"no manuscript file '{file}'") from None
     written = passes.staged_threads(db, mid, file, states=("written",),
@@ -891,10 +892,10 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
     n_forms = len(forms) + settled
     if kind == "suggestion":
         final = _consume_standalone_tags(db, final, written)
-    api._write_resolved_text(path, Path(manuscript["path"]), final)
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
         after = api.collect(db, manuscript, config, source=f"{kind}-resolve",
-                            episode=api.NO_EPISODE)
+                            episode=NO_EPISODE)
     states = [db.one("SELECT state FROM doc_threads WHERE id = ?",
                      (t["id"],))["state"] for t in written]
     url = None

@@ -32,7 +32,7 @@ from . import threads as threads_mod
 from .illus import (ILLUS_DIR, PROMPTS_SUBDIR, capture_embeds,
                     join_prompt_embeds, reembed, snapshot_prompts,
                     split_prompt_embeds, strip_dangling)
-from .revisions import iter_manuscript_paths, strip_embed_lines
+from .revisions import is_placeholder, iter_manuscript_paths, strip_embed_lines
 from .staging import is_marked as staging_is_marked
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
@@ -1327,8 +1327,6 @@ def chapter_stats(text: str) -> dict:
     sentence length in words; AWL = average word length in characters;
     FRE = Flesch Reading Ease with a heuristic syllable count (treat as
     approximate; higher is easier, 60–70 is plain English)."""
-    from .api import is_placeholder
-
     if is_placeholder(text):
         # As for an empty file: a readability score for a mid-rewrite
         # marker is noise in the manifest.
@@ -1871,7 +1869,6 @@ def _refuse_mid_rewrite(relpath: str, text: str) -> None:
     Byte-level rather than a database query, deliberately — it is the
     guard that survives a database that has lost the run row, and the
     state is fully described by the bytes (filter-pass design §2.3)."""
-    from .api import is_placeholder
     from .staging import is_marked
 
     if is_placeholder(text):
@@ -6091,3 +6088,19 @@ def decide_thread(db: Database, manuscript: dict, comment_id: str,
     except Exception:
         pass
     return {"comment_id": comment_id, "state": state, "signal": signal}
+
+
+def _write_resolved_text(path: Path, root: Path, final: str) -> str:
+    """Write a resolve's final text back to disk WITH its illustration
+    embed lines. The Doc never carries embed lines (push strips them),
+    so the text a filter, lens, or critique resolve reads back from a
+    tab is embed-free — and writing it as-is silently unlinked every
+    rendered illustration in the essay (the tag stayed, the picture
+    under it vanished from Obsidian; 15 slots across SMSTTD). The ordinary pull re-inserts them; this is the same
+    step, the prior pick winning while its file exists."""
+    prior = path.read_text(encoding="utf-8") if path.exists() else ""
+    normalized = normalize_markdown(final)
+    normalized = reembed(normalized, root, capture_embeds(prior))
+    path.write_text(normalized if normalized.endswith("\n")
+                    else normalized + "\n", encoding="utf-8")
+    return normalized

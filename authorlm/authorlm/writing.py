@@ -40,8 +40,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .concepts import show_concept
 from .db import Database, loads
 from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
+from .revisions import _version_text, is_placeholder
+from .summaries import drafting_context_for_writeup
 
 NONE = "(none)"
 EMPTY_ACCEPTED = "(nothing accepted yet)"
@@ -168,12 +171,10 @@ def _plan_concepts(plan: list) -> list[str]:
 
 
 def _concept_notes(db: Database, manuscript: dict, plan: list) -> str:
-    from . import api
-
     lines: list[str] = []
     for name in _plan_concepts(plan):
         try:
-            shown = api.show_concept(db, manuscript, name)
+            shown = show_concept(db, manuscript, name)
         except LookupError:
             # NOT skipped. A beat that names a concept the graph does not
             # have is information the drafter must see — silently dropping
@@ -215,11 +216,9 @@ def _original_block(db: Database, writeup: dict) -> str:
     ("use the language of the original as much as you can", author,
     2026-09-03). Pinned at `write start`, so byte-stable across beats.
     The DIGEST stays the authority on what the original CLAIMS."""
-    from . import api
-
-    text = api._version_text(db, writeup.get("source_version_id"),
-                             writeup["file"])
-    if not text or api.is_placeholder(text):
+    text = _version_text(db, writeup.get("source_version_id"),
+                         writeup["file"])
+    if not text or is_placeholder(text):
         return ""
     return text
 
@@ -254,11 +253,9 @@ def _accepted_block(manuscript: dict, writeup: dict) -> str:
     Under the in-flight stream a truncated file holds the mid-rewrite
     PLACEHOLDER. That marker is scaffolding, never prose, and must never
     reach the drafting payload as if the essay opened with it."""
-    from . import api
-
     path = Path(manuscript["path"]) / writeup["file"]
     text = path.read_text(encoding="utf-8") if path.exists() else ""
-    if api.is_placeholder(text) or not text.strip():
+    if is_placeholder(text) or not text.strip():
         text = ""
     return _section("ACCEPTED TEXT SO FAR", text or EMPTY_ACCEPTED)
 
@@ -314,13 +311,11 @@ def assemble(db: Database, manuscript: dict, writeup: dict, beat: dict,
     one-capture-per-invocation convention): the drafting context that
     reaches the model must be the same text the caller's own gates saw,
     not a second read a parallel session could have moved underneath it."""
-    from . import api
-
     return Payload(
         law=_law_block(db, manuscript["id"], writeup["file"]),
         frame=_frame_block(db, manuscript, writeup,
-                           api._drafting_context(db, manuscript, writeup,
-                                                 capture=capture)),
+                           drafting_context_for_writeup(db, manuscript, writeup,
+                                                        capture=capture)),
         accepted=_accepted_block(manuscript, writeup),
         beat=_beat_block(db, writeup, beat),
     )

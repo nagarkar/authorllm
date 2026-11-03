@@ -39,7 +39,7 @@ from . import threads as th
 def is_marked(text: str) -> bool:
     """True when the raw bytes carry a `<<old>>{{new}}` form.
 
-    A BYTE check on the file, exactly as `api.is_placeholder` is, and
+    A BYTE check on the file, exactly as `revisions.is_placeholder` is, and
     deliberately not a database query: it is the guard that survives a
     database that has lost the run row, and the state it describes is
     fully described by the bytes.

@@ -14,6 +14,17 @@ from . import backup
 from .db import Database, ko_fields, loads, now_iso
 
 
+# The third value of `collect(episode=…)`.
+#
+# `None` already means AMBIENT — attach to the session's most recently
+# created open episode — so there was no way to say "attach to nothing"
+# without inventing a value that is neither a row nor None. A sentinel
+# object is that value: it can never collide with an episode dict, it
+# cannot be produced by a database read, and `is` comparison makes the
+# branch unmistakable at the call site.
+NO_EPISODE = object()
+
+
 def active_session(db: Database, manuscript_id: str):
     return db.one(
         "SELECT * FROM sessions WHERE manuscript_id = ? AND status = 'active' "
