@@ -315,6 +315,32 @@ def unterminated_insertion_pull(root: Path) -> None:
            json.dumps(rep, default=str))
 
 
+@scenario("3e unterminated insertion: reconcile does not auto-pull markers")
+def unterminated_insertion_reconcile(root: Path) -> None:
+    # pull_doc refuses a broken form (#331); session-start reconcile
+    # used to auto-pull the same tab into the local file because it
+    # only ran strip_pending.
+    ws, db, manuscript, ms, fake = _fixture(
+        root, "s3e", ESSAY, fake_cls=_GoogleFake)
+    before = (ms / "solo.md").read_text()
+    fake.edit("tab-2", "Now consider the other side.",
+              "{{A new paragraph that lost its closer.\n\n"
+              "Now consider the other side.")
+    with _google(fake):
+        rep = gdocs.reconcile(db, manuscript, fake, docs_service=fake)
+    text = (ms / "solo.md").read_text()
+    expect("reconcile leaves the local file untouched",
+           text == before and "{{" not in text, text)
+    expect("reconcile does not claim a pull",
+           "solo.md" not in (rep.get("pulled") or []),
+           json.dumps(rep, default=str))
+    expect("reconcile names the file whose tab is broken",
+           any(e.get("file") == "solo.md"
+               and "lost a marker" in (e.get("error") or "")
+               for e in (rep.get("errors") or [])),
+           json.dumps(rep, default=str))
+
+
 @scenario("3c unterminated form: doc merge keeps the text")
 def unterminated_merge(root: Path) -> None:
     ws, db, manuscript, ms, fake, essay = _unterminated(root, "s3c")
@@ -404,6 +430,7 @@ def main() -> int:
         for fn in (all_accepted, dot_thread, modified_declined,
                    held_then_resolve, unterminated_pull, unterminated_decide,
                    unterminated_insertion_pull,
+                   unterminated_insertion_reconcile,
                    unterminated_merge, merge_images, push_after_cleaned,
                    push_after_stale):
             fn(root)
