@@ -173,11 +173,15 @@ def _land_explain(text: str, tag: dict, draft: str) -> str:
 def _land_suggestion(text: str, tag: dict, draft: str) -> str:
     """The agreed text REPLACES the target paragraph. Inline, that
     paragraph holds the tag, so the tag goes with it; standalone, the
-    tag's own line goes too."""
+    tag's own line goes too — and any units BETWEEN the target and the
+    tag (an illustration, a clip, …) stay put."""
     if tag["standalone"]:
-        line_end = text.find("\n", tag["end"])
-        line_end = len(text) if line_end == -1 else line_end
-        return text[:tag["target_start"]] + draft + text[line_end:]
+        body = text[:tag["target_start"]] + draft + text[tag["target_end"]:]
+        shift = len(draft) - (tag["target_end"] - tag["target_start"])
+        moved = dict(tag)
+        moved["start"] = tag["start"] + shift
+        moved["end"] = tag["end"] + shift
+        return remove_tag(body, moved)
     return text[:tag["target_start"]] + draft + text[tag["target_end"]:]
 
 
@@ -578,16 +582,22 @@ def _stage_doc(db, manuscript: dict, kind: str, file: str, text: str,
         old, anchor, definition = tag["raw"], paragraph_of(tag), None
         if kind == "suggestion":
             # The form wraps the TARGET paragraph — inline, tag and all;
-            # standalone, the paragraph before it, the tag line left
-            # standing until resolve consumes it on acceptance. A decline
-            # wraps the tag itself: the author sees it going and the
-            # paragraph staying.
+            # standalone, the prose unit before it (skipping intervening
+            # markup), the tag line left standing until resolve consumes
+            # it on acceptance. A decline wraps the tag itself: the
+            # author sees it going and the paragraph staying. Anchor from
+            # target_start so an intervening illustration/clip is not the
+            # planted unit (`anchor -= 1` only worked when the target was
+            # the immediate previous blank-line paragraph).
             if c["decline"]:
                 old = tag["raw"] if tag["standalone"] else tag["target"]
                 new = "" if tag["standalone"] else _target_without_tag(tag)
             else:
                 old, new = tag["target"], c["text"]
-                anchor -= 1 if tag["standalone"] else 0
+                if tag["target_start"] is not None:
+                    before = text[:tag["target_start"]]
+                    anchor = (len(_paragraphs(before + "x"))
+                              if before.strip() else 1)
         elif kind == "footnote":
             new, definition = f"[^{label}]", c["text"]
         else:

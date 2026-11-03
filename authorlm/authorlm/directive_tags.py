@@ -26,6 +26,17 @@ TAGS = {
 }
 _LABEL_OPT = re.compile(r"\s*\|\s*label:\s*(?P<label>[A-Za-z]+)\s*$", re.IGNORECASE)
 _PARAGRAPH = re.compile(r"[^\n]+(?:\n[^\n]+)*")
+# A standalone Suggestion evaluates authorial prose (design §1), never a
+# heading, footnote definition, directive/media tag, or close-tag unit
+# sitting between the prose and the note.
+_NON_PROSE_TARGET = re.compile(
+    r"^(?:"
+    r"#{1,6}\s|"
+    r"\[\^[^\]]+\]:|"
+    r"\[(?:/)?(?:Illustration|Footnote|Explain|Suggestion|Judgment|Voice|"
+    r"Clip|Collage|Montage)\b"
+    r")",
+    re.IGNORECASE)
 
 
 def check_kind(kind: str) -> str:
@@ -43,6 +54,20 @@ def is_standalone(text: str, start: int, end: int) -> bool:
     return not text[line_start:start].strip() and not text[end:line_end].strip()
 
 
+def _is_prose_suggestion_target(unit: str) -> bool:
+    """True when a blank-line unit is prose a Suggestion may replace."""
+    first = unit.strip().split("\n", 1)[0].strip()
+    return bool(first) and not _NON_PROSE_TARGET.match(first)
+
+
+def _prior_prose_target(paragraphs: list[tuple[int, int, str]], start: int
+                        ) -> tuple[int, int, str] | None:
+    """The nearest prose blank-line unit entirely before `start`, skipping
+    structural markup a margin note never evaluates."""
+    return next(((a, b, p) for a, b, p in reversed(paragraphs)
+                 if b <= start and _is_prose_suggestion_target(p)), None)
+
+
 def scan_text(text: str, kind: str) -> list[dict]:
     """Every open tag of one kind in one file's text, in document order:
     the ordinal `n` (1-based within the file — the `--tag` handle), the
@@ -51,7 +76,13 @@ def scan_text(text: str, kind: str) -> list[dict]:
     a suggestion acts on (`target`, `target_start`, `target_end`: the
     holding paragraph inline, the paragraph BEFORE a standalone tag,
     None when nothing precedes it), and — footnotes — the `| label:`
-    override when the author gave one."""
+    override when the author gave one.
+
+    A standalone suggestion's "paragraph before" is the nearest prior
+    *prose* unit (design §1: the note under what it comments on). An
+    intervening illustration, clip, heading, footnote definition, or
+    other directive line is not the target — taking it as one let apply
+    destroy that markup (or plant `<<tag>>{{prose}}` on the Doc road)."""
     pattern = TAGS[check_kind(kind)]
     paragraphs = [(m.start(), m.end(), m.group(0))
                   for m in _PARAGRAPH.finditer(text)]
@@ -69,8 +100,10 @@ def scan_text(text: str, kind: str) -> list[dict]:
                     (start, end, ""))
         standalone = is_standalone(text, start, end)
         if standalone:
-            target = next(((a, b, p) for a, b, p in reversed(paragraphs)
-                           if b <= start), None)
+            target = (_prior_prose_target(paragraphs, start)
+                      if kind == "suggestion"
+                      else next(((a, b, p) for a, b, p in reversed(paragraphs)
+                                 if b <= start), None))
         else:
             target = here
         tags.append({
