@@ -32,6 +32,7 @@ from . import sessions as ses
 from .analysis import analyze_pending, find_precedents
 from .briefing import build_briefing
 from .db import Database, ko_fields, loads, now_iso
+from .docs import _resolve_relpath
 from .guidance import (GUIDANCE_KINDS, _GUIDANCE_KINDS_SQL,
                        compute_prerequisite_gaps, generate_guidance,
                        intent_coverage_notes)
@@ -1239,29 +1240,6 @@ DIGEST_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 # schemas rot; the nuance belongs in the free-text reason, which is what
 # the "What Was Removed and Why" section quotes anyway.
 DISPOSITIONS = ("kept", "removed")
-
-
-def _resolve_relpath(manuscript: dict, query: str) -> str:
-    """Map a file argument to the manuscript-relative path used as the
-    Doc-mapping key and the on-disk name. Absolute paths that sit under
-    the manuscript root (and relative paths that resolve there) are
-    accepted; anything outside is refused. Bare names still go through
-    `docs._match`'s exact-then-unique-substring forgiveness."""
-    from .docs import _match
-    from .revisions import iter_manuscript_paths
-
-    root = Path(manuscript["path"])
-    candidates = iter_manuscript_paths(root)
-    probe = Path(query).expanduser()
-    try:
-        resolved = (probe if probe.is_absolute() else root / probe).resolve()
-        rel = str(resolved.relative_to(root.resolve()))
-    except (ValueError, OSError):
-        rel = None
-    if rel is not None and rel in candidates:
-        return rel
-    path = _match(candidates, query)
-    return str(path.relative_to(root))
 
 
 def _resolve_or_new(manuscript: dict, query: str, new: bool) -> str:

@@ -46,6 +46,7 @@ import json
 import re
 from pathlib import Path
 
+from .docs import _resolve_relpath
 from .revisions import is_placeholder, iter_manuscript_paths
 from .sessions import NO_EPISODE
 
@@ -548,7 +549,7 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
     # the Doc was still the working copy (found 2026-10-01 / confirmed
     # 2026-10-04).
     try:
-        file = api._resolve_relpath(manuscript, file)
+        file = _resolve_relpath(manuscript, file)
     except LookupError:
         raise LookupError(f"no manuscript file '{file}'") from None
     root = Path(manuscript["path"])
@@ -850,7 +851,7 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
     _kind(kind)
     mid = manuscript["id"]
     try:
-        file = api._resolve_relpath(manuscript, file)
+        file = _resolve_relpath(manuscript, file)
     except LookupError:
         raise LookupError(f"no manuscript file '{file}'") from None
     written = passes.staged_threads(db, mid, file, states=("written",),
