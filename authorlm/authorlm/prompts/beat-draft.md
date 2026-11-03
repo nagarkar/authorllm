@@ -78,7 +78,7 @@ line as unreliable, and do not build a load-bearing claim on it.
 
 ## Respect the budget
 
-THIS BEAT names a length budget in words. Write to it. A beat that runs 40% long is a
+THIS BEAT names a length budget in words of prose. Footnotes do not count against it, so a citation a claim needs is never cut to save words. Write to it. A beat that runs 40% long is a
 beat the author must cut before they can judge it, and their cutting is not the
 evidence this loop is trying to collect. Under budget is better than over.
 
@@ -108,7 +108,7 @@ inside this same reply — there is no second call.
 - Grounding: list every proper name, citation, quotation and date in the draft, and
   trace each one to a spec, a brief, or a digest id. If one cannot be traced, you have
   broken the first rule — go back and remove it, or reply BLOCKED.
-- Budget: how many words did you write, against the budget?
+- Budget: how many words of prose did you write, footnotes excluded, against the budget?
 
 If the check fails, fix the draft and check again. Report the check as it stands for
 the draft you are actually sending.
