@@ -1,7 +1,7 @@
 """Doc-road verbs from the 2026-10-17 tool harvest (session 220066de):
 `doc diff`, `doc merge`, `doc resolve-comments`, `revise stage|resolve`,
-`footnote apply --from-json`, the diff-push divergence message, the
-pull's TOC-conflict pairs, and `tools/run_tests.sh`.
+`footnote apply --from-json`, the diff-push divergence message and the
+pull's TOC-conflict pairs.
 
 Hermetic: Google is the `_SurgicalDocFake` from test_passes.py; no
 network, no model.
@@ -1598,34 +1598,6 @@ def read_budget(root: Path) -> None:
           fake.count("comments") <= 1, _budget(fake, "resolve"))
 
 
-# ------------------------------------------------------------------ H
-
-
-def run_tests_script(root: Path) -> None:
-    print("H. tools/run_tests.sh:")
-    script = HERE.parent / "tools" / "run_tests.sh"
-    check("the script exists and is executable",
-          script.is_file() and os.access(script, os.X_OK), str(script))
-    d = root / "rt"
-    (d / "tests").mkdir(parents=True)
-    (d / "tests" / "test_ok.py").write_text("print('fine')\n")
-    (d / "tests" / "test_live_llm.py").write_text(
-        "raise SystemExit('billed!')\n")
-    run = subprocess.run([str(script), str(d)], capture_output=True,
-                         text=True)
-    check("all passing (live suite skipped): exit 0, ok per file",
-          run.returncode == 0 and "ok   tests/test_ok.py" in run.stdout
-          and "test_live_llm" not in run.stdout, run.stdout + run.stderr)
-    (d / "tests" / "test_bad.py").write_text(
-        "print('line one')\nraise SystemExit('boom at the end')\n")
-    run = subprocess.run([str(script), str(d)], capture_output=True,
-                         text=True)
-    check("a failing file: FAIL, its tail, and a non-zero exit",
-          run.returncode != 0 and "FAIL tests/test_bad.py" in run.stdout
-          and "boom at the end" in run.stdout
-          and "ok   tests/test_ok.py" in run.stdout, run.stdout)
-
-
 def main_test() -> None:
     root = Path(tempfile.mkdtemp(prefix="authorlm-docverbs-"))
     try:
@@ -1641,7 +1613,6 @@ def main_test() -> None:
         toc_conflict(root)
         toc_doc_only_tabs(root)
         read_budget(root)
-        run_tests_script(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nall checks passed ({PASSED})")

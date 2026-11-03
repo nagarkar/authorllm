@@ -75,10 +75,12 @@ def test_every_page_head_links_the_favicons() -> None:
         check(f"web/{src} shows the icon in its header",
               'className="brand-icon" src="/icon-192.png"' in app)
         dist = ROOT / "authorlm" / out / "index.html"
-        if dist.is_file():  # build output, present only after an install
-            built = dist.read_text(encoding="utf-8").split("</head>")[0]
-            check(f"the built {out} head links favicon.ico",
-                  'favicon.ico"' in built and 'apple-touch-icon.png"' in built)
+        check(f"{out} is built (build output, not in git)", dist.is_file(),
+              "run `cd authorlm && python3 -c 'import setup; setup.build_pages()'` "
+              "(tests/run_all.py builds missing pages itself)")
+        built = dist.read_text(encoding="utf-8").split("</head>")[0]
+        check(f"the built {out} head links favicon.ico",
+              'favicon.ico"' in built and 'apple-touch-icon.png"' in built)
 
 
 def _get(url: str) -> tuple[int, str | None, bytes]:
