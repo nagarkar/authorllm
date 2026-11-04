@@ -662,6 +662,18 @@ Issue #173: default voices are explicitly declared in audiobook.toml.
 
 Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
 
+## `tests.test_clip_edit_json`
+
+`authorlm/tests/test_clip_edit_json.py`
+
+`clip edit --json`: the plan/job shape podlm reads.
+
+## `tests.test_clip_ensure_json`
+
+`authorlm/tests/test_clip_ensure_json.py`
+
+`clip ensure --json`: the plan/job shape podlm reads.
+
 ## `tests.test_comment_context`
 
 `authorlm/tests/test_comment_context.py`
@@ -727,6 +739,12 @@ The Doc-road failures of 2026-10-30 (discernment.md, SMSTTD), reproduced against
 `authorlm/tests/test_doc_road_verbs.py`
 
 Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, `doc merge`, `doc resolve-comments`, `revise stage|resolve`, `footnote apply --from-json`, the diff-push divergence message and the pull's TOC-conflict pairs.
+
+## `tests.test_drive_doc_gone`
+
+`authorlm/tests/test_drive_doc_gone.py`
+
+`drive_upload._doc_gone` decides whether a Drive update failure means "the author deleted the file — recreate" vs a real error that must stop the export.
 
 ## `tests.test_e2e`
 
@@ -860,6 +878,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
 
+## `tests.test_omni_helpers`
+
+`authorlm/tests/test_omni_helpers.py`
+
+Pure Omni helpers: model gate, duration clamp, billed USD from token usage, and the edit request body.
+
 ## `tests.test_paragraph_records`
 
 `authorlm/tests/test_paragraph_records.py`
@@ -907,6 +931,12 @@ Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5,
 `authorlm/tests/test_setup_web_build.py`
 
 `setup.py` builds the web pages at install time, because the built pages (`authorlm/*_dist/index.html`) are not tracked in git.
+
+## `tests.test_sidecar_would_be_emptied`
+
+`authorlm/tests/test_sidecar_would_be_emptied.py`
+
+`gdocs._sidecar_would_be_emptied` refuses a Doc push that would wipe every pronunciation row.
 
 ## `tests.test_signature_tag`
 
