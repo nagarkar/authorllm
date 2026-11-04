@@ -1408,6 +1408,394 @@ def _mp3(path: Path, secs: float = 0.2) -> None:
                    check=True)
 
 
+def check_generation_plan() -> None:
+    """`generation.plan` is the cost gate: generate never re-pays a done
+    id, retake always does, and --remaining only names what lacks a take.
+    `check_generation` exercises these only through `generate()`; a
+    regression in the skip/retake split would still spend characters
+    before any render assertion fired."""
+    from authorlm import generation as gen
+
+    book = _book_copy()
+    root = book / "_audio"
+    try:
+        loaded = gen.load_book(root)
+        chapter = gen.load_chapter(root, loaded, "kindness")
+        speech = list(gen.speech_of(chapter))
+        ids = [s["id"] for s in speech]
+        quality = loaded["quality"]
+
+        try:
+            gen.plan(root, loaded, chapter, None, False, False)
+            check("plan declines when neither -p nor --remaining is set", False)
+        except audio.AudioError as err:
+            check("plan declines when neither -p nor --remaining is set",
+                  "name paragraphs" in str(err) and "--remaining" in str(err),
+                  str(err))
+
+        cold = gen.plan(root, loaded, chapter, None, True, False)
+        check("--remaining with no takes plans every speech id",
+              cold["ids"] == ids and cold["skipped"] == []
+              and cold["quality"] == quality
+              and cold["characters"] == sum(len(s["text"]) for s in speech),
+              str(cold))
+
+        # Seed a real take for ¶2 so take_of sees it as done.
+        done = ids[1]
+        rel = f"audio/{done}.{quality}.mp3"
+        (root / "audio").mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(b"TAKE")
+        state = gen.load_state(root, "kindness")
+        state["sections"][done] = {
+            "audioFiles": {quality: rel},
+            "requestId": "req-plan",
+            "generatedAt": "2026-10-04T00:00:00Z",
+            "madeFrom": gen.made_from(speech[1]),
+        }
+        gen.save_state(root, "kindness", state)
+
+        rem = gen.plan(root, loaded, chapter, None, True, False)
+        check("--remaining skips a seeded take and counts only the rest",
+              rem["ids"] == [ids[0], ids[2], ids[3]]
+              and rem["skipped"] == []
+              and rem["characters"] == sum(len(speech[i]["text"])
+                                           for i in (0, 2, 3)),
+              str(rem))
+
+        named = gen.plan(root, loaded, chapter, "2-3", False, False)
+        check("generate -p skips a done id and lists it in skipped",
+              named["ids"] == [ids[2]] and named["skipped"] == [ids[1]]
+              and named["characters"] == len(speech[2]["text"]),
+              str(named))
+
+        retake = gen.plan(root, loaded, chapter, "2-3", False, True)
+        check("retake -p re-includes a done id and never skips",
+              retake["ids"] == [ids[1], ids[2]] and retake["skipped"] == []
+              and retake["characters"] == (len(speech[1]["text"])
+                                           + len(speech[2]["text"])),
+              str(retake))
+
+        # A state entry without the file on disk is not a take — plan must
+        # still treat the id as remaining (otherwise --remaining under-pays
+        # and the author never learns the mp3 is gone).
+        (root / rel).unlink()
+        ghost = gen.plan(root, loaded, chapter, None, True, False)
+        check("a state row whose take file is missing still counts as remaining",
+              done in ghost["ids"] and ghost["skipped"] == [],
+              str(ghost))
+    finally:
+        shutil.rmtree(book, ignore_errors=True)
+def check_build_request() -> None:
+    """`generation.build_request` — the compose seam that turns neighbours
+    + recent request ids + the pronunciation dictionary into one ElevenLabs
+    payload (pipeline §8). Pure; no disk, no network.
+
+    Open coverage PRs pin neighbours / recent_request_id / flags_from_state
+    (#126) and filename/diff helpers (#124). This covers the remaining
+    stitchable / eleven_v3 / locators wiring those helpers feed."""
+    from datetime import datetime, timezone
+
+    from authorlm import generation as gen
+    from authorlm.audio import AudioError
+
+    now = datetime(2026, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
+    recent = "2026-10-03T11:00:00Z"   # 1h inside STITCH_WINDOW_SECS
+    stale = "2026-10-03T09:00:00Z"    # 3h outside
+
+    def speech(sid: str, text: str, model: str = "eleven_multilingual_v2",
+               voice: str = "voice-a") -> dict:
+        return {"id": sid, "type": "speech", "text": text, "voiceId": voice, "cast": "narrator",
+                "model": model, "stability": 0.5, "similarity": 0.75,
+                "speed": 1.0, "pronunciations": []}
+
+    chapter = {"stem": "seam", "sections": [
+        speech("p1", "First paragraph."),
+        {"id": "sil", "type": "silence", "durationSecs": 0.4},
+        speech("p2", "Middle paragraph."),
+        speech("p3", "Other voice.", voice="voice-b"),
+        speech("p4", "Last paragraph."),
+    ]}
+    book = {"pronunciationDictionary": {"id": "dict-1", "versionId": "ver-7"}}
+    state = {"sections": {
+        "p1": {"requestId": "req-p1", "generatedAt": recent},
+        "p4": {"requestId": "req-p4", "generatedAt": stale},
+    }}
+
+    mid = gen.build_request(book, chapter, state, "p2", now=now)
+    check("build_request carries same-voice neighbour text across silence",
+          mid["previous_text"] == "First paragraph."
+          and mid["next_text"] == "Last paragraph.",
+          str({"prev": mid["previous_text"], "next": mid["next_text"]}))
+    check("build_request skips a different-voice neighbour for next_text",
+          mid["next_text"] == "Last paragraph."
+          and mid["speech"]["id"] == "p2")
+    check("build_request keeps a recent previous request id when stitchable",
+          mid["previous_request_ids"] == ["req-p1"]
+          and mid["next_request_ids"] == [],
+          str({"prev": mid["previous_request_ids"],
+               "next": mid["next_request_ids"]}))
+    check("build_request drops a neighbour request id outside the stitch window",
+          mid["next_request_ids"] == [])
+    check("build_request attaches pronunciation dictionary locators",
+          mid["locators"] == [{"pronunciation_dictionary_id": "dict-1",
+                               "version_id": "ver-7"}],
+          str(mid["locators"]))
+    check("build_request packs voice params from the speech section",
+          mid["voice"] == {"voice_id": "voice-a",
+                           "model": "eleven_multilingual_v2",
+                           "stability": 0.5, "similarity": 0.75,
+                           "speed": 1.0},
+          str(mid["voice"]))
+
+    # eleven_v3: ElevenLabs does not accept previous/next_request_ids on this model
+    # family. Neighbour TEXT still rides along; only the ids must clear.
+    v3_chapter = {"stem": "v3", "sections": [
+        speech("a", "Before.", model="eleven_v3"),
+        speech("b", "Target.", model="eleven_v3"),
+        speech("c", "After.", model="eleven_v3"),
+    ]}
+    v3_state = {"sections": {
+        "a": {"requestId": "req-a", "generatedAt": recent},
+        "c": {"requestId": "req-c", "generatedAt": recent},
+    }}
+    v3 = gen.build_request(book, v3_chapter, v3_state, "b", now=now)
+    check("build_request keeps neighbour text on eleven_v3",
+          v3["previous_text"] == "Before." and v3["next_text"] == "After.")
+    check("build_request clears request ids on eleven_v3 (not stitchable)",
+          v3["previous_request_ids"] == [] and v3["next_request_ids"] == [],
+          str({"prev": v3["previous_request_ids"],
+               "next": v3["next_request_ids"]}))
+
+    bare = gen.build_request({"pronunciationDictionary": {}}, chapter,
+                             {"sections": {}}, "p1", now=now)
+    check("build_request omits locators when the dictionary has no ids",
+          bare["locators"] == [] and bare["previous_text"] is None
+          and bare["previous_request_ids"] == [],
+          str(bare["locators"]))
+
+    try:
+        gen.build_request(book, chapter, state, "sil", now=now)
+        check("build_request declines a non-speech section", False)
+    except AudioError as err:
+        check("build_request declines a non-speech section by name",
+              "not speech" in str(err), str(err))
+    try:
+        gen.build_request(book, chapter, state, "missing", now=now)
+        check("build_request declines a missing section", False)
+    except AudioError as err:
+        check("build_request declines a missing section by name",
+              "missing" in str(err) or "not speech" in str(err), str(err))
+def check_generation_continuity() -> None:
+    """neighbours / recent_request_id / flags_from_state — stitch continuity.
+
+    Exercised only indirectly inside check_generation's TTS board. Wrong
+    neighbours put the wrong previous/next text on a call; a stale
+    request id across the stitch window breaks ElevenLabs continuity;
+    flags_from_state is how the status board names moved parameters when
+    a paragraph has no take of its own."""
+    from datetime import datetime, timedelta, timezone
+
+    from authorlm import generation as gen
+
+    narr = "voice-narrator"
+    guest = "voice-guest"
+    sections = [
+        {"id": "h1", "type": "heading", "text": "Title"},
+        {"id": "n1", "type": "speech", "voiceId": narr, "text": "One.",
+         "model": "eleven_turbo_v2_5", "stability": 0.5, "similarity": 0.75,
+         "speed": 1.0, "cast": "Narrator", "pronunciations": []},
+        {"id": "sil", "type": "silence"},
+        {"id": "g1", "type": "speech", "voiceId": guest, "text": "Aside.",
+         "model": "eleven_turbo_v2_5", "stability": 0.5, "similarity": 0.75,
+         "speed": 1.0, "cast": "Guest", "pronunciations": []},
+        {"id": "n2", "type": "speech", "voiceId": narr, "text": "Two.",
+         "model": "eleven_turbo_v2_5", "stability": 0.5, "similarity": 0.75,
+         "speed": 1.0, "cast": "Narrator", "pronunciations": []},
+        {"id": "n3", "type": "speech", "voiceId": narr, "text": "Three.",
+         "model": "eleven_turbo_v2_5", "stability": 0.5, "similarity": 0.75,
+         "speed": 1.0, "cast": "Narrator", "pronunciations": []},
+    ]
+    chapter = {"sections": sections}
+    prev, nxt = gen.neighbours(chapter, "n2")
+    check("neighbours skip silence and other voices, same-voice only",
+          prev is not None and nxt is not None
+          and prev["id"] == "n1" and nxt["id"] == "n3",
+          f"prev={prev and prev.get('id')} nxt={nxt and nxt.get('id')}")
+    check("neighbours at the edge return None on the open side",
+          gen.neighbours(chapter, "n1") == (None, sections[4])
+          and gen.neighbours(chapter, "n3")[0]["id"] == "n2"
+          and gen.neighbours(chapter, "n3")[1] is None)
+    check("neighbours decline a missing id and a non-speech section",
+          gen.neighbours(chapter, "missing") == (None, None)
+          and gen.neighbours(chapter, "sil") == (None, None)
+          and gen.neighbours(chapter, "h1") == (None, None))
+
+    now = datetime(2026, 9, 15, 12, 0, 0, tzinfo=timezone.utc)
+    recent = {"requestId": "req-recent",
+              "generatedAt": "2026-09-15T11:00:00Z"}
+    stale = {"requestId": "req-stale",
+             "generatedAt": "2026-09-15T09:00:00Z"}  # 3h > 2h window
+    check("recent_request_id returns the id inside the stitch window",
+          gen.recent_request_id(recent, now) == "req-recent")
+    check("recent_request_id drops ids outside the stitch window",
+          gen.recent_request_id(stale, now) is None)
+    check("recent_request_id declines missing fields and bad timestamps",
+          gen.recent_request_id(None, now) is None
+          and gen.recent_request_id({}, now) is None
+          and gen.recent_request_id({"requestId": "x"}, now) is None
+          and gen.recent_request_id(
+              {"requestId": "x", "generatedAt": "not-a-date"}, now) is None)
+    iso = {"requestId": "req-iso",
+           "generatedAt": "2026-09-15T11:30:00+00:00"}
+    check("recent_request_id accepts ISO-8601 with an offset",
+          gen.recent_request_id(iso, now) == "req-iso")
+    # Exactly at the window boundary is NOT recent (<, not <=).
+    edge_at = (now.replace(tzinfo=None)
+               - timedelta(seconds=gen.STITCH_WINDOW_SECS))
+    edge = {"requestId": "req-edge",
+            "generatedAt": edge_at.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    check("recent_request_id treats the window boundary as expired",
+          gen.recent_request_id(edge, now) is None)
+
+    # flags_from_state: a section with no take pairs to the newest other
+    # entry whose madeFrom text matches, and names what moved.
+    root = Path(tempfile.mkdtemp(prefix="authorlm-flags-"))
+    try:
+        sid_live = "a" * 32
+        sid_old = "b" * 32
+        sid_done = "c" * 32
+        speech_live = {
+            "id": sid_live, "type": "speech", "text": "Same words here.",
+            "voiceId": narr, "model": "eleven_turbo_v2_5",
+            "stability": 0.5, "similarity": 0.75, "speed": 1.1,
+            "cast": "Narrator", "pronunciations": [],
+        }
+        speech_done = {
+            "id": sid_done, "type": "speech", "text": "Already rendered.",
+            "voiceId": narr, "model": "eleven_turbo_v2_5",
+            "stability": 0.5, "similarity": 0.75, "speed": 1.0,
+            "cast": "Narrator", "pronunciations": [],
+        }
+        ch = {"sections": [speech_live, speech_done]}
+        audio_rel = f"audio/{sid_done}.mp3"
+        (root / "audio").mkdir(parents=True)
+        (root / audio_rel).write_bytes(b"MP3")
+        state = {"sections": {
+            sid_old: {
+                "generatedAt": "2026-09-01T10:00:00Z",
+                "madeFrom": {
+                    "text": "Same words here.", "cast": "Narrator",
+                    "voiceId": narr, "model": "eleven_turbo_v2_5",
+                    "stability": 0.5, "similarity": 0.75, "speed": 1.0,
+                    "pronunciations": [],
+                },
+            },
+            sid_done: {
+                "generatedAt": "2026-09-02T10:00:00Z",
+                "audioFiles": {"mp3_44100_128": audio_rel},
+                "madeFrom": {
+                    "text": "Already rendered.", "cast": "Narrator",
+                    "voiceId": narr, "model": "eleven_turbo_v2_5",
+                    "stability": 0.5, "similarity": 0.75, "speed": 1.0,
+                    "pronunciations": [],
+                },
+            },
+        }}
+        flags = gen.flags_from_state(root, ch, state)
+        check("flags_from_state names param drift for a section with no take",
+              sid_live in flags
+              and flags[sid_live]["kind"] == "params"
+              and flags[sid_live]["detail"] == ["speed"]
+              and flags[sid_live]["since"] == "2026-09-01T10:00:00Z",
+              str(flags))
+        check("flags_from_state skips sections that already have a take",
+              sid_done not in flags, str(flags))
+        # Newer matching madeFrom wins when two old entries share the text.
+        state["sections"]["d" * 32] = {
+            "generatedAt": "2026-09-03T10:00:00Z",
+            "madeFrom": {
+                "text": "Same words here.", "cast": "Narrator",
+                "voiceId": narr, "model": "eleven_turbo_v2_5",
+                "stability": 0.5, "similarity": 0.75, "speed": 1.0,
+                "pronunciations": [{"term": "Dharmic", "say": "DAR-mik"}],
+            },
+        }
+        flags = gen.flags_from_state(root, ch, state)
+        check("flags_from_state pairs to the newest matching madeFrom",
+              flags[sid_live]["since"] == "2026-09-03T10:00:00Z"
+              and flags[sid_live]["detail"] == [
+                  "speed", "removed Dharmic"], str(flags))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+def check_generation_helpers() -> None:
+    """Pure helpers that name moved takes, stitch files, and status cards.
+
+    Exercised only indirectly through `check_generation`'s fixture board —
+    these pins cover the edge cases that board never hits (empty diffs,
+    missing ids, filename hygiene, truncation)."""
+    from authorlm import generation as gen
+
+    check("sanitise_filename keeps safe characters and collapses the rest",
+          gen.sanitise_filename("Kindness Ch.1!") == "Kindness_Ch.1"
+          and gen.sanitise_filename("a/b:c") == "a_b_c"
+          and gen.sanitise_filename("___") == "untitled"
+          and gen.sanitise_filename("") == "untitled"
+          and gen.sanitise_filename("ok-name_1.mp3") == "ok-name_1.mp3")
+
+    chapter = {"sections": [
+        {"id": "h1", "type": "heading", "text": "Title"},
+        {"id": "a" * 32, "type": "speech", "text": "First."},
+        {"id": "silence", "type": "silence"},
+        {"id": "b" * 32, "type": "speech", "text": "Second."},
+        {"id": "c" * 32, "type": "speech", "text": "Third."},
+    ]}
+    check("ordinal_of counts speech sections only, 1-based",
+          gen.ordinal_of(chapter, "a" * 32) == 1
+          and gen.ordinal_of(chapter, "b" * 32) == 2
+          and gen.ordinal_of(chapter, "c" * 32) == 3
+          and gen.ordinal_of(chapter, "h1") is None
+          and gen.ordinal_of(chapter, "missing") is None)
+
+    check("first_words truncates with an ellipsis and keeps short text whole",
+          gen.first_words("one two three four five six seven eight nine", 8)
+          == "one two three four five six seven eight…"
+          and gen.first_words("short", 8) == "short"
+          and gen.first_words("", 8) == "")
+
+    old_p = [{"term": "Dharmic", "say": "DAR-mik"},
+             {"term": "Epictetus", "say": "ep-ih-TEE-tus"}]
+    new_p = [{"term": "Dharmic", "say": "DHAR-mik"},
+             {"term": "Basilides", "say": "ba-SIL-ih-deez"}]
+    check("pronunciation_diff names adds, changes, and removals",
+          gen.pronunciation_diff(old_p, new_p)
+          == ["Dharmic: DAR-mik → DHAR-mik",
+              "added Basilides → ba-SIL-ih-deez",
+              "removed Epictetus"]
+          and gen.pronunciation_diff([], []) == []
+          and gen.pronunciation_diff(old_p, old_p) == [])
+
+    base = {"voiceId": "v1", "cast": "Narrator", "model": "eleven_turbo_v2_5",
+            "stability": 0.5, "similarity": 0.75, "speed": 1.0,
+            "pronunciations": []}
+    check("param_diff names voice, model, and numeric drifts",
+          gen.param_diff(base, {**base, "voiceId": "v2", "cast": "Other"})
+          == ["voice"]
+          and gen.param_diff(base, {**base, "model": "eleven_multilingual_v2"})
+          == ["model"]
+          and gen.param_diff(base, {**base, "stability": 0.6,
+                                    "similarity": 0.8, "speed": 1.1})
+          == ["stability", "similarity", "speed"]
+          and gen.param_diff(
+              {**base, "pronunciations": old_p},
+              {**base, "pronunciations": new_p})
+          == ["Dharmic: DAR-mik → DHAR-mik",
+              "added Basilides → ba-SIL-ih-deez",
+              "removed Epictetus"])
+    check("param_diff falls back to 'parameters' when nothing named differs",
+          gen.param_diff(base, dict(base)) == ["parameters"]
+          and gen.param_diff({}, {"pronunciations": []}) == ["parameters"])
+
+
 def check_generation() -> None:
     """generate / retake / stitch / status on a copy of the fixture, with
     a fake ElevenLabs (docs/audiobook-review-design.md §4–§5)."""
@@ -1552,6 +1940,20 @@ def check_generation() -> None:
                   any(p.name.startswith("silence_") for p in (root / "silence").iterdir()))
             check("status shows the stitch as fresh",
                   gen.status(manuscript, "kindness")["chapters"][0]["stitchStale"] is False)
+            # Corrupt the recorded key while leaving the stitch file in
+            # place — the board must flag stale so the author does not
+            # ship audio that no longer matches the chapter recipe.
+            stale_state = gen.load_state(root, "kindness")
+            stale_state["stitchKeys"]["mp3_44100_128"] = "deadbeefdeadbeef"
+            gen.save_state(root, "kindness", stale_state)
+            check("status flags a stitch whose key no longer matches "
+                  "the chapter",
+                  gen.status(manuscript, "kindness")["chapters"][0]
+                  ["stitchStale"] is True)
+            # Restore a matching key so the retake-drop check below is
+            # still exercising a fresh stitch path.
+            stale_state["stitchKeys"]["mp3_44100_128"] = gen.stitch_key(chapter)
+            gen.save_state(root, "kindness", stale_state)
             gen.generate(manuscript, "kindness", spec="1", retake=True, client=client)
             check("a retake drops the stitch, so the chapter reads as not stitched",
                   gen.status(manuscript, "kindness")["chapters"][0]["stitched"] is None)
@@ -2254,6 +2656,8 @@ def check_audiobook_continuation_edit() -> None:
 
 
 def main_test() -> None:
+    check_build_request()
+    check_generation_helpers()
     check_text_rules()
     check_voice_tags()
     check_cast()
@@ -2270,6 +2674,8 @@ def main_test() -> None:
     check_workbench()
     check_audiostation_launch()
     check_casting_filter_block()
+    check_generation_plan()
+    check_generation_continuity()
     check_generation()
     check_audiobook_page()
     check_audiobook_continuation_edit()
