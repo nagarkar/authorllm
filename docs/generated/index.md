@@ -170,6 +170,12 @@ AuthorLM CLI — the single orchestrator (RFC AuthorLM §23.9).
 
 Client provenance — *which chat* did this.
 
+## `authorlm.collect`
+
+`authorlm/authorlm/collect.py`
+
+The observation pipeline: `collect` takes a snapshot of the manuscript and reports what changed, the transitions, the concept scans, the prerequisite delta, and the illustration, verse, directive and media tags left open.
+
 ## `authorlm.completion`
 
 `authorlm/authorlm/completion.py`

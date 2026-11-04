@@ -3227,6 +3227,7 @@ def cmd_directive(args):
     suggestion may be declined on apply (`--decline TAG=REASON`)."""
     from pathlib import Path
 
+    from . import directive_tags
     from . import directives as dv
 
     kind = args.command
@@ -3234,7 +3235,8 @@ def cmd_directive(args):
     manuscript = _manuscript(db, args)
     root = Path(manuscript["path"])
     if args.action == "list":
-        rows = dv.open_report(root, (kind,), [args.file] if args.file else None)
+        rows = directive_tags.open_report(root, (kind,),
+                                          [args.file] if args.file else None)
         out = dv.pending(db, manuscript["id"], kind, args.file or None)
         if not rows and not out:
             print(f"No open [{kind.title()}: …] tags.")

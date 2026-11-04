@@ -4499,6 +4499,7 @@ def _directives_on_the_doc_road(root: Path) -> None:
     stays pristine, and `resolve` lands the author's edits. Direct apply
     stays the local road (test_api proves that half)."""
     print("directives on the Doc road:")
+    from authorlm import directive_tags
     from authorlm import directives as dv
 
     db, manuscript, ms, fake = _twin_fixture(root, "directive-ws",
@@ -4573,11 +4574,11 @@ def _directives_on_the_doc_road(root: Path) -> None:
           "<<" not in fake.tab_text("solo.md")
           and "[^W2]" in fake.tab_text("solo.md"), fake.tab_text("solo.md"))
     check("the tag's local ordinals reflect what is still open",
-          [(r["kind"], r["n"], r["gist"]) for r in dv.open_report(ms)]
+          [(r["kind"], r["n"], r["gist"]) for r in directive_tags.open_report(ms)]
           == [("footnote", 1, "Jung's date"),
               ("explain", 1, "what holding means here"),
               ("explain", 2, "why the wall must fall")],
-          str(dv.open_report(ms)))
+          str(directive_tags.open_report(ms)))
 
     # Explain on the same road: inline and standalone, resolve accepts.
     rep = dv.apply(db, manuscript, {}, "explain", "solo.md",
@@ -4619,6 +4620,7 @@ def _directives_pull_first(root: Path) -> None:
     write_pending_forms never wipes prose the author typed only in the
     Doc. A two-sided edit stops before anything reaches the tab."""
     print("directives pull the Doc down before staging:")
+    from authorlm import directive_tags
     from authorlm import directives as dv
 
     def fixture(subdir: str):
@@ -4701,6 +4703,7 @@ def _suggestions_on_the_doc_road(root: Path) -> None:
     until resolve consumes it on acceptance. A decline wraps the tag
     itself. Local stays pristine; resolve lands the author's ruling."""
     print("suggestions on the Doc road:")
+    from authorlm import directive_tags
     from authorlm import directives as dv
 
     # A note on the next line (no blank) shares a blank-line unit with the
@@ -4820,13 +4823,13 @@ def _suggestions_on_the_doc_road(root: Path) -> None:
           and "Epsilon is short." in fake.tab_text("solo.md"),
           fake.tab_text("solo.md"))
     check("one tag stays open; the evidence carries the producer's type",
-          [(r["n"], r["gist"]) for r in dv.open_report(ms)]
+          [(r["n"], r["gist"]) for r in directive_tags.open_report(ms)]
           == [(1, "add an example")]
           and db.one("SELECT COUNT(*) AS n FROM evidence WHERE manuscript_id "
                      "= ? AND evidence_type = 'suggestion_edit'",
                      (mid,))["n"] == 5
           and gdocs.forms_pending(db, mid, "solo.md") is None,
-          str(dv.open_report(ms)))
+          str(directive_tags.open_report(ms)))
 
 
 SKY_TAG = ("[Illustration: A sky of parted clouds from which no hand "
@@ -4846,6 +4849,7 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
     after the tag AS THE TAB RENDERS IT — and a file's anchors and
     definitions land together or not at all."""
     print("footnotes after a closing illustration (Doc road):")
+    from authorlm import directive_tags
     from authorlm import directives as dv
 
     db, manuscript, ms, fake = _outside_fixture(root, "sky-ws",

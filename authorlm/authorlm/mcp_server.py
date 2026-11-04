@@ -739,11 +739,13 @@ def run_sweep(kind: str, manuscript: str | None = None,
 def _list_directive(kind: str, file: str | None, manuscript: str | None) -> dict:
     from pathlib import Path
 
+    from . import directive_tags
     from . import directives as dv
 
     db = _db()
     ms = _manuscript(db, manuscript)
-    rows = dv.open_report(Path(ms["path"]), (kind,), [file] if file else None)
+    rows = directive_tags.open_report(Path(ms["path"]), (kind,),
+                                      [file] if file else None)
     out = [{"file": t["file"], "gist": _loads(t["metadata"], {}).get("gist"),
             "proposed": t["proposed_new"]}
            for t in dv.pending(db, ms["id"], kind, file)]
