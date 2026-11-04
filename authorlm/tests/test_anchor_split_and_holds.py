@@ -118,6 +118,58 @@ def test_epigraph_lands_in_its_own_tab() -> None:
           out.get("a.md") == "# **Alpha**\n\nLast line of A.\n"
           and out.get("b.md") == "# **Beta**\n\nBody of B.\n", out)
 
+    # Soft-break join of the prior tab's last line with this tab's
+    # epigraph: substring containment would steal "Last line of A." into
+    # b; equality keeps it in a and leaves the epigraph stuck there
+    # rather than inventing a boundary inside the joined unit.
+    export3 = ("# **Alpha**\n\nBody of A.\n\nLast line of A.\n"
+               "*The idea of death haunts the human animal.* — Becker\n\n"
+               "# **Beta**\n\nBody of B.\n")
+    out = _split(export3,
+                 _tab("a.md", [(H1, "Alpha"), (P, "Body of A."),
+                               (P, "Last line of A.")]),
+                 _tab("b.md", [(P, "The idea of death haunts the human "
+                                   "animal. — Becker"),
+                               (H1, "Beta"), (P, "Body of B.")]))
+    check("a soft-break-joined prior line is not stolen into the next tab",
+          "Last line of A." in out.get("a.md", "")
+          and "Last line of A." not in out.get("b.md", "")
+          and out.get("b.md") == "# **Beta**\n\nBody of B.\n", out)
+
+    # Prior chapter paraphrases the epigraph; the epigraph line itself is
+    # missing from the export. Substring match would pull the paraphrase
+    # into b; equality stops short.
+    export4 = ("# **Alpha**\n\nBody of A.\n\n"
+               "As Becker wrote, the idea of death haunts the human "
+               "animal.\n\n# **Beta**\n\nBody of B.\n")
+    out = _split(export4,
+                 _tab("a.md", [(H1, "Alpha"), (P, "Body of A."),
+                               (P, "As Becker wrote, the idea of death "
+                                   "haunts the human animal.")]),
+                 _tab("b.md", [(P, "the idea of death haunts the human "
+                                   "animal."),
+                               (H1, "Beta"), (P, "Body of B.")]))
+    check("a prior line that merely contains the epigraph is not stolen",
+          out.get("a.md") == ("# **Alpha**\n\nBody of A.\n\n"
+                              "As Becker wrote, the idea of death haunts "
+                              "the human animal.\n")
+          and out.get("b.md") == "# **Beta**\n\nBody of B.\n", out)
+
+    # Two before-paragraphs soft-break-joined into one export unit still
+    # back up as one unit when the unit equals their join exactly.
+    export5 = ("# **Alpha**\n\nBody of A.\n\n"
+               "\\[Omit: all\\]\n*Some things are in our power.*\n\n"
+               "# **Gamma**\n\nBody of C.\n")
+    out = _split(export5,
+                 _tab("a.md", [(H1, "Alpha"), (P, "Body of A.")]),
+                 _tab("c.md", [(P, "[Omit: all]"),
+                               (P, "Some things are in our power."),
+                               (H1, "Gamma"), (P, "Body of C.")]))
+    check("joined before-paragraphs still back up when the unit equals them",
+          out.get("c.md") == ("\\[Omit: all\\]\n*Some things are in our "
+                              "power.*\n\n# **Gamma**\n\nBody of C.\n")
+          and out.get("a.md") == "# **Alpha**\n\nBody of A.\n", out)
+
 
 def test_later_echo_of_an_opening_heading_does_not_split() -> None:
     export = ("# **Alpha**\n\nSpeaking of Beta.\n\n## **Beta**\n\nA sub-section "
