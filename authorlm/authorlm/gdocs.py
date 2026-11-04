@@ -1329,13 +1329,14 @@ def _back_over(lines: list[str], plain: list[str], at: int,
     """The line the tab's section starts on: `at` (the matched heading
     line) backed up over the export paragraphs (blank-line-separated
     units) that hold the tab's `before` paragraphs, last first. A unit
-    counts only when it holds the paragraph's text, so a mismatch stops
-    the back-up short rather than taking the prior tab's lines; two
-    paragraphs the export joined into one unit cost one unit."""
+    counts only when its plain text equals one `before` paragraph, or
+    equals several consecutive `before` paragraphs the export joined
+    into one unit; a longer prior-tab line that merely contains the
+    epigraph as a substring stops the back-up short rather than
+    stealing that line."""
     start = at
-    for want in reversed(before):
-        if start < at and want in " ".join(plain[start:at]):
-            continue  # already inside the unit taken for a later paragraph
+    idx = len(before) - 1
+    while idx >= 0:
         j = start - 1
         while j >= floor and not lines[j].strip():
             j -= 1
@@ -1344,9 +1345,23 @@ def _back_over(lines: list[str], plain: list[str], at: int,
         k = j
         while k - 1 >= floor and lines[k - 1].strip():
             k -= 1
-        if want not in " ".join(plain[k:j + 1]):
+        unit = " ".join(plain[k:j + 1])
+        # Exact partition of the unit into a trailing run of still-pending
+        # before paragraphs (one alone, or several soft-break-joined).
+        matched_from = None
+        parts: list[str] = []
+        for i in range(idx, -1, -1):
+            parts.insert(0, before[i])
+            joined = " ".join(parts)
+            if joined == unit:
+                matched_from = i
+                break
+            if len(joined) > len(unit):
+                break
+        if matched_from is None:
             break
         start = k
+        idx = matched_from - 1
     return start
 
 
