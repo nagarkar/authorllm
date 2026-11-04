@@ -827,6 +827,56 @@ class MediaTests(unittest.TestCase):
             self.assertEqual(data.get("alpha"), "alpha-01.mp4", data)
             self.assertEqual(data.get("beta"), "beta-01.mp4", data)
 
+    def test_attach_keeps_both_sources_under_concurrent_writers(self):
+        """Two overlapping attaches of the same clip must not share a path
+        and wipe one import — #266 closed this for `_save_take`; attach
+        still used unlocked `_next_n` + `copyfile`."""
+        import threading
+
+        key = self._generated_clip(words=10)
+        srcs = [self.root / "a.mp4", self.root / "b.mp4"]
+        srcs[0].write_bytes(b"SOURCE-A")
+        srcs[1].write_bytes(b"SOURCE-B")
+        barrier = threading.Barrier(2)
+        real_next = media_gen._next_n
+        seen = {"n": 0}
+        lock = threading.Lock()
+
+        def synced_next(root, key, prefix=""):
+            n = real_next(root, key, prefix)
+            with lock:
+                seen["n"] += 1
+                count = seen["n"]
+            if count <= 2:
+                barrier.wait(timeout=5)
+            return n
+
+        outs: list[dict | None] = [None, None]
+        errs: list[BaseException] = []
+
+        def worker(i: int) -> None:
+            try:
+                outs[i] = media_gen.attach(self.root, key, srcs[i])
+            except BaseException as err:  # noqa: BLE001 — surface in assert
+                errs.append(err)
+
+        media_gen._next_n = synced_next  # type: ignore[method-assign]
+        try:
+            threads = [threading.Thread(target=worker, args=(i,))
+                       for i in (0, 1)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+        finally:
+            media_gen._next_n = real_next  # type: ignore[method-assign]
+
+        self.assertEqual(errs, [])
+        self.assertTrue(all(outs))
+        self.assertNotEqual(outs[0]["path"], outs[1]["path"], outs)
+        bodies = {(self.root / o["path"]).read_bytes() for o in outs}
+        self.assertEqual(bodies, {b"SOURCE-A", b"SOURCE-B"})
+
     # -- exports
 
     def test_strip_for_book(self):
