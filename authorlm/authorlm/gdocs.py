@@ -16,6 +16,9 @@ backslash escapes, CRLF, NBSP, bullet markers, blank-line runs).
 Scope: https://www.googleapis.com/auth/drive.file — this app only ever
 sees files it created. OAuth token cached at ~/.authorlm/gdocs_token.json, or taken from
 AUTHORLM_GDOCS_TOKEN when that file is absent (cloud sessions).
+
+Decisions:
+- A tab's anchor in the whole-Doc export is its opening heading (level and text), the split backs up over any epigraph paragraphs before it, and opening headings must be unique across tabs and must not recur as a heading in an earlier tab; the pull stops and names the pair otherwise. Why: first-paragraph anchors let a short dialogue line ("Yes.") steal the prior chapter's tail; a uniqueness gate over the whole export dropped tabs whose opener is echoed later. Enforced by: tests/test_anchor_split_and_holds.py::test_dialogue_line_is_not_an_anchor, tests/test_anchor_split_and_holds.py::test_epigraph_lands_in_its_own_tab, tests/test_anchor_split_and_holds.py::test_duplicate_opening_heading_stops_the_pull, tests/test_anchor_split_and_holds.py::test_opening_heading_inside_an_earlier_tab_stops_the_pull, tests/test_anchor_split_and_holds.py::test_tab_without_heading_stops_the_pull. (owner)
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ import os
 import re
 import weakref
 from pathlib import Path
+from typing import NamedTuple
 
 from .db import Database, loads, now_iso
 from . import form_grammar
@@ -1207,28 +1211,62 @@ def next_tab_move(current: list[str], desired: list[str]) -> dict | None:
     return None
 
 
-def tab_anchors(tab_doc: dict | None) -> dict[str, str]:
-    """Each tab's first non-empty paragraph as plain text, by title, from a
-    `documents.get(includeTabsContent=True)` result. The fallback boundary
-    for `split_tabbed_export` when the export carries no tab-title
-    headings (2026-10-26: Google's markdown export stopped writing them,
-    and every pull read every tab as missing)."""
-    out: dict[str, str] = {}
+class TabAnchor(NamedTuple):
+    """Where a tab starts in the whole-Doc export, read from the Docs API
+    tab content. `level` is the opening heading's level (1-6), or 0 for a
+    tab that opens with plain text (then `text` is that first paragraph)
+    or holds no text at all (`text` empty). `before` is the plain text of
+    the non-empty paragraphs that precede the heading in the tab: an
+    epigraph, an `[Omit: all]` tag. `chapter` marks a `*.md` tab outside
+    the illustrations subtree, the tabs that must open with a heading.
+    `headings` is every heading in the tab, opener included, as (level,
+    text), for the gate's check that a later tab's opener recurs in no
+    earlier tab."""
+    level: int
+    text: str
+    before: tuple[str, ...]
+    chapter: bool
+    headings: tuple[tuple[int, str], ...] = ()
 
-    def walk(tabs: list) -> None:
+
+def tab_anchors(tab_doc: dict | None) -> dict[str, TabAnchor]:
+    """Each tab's `TabAnchor`, by title, from a
+    `documents.get(includeTabsContent=True)` result: the first paragraph
+    whose `paragraphStyle.namedStyleType` is `HEADING_n` gives the level
+    and the text. The boundary for `split_tabbed_export`, whose export
+    carries no tab-title headings."""
+    out: dict[str, TabAnchor] = {}
+
+    def walk(tabs: list, under_illus: bool) -> None:
         for t in tabs:
             title = t.get("tabProperties", {}).get("title", "")
+            chapter = title.endswith(".md") and not under_illus
             body = t.get("documentTab", {}).get("body", {}).get("content", [])
+            before: list[str] = []
+            headings: list[tuple[int, str]] = []
+            anchor: TabAnchor | None = None
             for el in body:
-                text = "".join(r.get("textRun", {}).get("content", "")
-                               for r in el.get("paragraph", {}).get("elements", []))
-                if text.strip():
-                    out[title] = text.strip()
-                    break
-            else:
-                out[title] = ""
-            walk(t.get("childTabs", []))
-    walk((tab_doc or {}).get("tabs", []))
+                para = el.get("paragraph", {})
+                text = _plain("".join(r.get("textRun", {}).get("content", "")
+                                      for r in para.get("elements", [])))
+                if not text:
+                    continue
+                named = para.get("paragraphStyle", {}).get(
+                    "namedStyleType", "")
+                if not named.startswith("HEADING_"):
+                    if anchor is None:
+                        before.append(text)
+                    continue
+                headings.append((int(named[-1]), text))
+                if anchor is None:
+                    anchor = TabAnchor(int(named[-1]), text, tuple(before),
+                                       chapter)
+            out[title] = (anchor or TabAnchor(
+                0, before[0] if before else "", (), chapter)
+            )._replace(headings=tuple(headings))
+            walk(t.get("childTabs", []),
+                 under_illus or title == ILLUS_TAB_TITLE)
+    walk((tab_doc or {}).get("tabs", []), False)
     return out
 
 
@@ -1241,43 +1279,119 @@ def _plain(line: str) -> str:
     return " ".join(t.split())
 
 
-# Prefix match for `_split_by_anchors` only when the Docs-API first
-# paragraph is this long: a short needle like "Yes." is a prefix of any
-# longer line that opens with it ("Yes. This is still…") and pulled the
-# rest of the prior tab into the next one (2026-10-27). Exact match
-# always wins; below this length a missed soft-break join stays missing.
-_ANCHOR_PREFIX_MIN = 40
+_HEADING_LINE = re.compile(r"^\s{0,3}(#{1,6})\s")
+
+
+def _heading_level(line: str) -> int:
+    """The level of a markdown heading line (`# **Text**`), 0 otherwise."""
+    m = _HEADING_LINE.match(line)
+    return len(m.group(1)) if m else 0
+
+
+def check_tab_anchors(order: list[str], anchors: dict[str, TabAnchor]) -> None:
+    """The gate every split of the whole-Doc export runs first (pull,
+    reconcile, the marked-text fetches): every opening heading is unique
+    across tabs on (level, text) and recurs as no heading, opening or
+    inner, of an earlier tab in `order` (the forward search would stop at
+    that earlier heading); and every chapter tab that holds text opens
+    with a heading. Stops with a `LookupError` that names the tabs and
+    the heading, or the tab and its first line. A later echo, in a later
+    tab or as prose anywhere, is allowed."""
+    seen: dict[tuple[int, str], tuple[str, bool]] = {}
+    for title in order:
+        a = anchors.get(title)
+        if a is None:
+            continue
+        if a.level:
+            key = (a.level, a.text)
+            if key in seen:
+                earlier, opener = seen[key]
+                where = ("both open with the heading" if opener else
+                         f"share the heading")
+                raise LookupError(
+                    f"tabs '{earlier}' and '{title}' {where} "
+                    f"{'#' * a.level} {a.text}"
+                    + ("" if opener else f" ('{title}' opens with it; "
+                       f"'{earlier}' holds it as a heading inside)")
+                    + "; retitle one so every tab's opening heading is "
+                    "unique and recurs in no earlier tab")
+            for k, h in enumerate(a.headings):
+                seen.setdefault(h, (title, k == 0))
+        elif a.chapter and a.text:
+            raise LookupError(
+                f"tab '{title}' opens with plain text, not a heading "
+                f"(every tab must open with a heading); its first line "
+                f"is: {a.text!r}")
+
+
+def _back_over(lines: list[str], plain: list[str], at: int,
+               before: tuple[str, ...], floor: int) -> int:
+    """The line the tab's section starts on: `at` (the matched heading
+    line) backed up over the export paragraphs (blank-line-separated
+    units) that hold the tab's `before` paragraphs, last first. A unit
+    counts only when its plain text equals one `before` paragraph, or
+    equals several consecutive `before` paragraphs the export joined
+    into one unit; a longer prior-tab line that merely contains the
+    epigraph as a substring stops the back-up short rather than
+    stealing that line."""
+    start = at
+    idx = len(before) - 1
+    while idx >= 0:
+        j = start - 1
+        while j >= floor and not lines[j].strip():
+            j -= 1
+        if j < floor:
+            break
+        k = j
+        while k - 1 >= floor and lines[k - 1].strip():
+            k -= 1
+        unit = " ".join(plain[k:j + 1])
+        # Exact partition of the unit into a trailing run of still-pending
+        # before paragraphs (one alone, or several soft-break-joined).
+        matched_from = None
+        parts: list[str] = []
+        for i in range(idx, -1, -1):
+            parts.insert(0, before[i])
+            joined = " ".join(parts)
+            if joined == unit:
+                matched_from = i
+                break
+            if len(joined) > len(unit):
+                break
+        if matched_from is None:
+            break
+        start = k
+        idx = matched_from - 1
+    return start
 
 
 def _split_by_anchors(text: str, order: list[str],
-                      anchors: dict[str, str]) -> dict[str, str]:
-    """Split the export at each tab's first paragraph, in tab order,
-    searching forward only. A tab with no text gets an empty section; a
-    tab whose first paragraph is not found gets none (reported missing,
-    never guessed). A line matches when it equals the anchor, or — only
-    when the anchor is at least `_ANCHOR_PREFIX_MIN` plain chars — when
-    it starts with the whole anchor (the export line can be longer than
-    the Docs-API paragraph). The match uses the full anchor, not a
-    truncated prefix: truncating to 80 plain chars let a later tab's
-    opener steal mid-chapter lines that only shared that prefix
-    (2026-10-29). The length floor closes the same door for a short
-    anchor like "Yes.", which is a prefix of any line that opens with it
-    (2026-10-27)."""
+                      anchors: dict[str, TabAnchor]) -> dict[str, str]:
+    """Split the export at each tab's anchor, in tab order, searching
+    forward only: a heading line of the anchor's level whose plain text
+    equals the anchor's (a non-heading line never matches a heading
+    anchor), backed up over the tab's `before` paragraphs. A tab that
+    opens with plain text (AuthorLM's own container, manifest,
+    illustrations and prompt tabs; a hand-made scratch tab) starts at the
+    non-heading line equal to its first paragraph. A tab with no text
+    gets an empty section; a tab whose anchor is not found gets none
+    (reported missing, never guessed)."""
+    check_tab_anchors(order, anchors)
     lines = text.splitlines()
     plain = [_plain(l) for l in lines]
+    level = [_heading_level(l) for l in lines]
     starts: list[tuple[int, str]] = []
     empty: list[str] = []
     pos = 0
     for title in order:
-        want = _plain(anchors.get(title, ""))
-        if not want:
+        a = anchors.get(title)
+        if a is None or not a.text:
             empty.append(title)
             continue
         for i in range(pos, len(lines)):
-            p = plain[i]
-            if p and (p == want or (len(want) >= _ANCHOR_PREFIX_MIN
-                                    and p.startswith(want))):
-                starts.append((i, title))
+            if level[i] == a.level and plain[i] == a.text:
+                starts.append((_back_over(lines, plain, i, a.before, pos),
+                               title))
                 pos = i + 1
                 break
     out = {t: "\n" for t in empty}
@@ -1289,11 +1403,14 @@ def _split_by_anchors(text: str, order: list[str],
 
 def split_tabbed_export(text: str, known_files,
                         order: list[str] | None = None,
-                        anchors: dict[str, str] | None = None) -> dict[str, str]:
-    """Split a whole-master markdown export into per-file sections. Tab
-    titles export as top-level headings ('# **<title>**'); only headings
-    naming a known mapped file are boundaries — content headings, even
-    H1s, pass through untouched.
+                        anchors: dict[str, TabAnchor] | None = None
+                        ) -> dict[str, str]:
+    """Split a whole-master markdown export into per-file sections. An
+    export that carries tab titles as top-level headings ('# **<title>**')
+    splits on them: only headings naming a known mapped file are
+    boundaries — content headings, even H1s, pass through untouched. An
+    export without them (Google's, since 2026-10) splits by `anchors`,
+    each tab's opening heading (`tab_anchors`, `_split_by_anchors`).
 
     `order` is the tab titles in true document order (the Docs API's tab
     tree, e.g. from `walk_tabs`). When given, a name in `order` only
@@ -1330,8 +1447,7 @@ def split_tabbed_export(text: str, known_files,
     found = {name: "\n".join(lines).strip() + "\n"
              for name, lines in sections.items()}
     # No tab-title heading at all for tabs the Docs API lists: the export
-    # dropped them (Google's format, 2026-10-26). Find each tab by its
-    # first paragraph instead.
+    # carries none. Find each tab by its opening heading instead.
     if order and anchors and not any(t in found for t in order):
         return _split_by_anchors(text, list(order), anchors)
     return found
@@ -2260,7 +2376,7 @@ def three_way(tab_text: str, local_text: str, base_hash: str | None) -> str:
 
 
 def _tab_boundaries(links: dict, bridge: "DocBridge", docs_service,
-                    master_id: str) -> tuple[set, list[str], dict[str, str]]:
+                    master_id: str) -> tuple[set, list[str], dict[str, TabAnchor]]:
     """The split boundaries and live tab order pull_doc and diff_push
     use: every live tab title (not only mapped essay files), the
     manifest and illustrations tabs, and mapped prompt tabs (it-x7-2)."""
@@ -3014,6 +3130,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             report["local_ahead"].append(relpath)
             entry["checked_out"] = False
             continue
+        if state in ("conflict", "local_ahead"):
+            report.setdefault("forced", []).append(relpath)
         if text != current:
             path.write_text(reembed(text, bridge.root,
                                     capture_embeds(current_raw)),
@@ -3071,6 +3189,8 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             if state == "local_ahead" and not force:
                 report["local_ahead"].append(display)
                 continue
+            if state in ("conflict", "local_ahead"):
+                report.setdefault("forced", []).append(display)
             if text != current:
                 prompts_dir.mkdir(parents=True, exist_ok=True)
                 path.write_text(join_prompt_embeds(text, prior_embeds),

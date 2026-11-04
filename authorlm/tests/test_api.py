@@ -84,6 +84,72 @@ def check(label: str, condition: bool, context: str = "") -> None:
     print(f"  ok: {label}")
 
 
+def check_morph_scope_and_critic_nearest() -> None:
+    """Morph's paragraph-selection seam and the critic's resemblance ranker.
+
+    #121 pins the morph reply grammar; these paths decide WHICH paragraphs
+    get judged and which nearby passages a critic sees — both silent when
+    wrong (empty morph run, missed repetition)."""
+    from authorlm import critic as crt
+    from authorlm import morph
+    from authorlm.db import Database
+
+    draft = ("The guest who leaves with the hotel towels and the shopper "
+             "who leaves without paying do so because it helps them.")
+    files = {
+        "a.md": [
+            "Unrelated prose about stars and silence in the night.",
+            "The guest who leaves with the hotel towels and the shopper "
+            "who leaves without paying do so because it helps them today.",
+        ],
+        "b.md": ["Something about rank and possession only in this essay."],
+    }
+    hits = crt.nearest_passages(draft, files, ["a.md", "b.md"], limit=2)
+    check("nearest_passages ranks the overlapping paragraph first, "
+          "deterministically",
+          len(hits) >= 1 and hits[0][0] == "a.md" and hits[0][1] == 2
+          and hits[0][3] > 0, str(hits))
+    check("nearest_passages returns [] when the draft has no shingles",
+          crt.nearest_passages("hi", files, ["a.md"]) == [])
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-morph-scope-"))
+    try:
+        ms = root / "ms"
+        ms.mkdir()
+        (ms / "toc.toml").write_text('[[chapter]]\nfile = "ch.md"\n')
+        (ms / "ch.md").write_text(
+            "# Chapter\n\nFirst paragraph stays the same.\n\n"
+            "## A heading\n\nSecond paragraph is brand new here.\n")
+        db = Database(root / "authorlm.db")
+        manuscript = api.register_manuscript(db, "morphbook", str(ms))
+        try:
+            morph.load_rubric(manuscript)
+            check("load_rubric declines a missing rubric by name", False)
+        except morph.NoRubric as err:
+            check("load_rubric declines a missing rubric by name",
+                  "_morph/paragraph-defects.md" in str(err), str(err))
+        (ms / morph.MORPH_DIR).mkdir()
+        (ms / morph.MORPH_DIR / "paragraph-defects.md").write_text(
+            "# Rubric\n\n### Flag — Specificity\n\nBe concrete.\n")
+        check("load_rubric returns the author-editable body",
+              "Specificity" in morph.load_rubric(manuscript))
+
+        api.collect(db, manuscript, {})
+        (ms / "ch.md").write_text(
+            "# Chapter\n\nFirst paragraph stays the same.\n\n"
+            "## A heading\n\nSecond paragraph CHANGED for this collect.\n")
+        api.collect(db, manuscript, {})
+        v2_files = {"ch.md": (ms / "ch.md").read_text()}
+        payload = morph.assemble(db, manuscript, "ch.md", v2_files, [4])
+        check("assemble windows the target and appends the schema contract",
+              "=== Judging P4 ===" in payload
+              and "P2:" in payload and "P4:" in payload
+              and '"P1"' in payload and "claim_before_evidence" in payload,
+              payload[:500])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_show_verbs() -> None:
     """Every entity verb exposes `show`, spelled the same way.
 
@@ -102,10 +168,11 @@ def check_show_verbs() -> None:
 
 
 def check_no_agreement_flags() -> None:
-    """`yes` says nothing about what happens: `--dry-run` previews, `--live`
-    goes ahead, and a flag that skips a question says so (metalm
-    guidelines/cli.md). Walks every parser, so a new verb cannot bring the
-    flag back, and parses the old spellings, so they stay gone."""
+    """`yes` and `confirm` say nothing about what happens: `--dry-run`
+    previews, `--live` goes ahead, `--force` overrides a stop, and a flag that
+    skips a question says so (metalm guidelines/cli.md). Walks every parser
+    and every MCP tool, so a new verb cannot bring the flag back, and parses
+    the old spellings, so they stay gone."""
     import argparse
 
     from authorlm.cli import build_parser
@@ -117,17 +184,30 @@ def check_no_agreement_flags() -> None:
         name, parser = pending.pop()
         for action in parser._actions:
             for flag in action.option_strings:
-                if flag in ("--yes", "-y"):
+                if flag in ("--yes", "-y", "--confirm"):
                     seen.add(f"{name} {flag}")
             if isinstance(action.choices, dict):
                 pending.extend((f"{name} {verb}", sub)
                                for verb, sub in action.choices.items()
                                if isinstance(sub, argparse.ArgumentParser))
-    check("no verb declares --yes or -y", not seen, str(sorted(seen)))
+    check("no verb declares --yes, -y or --confirm", not seen, str(sorted(seen)))
+    from authorlm.mcp_server import mcp
+    agreeing = {tool.name for tool in mcp._tool_manager.list_tools()
+                if {"yes", "confirm"} & set(tool.parameters.get("properties", {}))}
+    check("no MCP tool takes yes or confirm", not agreeing, str(sorted(agreeing)))
+    tools = {tool.name: set(tool.parameters.get("properties", {}))
+             for tool in mcp._tool_manager.list_tools()}
+    for name in ("audition_voices", "push_pronunciations", "say_term"):
+        check(f"MCP {name} goes ahead with live", "live" in tools[name])
+    for name in ("clip_ensure", "clip_edit"):
+        check(f"MCP {name} passes a cap with force", "force" in tools[name])
     for argv in (["setup", "--workspace", "x", "--yes"],
                  ["setup", "--workspace", "x", "-y"],
                  ["audio", "audition", "--yes"],
-                 ["audio", "dictionary", "push", "--yes"]):
+                 ["audio", "dictionary", "push", "--yes"],
+                 ["clip", "ensure", "k", "--generate", "--confirm"],
+                 ["clip", "edit", "k", "--take", "01", "--confirm"],
+                 ["audio", "preview", "becker", "--force"]):
         rejected = False
         try:
             with contextlib.redirect_stderr(io.StringIO()):
@@ -139,6 +219,10 @@ def check_no_agreement_flags() -> None:
           root.parse_args(["setup", "--no-questions"]).no_questions)
     check("audio --live parses",
           root.parse_args(["audio", "dictionary", "push", "--live"]).live)
+    check("clip ensure --force parses",
+          root.parse_args(["clip", "ensure", "k", "--force"]).force)
+    check("audio preview --rebuild parses",
+          root.parse_args(["audio", "preview", "becker", "--rebuild"]).rebuild)
 
 
 def check_broken_pipe() -> None:
@@ -2361,6 +2445,89 @@ def _writeup_fixture(prefix: str, filename: str = "01-epictetus.md"):
     return root, ws, db, manuscript, intent
 
 
+def check_critic_checklist_and_lint_draft() -> None:
+    """Critic payload inputs the independent reader cites by number.
+
+    `parse_report` and the propose gates live in check_lint_and_propose_gates;
+    nearest_passages is claimed by open coverage #124. These seams decide
+    which laws/learnings get L#/G# labels, which concepts count as already
+    introduced elsewhere, and whether a draft is linted against its own
+    file on disk — silent when wrong (mis-cited law, missed redefinition,
+    self-overlap invisible)."""
+    from authorlm import critic as crt
+    from authorlm.db import ko_fields
+
+    root, ws, db, manuscript, _intent = _writeup_fixture(
+        "authorlm-critic-checklist-")
+    ms = Path(manuscript["path"])
+    try:
+        api.add_style_law(db, manuscript, "tone", "Prefer short sentences.",
+                          guide_name="Connections essays")
+        api.add_style_law(db, manuscript, "register", "Stay in plain English.",
+                          guide_name="Connections essays")
+        text = crt.checklist(db, manuscript["id"], "01-epictetus.md",
+                             ["keep the beat short", "name the crux once"])
+        check("checklist numbers laws L1… and learnings G1… in order",
+              "L1 [tone] Prefer short sentences." in text
+              and "L2 [register] Stay in plain English." in text
+              and "G1 keep the beat short" in text
+              and "G2 name the crux once" in text, text)
+        laws_only = crt.checklist(db, manuscript["id"], "01-epictetus.md", [])
+        check("checklist with no learnings emits only the L lines",
+              "L1 [tone]" in laws_only and "L2 [register]" in laws_only
+              and "G1" not in laws_only, laws_only)
+
+        mid = manuscript["id"]
+        for name, kind, status, introduced in (
+            ("Hierarchy", "concept", "realized", "impulses.md"),
+            ("Rank", "concept", "declared", "later.md"),
+            ("Ghost", "concept", "realized", None),
+            ("Drafty", "concept", "proposed", "impulses.md"),
+            ("AliasOnly", "alias", "realized", "impulses.md"),
+        ):
+            row = ko_fields("cn")
+            row.update(manuscript_id=mid, name=name, kind=kind,
+                       status=status, introduced_in=introduced,
+                       notes=f"{name} notes", aliases="[]")
+            db.insert("concept_nodes", row)
+        proven = crt.concept_provenance(db, mid)
+        check("concept_provenance keeps realized/declared concepts with "
+              "introduced_in, drops ghosts and non-concepts",
+              set(proven) == {("Hierarchy", "impulses.md"),
+                              ("Rank", "later.md")}, str(proven))
+
+        # Self-overlap: the draft repeats a paragraph already on disk in
+        # this file. include_self=True (default) must surface it; False
+        # must not, because the corpus excludes this file.
+        (ms / "01-epictetus.md").write_text(
+            "# Epictetus\n\n"
+            "The guest who leaves with the hotel towels and the shopper "
+            "who leaves without paying do so because it helps them.\n")
+        (ms / "other.md").write_text(
+            "# Other\n\nSomething about stars and silence only.\n")
+        draft = ("The guest who leaves with the hotel towels and the shopper "
+                 "who leaves without paying do so because it helps them.")
+        with_self = crt.lint_draft(db, manuscript, "01-epictetus.md", draft)
+        without = crt.lint_draft(db, manuscript, "01-epictetus.md", draft,
+                                 include_self=False)
+        check("lint_draft include_self=True flags overlap against this file",
+              any(f.code == "overlap" and "01-epictetus.md" in (f.ref or "")
+                  for f in with_self.findings), str(with_self.findings))
+        check("lint_draft include_self=False drops this file from the corpus",
+              not any(f.code == "overlap" and "01-epictetus.md" in (f.ref or "")
+                      for f in without.findings), str(without.findings))
+        # Redefinition warning rides the provenance list: drafting
+        # Hierarchy in a different essay than the one that introduced it.
+        redef = crt.lint_draft(
+            db, manuscript, "01-epictetus.md",
+            "A hierarchy is the ordering by a hierarchy's metric.")
+        check("lint_draft feeds concept_provenance into redefinition checks",
+              any(f.code == "redefinition" and "impulses.md" in (f.ref or "")
+                  for f in redef.findings), str(redef.findings))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def check_lint_and_propose_gates() -> None:
     """The deterministic prose lint (authorlm/lint.py) and the three gates
     on `write propose` (review 2026-09-06): a payload assembled since the
@@ -2419,6 +2586,36 @@ def check_lint_and_propose_gates() -> None:
           "paragraph whole, and drops the draft's own bold",
           marked == "Rank is a **state.** It is earned each **beat.**\n\n"
                     "**A wholly new paragraph.**", repr(marked))
+    # best_match / changed_only feed write_landed and the CLI "changed
+    # paragraphs only" view — wrong ratios misreport how an accepted beat
+    # landed; wrong keep/omit hides or floods the review.
+    idx, ratio = lint_mod.best_match(
+        "Rank is a state earned each day.",
+        ["Rank is a possession.",
+         "Rank is a state earned each day.",
+         "Other prose entirely."])
+    check("lint.best_match picks the closest paragraph by word sequence",
+          idx == 1 and ratio == 1.0, str((idx, ratio)))
+    idx, ratio = lint_mod.best_match(
+        "Rank is a **state** earned each day.",
+        ["Rank is a state earned each day."])
+    check("lint.best_match strips bold before comparing",
+          idx == 0 and ratio == 1.0, str((idx, ratio)))
+    check("lint.best_match on an empty unit or empty candidates is "
+          "(None, 0.0)",
+          lint_mod.best_match("", ["a paragraph"]) == (None, 0.0)
+          and lint_mod.best_match("words here", ["", "   "]) == (None, 0.0)
+          and lint_mod.best_match("x", []) == (None, 0.0))
+    kept, omitted = lint_mod.changed_only(
+        "An untouched body paragraph.\n\n"
+        "# **A changed heading**\n\n"
+        "A **changed** body paragraph.\n\n"
+        "# Unchanged heading stays out")
+    check("lint.changed_only keeps paragraphs that carry a bold span "
+          "and counts the ones left out",
+          kept == ["# **A changed heading**",
+                   "A **changed** body paragraph."]
+          and omitted == 2, str((kept, omitted)))
     grade = lint_mod.reading_grade(
         "The guest takes hotel towels, and the shopper skips payment. "
         "They do this to cope in a world they do not trust.")
@@ -2481,6 +2678,34 @@ def check_lint_and_propose_gates() -> None:
               "THE CHECKLIST" in payload and "ACCEPTED TEXT SO FAR" in payload
               and "LINT" in payload and "THE DRAFT" in payload
               and draft in payload and "VERDICT" in payload, payload[:300])
+        # critic.assemble block inventory — every labelled section the
+        # independent reader is promised (critic.py). Substring presence
+        # above is not enough: dropping SETTLED CONTEXT or NEAREST
+        # PASSAGES would still pass those four labels and leave the
+        # critic unable to judge a back-reference or cross-essay repeat.
+        required_blocks = (
+            "THE CHECKLIST (binding; cite the number)",
+            "LAST VERDICT",
+            "THIS BEAT",
+            "CONCEPT NOTES",
+            "PROTECTED TERMS",
+            "SETTLED CONTEXT",
+            "ACCEPTED TEXT SO FAR",
+            "THE ORIGINAL ESSAY",
+            "NEAREST PASSAGES ELSEWHERE IN THE BOOK",
+            "LINT",
+            "THE DRAFT",
+        )
+        missing = [b for b in required_blocks if b not in payload]
+        check("critic.assemble emits every labelled block the prompt promises",
+              not missing, f"missing={missing}; head={payload[:400]!r}")
+        # This fixture reworks an existing essay, so the pinned original
+        # must be the essay body — never the "(not a rewrite)" stand-in.
+        check("a rewrite critique carries the pinned original essay body",
+              "# Epictetus" in payload and "(not a rewrite)" not in payload,
+              payload[payload.find("THE ORIGINAL"):
+                      payload.find("THE ORIGINAL") + 240]
+              if "THE ORIGINAL" in payload else payload[:240])
         try:
             api.write_propose(db, manuscript, draft, "opener per the plan",
                               critique="VERDICT\nFAIL\n\nFINDINGS\n- LOGIC | «x» | y | z")
@@ -6556,6 +6781,8 @@ def check_stage_revisions(root: Path, FakeGoogle) -> None:
 
 
 def main_test() -> None:
+    check_critic_checklist_and_lint_draft()
+    check_morph_scope_and_critic_nearest()
     check_directives()
     check_suggestions()
     check_critique_resolve_reembeds()
@@ -7351,6 +7578,20 @@ def main_test() -> None:
               clean == ("# Title\n\nSome -escaped . text here.\n"
                         "- a bullet\n\nEnds with nbsp.\n"), repr(clean))
         check("normalizer is idempotent", normalize_markdown(clean) == clean)
+        # Docs export escapes a typed URL colon as `https\://…` so it will
+        # not auto-link (seen 2026-10-02 on footnote lines an outside
+        # caller staged). Colon joined the escape set in f785954; without
+        # this undo, resolve sees a different string than the local file.
+        colon = ("See https\\://example.com/a and a footnote[^1].\n\n"
+                 "[^1]: https\\://example.com/note\n")
+        check("normalizer undoes the exporter's escaped colon in URLs",
+              normalize_markdown(colon)
+              == ("See https://example.com/a and a footnote[^1].\n\n"
+                  "[^1]: https://example.com/note\n"),
+              repr(normalize_markdown(colon)))
+        check("colon unescape is idempotent once the backslash is gone",
+              normalize_markdown(normalize_markdown(colon))
+              == normalize_markdown(colon))
 
         # Verse: a Doc export writes a hard line break as two trailing
         # spaces; the canonical form is the backslash break, rewritten
@@ -8425,6 +8666,8 @@ def main_test() -> None:
         check("pull --force takes the Doc's version",
               forced["changed"] == ["01-choice.md"]
               and "Edited in Docs again" in (ms / "01-choice.md").read_text())
+        check("pull --force reports the file it overrode",
+              forced.get("forced") == ["01-choice.md"], str(forced))
 
         # A Doc-pasted image exports as a dangling ![][imageN] ref: the
         # pull strips it (the bridge cannot transport images) and warns.
@@ -12906,6 +13149,126 @@ def main_test() -> None:
               and "foregroundColor" in insert_reqs[2]["updateTextStyle"]
               ["textStyle"],
               str(insert_reqs))
+        # Order is load-bearing (#129 / 7e3a268): applying a named style
+        # AFTER the green text style resets the paragraph to the style's
+        # own colour and strips the green off every insertion.
+        keys = [next(iter(r)) for r in insert_reqs[:3]]
+        check("insert mark sets NORMAL_TEXT before the green text style",
+              keys == ["insertText", "updateParagraphStyle",
+                       "updateTextStyle"],
+              str(keys))
+
+        # doc_spacing feeds every insert-only Doc heal; missing settings
+        # must land on the ratified defaults (115 / 0 / 6).
+        from authorlm import gdocs as gdocs_spacing
+        with tempfile.TemporaryDirectory() as spacing_root:
+            bare_ms = {"path": spacing_root}
+            check("doc_spacing defaults to DOC_SPACING when settings.toml "
+                  "is absent",
+                  gdocs_spacing.doc_spacing(bare_ms)
+                  == gdocs_spacing.DOC_SPACING
+                  == {"line_spacing": 115, "space_above": 0,
+                      "space_below": 6},
+                  str(gdocs_spacing.doc_spacing(bare_ms)))
+            exports = Path(spacing_root) / "_exports"
+            exports.mkdir()
+            (exports / "settings.toml").write_text(
+                'title = "Spacing Fixture"\n'
+                'variant = "images"\n',
+                encoding="utf-8")
+            check("doc_spacing still defaults when settings.toml has only "
+                  "flat export keys",
+                  gdocs_spacing.doc_spacing(bare_ms)
+                  == gdocs_spacing.DOC_SPACING,
+                  str(gdocs_spacing.doc_spacing(bare_ms)))
+
+        # --- apply_tab_spacing: insert-only staging leaves NORMAL_TEXT
+        # paragraphs with Google's default (no spaceBelow). Without this
+        # re-apply, markdown export joins neighbouring adds into one
+        # paragraph with hard breaks, and resolve cannot read forms back.
+        from authorlm.gdocs import apply_tab_spacing, DOC_SPACING
+
+        class _SpacingDocs:
+            def __init__(self, tabs):
+                self._tabs = tabs
+                self.updates = []
+
+            def documents(self):
+                outer = self
+
+                class _Req:
+                    def __init__(self, result):
+                        self._result = result
+
+                    def execute(self):
+                        return self._result
+
+                class _Documents:
+                    def get(self, documentId=None, includeTabsContent=None, fields=None):
+                        return _Req({"tabs": outer._tabs})
+
+                    def batchUpdate(self, documentId=None, body=None):
+                        outer.updates.append(body)
+                        return _Req({})
+                return _Documents()
+
+        spacing_tabs = [{
+            "tabProperties": {"tabId": "tab-solo"},
+            "documentTab": {"body": {"content": [
+                {"startIndex": 1, "endIndex": 10,
+                 "paragraph": {"paragraphStyle": {
+                     "namedStyleType": "HEADING_1"},
+                     "elements": []}},
+                {"startIndex": 10, "endIndex": 40,
+                 "paragraph": {"paragraphStyle": {
+                     "namedStyleType": "NORMAL_TEXT"},
+                     "elements": []}},
+                {"startIndex": 40, "endIndex": 70,
+                 "paragraph": {"paragraphStyle": {
+                     "namedStyleType": "NORMAL_TEXT"},
+                     "elements": []}},
+                {"startIndex": 70, "endIndex": 70,
+                 "paragraph": {"paragraphStyle": {
+                     "namedStyleType": "NORMAL_TEXT"},
+                     "elements": []}},
+            ]}},
+            "childTabs": [],
+        }]
+        spacing_docs = _SpacingDocs(spacing_tabs)
+        n = apply_tab_spacing(spacing_docs, "doc-1", "tab-solo", DOC_SPACING)
+        check("apply_tab_spacing merges adjacent NORMAL_TEXT into one "
+              "range and skips headings and empty spans",
+              n == 1
+              and len(spacing_docs.updates) == 1
+              and spacing_docs.updates[0]["requests"][0]
+              ["updateParagraphStyle"]["range"]
+              == {"tabId": "tab-solo", "startIndex": 10, "endIndex": 70},
+              str(spacing_docs.updates))
+        style = (spacing_docs.updates[0]["requests"][0]["updateParagraphStyle"]
+                 ["paragraphStyle"])
+        check("apply_tab_spacing writes DOC_SPACING lineSpacing / "
+              "spaceAbove / spaceBelow (the fields insert-only staging "
+              "omits and resolve re-applies before reading forms back)",
+              style["lineSpacing"] == DOC_SPACING["line_spacing"]
+              and style["spaceAbove"]["magnitude"] == DOC_SPACING["space_above"]
+              and style["spaceBelow"]["magnitude"] == DOC_SPACING["space_below"]
+              and style["spaceBelow"]["unit"] == "PT",
+              str(style))
+        empty_docs = _SpacingDocs([{
+            "tabProperties": {"tabId": "tab-empty"},
+            "documentTab": {"body": {"content": [
+                {"startIndex": 1, "endIndex": 5,
+                 "paragraph": {"paragraphStyle": {
+                     "namedStyleType": "HEADING_1"},
+                     "elements": []}},
+            ]}},
+            "childTabs": [],
+        }])
+        check("apply_tab_spacing sends no batchUpdate when no NORMAL_TEXT "
+              "ranges qualify",
+              apply_tab_spacing(empty_docs, "doc-1", "tab-empty",
+                                DOC_SPACING) == 0
+              and empty_docs.updates == [])
 
         # --- Editorial verbs lazy-open a session (CLI helper) ---
         from authorlm import sessions as ses
@@ -13457,8 +13820,8 @@ def main_test() -> None:
             "move_style_law",
             # The audiobook (audiobook-pipeline-design §11): the export,
             # the readiness report, free voice discovery, the paid
-            # audition (confirm-gated), the cast row, the dictionary push
-            # (confirm-gated). `audio init` is CLI-only: a one-time seed.
+            # audition (live=True), the cast row, the dictionary push
+            # (live=True). `audio init` is CLI-only: a one-time seed.
             "export_audio", "audio_readiness", "list_voices",
             "audition_voices", "set_cast", "push_pronunciations", "say_term",
             # Media for podcasts (video-clips-design §8f/§8g): the one

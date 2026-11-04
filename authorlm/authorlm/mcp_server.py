@@ -871,15 +871,15 @@ def set_clip_spec(specs: dict[str, str], supersede: bool = False,
 
 @mcp.tool()
 def clip_ensure(key: str, generate: bool = False, dry_run: bool = True,
-                confirm: bool = False, model: str | None = None,
+                force: bool = False, model: str | None = None,
                 manuscript: str | None = None) -> dict:
     """A generated clip's takes (docs/video-clips-design.md §8c, §8f). By
     default a DRY RUN: the model, length, estimated cost, the exact prompt,
     the gate's reasons, and any fresh takes' paths — nothing spent. With
     generate=True and dry_run=False it starts a Veo or Omni generation (BILLED) and
     returns the job; poll it with clip_job. Only with the author's yes for
-    the stated cost. `confirm` passes a per-call or per-day cap. Paths
-    only."""
+    the stated cost. `force` goes past a per-call or per-day cap, and the
+    reply's `overrode` names the cap. Paths only."""
     def run():
         from . import media_gen
 
@@ -888,7 +888,8 @@ def clip_ensure(key: str, generate: bool = False, dry_run: bool = True,
         plan = media_gen.plan(db, ms, key, model)
         if dry_run or not generate:
             return {"plan": plan}
-        return {"job": media_gen.start(db, ms, key, model, confirm=confirm)}
+        return {"job": media_gen.start(db, ms, key, model, force=force),
+                "overrode": plan["over_cap"] if force else []}
     return _guard(run)
 
 
@@ -906,20 +907,24 @@ def clip_job(job_id: str, manuscript: str | None = None) -> dict:
 
 @mcp.tool()
 def clip_edit(key: str, take: str, instruction: str, generate: bool = False,
-              confirm: bool = False, manuscript: str | None = None) -> dict:
+              force: bool = False, manuscript: str | None = None) -> dict:
     """Revise a take Omni made, by instruction ("warmer light, slower
     push-in"). By default a DRY RUN: the cost, the prompt and the gate's
     reasons. With generate=True it starts the revision (BILLED) — only
-    with the author's yes for the stated cost; poll it with clip_job. The
-    revision lands as take eNN beside the original, which is kept."""
+    with the author's yes for the stated cost; poll it with clip_job. `force`
+    goes past a per-call or per-day cap, and the reply's `overrode` names
+    the cap. The revision lands as take eNN beside the original, which is
+    kept."""
     def run():
         from . import media_gen
 
         ms = _manuscript(_db(), manuscript)
+        plan = media_gen.edit_plan(ms, key, take, instruction)
         if not generate:
-            return {"plan": media_gen.edit_plan(ms, key, take, instruction)}
+            return {"plan": plan}
         return {"job": media_gen.edit_start(ms, key, take, instruction,
-                                            confirm=confirm)}
+                                            force=force),
+                "overrode": plan["over_cap"] if force else []}
     return _guard(run)
 
 
@@ -1882,7 +1887,7 @@ def resolve_improvement(task_id: str, action: str,
 # ---------------------------------------------------------------- audio
 # The audiobook (docs/audiobook-pipeline-design.md §11). AuthorLM
 # produces the manifests; audiostation generates. Nothing here spends
-# ElevenLabs credits without `confirm=True`, and the chat road states
+# ElevenLabs credits without `live=True`, and the chat road states
 # the character cost first.
 
 
@@ -1937,13 +1942,13 @@ def audition_voices(cast: list[str], text: str | None = None,
                     stability: float | None = None,
                     similarity: float | None = None,
                     speed: float | None = None, model: str | None = None,
-                    label: str | None = None, confirm: bool = False,
+                    label: str | None = None, live: bool = False,
                     manuscript: str | None = None) -> dict:
     """PAID audition: render the author's own words in each candidate
     (cast keys from cast.md, or raw ElevenLabs voice ids) at the book's
     model, appended to the audition gallery. Give `text`, or `file` plus
     `paragraphs` ('3-5', 1-based paragraph sections of that essay's audio
-    text). Without confirm=True nothing is rendered: the reply carries the
+    text). Without live=True nothing is rendered: the reply carries the
     character cost for the author to approve. Vary one parameter per
     round; never write a cast row the author has not heard."""
     def run():
@@ -1957,8 +1962,8 @@ def audition_voices(cast: list[str], text: str | None = None,
             words = audio.audition_text(selected, file, paragraphs)
         candidates = [c.strip() for c in cast if c.strip()]
         chars = len(audio.normalize(words)) * len(candidates)
-        if not confirm:
-            return {"needs_confirmation": True, "characters": chars,
+        if not live:
+            return {"preview": True, "characters": chars,
                     "candidates": candidates,
                     "text": audio.normalize(words)[:200]}
         client = audio.ElevenLabs(audio.api_key())
@@ -2008,8 +2013,9 @@ def set_cast(key: str, voice_id: str, voice: str | None = None,
 @mcp.tool()
 def say_term(term: str, say: list[str] | None = None, cast: str | None = None,
              file: str | None = None, dictionary: bool = False,
-             settle: str | None = None, manuscript: str | None = None) -> dict:
-    """The fast pronunciation loop: hear `term` in a real sentence from
+             settle: str | None = None, live: bool = False,
+             manuscript: str | None = None) -> dict:
+    """PAID. The fast pronunciation loop: hear `term` in a real sentence from
     the book, in the voice of the section that says it (or `cast`'s), with
     each respelling in `say` substituted inline the way the alias rule
     would — no dictionary push, about 150 characters per clip. Omit `say`
@@ -2017,11 +2023,18 @@ def say_term(term: str, say: list[str] | None = None, cast: str | None = None,
     untouched sentence with the pushed dictionary attached to prove the
     rule fires. Clips land in the audition gallery. `settle` writes that
     one respelling into pronunciations.md — only on the author's word;
-    then push_pronunciations and export_audio carry it."""
+    then push_pronunciations and export_audio carry it. Without live=True
+    nothing is rendered or settled: the reply carries the sentence and the
+    character cost for the author to approve."""
     def run():
         from . import audio
         db = _db()
         selected = _manuscript(db, manuscript)
+        if not live:
+            plan = audio.say_plan(selected, term, says=say, cast_key=cast,
+                                  file=file, use_dictionary=dictionary)
+            return {"preview": True, "characters": plan["characters"],
+                    "context": plan["context"], "clips": plan["clips"]}
         client = audio.ElevenLabs(audio.api_key())
         result = audio.say(selected, client, term, says=say, cast_key=cast,
                            file=file, use_dictionary=dictionary)
@@ -2032,14 +2045,14 @@ def say_term(term: str, say: list[str] | None = None, cast: str | None = None,
 
 
 @mcp.tool()
-def push_pronunciations(confirm: bool = False,
+def push_pronunciations(live: bool = False,
                         manuscript: str | None = None) -> dict:
     """Push pronunciations.md to the ElevenLabs dictionary named in
-    audiobook.toml. Append-only with replacement: new terms are added, a
-    changed reading is removed then re-added, rows missing from the table
-    are reported and left alone. Without confirm=True nothing is applied —
-    the reply is the plan (create / add / change / remote-only) to read to
-    the author first."""
+    audiobook.toml. The push mirrors the table: new terms are added, a
+    changed reading is removed then re-added, and a rule the table no
+    longer carries is removed. Without live=True nothing is applied — the
+    reply is the plan (create / add / change / remove) to read to the
+    author first."""
     def run():
         from . import audio
         db = _db()
@@ -2047,11 +2060,11 @@ def push_pronunciations(confirm: bool = False,
         plan = audio.dictionary_plan(_manuscript(db, manuscript), client)
         summary = {"plan": audio.describe_plan(plan), "create": plan["create"],
                    "add": len(plan["add"]), "change": len(plan["change"]),
-                   "remote_only": plan["remote_only"]}
-        if not (plan["create"] or plan["add"] or plan["change"]):
+                   "remove": plan["remove"]}
+        if not (plan["create"] or plan["add"] or plan["change"] or plan["remove"]):
             return {**summary, "applied": False, "nothing_to_push": True}
-        if not confirm:
-            return {**summary, "applied": False, "needs_confirmation": True}
+        if not live:
+            return {**summary, "applied": False, "preview": True}
         result = audio.dictionary_apply(plan, client)
         return {**summary, "applied": True, **result}
     return _guard(run)

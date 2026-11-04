@@ -238,20 +238,14 @@ def pick(root: Path, key: str, n: str) -> dict:
 def attach(root: Path, key: str, source: Path, desc: str = "0" * 8,
            law: str = "0000") -> dict:
     """Bring an outside file in as take `iNN` of a clip. Returns its path."""
-    import shutil
-
     clip = media.find_clip(root, key)
     source = Path(source)
     ext = source.suffix.lower().lstrip(".")
     if ext not in ("mp4", "mov", "m4v", "webm"):
         raise ValueError(f"{source.name} is not a video (mp4, mov, m4v, webm)")
-    name = (f"{clip['ref'][:-3]}-{desc}-{law}-"
-            f"{_next_n(root, clip['ref'][:-3], "i")}.{ext}")
-    dest = Path(root) / media.CLIPS_DIR / name
-    shutil.copyfile(source, dest)
-    if not chosen(root, clip["ref"][:-3]):
-        _set_chosen(root, clip["ref"][:-3], name)
-    return {"key": clip["ref"][:-3], "path": f"{media.CLIPS_DIR}/{name}"}
+    ckey = clip["ref"][:-3]
+    name = _new_take(root, ckey, desc, law, "i", ext, source.read_bytes())
+    return {"key": ckey, "path": f"{media.CLIPS_DIR}/{name}"}
 
 
 # ------------------------------------------------------------------ plan
@@ -332,7 +326,7 @@ def plan(db, manuscript: dict, key: str, model: str | None = None) -> dict:
     """Everything a generation would send and cost, plus the gate. Spends
     nothing — this is `--dry-run`. Returns {key, file, model, resolution,
     aspect_ratio, duration, est_usd, prompt, first_frame, last_frame,
-    references, desc, law, reasons, needs_confirm, fresh_takes}."""
+    references, desc, law, reasons, over_cap, fresh_takes}."""
     root = Path(manuscript["path"])
     listing = media.list_media(root, None, key)["media"]
     if not listing or listing[0]["kind"] != "clip":
@@ -371,12 +365,12 @@ def plan(db, manuscript: dict, key: str, model: str | None = None) -> dict:
         reasons.append(f"{model} has no {resolution} output")
     est = round((rate or 0) * duration, 2)
     spent = day_spend(root)
-    needs_confirm = []
+    over_cap = []
     if est > cfg["max_call_usd"]:
-        needs_confirm.append(f"${est:.2f} is over the per-call cap "
+        over_cap.append(f"${est:.2f} is over the per-call cap "
                              f"${cfg['max_call_usd']:.2f}")
     if spent + est > cfg["max_day_usd"]:
-        needs_confirm.append(f"today's ${spent:.2f} + ${est:.2f} is over the "
+        over_cap.append(f"today's ${spent:.2f} + ${est:.2f} is over the "
                              f"per-day cap ${cfg['max_day_usd']:.2f}")
     desc = desc_hash(spec, fields)
     lawh = _hash(law, 4)
@@ -393,7 +387,7 @@ def plan(db, manuscript: dict, key: str, model: str | None = None) -> dict:
             "last_frame": str(last) if last else None,
             "references": [str(p) for p in refs],
             "desc": desc, "law": lawh, "reasons": reasons,
-            "needs_confirm": needs_confirm, "fresh_takes": fresh}
+            "over_cap": over_cap, "fresh_takes": fresh}
 
 
 # ------------------------------------------------------------------ the API
@@ -488,16 +482,16 @@ def _key() -> str:
 
 
 def start(db, manuscript: dict, key: str, model: str | None = None,
-          confirm: bool = False, http=None) -> dict:
+          force: bool = False, http=None) -> dict:
     """Start a generation (paid). Declines when the gate has reasons, or
-    when a cap is passed without `confirm`. Records the job and returns it."""
+    when a cap is passed without `force`. Records the job and returns it."""
     p = plan(db, manuscript, key, model)
     if p["reasons"]:
         raise ValueError(f"{key} is not ready to generate: "
                          + "; ".join(p["reasons"]))
-    if p["needs_confirm"] and not confirm:
-        raise ValueError("over a spend cap — " + "; ".join(p["needs_confirm"])
-                         + " — rerun with --confirm")
+    if p["over_cap"] and not force:
+        raise ValueError("over a spend cap — " + "; ".join(p["over_cap"])
+                         + " — rerun with --force to go past it")
     http = http or _http
     omni = is_omni(p["model"])
     if omni:
@@ -568,20 +562,20 @@ def poll(manuscript: dict, job_id: str, http=None) -> dict:
     return job
 
 
-def _save_take(root: Path, job: dict, blob: bytes) -> None:
-    """Land the paid bytes under a new take name.
+def _new_take(root: Path, key: str, desc: str, law: str, prefix: str,
+              ext: str, blob: bytes) -> str:
+    """Land `blob` under the clip's next take name and return that name;
+    the take becomes the clip's chosen one when it has none.
 
-    Exclusive create so two overlapping polls for the same clip cannot
-    both compute the same next N and destroy each other's take."""
-    prefix = "e" if job.get("edit_of") else ""
+    Exclusive create so two overlapping writers for the same clip (polls,
+    attaches, or one of each) cannot both compute the same next N and
+    destroy each other's bytes; a collision recomputes N and retries."""
     clips = root / media.CLIPS_DIR
     clips.mkdir(parents=True, exist_ok=True)
     while True:
-        name = (f"{job['key']}-{job['desc']}-{job['law']}-"
-                f"{_next_n(root, job['key'], prefix)}.mp4")
-        path = clips / name
+        name = f"{key}-{desc}-{law}-{_next_n(root, key, prefix)}.{ext}"
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fd = os.open(clips / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             continue
         try:
@@ -589,8 +583,16 @@ def _save_take(root: Path, job: dict, blob: bytes) -> None:
         finally:
             os.close(fd)
         break
-    if not chosen(root, job["key"]):
-        _set_chosen(root, job["key"], name)
+    if not chosen(root, key):
+        _set_chosen(root, key, name)
+    return name
+
+
+def _save_take(root: Path, job: dict, blob: bytes) -> None:
+    """Land the paid bytes under a new take name."""
+    prefix = "e" if job.get("edit_of") else ""
+    name = _new_take(root, job["key"], job["desc"], job["law"], prefix,
+                     "mp4", blob)
     job.update(state="done", take=f"{media.CLIPS_DIR}/{name}")
 
 
@@ -657,12 +659,12 @@ def edit_plan(manuscript: dict, key: str, take: str, instruction: str) -> dict:
     est = round(MODELS.get(model, {}).get("720p", 0.10) * duration
                 + duration * OMNI_TOKENS_PER_SECOND * OMNI_RATES["input"], 2)
     spent = day_spend(root)
-    needs_confirm = []
+    over_cap = []
     if est > cfg["max_call_usd"]:
-        needs_confirm.append(f"${est:.2f} is over the per-call cap "
+        over_cap.append(f"${est:.2f} is over the per-call cap "
                              f"${cfg['max_call_usd']:.2f}")
     if spent + est > cfg["max_day_usd"]:
-        needs_confirm.append(f"today's ${spent:.2f} + ${est:.2f} is over the "
+        over_cap.append(f"today's ${spent:.2f} + ${est:.2f} is over the "
                              f"per-day cap ${cfg['max_day_usd']:.2f}")
     m = TAKE.match(parent["name"])
     return {"key": ckey, "take": parent["path"], "model": model,
@@ -674,7 +676,7 @@ def edit_plan(manuscript: dict, key: str, take: str, instruction: str) -> dict:
             "aspect_ratio": cfg["aspect_ratio"], "est_usd": est,
             "day_spent_usd": spent, "desc": m.group("desc"),
             "law": m.group("law"), "reasons": reasons,
-            "needs_confirm": needs_confirm}
+            "over_cap": over_cap}
 
 
 def edit_body(p: dict) -> dict:
@@ -687,16 +689,16 @@ def edit_body(p: dict) -> dict:
 
 
 def edit_start(manuscript: dict, key: str, take: str, instruction: str,
-               confirm: bool = False, http=None) -> dict:
+               force: bool = False, http=None) -> dict:
     """Start revising a take (paid). Same gate and caps as `start`; poll
     the returned job with `poll`, and the revision lands as take eNN."""
     p = edit_plan(manuscript, key, take, instruction)
     if p["reasons"]:
         raise ValueError(f"take {take} of {key} cannot be revised: "
                          + "; ".join(p["reasons"]))
-    if p["needs_confirm"] and not confirm:
-        raise ValueError("over a spend cap — " + "; ".join(p["needs_confirm"])
-                         + " — rerun with --confirm")
+    if p["over_cap"] and not force:
+        raise ValueError("over a spend cap — " + "; ".join(p["over_cap"])
+                         + " — rerun with --force to go past it")
     http = http or _http
     body = edit_body(p)
     op = http("POST", f"{BASE_URL}/interactions", _key(), body)

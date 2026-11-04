@@ -632,11 +632,11 @@ Drive the Doc-road failure scenarios (test_doc_road_failures.py) against the LIV
 
 The one way to run the whole test suite.
 
-## `tests.test_anchor_prefix_truncation`
+## `tests.test_alias_canonical_conflict`
 
-`authorlm/tests/test_anchor_prefix_truncation.py`
+`authorlm/tests/test_alias_canonical_conflict.py`
 
-`_split_by_anchors` must not truncate the Docs-API anchor to 80 chars.
+`proposals._content_hash` / `_alias_canonical_conflict` gate alias proposals before they reach the author's queue.
 
 ## `tests.test_anchor_split_and_holds`
 
@@ -650,6 +650,12 @@ Doc sync doors that silently corrupt when wrong.
 
 API-layer tests + CLI/MCP parity checklist (P11).
 
+## `tests.test_apply_accepted`
+
+`authorlm/tests/test_apply_accepted.py`
+
+`staging.apply_accepted` is the local-road compose that turns accepted filter/critique threads into finished essay bytes.
+
 ## `tests.test_audio`
 
 `authorlm/tests/test_audio.py`
@@ -661,6 +667,12 @@ The audiobook export (docs/audiobook-pipeline-design.md), hermetic.
 `authorlm/tests/test_audio_preview_without_paid_voice.py`
 
 Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
+
+## `tests.test_audio_section_ids`
+
+`authorlm/tests/test_audio_section_ids.py`
+
+`audio.section_id` / `silence_id` / `applicable_rules` are the paid audio cache keys.
 
 ## `tests.test_audio_voice_config`
 
@@ -674,11 +686,35 @@ Issue #173: default voices are explicitly declared in audiobook.toml.
 
 Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
 
+## `tests.test_clamped_delta`
+
+`authorlm/tests/test_clamped_delta.py`
+
+`clients._clamped_delta` / `_scale_models` sit on the chat-usage discontinuity path: when a transcript file is replaced or truncated, the ledger must never invent negative spend and must never guess a per-model split of a clamped total.
+
+## `tests.test_clip_edit_json`
+
+`authorlm/tests/test_clip_edit_json.py`
+
+`clip edit --json`: the plan/job shape podlm reads.
+
+## `tests.test_clip_ensure_json`
+
+`authorlm/tests/test_clip_ensure_json.py`
+
+`clip ensure --json`: the plan/job shape podlm reads.
+
 ## `tests.test_comment_context`
 
 `authorlm/tests/test_comment_context.py`
 
 Comment context on the pull (it adds where a Doc comment's anchor sits and the summaries already fresh there, never building one) and `summarize put` (a section summary written by the session, stamped with the section's hash, refused without the four labels). No LLM.
+
+## `tests.test_concept_mention_patterns`
+
+`authorlm/tests/test_concept_mention_patterns.py`
+
+Realization vs first-mention firewall (`concept_pattern` / `mention_pattern`).
 
 ## `tests.test_context`
 
@@ -698,6 +734,18 @@ Continuation files: export setting `continuation_level`.
 
 Critique-pass tests (docs/critique-pass-design.md).
 
+## `tests.test_critique_dedupe_key`
+
+`authorlm/tests/test_critique_dedupe_key.py`
+
+`critique._dedupe_key` is the cross-source idempotency normalizer for critique import.
+
+## `tests.test_depends_on`
+
+`authorlm/tests/test_depends_on.py`
+
+`summaries._depends_on` turns model-named ordinals into earlier para hashes.
+
 ## `tests.test_doc_add_toc`
 
 `authorlm/tests/test_doc_add_toc.py`
@@ -715,6 +763,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 `authorlm/tests/test_doc_fakes_vs_google.py`
 
 The Doc-road fake checked against Google: every snapshot recorded live by tests/doc_road_live.py (a full documents.get and the markdown export of the same revision) is rebuilt in `_GoogleFake` from the recorded tab content, exported by the fake, and compared, tab by tab, with what Google exported. A difference means the fake no longer renders the way Google does: re-record (`python3 tests/doc_road_live.py --record`) and bring `_GoogleFake` back in line.
+
+## `tests.test_doc_filename`
+
+`authorlm/tests/test_doc_filename.py`
+
+`docs.doc_filename` is the only sanitizer `add_doc` uses for new chapter paths. Unsafe characters become hyphens, whitespace collapses, empty names refuse, and a missing extension becomes `.md`. Existing suites only call `add_doc` with already-safe names, so a regression here would land files with `/` or `#` in the path (or accept a blank title).
 
 ## `tests.test_doc_freshness`
 
@@ -740,17 +794,47 @@ The Doc-road failures of 2026-10-30 (discernment.md, SMSTTD), reproduced against
 
 Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, `doc merge`, `doc resolve-comments`, `revise stage|resolve`, `footnote apply --from-json`, the diff-push divergence message and the pull's TOC-conflict pairs.
 
+## `tests.test_drive_doc_gone`
+
+`authorlm/tests/test_drive_doc_gone.py`
+
+`drive_upload._doc_gone` decides whether a Drive update failure means "the author deleted the file — recreate" vs a real error that must stop the export.
+
 ## `tests.test_e2e`
 
 `authorlm/tests/test_e2e.py`
 
 End-to-end test of every MVP use case, driven through the real CLI.
 
+## `tests.test_effective_style`
+
+`authorlm/tests/test_effective_style.py`
+
+`styles.effective_style` (and `guide_chain`) compose ratified law into drafting prompts with no model in the loop. Wrong override / retire / chain math injects or drops binding law.
+
+## `tests.test_episode_for_intent`
+
+`authorlm/tests/test_episode_for_intent.py`
+
+`sessions.episode_for_intent` must find an intent's open episode in ANY session, not only the current one.
+
 ## `tests.test_essay_summaries`
 
 `authorlm/tests/test_essay_summaries.py`
 
 Summary hierarchy, step 4 (docs/summary-hierarchy-design.md §3.4, §4.5, §6.6, §11.4): the essay-summary pass. The essay is composed from its section summaries (never the text) and the prior essay summaries; the model writes FLOW, MOVES, MOTIFS, DOES NOT and code derives INTRODUCES, ASSUMES, PROMISES, DEBTS from the paragraph records and renders them under those labels; `sections_hash` tells "my sections changed"; `ensure(level="essay")` rebuilds the two lower levels first and prints one cost line per level; the structural coverage check replaces the paragraph citation parser. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `essay-summary` section.
+
+## `tests.test_export_escapes`
+
+`authorlm/tests/test_export_escapes.py`
+
+PDF running heads and settings.toml round-trips depend on two tiny escapers in `export.py`. Neither had a direct test: a title with `%` or `_` would break LaTeX mid-build, and a setting value with `"` or `\` would corrupt `_exports/settings.toml` on the next `export set`.
+
+## `tests.test_export_filename`
+
+`authorlm/tests/test_export_filename.py`
+
+`export.export_filename` sanitizes the combined-export basename.
 
 ## `tests.test_export_upload`
 
@@ -769,6 +853,12 @@ The per-essay adjudicator and the writes (docs/extraction-redesign.md §4.5, §4
 `authorlm/tests/test_extraction_calibration.py`
 
 `extract calibrate --replay` (docs/extraction-redesign.md §4.6, §6.1, §9 phase 4): the historical candidates through the gates and the adjudicator, against the author's verdicts, and the thresholds moved.
+
+## `tests.test_extraction_gate_helpers`
+
+`authorlm/tests/test_extraction_gate_helpers.py`
+
+Direct pins for extraction gate-1/2/3 pure helpers (§4.4).
 
 ## `tests.test_extraction_gates`
 
@@ -794,11 +884,23 @@ The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, �
 
 `filtering.reply_json` is the first parser every pasted filter reply goes through (registry prelude, pronunciation prelude, filter record).
 
+## `tests.test_filtered_prefix`
+
+`authorlm/tests/test_filtered_prefix.py`
+
+`filtering.filtered_prefix` is the autoregressive conditioning block for sequential filter runs: later windows must see THIS RUN's rewrites of earlier units, not the original manuscript text.
+
 ## `tests.test_findings_edit_entry`
 
 `authorlm/tests/test_findings_edit_entry.py`
 
 `findings.edit_entry` is the one gate every producer's `replacement` passes through before it is staged as a `<<old>>{{new}}` edit in the author's Doc tab.
+
+## `tests.test_flat_prose`
+
+`authorlm/tests/test_flat_prose.py`
+
+`gdocs._flat_prose` matches Doc comment anchors across emphasis.
 
 ## `tests.test_footnote_prefixes_nested`
 
@@ -806,11 +908,23 @@ The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, �
 
 footnote_prefixes must stay injective when nested paths share a stem.
 
+## `tests.test_form_remnants`
+
+`authorlm/tests/test_form_remnants.py`
+
+`form_grammar.form_remnants` / `strip_form_remnants` clean hand-resolved Doc forms after pull.
+
 ## `tests.test_gallery`
 
 `authorlm/tests/test_gallery.py`
 
 Hermetic tests for tools/gallery.py — self-contained image-review pages.
+
+## `tests.test_gdocs_clamp`
+
+`authorlm/tests/test_gdocs_clamp.py`
+
+`gdocs.clamp` is the one truncation used in Doc fault lines, settle receipts, and CLI proposal diffs.
 
 ## `tests.test_generated_docs`
 
@@ -824,11 +938,83 @@ docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generat
 
 Retake must not destroy a good paragraph take when the write fails mid-flight.
 
+## `tests.test_grounding_strength`
+
+`authorlm/tests/test_grounding_strength.py`
+
+`extraction.grounding_strength` and `extraction_calibration._best` choose which paragraph a relocated candidate is judged on.
+
+## `tests.test_hard_terms`
+
+`authorlm/tests/test_hard_terms.py`
+
+`filtering.is_hard_to_say` / `hard_terms` / `candidate_terms` are the harness-computed pronunciation prelude signals (F1 / F2).
+
+## `tests.test_has_broken_forms`
+
+`authorlm/tests/test_has_broken_forms.py`
+
+`threads.has_broken_forms` is the pull/skip gate for marker corruption.
+
+## `tests.test_hold_commented`
+
+`authorlm/tests/test_hold_commented.py`
+
+`gdocs._hold_commented` is the surgical-push door for open margin comments.
+
+## `tests.test_holds_doc_edits`
+
+`authorlm/tests/test_holds_doc_edits.py`
+
+`gdocs._holds_doc_edits` is the push-guard door for a hand-settled conflict.
+
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`
 
 Interlocutor tests (docs/interlocutor-design.md).
+
+## `tests.test_is_heading`
+
+`authorlm/tests/test_is_heading.py`
+
+`filtering.is_heading` labels markdown heading units in the filter prompt so the model can leave titles alone.
+
+## `tests.test_is_tag_line`
+
+`authorlm/tests/test_is_tag_line.py`
+
+`media.is_tag_line` decides which lines `strip_for_book` drops from PDF/EPUB exports.
+
+## `tests.test_iter_manuscript_paths`
+
+`authorlm/tests/test_iter_manuscript_paths.py`
+
+`revisions.iter_manuscript_paths` is the observation visibility gate.
+
+## `tests.test_label_opt`
+
+`authorlm/tests/test_label_opt.py`
+
+Footnote `| label:` override parsing (`directives._LABEL_OPT`).
+
+## `tests.test_lens_protection`
+
+`authorlm/tests/test_lens_protection.py`
+
+`lenses.protected_files` and `_is_card` gate which chapters a lens may touch and how the reading-order block labels them.
+
+## `tests.test_lint_checks`
+
+`authorlm/tests/test_lint_checks.py`
+
+Individual `lint.check_*` helpers encode ratified style laws that `write propose` can refuse as errors.
+
+## `tests.test_lint_shingles`
+
+`authorlm/tests/test_lint_shingles.py`
+
+Lint word-normalization, syllable count, and n-gram shingles.
 
 ## `tests.test_live_llm`
 
@@ -842,11 +1028,47 @@ Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 
 locate_block must match a card by section id, not spoken text alone.
 
+## `tests.test_locate_quote`
+
+`authorlm/tests/test_locate_quote.py`
+
+`gdocs.locate_quote` attributes a Doc margin comment to exactly one local file (and its nearest heading). Missing, empty, or ambiguous anchors stay unattributed — never guessed. A quote that spans paragraphs still resolves via the flattened match, then falls back to the quote's head for the paragraph index.
+
 ## `tests.test_loop`
 
 `authorlm/tests/test_loop.py`
 
 Proposal learning loop — firewall, screen, distillation, retraction.
+
+## `tests.test_manifest_normalize`
+
+`authorlm/tests/test_manifest_normalize.py`
+
+`manifest._normalize` is the term cleaner behind essay debt columns.
+
+## `tests.test_manifest_render_lines`
+
+`authorlm/tests/test_manifest_render_lines.py`
+
+`manifest.render_lines` is the plain-text Reader load that `gdocs.manifest_text` appends under the chapter inventory (#243).
+
+## `tests.test_manuscript_metadata`
+
+`authorlm/tests/test_manuscript_metadata.py`
+
+Manuscript identity parsers for catalog / audiobook / export doors.
+
+## `tests.test_margin`
+
+`authorlm/tests/test_margin.py`
+
+`gdocs.Margin` / `_open_comments` — one comments read per push verb.
+
+## `tests.test_marker_liveness`
+
+`authorlm/tests/test_marker_liveness.py`
+
+Client session markers: liveness, host-id extraction, and clear.
 
 ## `tests.test_media`
 
@@ -854,11 +1076,65 @@ Proposal learning loop — firewall, screen, distillation, retraction.
 
 Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and stripping from every book export (docs/video-clips-design.md).
 
+## `tests.test_media_clip_keys`
+
+`authorlm/tests/test_media_clip_keys.py`
+
+Clip key minting rests on three pure helpers in `media.py`.
+
+## `tests.test_media_gen_chosen`
+
+`authorlm/tests/test_media_gen_chosen.py`
+
+`media_gen.chosen` / `pick` / `attach` — the take the author (or podlm) selected for a clip.
+
+## `tests.test_media_gen_desc_hash`
+
+`authorlm/tests/test_media_gen_desc_hash.py`
+
+`media_gen.desc_hash` names what shapes a Veo take on disk.
+
+## `tests.test_media_gen_helpers`
+
+`authorlm/tests/test_media_gen_helpers.py`
+
+Pure helpers behind Veo clip generation: duration buckets, day spend, prompt composition, and take staleness.
+
+## `tests.test_media_gen_next_n`
+
+`authorlm/tests/test_media_gen_next_n.py`
+
+`media_gen._next_n`: numbered vs imported take slots.
+
+## `tests.test_mentioned_in`
+
+`authorlm/tests/test_mentioned_in.py`
+
+`hygiene.mentioned_in` is the groundedness gate for concepts and edges.
+
+## `tests.test_merge_changes`
+
+`authorlm/tests/test_merge_changes.py`
+
+`gdocs._merge_changes` writes one caller's mapping edits onto current metadata.
+
+## `tests.test_mint_name`
+
+`authorlm/tests/test_mint_name.py`
+
+`media.parse_sections` / `brief_terms` / `_mint_name` turn clip tag bodies into stable keys and search terms.
+
 ## `tests.test_morph_targets`
 
 `authorlm/tests/test_morph_targets.py`
 
 `morph.targets` decides which paragraphs `morph run` sends to the model, and so which paragraphs it may stage edits against.
+
+## `tests.test_near_duplicate`
+
+`authorlm/tests/test_near_duplicate.py`
+
+`loop.similarity` / `loop.near_duplicate` are the deterministic proposal firewall (Common Core §8.9 / loop invariant “never re-ask”).
 
 ## `tests.test_normalize_fences`
 
@@ -866,17 +1142,59 @@ Media slice 1: [Clip] / [Collage] grammar, validation, `media list`, and strippi
 
 Fenced code must survive normalize_markdown byte-for-byte.
 
+## `tests.test_normalize_isbn13`
+
+`authorlm/tests/test_normalize_isbn13.py`
+
+`api._normalize_isbn13` / `_validate_format_isbns` are the catalog identity door for every paperback/hardcover ISBN the CLI and MCP accept.
+
 ## `tests.test_normalize_thematic_break`
 
 `authorlm/tests/test_normalize_thematic_break.py`
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
 
+## `tests.test_omni_helpers`
+
+`authorlm/tests/test_omni_helpers.py`
+
+Pure Omni helpers: model gate, duration clamp, billed USD from token usage, and the edit request body.
+
+## `tests.test_own_line_form`
+
+`authorlm/tests/test_own_line_form.py`
+
+`threads.own_line_form` / `math_spans` / `in_math` / `pending_forms` decide which bare `{{…}}` count as staged insertions on Doc-road resolve.
+
 ## `tests.test_paragraph_records`
 
 `authorlm/tests/test_paragraph_records.py`
 
 Summary hierarchy, step 2 (docs/summary-hierarchy-design.md §3.2, §3.5, §4.5, §11.2): the paragraph-records pass. One call per heading section, headings with no call, the span check counted in the build report, the 24,000-character split, lazy rebuild of dirty rows only, and the one cost line. A fake LLM throughout; the live recording is tests/test_live_llm.py's `paragraph-records` section.
+
+## `tests.test_parse_distiller`
+
+`authorlm/tests/test_parse_distiller.py`
+
+`beliefs.parse_distiller` + `belief_labels` — the grammar that turns a distiller reply into a seed / match / decline.
+
+## `tests.test_parse_fields`
+
+`authorlm/tests/test_parse_fields.py`
+
+`media.parse_fields` is the grammar door for every [Clip]/[Collage] field list: description, optional ⇢ note, then `| key: value` pairs.
+
+## `tests.test_parse_prelude`
+
+`authorlm/tests/test_parse_prelude.py`
+
+`filtering.parse_prelude` freezes the motif registry for a global filter run. Every later unit is judged against that opaque string.
+
+## `tests.test_parse_ts_sweep_markers`
+
+`authorlm/tests/test_parse_ts_sweep_markers.py`
+
+`clients._parse_ts` and `clients.sweep_markers` bound marker lifetime.
 
 ## `tests.test_passes`
 
@@ -890,6 +1208,12 @@ The critique pass (design §5–§7): preflight gate, context package, output co
 
 The critique editor's output contract holds against wrong SHAPES, not only wrong values: a list element that is not a JSON object, or an `insertions`/`suggestions` field that is not a list, is a ContractError (so run_editor retries with the violation named), never an AttributeError that aborts the run.
 
+## `tests.test_paths_env`
+
+`authorlm/tests/test_paths_env.py`
+
+.env parse and rewrite (`paths.load_env` / `paths.set_env_value`).
+
 ## `tests.test_pdf2md_furniture`
 
 `authorlm/tests/test_pdf2md_furniture.py`
@@ -902,11 +1226,53 @@ Hermetic tests: pdf2md furniture must not eat English body words.
 
 Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 
+## `tests.test_peel_embed_suffix`
+
+`authorlm/tests/test_peel_embed_suffix.py`
+
+`revisions.peel_embed_suffix` keeps illustration settle from raising false "text drifted" when an embed line is glued under its `[Illustration: …]` tag.
+
+## `tests.test_preview_voice_stamp`
+
+`authorlm/tests/test_preview_voice_stamp.py`
+
+Lazy-preview stamp and orphan sweep (#227).
+
+## `tests.test_pronunciation_param_diff`
+
+`authorlm/tests/test_pronunciation_param_diff.py`
+
+`generation.pronunciation_diff` / `param_diff` flag a stale take for re-render.
+
+## `tests.test_refuse_sidecar`
+
+`authorlm/tests/test_refuse_sidecar.py`
+
+`structure.refuse_sidecar` is the named door every filter / lens / intent verb shares for `pronunciations.md`.
+
+## `tests.test_reply_records`
+
+`authorlm/tests/test_reply_records.py`
+
+Paragraph-record reply unwrap (`_reply_records`) and JSON schema shape.
+
+## `tests.test_resolve_pointers`
+
+`authorlm/tests/test_resolve_pointers.py`
+
+`lenses.resolve_pointers` decides which other chapters a lens INPUTS payload may pull in as pointed-to essays.
+
 ## `tests.test_run_all`
 
 `authorlm/tests/test_run_all.py`
 
 tests/run_all.py, the suite's one runner, against fixture trees: throwaway test files whose outcome is known, so nothing here needs Node, a model or the real suite. Every test that ought to run runs; a silent skip or an early stop is how one does not. (owner)
+
+## `tests.test_same_para`
+
+`authorlm/tests/test_same_para.py`
+
+`gdocs._norm_para` / `_same_para` / `first_divergence` / `divergence_note` align Doc paragraphs with the markdown export for diff-push.
 
 ## `tests.test_section_summaries`
 
@@ -914,17 +1280,65 @@ tests/run_all.py, the suite's one runner, against fixture trees: throwaway test 
 
 Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5, §11.3): the section-summary pass. One call per section with the text as authority and the paragraph records as skeleton, conditioned on the earlier sections' POINT lines; MOVES coverage as set equality on the body paragraphs, misses reported; heading-only sections stored with no call; `ensure(level="section")` rebuilds the paragraph level first and prints one cost line per level. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `section-summary` section.
 
+## `tests.test_select_chapters`
+
+`authorlm/tests/test_select_chapters.py`
+
+`structure.select_chapters` is the part-build / interlocutor door that turns a named parent into that part plus its TOC descendants.
+
+## `tests.test_separate_tag_lines`
+
+`authorlm/tests/test_separate_tag_lines.py`
+
+`gdocs.separate_tag_lines` blanks between consecutive `[…]` tag lines in the bytes handed to a markdown import.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
 
 `setup.py` builds the web pages at install time, because the built pages (`authorlm/*_dist/index.html`) are not tracked in git.
 
+## `tests.test_sidecar_would_be_emptied`
+
+`authorlm/tests/test_sidecar_would_be_emptied.py`
+
+`gdocs._sidecar_would_be_emptied` refuses a Doc push that would wipe every pronunciation row.
+
 ## `tests.test_signature_tag`
 
 `authorlm/tests/test_signature_tag.py`
 
 The [Signature: uri] tag: plain text in the files, a signature block (image, author's name, export date) in every reader output, dropped from the audio-clean build. Run: python3 tests/test_signature_tag.py
+
+## `tests.test_silent_preview`
+
+`authorlm/tests/test_silent_preview.py`
+
+`generation._silent` — the say-preview silence door (#304).
+
+## `tests.test_split_tabbed_export`
+
+`authorlm/tests/test_split_tabbed_export.py`
+
+`gdocs.split_tabbed_export` cuts a whole-master markdown export into per-tab bodies.
+
+## `tests.test_stale_suggestions`
+
+`authorlm/tests/test_stale_suggestions.py`
+
+`hygiene.stale_suggestions` marks pending bridge / prerequisite guidance moot when collect later realizes the concept or closes the gap.
+
+## `tests.test_structure_find_file`
+
+`authorlm/tests/test_structure_find_file.py`
+
+`structure.title_of` / `find_file` are the shared file-lookup helpers moved down from `lenses` in #346.
+
+## `tests.test_style_aspect_firewall`
+
+`authorlm/tests/test_style_aspect_firewall.py`
+
+Figure / illustration / illustration-placement must never cross prompts.
 
 ## `tests.test_summaries`
 
@@ -938,6 +1352,48 @@ Essay summaries (critique-pass design §4; summary-hierarchy design §3.4): read
 
 Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): paragraph kinds, content hashes, section hashes, the two new tables, freshness derived at read time, and the read API over current rows. No model call anywhere in this suite.
 
+## `tests.test_summary_of`
+
+`authorlm/tests/test_summary_of.py`
+
+`filters.summary_of` and `lenses.summary_of` are what `filter list` and `lens list` print for each artifact.
+
+## `tests.test_support_evidence_type`
+
+`authorlm/tests/test_support_evidence_type.py`
+
+`beliefs._support_evidence_type` is the INV-2 door between machine inference and author-originated evidence.
+
+## `tests.test_sweeps_narrowing`
+
+`authorlm/tests/test_sweeps_narrowing.py`
+
+`sweeps._changed_files` / `_claims_for` are the deterministic narrowing step before the ontology sweep spends tokens.
+
+## `tests.test_tab_is_empty`
+
+`authorlm/tests/test_tab_is_empty.py`
+
+`gdocs._tab_is_empty` chooses full rewrite vs surgical Doc push.
+
+## `tests.test_threads_reply_unstrike`
+
+`authorlm/tests/test_threads_reply_unstrike.py`
+
+Margin-thread reply law and Doc-export strike peel.
+
+## `tests.test_timestamp_seconds`
+
+`authorlm/tests/test_timestamp_seconds.py`
+
+`media.timestamp_seconds` turns a clip's `start:` / `end:` field into seconds for the end-after-start check and still-vs-video gate.
+
+## `tests.test_toc_ancestors`
+
+`authorlm/tests/test_toc_ancestors.py`
+
+`passes.toc_ancestors` walks toc.toml parents nearest-first for the critique/intent scope chain.
+
 ## `tests.test_toc_outside`
 
 `authorlm/tests/test_toc_outside.py`
@@ -950,11 +1406,47 @@ toc.toml `outside`: Doc tabs that are not part of the book.
 
 _No docstring._
 
+## `tests.test_unchanged_since_push`
+
+`authorlm/tests/test_unchanged_since_push.py`
+
+`gdocs.unchanged_since_push` is the audiobook page's Push skip door.
+
+## `tests.test_usage_four`
+
+`authorlm/tests/test_usage_four.py`
+
+`clients._four` coerces every JSONL usage object into the four counters the chat-usage sweep bills against.
+
+## `tests.test_usage_money`
+
+`authorlm/tests/test_usage_money.py`
+
+`usage._money` formats the cost column on every usage report row.
+
+## `tests.test_validate_reply`
+
+`authorlm/tests/test_validate_reply.py`
+
+`filtering.validate_reply` is §2.5's filter-reply door: every pasted or model reply for `filter record` / settle must pass here before any `<<old>>{{new}}` is staged.
+
+## `tests.test_verse_poem_level`
+
+`authorlm/tests/test_verse_poem_level.py`
+
+`verse.poem_level` and `verse.heading_levels` decide where poems sit in a verse file and what the collect report warns about.
+
 ## `tests.test_write_accept_idempotent`
 
 `authorlm/tests/test_write_accept_idempotent.py`
 
 write_accept must not duplicate a beat after a crash mid-accept.
+
+## `tests.test_writing_parse_reply`
+
+`authorlm/tests/test_writing_parse_reply.py`
+
+`writing.parse_reply` is the beat-draft door. It accepts exactly two shapes: ordered WHY / SELF-CHECK / DRAFT, or a leading BLOCKED (optional QUESTION). Mis-ordered labels and a reply in neither shape must refuse; a bare BLOCKED line AFTER DRAFT must stay manuscript prose.
 
 ## `tools.bootstrap_beliefs`
 

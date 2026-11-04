@@ -1510,33 +1510,37 @@ by its number in the chapter (`-p 12`, `-p 12,14-16`) or an id prefix.
   how a chat request becomes a paragraph:** the author says "regenerate
   the Basilides paragraph in becker", never a number. Run the find; one
   match → run the verb; several → list them by first words and ask.
-- `authorlm audio generate <stem> --remaining [--dry-run] -m <ms>` —
-  render every paragraph of the chapter without a take, at the book's
-  quality (`[tts].quality`, now `mp3_44100_192`). Prints the count and
-  character cost before the calls and what it spent after, with the
-  account's remaining characters. `--dry-run` prints the cost and renders
-  nothing. `-p 12,14-16` instead of `--remaining` renders those; **a
-  paragraph that already has a take is skipped and named** — generate
+- `authorlm audio generate <stem> --remaining [--dry-run | --live] -m <ms>`
+  — every paragraph of the chapter without a take, at the book's quality
+  (`[tts].quality`, now `mp3_44100_192`). By default it prints the count
+  and character cost and renders nothing; `--dry-run` says the same thing
+  outright. `--live` renders and prints what it spent, with the account's
+  remaining characters. `-p 12,14-16` instead of `--remaining` names those;
+  **a paragraph that already has a take is skipped and named** — generate
   never re-renders a done id.
-- `authorlm audio retake <stem> -p 14 -m <ms>` — re-render a paragraph
-  that has a take and replace it. The only way a done id is rendered
-  again, and only on the author's word ("I don't like it").
+- `authorlm audio retake <stem> -p 14 [--dry-run | --live] -m <ms>` — the
+  cost of re-rendering a paragraph that has a take; `--live` renders it
+  and replaces the take. The only way a done id is rendered again, and
+  only on the author's word ("I don't like it").
 - `authorlm audio stitch <stem> -m <ms>` — one file, ffmpeg, two-pass
   loudness (−20 LUFS / −3 dBTP), free. Refuses while any paragraph lacks
   a take. A later take or retake marks the stitch stale on the board.
 
-A paid verb prints its cost and runs; a CLI call is the author's word, so
-there is no confirmation prompt — which is why you state the cost from
-`--dry-run` or the board and get a yes in chat before running `generate`
-or `retake` on more than the author just named. The character limit for
-live checks the author set stands: ≤ 2,000 a round unless they say more.
+A paid verb (`generate`, `retake`, `say`, `audition`) prints its cost and
+renders nothing unless `--live` is on the line. There is no prompt: state
+the cost it printed and get a yes in chat before passing `--live` on more
+than the author just named. `--live` with `--dry-run` is a usage error, and
+so is `--live` on an `audio` action that neither spends nor sends. The
+review page's and the workbench's buttons are the author's own click and
+render directly. The character limit for live checks the author set stands:
+≤ 2,000 a round unless they say more.
 
 **Equal doors rule.** Never run `generate`/`retake` on a chapter while
 audiostation is rendering that chapter (the app has no lock). Reloads in
 the app cannot double-render; only two deliberate renders can.
 
 **The free listen.** `authorlm audio preview <stem> | --all [-p …]
-[--force] -m <ms>` renders every paragraph without a preview with macOS
+[--rebuild] -m <ms>` renders every paragraph without a preview with macOS
 `say` (voice and rate from `[preview]` in `audiobook.toml`; Daniel,
 175 wpm × the cast row's speed; respellings substituted inline so the
 table is heard too) into `_audio/preview/<id>.mp3`, four at a time,
@@ -1656,7 +1660,7 @@ to choose an ElevenLabs voice just to listen with Mac `say`.
    artifact; the author listens and names a shortlist in chat.
 2. **Then paid, on the author's words.** `audition_voices` with the
    shortlist and `file` + `paragraphs` (the paragraphs that will
-   actually be generated) or `text`. Without `confirm=True` it returns
+   actually be generated) or `text`. Without `live=True` it returns
    the character cost — read it to the author and wait for a yes. Never
    audition on paid clips before a free pass has narrowed the field.
    **This verb is for short samples only** (a paragraph or two per
@@ -1668,8 +1672,8 @@ to choose an ElevenLabs voice just to listen with Mac `say`.
    the author wants to hear a whole chapter, or more than a couple of
    paragraphs, in a candidate voice, go through the ordinary verbs, per
    candidate: `audio cast set <role> --voice-id <id> --voice "<name>"`,
-   `audio export`, `audio generate <stem> --remaining` (dry run shown
-   first), `audio stitch <stem>`, then copy or note the stitched file
+   `audio export`, `audio generate <stem> --remaining` (the printed cost
+   shown first, then `--live`), `audio stitch <stem>`, then copy or note the stitched file
    before the next candidate overwrites `audio/<stem>.<quality>.mp3`.
    Takes are keyed by text + voice + settings (§6 of the design), so every
    candidate's takes stay in `state/` and `audio/`: casting the winner
@@ -1688,7 +1692,7 @@ to choose an ElevenLabs voice just to listen with Mac `say`.
 
 **Pronunciations → ElevenLabs.** `push_pronunciations` (`audio
 dictionary push`) shows the plan first — rows to add, readings that
-changed, and rules to remove — and applies only with `confirm=True`.
+changed, and rules to remove — and applies only with `live=True`.
 **The push mirrors the table** (author's ruling 2026-09-26; the
 append-only rule of 2026-09-03 is reversed): a rule on ElevenLabs that
 `pronunciations.md` does not carry is removed on the next push, and a
@@ -1706,7 +1710,8 @@ writes the new version into `audiobook.json`.
 **Settling a pronunciation by ear.** `say_term` (`audio say`) renders the
 word's own sentence, in the voice of the section that says it, with each
 respelling substituted inline as the alias rule would — no dictionary
-push, about 150 characters per clip. `authorlm workbench -m <manuscript>`
+push, about 150 characters per clip. Without `live=True` (`--live`) it
+states the cost, renders nothing and settles nothing. `authorlm workbench -m <manuscript>`
 (run in the background from Bash, like `triage-app`; it serves the page
 on a loopback port and opens the browser) is the same loop as a local
 page: every word, every voice that says it, a respelling box, Regenerate
@@ -2348,8 +2353,8 @@ drops the tag lines and keeps every word of prose.
 - **Generation (Veo or Omni, billed):** `clip ensure <key> --dry-run` / MCP
   `clip_ensure` (a dry run by default) shows the model, length, cost and the
   exact prompt and spends nothing. **Generate only after the author says yes
-  to the stated cost:** `clip ensure <key> --generate` (`--confirm` past a
-  cap) starts a job; `clip job <id>` / `clip_job` polls and downloads the
+  to the stated cost:** `clip ensure <key> --generate` (`--force` past a
+  cap, named when it stops; it prints the cap it passed) starts a job; `clip job <id>` / `clip_job` polls and downloads the
   take (the first take is chosen). The author chooses takes (in podlm's
   gallery or in chat); record it with `clip pick <key> --take NN` /
   `clip_pick`, never on your own. `clip attach` / `clip_attach` brings in a
