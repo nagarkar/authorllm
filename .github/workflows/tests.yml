@@ -2,6 +2,8 @@
 # so a PR that breaks a test shows red before it merges (issue #363).
 # Offline: no Google token and no model keys reach the runner, and test_live_llm.py stays out (no --live).
 # llmlm is the sibling checkout CLAUDE.md's install line expects, at its main; it is public, so no secret.
+# macOS, where AuthorLM runs: the real `say` checks run there, and one test_api.py check counts on a
+# replaced file getting a new inode, which the Linux runner's file system does not give it.
 name: tests
 on: pull_request
 permissions:
@@ -11,12 +13,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   suite:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,10 +36,7 @@ jobs:
           cache: npm
           cache-dependency-path: authorllm/authorlm/web/*/package-lock.json
       # Optional for the suite: without them run_all.py reports those checks as skipped.
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pandoc ffmpeg
-      - if: runner.os == 'macOS'
-        run: brew install pandoc ffmpeg
+      - run: brew install pandoc ffmpeg
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
