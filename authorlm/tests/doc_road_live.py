@@ -39,6 +39,7 @@ from authorlm import threads as th  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 
 import test_doc_road_failures as F  # noqa: E402
+import _doc_shapes as SH  # noqa: E402
 from _doc_freshness import DOC_PREFIX, DOC_TAB, LOG  # noqa: E402
 
 CACHE = HERE / "doc_cache"
@@ -521,6 +522,114 @@ def s5b(env):
              "Habit, edited locally" in text or res.get("held"), text)
 
 
+def _shape_tab_ids(docs, doc_id: str) -> list[str]:
+    got = docs.documents().get(documentId=doc_id, includeTabsContent=True,
+                               fields=gdocs.MASTER_FIELDS).execute()
+    props: list = []
+    gdocs.walk_tabs(got.get("tabs", []), props, [])
+    return [tid for tid, title in props if title in SH.TITLES]
+
+
+def _drop_shape_tabs(docs, doc_id: str) -> None:
+    """Take scenario 6's tabs out of the fixture Doc, one at a time (a
+    tab that went with its parent is no longer there to delete)."""
+    while True:
+        ids = _shape_tab_ids(docs, doc_id)
+        if not ids:
+            return
+        docs.documents().batchUpdate(documentId=doc_id, body={
+            "requests": [{"deleteTab": {"tabId": ids[0]}}]}).execute()
+
+
+def s6(env):
+    """The tab shapes that broke the cut of the export into tabs
+    (_doc_shapes.py), in the Doc together, recorded in one snapshot and
+    taken out again. The cut itself is checked here on the live read;
+    tests/test_tab_alignment.py checks it on the recording."""
+    svc, docs, doc_id, db, manuscript, ms = env
+    _drop_shape_tabs(docs, doc_id)      # what a stopped run left behind
+    try:
+        for rel, text in SH.FILES.items():
+            (ms / rel).write_text(text)
+        _quiet(api.collect, db, manuscript, {})
+        for rel in SH.FILES:
+            gdocs.push_doc(db, manuscript, rel, service=svc,
+                           docs_service=docs, rebuild=True)
+        container = gdocs._mapping(db, manuscript)["gdocs"]["_container_tab"]
+        for title, text, first_child, last_style, picture in SH.HAND_TABS:
+            props = {"title": title}
+            if first_child:
+                props.update(parentTabId=container, index=0)
+            reply = docs.documents().batchUpdate(documentId=doc_id, body={
+                "requests": [{"addDocumentTab": {
+                    "tabProperties": props}}]}).execute()
+            tab_id = reply["replies"][0]["addDocumentTab"]["tabProperties"][
+                "tabId"]
+            reqs = []
+            if text:
+                reqs.append({"insertText": {
+                    "location": {"tabId": tab_id, "index": 1},
+                    "text": text}})
+            if last_style:
+                at = 1 + gdocs._utf16_len(text)
+                reqs.append({"updateParagraphStyle": {
+                    "range": {"tabId": tab_id, "startIndex": at,
+                              "endIndex": at + 1},
+                    "paragraphStyle": {"namedStyleType": last_style},
+                    "fields": "namedStyleType"}})
+            if reqs:
+                docs.documents().batchUpdate(
+                    documentId=doc_id, body={"requests": reqs}).execute()
+            if picture == "end":
+                for req in ("insertPageBreak", "insertInlineImage"):
+                    at = gdocs._tab_end(docs, doc_id, tab_id) - 1
+                    spec = {"location": {"tabId": tab_id, "index": at}}
+                    if req == "insertInlineImage":
+                        spec["uri"] = SH.PICTURE
+                    docs.documents().batchUpdate(documentId=doc_id, body={
+                        "requests": [{req: spec}]}).execute()
+            elif picture == "start":
+                docs.documents().batchUpdate(documentId=doc_id, body={
+                    "requests": [{"insertInlineImage": {
+                        "location": {"tabId": tab_id, "index": 1},
+                        "uri": SH.PICTURE}}]}).execute()
+            if title == "Tab 31":
+                scratch = tab_id
+        snapshot(svc, docs, doc_id, "shapes")
+        doc = docs.documents().get(
+            documentId=doc_id, includeTabsContent=True,
+            fields=gdocs.MASTER_FIELDS).execute()
+        data = svc.files().export(fileId=doc_id,
+                                  mimeType=gdocs.MARKDOWN_MIME).execute()
+        whole = gdocs.unescape_export_math(
+            data.decode() if isinstance(data, bytes) else data)
+        cut = {s.title: s.text for s in gdocs.align_export(whole, doc)}
+        F.expect("every shape tab has its section",
+                 all(t in cut for t in SH.TITLES), str(sorted(cut)))
+        F.expect("the dialogue line stays in the chapter that holds it",
+                 cut["sh-a.md"].rstrip().endswith("More A.")
+                 and cut["sh-b.md"].startswith("Yes."), cut["sh-a.md"]
+                 + "\n---\n" + cut["sh-b.md"])
+        # A footnote made with Insert > Footnote: the export puts its
+        # text after the last tab, so this snapshot is one the cut stops
+        # on.
+        at = gdocs._locate_in_tab(docs, doc_id, scratch, "keeps.")[1]
+        reply = docs.documents().batchUpdate(documentId=doc_id, body={
+            "requests": [{"createFootnote": {"location": {
+                "tabId": scratch, "index": at}}}]}).execute()
+        note = reply["replies"][0]["createFootnote"]["footnoteId"]
+        docs.documents().batchUpdate(documentId=doc_id, body={"requests": [
+            {"insertText": {"location": {"tabId": scratch, "segmentId": note,
+                                         "index": 1},
+                            "text": SH.FOOTNOTE}}]}).execute()
+        snapshot(svc, docs, doc_id, "footnote")
+    finally:
+        _drop_shape_tabs(docs, doc_id)
+        for rel in SH.FILES:
+            gdocs.drop_link(db, manuscript, rel)
+            (ms / rel).unlink(missing_ok=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--record", action="store_true",
@@ -540,7 +649,7 @@ def main() -> int:
         env = (svc, docs, doc_id, db, manuscript, ms)
         for name, fn in (("1a", s1a), ("1b", s1b), ("1c", s1c), ("2", s2),
                          ("3a", s3a), ("3b", s3b), ("3c", s3c), ("4", s4),
-                         ("5a", s5a), ("5b", s5b)):
+                         ("5a", s5a), ("5b", s5b), ("6", s6)):
             if args.only and name not in args.only:
                 continue
             run(name, fn, env)

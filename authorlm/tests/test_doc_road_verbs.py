@@ -736,8 +736,10 @@ def spacing_join(root: Path) -> None:
         msg = ""
     except LookupError as err:
         msg = str(err)
-    check("an unexplained disagreement stops the push",
-          "tab structure and export disagree" in msg, msg)
+    check("an unexplained disagreement stops the push, naming the tab "
+          "and what each side holds",
+          "tab 'solo.md' does not match its part of the Doc's markdown "
+          "export" in msg and "Beta two" in msg, msg)
     check("...having written no text to the tab",
           not _text_writes(fake) and fake.tab_text("solo.md") == before,
           str(_text_writes(fake)))
@@ -757,7 +759,7 @@ def spacing_join(root: Path) -> None:
     except LookupError as err:
         msg = str(err)
     check("a disagreement after a write stops the push",
-          bool(_text_writes(fake)) and "disagree" in msg, msg)
+          bool(_text_writes(fake)) and "does not match" in msg, msg)
     check("...and says this push wrote to the tab, never 'Nothing was "
           "written'", "Nothing was written" not in msg
           and "this push wrote" in msg.lower()
@@ -787,7 +789,8 @@ def spacing_join(root: Path) -> None:
     except LookupError as err:
         msg = str(err)
     check("a disagreement stops the push before the settle step",
-          "tab structure and export disagree" in msg, msg)
+          "does not match its part of the Doc's markdown export" in msg
+          and "Nothing was written" in msg, msg)
     check("...the settled form still stands; no text was written",
           not _text_writes(fake) and fake.tab_text("solo.md") == before,
           str(_text_writes(fake)))

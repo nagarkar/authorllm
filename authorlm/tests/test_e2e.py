@@ -3422,35 +3422,50 @@ def scenario_doc_comments(root: Path) -> None:
           db.one("SELECT file FROM doc_comments WHERE comment_id='c2'")["file"] == "one.md"
           and db.one("SELECT COUNT(*) AS n FROM doc_comments")["n"] == 2, "")
 
-    # Google's export without tab titles (2026-10-26): split by each
-    # tab's opening heading, in tab order; a later echo of tab one's
-    # heading inside tab two is not a boundary.
+    # Google's export without tab titles (2026-10-26): cut by walking it
+    # against each tab's own words, in tab order; a later echo of tab
+    # one's heading inside tab two is not a boundary.
     import authorlm.gdocs as gd0
     export = ("# **Part One**\n\nAlpha text.\n\n# **Part Two**\n\nBeta, with *italic*.\n\n"
               "# **Part One**\n\nA later heading that repeats tab one's.\n")
     h1 = {"namedStyleType": "HEADING_1"}
+
+    def body(*paras):
+        return {"body": {"content": [
+            {"paragraph": {"paragraphStyle": h1 if head else {},
+                           "elements": [{"textRun": {"content": text + "\n"}}]}}
+            for head, text in paras]}}
     doc = {"tabs": [
-        {"tabProperties": {"title": "one.md"}, "documentTab": {"body": {"content": [
-            {"paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
-            {"paragraph": {"paragraphStyle": h1,
-                           "elements": [{"textRun": {"content": "Part One\n"}}]}}]}}},
-        {"tabProperties": {"title": "two.md"}, "documentTab": {"body": {"content": [
-            {"paragraph": {"paragraphStyle": h1,
-                           "elements": [{"textRun": {"content": "Part Two\n"}}]}}]}}},
+        {"tabProperties": {"title": "one.md"},
+         "documentTab": body((False, ""), (True, "Part One"), (False, "Alpha text."))},
+        {"tabProperties": {"title": "two.md"},
+         "documentTab": body((True, "Part Two"), (False, "Beta, with italic."),
+                             (True, "Part One"),
+                             (False, "A later heading that repeats tab one's."))},
         {"tabProperties": {"title": "empty.md"}, "documentTab": {"body": {"content": []}}}]}
     secs = gd0.split_tabbed_export(export, {"one.md", "two.md", "empty.md"},
                                    order=["one.md", "two.md", "empty.md"],
-                                   anchors=gd0.tab_anchors(doc))
-    check("an export without tab titles splits by each tab's opening heading",
+                                   tab_doc=doc)
+    check("an export without tab titles is cut by each tab's own words",
           secs.get("one.md") == "# **Part One**\n\nAlpha text.\n"
           and secs.get("two.md", "").startswith("# **Part Two**")
           and "A later heading" in secs.get("two.md", "")
           and secs.get("empty.md") == "\n", str(secs))
-    old_style = "# **one.md**\n\nAlpha.\n\n# **two.md**\n\nBeta.\n"
-    secs = gd0.split_tabbed_export(old_style, {"one.md", "two.md"},
-                                   order=["one.md", "two.md"],
-                                   anchors=gd0.tab_anchors(doc))
-    check("an export with tab titles still splits on them",
+    old_style = ("# **one.md**\n\n" + export.split("# **Part Two**")[0]
+                 + "# **two.md**\n\n# **Part Two**" + export.split("# **Part Two**")[1]
+                 + "\n# **empty.md**\n")
+    secs = gd0.split_tabbed_export(old_style, {"one.md", "two.md", "empty.md"},
+                                   order=["one.md", "two.md", "empty.md"],
+                                   tab_doc=doc)
+    check("an export with tab titles is cut the same, the titles left out",
+          secs.get("one.md") == "# **Part One**\n\nAlpha text.\n"
+          and secs.get("two.md", "").startswith("# **Part Two**")
+          and "A later heading" in secs.get("two.md", "")
+          and "empty.md" not in secs.get("two.md", "")
+          and secs.get("empty.md") == "\n", str(secs))
+    secs = gd0.split_tabbed_export("# **one.md**\n\nAlpha.\n\n# **two.md**\n\nBeta.\n",
+                                   {"one.md", "two.md"}, order=["one.md", "two.md"])
+    check("with no structured read, an export with tab titles splits on them",
           secs == {"one.md": "Alpha.\n", "two.md": "Beta.\n"}, str(secs))
 
     # Comment-loss causes (2026-10-26).

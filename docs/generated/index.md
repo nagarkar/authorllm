@@ -602,6 +602,12 @@ The drafting payload seam — stored state in, four blocks out.
 
 How old the Doc-road recordings are, and what to do about it.
 
+## `tests._doc_shapes`
+
+`authorlm/tests/_doc_shapes.py`
+
+The tab shapes that broke the cut of the whole-Doc export into tabs, one per pull request that mended the old cut (#27, #31, #36, #102, #252, #262, #309, #317, #322, #337, #357, #361) and issue #155.
+
 ## `tests._extraction_fixture`
 
 `authorlm/tests/_extraction_fixture.py`
@@ -637,12 +643,6 @@ The one way to run the whole test suite.
 `authorlm/tests/test_alias_canonical_conflict.py`
 
 `proposals._content_hash` / `_alias_canonical_conflict` gate alias proposals before they reach the author's queue.
-
-## `tests.test_anchor_split_and_holds`
-
-`authorlm/tests/test_anchor_split_and_holds.py`
-
-Doc sync doors that silently corrupt when wrong.
 
 ## `tests.test_api`
 
@@ -1369,6 +1369,12 @@ Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): p
 `authorlm/tests/test_sweeps_narrowing.py`
 
 `sweeps._changed_files` / `_claims_for` are the deterministic narrowing step before the ontology sweep spends tokens.
+
+## `tests.test_tab_alignment`
+
+`authorlm/tests/test_tab_alignment.py`
+
+The cut of the whole-Doc markdown export into tabs.
 
 ## `tests.test_tab_is_empty`
 

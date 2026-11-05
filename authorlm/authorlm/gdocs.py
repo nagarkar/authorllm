@@ -18,7 +18,7 @@ sees files it created. OAuth token cached at ~/.authorlm/gdocs_token.json, or ta
 AUTHORLM_GDOCS_TOKEN when that file is absent (cloud sessions).
 
 Decisions:
-- A tab's anchor in the whole-Doc export is its opening heading (level and text), the split backs up over any epigraph paragraphs before it, and opening headings must be unique across tabs and must not recur as a heading in an earlier tab; the pull stops and names the pair otherwise. Why: first-paragraph anchors let a short dialogue line ("Yes.") steal the prior chapter's tail; a uniqueness gate over the whole export dropped tabs whose opener is echoed later. Enforced by: tests/test_anchor_split_and_holds.py::test_dialogue_line_is_not_an_anchor, tests/test_anchor_split_and_holds.py::test_epigraph_lands_in_its_own_tab, tests/test_anchor_split_and_holds.py::test_duplicate_opening_heading_stops_the_pull, tests/test_anchor_split_and_holds.py::test_opening_heading_inside_an_earlier_tab_stops_the_pull, tests/test_anchor_split_and_holds.py::test_tab_without_heading_stops_the_pull. (owner)
+- The whole-Doc export is cut into tabs by walking it against every word of every tab, as the structured read (which carries tab ids) holds them: a tab ends where its own words end, the next tab must start there word for word, and a tab the export does not match stops the pull with one message that names the tab and shows both sides; text never moves to another file. Why: every cut that looked for one line (a tab-title heading, a first paragraph, an opening heading) could be drawn to another copy of that line, which took twelve pull requests, and the opening-heading rule stopped pulls of Docs whose tabs shared a heading or opened with prose. Enforced by: tests/test_tab_alignment.py::test_recorded_shapes, tests/test_tab_alignment.py::test_322_a_duplicate_dialogue_line, tests/test_tab_alignment.py::test_357_shapes_the_heading_gate_stopped, tests/test_tab_alignment.py::test_361_an_epigraph_before_the_heading, tests/test_tab_alignment.py::test_a_mismatch_stops_and_names_the_tab, tests/test_tab_alignment.py::test_no_text_moves_between_files. (owner)
 """
 
 from __future__ import annotations
@@ -1215,214 +1215,343 @@ def next_tab_move(current: list[str], desired: list[str]) -> dict | None:
     return None
 
 
-class TabAnchor(NamedTuple):
-    """Where a tab starts in the whole-Doc export, read from the Docs API
-    tab content. `level` is the opening heading's level (1-6), or 0 for a
-    tab that opens with plain text (then `text` is that first paragraph)
-    or holds no text at all (`text` empty). `before` is the plain text of
-    the non-empty paragraphs that precede the heading in the tab: an
-    epigraph, an `[Omit: all]` tag. `chapter` marks a `*.md` tab outside
-    the illustrations subtree, the tabs that must open with a heading.
-    `headings` is every heading in the tab, opener included, as (level,
-    text), for the gate's check that a later tab's opener recurs in no
-    earlier tab."""
-    level: int
+class TabWords(NamedTuple):
+    """One tab of the master Doc as the structured read holds it: its id,
+    its title and every word of its body, in order (`tab_words`)."""
+    tab_id: str
+    title: str
+    words: tuple[str, ...]
+
+
+class TabSection(NamedTuple):
+    """One tab's share of the whole-Doc markdown export (`align_export`)."""
+    tab_id: str
+    title: str
     text: str
-    before: tuple[str, ...]
-    chapter: bool
-    headings: tuple[tuple[int, str], ...] = ()
 
 
-def tab_anchors(tab_doc: dict | None) -> dict[str, TabAnchor]:
-    """Each tab's `TabAnchor`, by title, from a
-    `documents.get(includeTabsContent=True)` result: the first paragraph
-    whose `paragraphStyle.namedStyleType` is `HEADING_n` gives the level
-    and the text. The boundary for `split_tabbed_export`, whose export
-    carries no tab-title headings."""
-    out: dict[str, TabAnchor] = {}
+class ExportMismatch(LookupError):
+    """The whole-Doc export could not be cut into tabs: some tab's words,
+    as the structured read holds them, are not where the export should
+    hold them. The message names the tab and shows both sides."""
 
-    def walk(tabs: list, under_illus: bool) -> None:
-        for t in tabs:
-            title = t.get("tabProperties", {}).get("title", "")
-            chapter = title.endswith(".md") and not under_illus
-            body = t.get("documentTab", {}).get("body", {}).get("content", [])
-            before: list[str] = []
-            headings: list[tuple[int, str]] = []
-            anchor: TabAnchor | None = None
-            for el in body:
-                para = el.get("paragraph", {})
-                text = _plain("".join(r.get("textRun", {}).get("content", "")
-                                      for r in para.get("elements", [])))
-                if not text:
-                    continue
+
+# A word, for the alignment: a run of letters and digits. Markdown's own
+# marks (`#`, `*`, `\`, `|`, `[`) and the underscore are never part of
+# one, so the tab's text and its markdown agree on words whatever the
+# exporter escapes.
+_WORD = re.compile(r"[^\W_]+")
+# A line or paragraph that holds marks and no word (`---`, `——`, `}`, an
+# empty heading's `#`, a horizontal rule, a pasted image alone on its
+# line): one unit, so it is cut with the tab that holds it.
+_MARKS_ONLY = "\x00"
+# What the exporter writes that the tab's text does not hold: a link's
+# target, a pasted image's reference and (at the end of the export) its
+# data, a list item's bullet or number, and emphasis marks, which may sit
+# inside a word (`x*p1*` for a tab's "xp1").
+_EXPORT_LINK_TARGET = re.compile(
+    r"(?<!\\)((?:\\\\)*)\]\((?:[^()\\\n]|\\.|\((?:[^()\\\n]|\\.)*\))*\)")
+_EXPORT_IMAGE_REF = re.compile(r"!\[[^\]\n]*\]\[[^\]\n]*\]")
+_EXPORT_IMAGE_DATA = re.compile(r"^\[image\d+\]:\s")
+_EXPORT_FOOTNOTE_TEXT = re.compile(r"^\[\^[^\]\s]+\]:\s")
+_EXPORT_LIST_MARK = re.compile(r"^\s*(?:\d+\.|[-*+])\s+")
+_EXPORT_EMPHASIS = re.compile(r"\\.|\*+|~~")
+_EXPORT_TABLE_LINE = re.compile(r"^\s*\|")
+_TAB_TITLE_LINE = re.compile(r"^#\s+\*{0,2}(.+?)\*{0,2}\s*$")
+
+# Where a tab starts, this many words must agree exactly, and after a
+# difference inside a tab this many must agree again before the walk goes
+# on; a difference may put the two sides at most _ALIGN_REACH words apart.
+_ALIGN_RUN = 8
+_ALIGN_REACH = 200
+
+
+def _body_words(content: list, out: list[str], in_table: bool = False) -> None:
+    """The words of a tab body (or a table cell), in order, onto `out`."""
+    for item in content:
+        para = item.get("paragraph")
+        if para is not None:
+            elements = para.get("elements", [])
+            text = "".join(e.get("textRun", {}).get("content", "")
+                           for e in elements)
+            if not text.strip():
+                # No text: a rule or a pasted image alone in its
+                # paragraph, or an empty heading (the export writes its
+                # `#`), is a line of marks. An empty plain paragraph is a
+                # blank line, and a page break is no line at all.
                 named = para.get("paragraphStyle", {}).get(
                     "namedStyleType", "")
-                if not named.startswith("HEADING_"):
-                    if anchor is None:
-                        before.append(text)
-                    continue
-                headings.append((int(named[-1]), text))
-                if anchor is None:
-                    anchor = TabAnchor(int(named[-1]), text, tuple(before),
-                                       chapter)
-            out[title] = (anchor or TabAnchor(
-                0, before[0] if before else "", (), chapter)
-            )._replace(headings=tuple(headings))
-            walk(t.get("childTabs", []),
-                 under_illus or title == ILLUS_TAB_TITLE)
-    walk((tab_doc or {}).get("tabs", []), False)
+                if not in_table and (
+                        any("horizontalRule" in e
+                            or "inlineObjectElement" in e for e in elements)
+                        or named.startswith("HEADING_") or named == "TITLE"):
+                    out.append(_MARKS_ONLY)
+                continue
+            # A soft line break (\x0b) starts a new export line.
+            for line in re.split(r"[\x0b\n]", text):
+                words = _WORD.findall(line)
+                if words:
+                    out.extend(words)
+                elif line.strip() and not in_table:
+                    out.append(_MARKS_ONLY)
+        for row in (item.get("table") or {}).get("tableRows", []):
+            for cell in row.get("tableCells", []):
+                _body_words(cell.get("content", []), out, True)
+
+
+def tab_words(tab_doc: dict | None) -> list[TabWords]:
+    """Every tab of a `documents.get(includeTabsContent=True)` result, in
+    the Doc's own tab order (the order `walk_tabs` gives), with the words
+    of its body: what `align_export` holds the export against."""
+    out: list[TabWords] = []
+
+    def walk(tabs: list) -> None:
+        for t in tabs:
+            props = t.get("tabProperties", {})
+            words: list[str] = []
+            _body_words(t.get("documentTab", {}).get("body", {}).get(
+                "content", []), words)
+            out.append(TabWords(props.get("tabId") or "",
+                                props.get("title", ""), tuple(words)))
+            walk(t.get("childTabs", []))
+    walk((tab_doc or {}).get("tabs", []))
     return out
 
 
-def _plain(line: str) -> str:
-    """A markdown line as the words a reader sees: heading marks, emphasis,
-    escapes and spacing gone, for matching against Docs API text."""
-    t = re.sub(r"^\s*#+\s*", "", line)
-    t = t.replace("\\", "")
-    t = re.sub(r"[*_`]", "", t)
-    return " ".join(t.split())
+def _export_line_words(line: str) -> list[str]:
+    """One export line as `_body_words` would give its text."""
+    if not line.strip() or _EXPORT_IMAGE_DATA.match(line):
+        return []
+    bare = _EXPORT_LINK_TARGET.sub(r"\1]", _EXPORT_IMAGE_REF.sub("", line))
+    bare = _EXPORT_LIST_MARK.sub("", bare, count=1)
+    bare = _EXPORT_EMPHASIS.sub(
+        lambda m: m.group(0) if m.group(0)[0] == "\\" else "", bare)
+    words = _WORD.findall(bare)
+    if words or _EXPORT_TABLE_LINE.match(line):
+        return words
+    return [_MARKS_ONLY]
 
 
-_HEADING_LINE = re.compile(r"^\s{0,3}(#{1,6})\s")
+def _shown(words) -> str:
+    """Words for a message, clipped."""
+    text = " ".join("(marks only)" if w == _MARKS_ONLY else w for w in words)
+    return text if len(text) <= 80 else text[:79] + "…"
 
 
-def _heading_level(line: str) -> int:
-    """The level of a markdown heading line (`# **Text**`), 0 otherwise."""
-    m = _HEADING_LINE.match(line)
-    return len(m.group(1)) if m else 0
+def align_export(text: str, tab_doc: dict | None) -> list[TabSection]:
+    """Cut the whole-Doc markdown export into one section per tab, by
+    walking it against every word of every tab, in tab order.
 
+    The export is each tab's markdown, one after the other, with nothing
+    in it that says where a tab ends. The structured read does say what
+    each tab holds, so each tab's words are walked along the export in
+    turn: the tab ends on the line that holds its last word, and the next
+    tab must start, word for word, on the next line that holds any. No
+    line is ever searched for, so a line that repeats elsewhere (a
+    dialogue line, an opening shared by two chapters, a heading that
+    recurs) cannot draw a boundary to itself.
 
-def check_tab_anchors(order: list[str], anchors: dict[str, TabAnchor]) -> None:
-    """The gate every split of the whole-Doc export runs first (pull,
-    reconcile, the marked-text fetches): every opening heading is unique
-    across tabs on (level, text) and recurs as no heading, opening or
-    inner, of an earlier tab in `order` (the forward search would stop at
-    that earlier heading); and every chapter tab that holds text opens
-    with a heading. Stops with a `LookupError` that names the tabs and
-    the heading, or the tab and its first line. A later echo, in a later
-    tab or as prose anywhere, is allowed."""
-    seen: dict[tuple[int, str], tuple[str, bool]] = {}
-    for title in order:
-        a = anchors.get(title)
-        if a is None:
-            continue
-        if a.level:
-            key = (a.level, a.text)
-            if key in seen:
-                earlier, opener = seen[key]
-                where = ("both open with the heading" if opener else
-                         f"share the heading")
-                raise LookupError(
-                    f"tabs '{earlier}' and '{title}' {where} "
-                    f"{'#' * a.level} {a.text}"
-                    + ("" if opener else f" ('{title}' opens with it; "
-                       f"'{earlier}' holds it as a heading inside)")
-                    + "; retitle one so every tab's opening heading is "
-                    "unique and recurs in no earlier tab")
-            for k, h in enumerate(a.headings):
-                seen.setdefault(h, (title, k == 0))
-        elif a.chapter and a.text:
-            raise LookupError(
-                f"tab '{title}' opens with plain text, not a heading "
-                f"(every tab must open with a heading); its first line "
-                f"is: {a.text!r}")
+    Inside a tab the two sides may differ (the exporter adds and drops
+    things this module does not model): the walk goes on once
+    `_ALIGN_RUN` words agree again within `_ALIGN_REACH`. Where a tab
+    starts and where it ends they may not: an `ExportMismatch` stops the
+    caller, naming the tab and showing what the tab holds and what the
+    export holds. So does a line of table marks alone between two tabs
+    with nothing to say whose it is, and text that is in no tab.
 
-
-def _back_over(lines: list[str], plain: list[str], at: int,
-               before: tuple[str, ...], floor: int) -> int:
-    """The line the tab's section starts on: `at` (the matched heading
-    line) backed up over the export paragraphs (blank-line-separated
-    units) that hold the tab's `before` paragraphs, last first. A unit
-    counts only when its plain text equals one `before` paragraph, or
-    equals several consecutive `before` paragraphs the export joined
-    into one unit; a longer prior-tab line that merely contains the
-    epigraph as a substring stops the back-up short rather than
-    stealing that line."""
-    start = at
-    idx = len(before) - 1
-    while idx >= 0:
-        j = start - 1
-        while j >= floor and not lines[j].strip():
-            j -= 1
-        if j < floor:
-            break
-        k = j
-        while k - 1 >= floor and lines[k - 1].strip():
-            k -= 1
-        unit = " ".join(plain[k:j + 1])
-        # Exact partition of the unit into a trailing run of still-pending
-        # before paragraphs (one alone, or several soft-break-joined).
-        matched_from = None
-        parts: list[str] = []
-        for i in range(idx, -1, -1):
-            parts.insert(0, before[i])
-            joined = " ".join(parts)
-            if joined == unit:
-                matched_from = i
-                break
-            if len(joined) > len(unit):
-                break
-        if matched_from is None:
-            break
-        start = k
-        idx = matched_from - 1
-    return start
-
-
-def _split_by_anchors(text: str, order: list[str],
-                      anchors: dict[str, TabAnchor]) -> dict[str, str]:
-    """Split the export at each tab's anchor, in tab order, searching
-    forward only: a heading line of the anchor's level whose plain text
-    equals the anchor's (a non-heading line never matches a heading
-    anchor), backed up over the tab's `before` paragraphs. A tab that
-    opens with plain text (AuthorLM's own container, manifest,
-    illustrations and prompt tabs; a hand-made scratch tab) starts at the
-    non-heading line equal to its first paragraph. A tab with no text
-    gets an empty section; a tab whose anchor is not found gets none
-    (reported missing, never guessed)."""
-    check_tab_anchors(order, anchors)
+    A tab that holds no word gets an empty section. An export in the
+    form Google wrote until 2026-10-26, a heading `# **<tab title>**`
+    before every tab, is cut the same way with each of those headings
+    left out; it is tried only when the export does not match without
+    them."""
+    tabs = tab_words(tab_doc)
     lines = text.splitlines()
-    plain = [_plain(l) for l in lines]
-    level = [_heading_level(l) for l in lines]
-    starts: list[tuple[int, str]] = []
-    empty: list[str] = []
-    pos = 0
-    for title in order:
-        a = anchors.get(title)
-        if a is None or not a.text:
-            empty.append(title)
+    words: list[str] = []     # the export's words
+    on: list[int] = []        # the line each is on
+    for n, line in enumerate(lines):
+        for w in _export_line_words(line):
+            words.append(w)
+            on.append(n)
+    try:
+        return _cut_export(tabs, lines, words, on, titled=False)
+    except ExportMismatch:
+        if not (tabs and words and _is_title_line(lines[on[0]], tabs[0])):
+            raise
+    return _cut_export(tabs, lines, words, on, titled=True)
+
+
+def _is_title_line(line: str, tab: TabWords) -> bool:
+    m = _TAB_TITLE_LINE.match(line)
+    return bool(m) and m.group(1).strip().replace("\\_", "_") == tab.title
+
+
+def _cut_export(tabs: list[TabWords], lines: list[str], words: list[str],
+                on: list[int], titled: bool) -> list[TabSection]:
+    """`align_export`'s walk. `words` are the export's, `on` the line each
+    is on; `titled` says every tab is preceded by its title heading."""
+    total = len(words)
+    again = ("Stopped before cutting the export, so no text can land in "
+             "the wrong file. If the Doc was being edited, run the command "
+             "again.")
+
+    def past_line(j: int, line: int) -> int:
+        """The first word at or after `j` on a line after `line`."""
+        while j < total and on[j] <= line:
+            j += 1
+        return j
+
+    def stop(tab: TabWords, why: str) -> None:
+        raise ExportMismatch(f"tab '{tab.title}' does not match its part of "
+                             f"the Doc's markdown export: {why}. {again}")
+
+    def walk(tab: TabWords, j: int, before: str) -> int:
+        """Walk the tab's words from export word `j`; the index after its
+        last word. Stops when the two sides part and do not meet again."""
+        mine = tab.words
+        start = j
+        i = 0
+        while i < len(mine):
+            if j < total and mine[i] == words[j]:
+                i += 1
+                j += 1
+                continue
+            at = f"line {on[j] + 1}" if j < total else "its end"
+            if i < _ALIGN_RUN:
+                stop(tab, f"the tab opens «{_shown(mine[:12])}» and the "
+                          f"export, after {before}, reads "
+                          f"«{_shown(words[start:start + 12])}» ({at})")
+            jump = None
+            for apart in range(1, 2 * _ALIGN_REACH + 1):
+                for da in range(max(0, apart - _ALIGN_REACH),
+                                min(apart, _ALIGN_REACH) + 1):
+                    a, b = i + da, j + apart - da
+                    if (a + _ALIGN_RUN <= len(mine)
+                            and b + _ALIGN_RUN <= total
+                            and mine[a] == words[b]
+                            and list(mine[a:a + _ALIGN_RUN])
+                            == words[b:b + _ALIGN_RUN]):
+                        jump = (a, b)
+                        break
+                if jump:
+                    break
+            if jump is None:
+                stop(tab, f"after «{_shown(mine[max(0, i - 8):i])}» the tab "
+                          f"reads «{_shown(mine[i:i + 12])}» and the export "
+                          f"reads «{_shown(words[j:j + 12])}» ({at})")
+            i, j = jump
+        return j
+
+    # One cut per tab that takes lines: where the section before it ends,
+    # where its own begins, and its place in `out`.
+    cuts: list[tuple[int, int, int]] = []
+    out: list[TabSection] = []
+    j = 0              # the next export word no tab has taken
+    last = -1          # the line of the last word a tab took
+    before = "the start of the export"
+    for tab in tabs:
+        j = past_line(j, last)
+        first = on[j] if j < total else len(lines)
+        if titled:
+            if j >= total or not _is_title_line(lines[first], tab):
+                stop(tab, "the export carries a title heading before each "
+                          f"tab, and after {before} "
+                          + ("it ends" if j >= total else
+                             f"line {first + 1} reads "
+                             f"«{clamp(lines[first])}»"))
+            cuts.append((first, first + 1, len(out)))
+            j, last = past_line(j, first), first
+            if tab.words:
+                j = walk(tab, j, "its title heading")
+                last = on[j - 1]
+            out.append(TabSection(tab.tab_id, tab.title, "\n"))
+            before = f"tab '{tab.title}'"
             continue
-        for i in range(pos, len(lines)):
-            if level[i] == a.level and plain[i] == a.text:
-                starts.append((_back_over(lines, plain, i, a.before, pos),
-                               title))
-                pos = i + 1
-                break
-    out = {t: "\n" for t in empty}
-    for k, (i, title) in enumerate(starts):
-        end = starts[k + 1][0] if k + 1 < len(starts) else len(lines)
-        out[title] = "\n".join(lines[i:end]).strip() + "\n"
+        if not tab.words:
+            out.append(TabSection(tab.tab_id, tab.title, "\n"))
+            continue
+        end = walk(tab, j, before)
+        # Lines of table marks alone, between the tab before and this one,
+        # are this tab's when they touch its first line and not the last
+        # line of the tab before.
+        start = first
+        while start - 1 > last and lines[start - 1].strip():
+            start -= 1
+        floor = last
+        while floor + 1 < start and lines[floor + 1].strip():
+            floor += 1
+        loose = [n for n in range(floor + 1, start) if lines[n].strip()]
+        if start < first and start - 1 == last and last >= 0:
+            loose = [start]
+        if loose:
+            stop(tab, f"line {loose[0] + 1} of the export, "
+                      f"«{clamp(lines[loose[0]])}», sits between {before} "
+                      "and this tab, holds no word, and nothing says which "
+                      "of the two it belongs to")
+        cuts.append((start, start, len(out)))
+        out.append(TabSection(tab.tab_id, tab.title, "\n"))
+        j, last = end, on[end - 1]
+        before = f"tab '{tab.title}'"
+    j = past_line(j, last)
+    if j < total:
+        footnote = _EXPORT_FOOTNOTE_TEXT.match(lines[on[j]])
+        raise ExportMismatch(
+            f"the Doc's markdown export holds text that is in no tab, after "
+            f"{before}: line {on[j] + 1}, «{clamp(lines[on[j]])}». "
+            + ("It is the text of a footnote made with Insert > Footnote, "
+               "which the export puts after the last tab, where nothing "
+               "says which tab it belongs to; write the footnote as text "
+               "(`[^X]` and a `[^X]: ...` line) in its own tab. "
+               if footnote else "") + again)
+    for k, (_, begin, idx) in enumerate(cuts):
+        end_line = cuts[k + 1][0] if k + 1 < len(cuts) else len(lines)
+        out[idx] = out[idx]._replace(
+            text="\n".join(lines[begin:end_line]).strip() + "\n")
     return out
+
+
+def _holds_content(tab_doc: dict | None) -> bool:
+    """Whether the read carries tab bodies (a real
+    `includeTabsContent=True` read always does), not titles alone."""
+    def any_body(tabs: list) -> bool:
+        return any("documentTab" in t or any_body(t.get("childTabs", []))
+                   for t in tabs)
+    return any_body((tab_doc or {}).get("tabs", []))
+
+
+# The last cut, kept because one command cuts the same export at the same
+# revision several times (the read, the guard, the push): the structured
+# read it was cut against (the same dict while the revision stands, see
+# `master_doc`), the export text, and the sections.
+_LAST_CUT: list = []
 
 
 def split_tabbed_export(text: str, known_files,
                         order: list[str] | None = None,
-                        anchors: dict[str, TabAnchor] | None = None
-                        ) -> dict[str, str]:
-    """Split a whole-master markdown export into per-file sections. An
-    export that carries tab titles as top-level headings ('# **<title>**')
-    splits on them: only headings naming a known mapped file are
-    boundaries — content headings, even H1s, pass through untouched. An
-    export without them (Google's, since 2026-10) splits by `anchors`,
-    each tab's opening heading (`tab_anchors`, `_split_by_anchors`).
+                        tab_doc: dict | None = None) -> dict[str, str]:
+    """Split a whole-master markdown export into per-file sections, by
+    tab title.
 
-    `order` is the tab titles in true document order (the Docs API's tab
-    tree, e.g. from `walk_tabs`). When given, a name in `order` only
-    starts a new section at its correct position in that sequence — so a
-    prose heading that happens to repeat some *other* tab's title, out of
-    turn, is never mistaken for a boundary (it-x7-2). A known name absent
-    from `order` (no positional info for it, e.g. docs_service wasn't
-    available) still matches anywhere, as before."""
+    With `tab_doc`, the structured read of the same Doc
+    (`documents.get(includeTabsContent=True)`), the cut is `align_export`:
+    every tab's whole content decides where it ends, and a tab the export
+    does not match stops the caller with an `ExportMismatch`. Every tab
+    gets a section; a tab that holds no word gets an empty one.
+
+    Without it (no Docs service, or a read that carries titles only)
+    there is nothing to align against, and the export splits only on the
+    tab-title headings ('# **<title>**') Google wrote until 2026-10-26:
+    only headings naming a known mapped file are boundaries, and a name
+    in `order` (the tab titles in document order) starts a section only
+    at its position in that sequence, so a prose heading that repeats
+    another tab's title out of turn is not a boundary (it-x7-2). An
+    export without those headings then yields no section at all, and the
+    callers report every file as missing rather than guess."""
+    if _holds_content(tab_doc):
+        if _LAST_CUT and _LAST_CUT[0] is tab_doc and _LAST_CUT[1] == text:
+            return dict(_LAST_CUT[2])
+        cut = {s.title: s.text for s in align_export(text, tab_doc)}
+        _LAST_CUT[:] = [tab_doc, text, cut]
+        return dict(cut)
     pattern = re.compile(r"^#\s+\*{0,2}(.+?)\*{0,2}\s*$")
     sections: dict[str, list[str]] = {}
     current: str | None = None
@@ -1448,13 +1577,8 @@ def split_tabbed_export(text: str, known_files,
             continue
         if current is not None:
             sections[current].append(line)
-    found = {name: "\n".join(lines).strip() + "\n"
-             for name, lines in sections.items()}
-    # No tab-title heading at all for tabs the Docs API lists: the export
-    # carries none. Find each tab by its opening heading instead.
-    if order and anchors and not any(t in found for t in order):
-        return _split_by_anchors(text, list(order), anchors)
-    return found
+    return {name: "\n".join(lines).strip() + "\n"
+            for name, lines in sections.items()}
 
 
 # ---------------------------------------------------------------- mapping
@@ -2380,7 +2504,7 @@ def three_way(tab_text: str, local_text: str, base_hash: str | None) -> str:
 
 
 def _tab_boundaries(links: dict, bridge: "DocBridge", docs_service,
-                    master_id: str) -> tuple[set, list[str], dict[str, TabAnchor]]:
+                    master_id: str) -> tuple[set, list[str], dict]:
     """The split boundaries and live tab order pull_doc and diff_push
     use: every live tab title (not only mapped essay files), the
     manifest and illustrations tabs, and mapped prompt tabs (it-x7-2)."""
@@ -2391,7 +2515,7 @@ def _tab_boundaries(links: dict, bridge: "DocBridge", docs_service,
     walk_tabs(tab_doc.get("tabs", []), tab_props, [])
     known = set(mapped) | {MANIFEST_TITLE} | {ILLUS_TAB_TITLE} | set(pmapped)
     titles = {t for _, t in tab_props if t}
-    return known | titles, [t for _, t in tab_props if t], tab_anchors(tab_doc)
+    return known | titles, [t for _, t in tab_props if t], tab_doc
 
 
 def doc_revision(docs_service, master_id: str) -> str | None:
@@ -2408,13 +2532,14 @@ def doc_revision(docs_service, master_id: str) -> str | None:
 
 # What the master Doc's full reads ask for: every field any reader of
 # them uses (tab ids, titles and nesting; each element's index range;
-# paragraph text, rules and named style; the spacing apply_tab_spacing
-# compares; table cells), and nothing else — the full read was 8.6 MB
+# paragraph text, rules, pasted images and named style; the spacing
+# apply_tab_spacing compares; table cells), and nothing else — the full read was 8.6 MB
 # on SMSTTD (2026-10-30). Google nests tabs three deep; this asks four.
 # A reader that needs a new field adds it here, or it comes back
 # missing.
 _PARA_FIELDS = ("startIndex,endIndex,paragraph(elements(startIndex,endIndex,"
-                "textRun/content,horizontalRule),paragraphStyle("
+                "textRun/content,horizontalRule,inlineObjectElement/"
+                "inlineObjectId),paragraphStyle("
                 "namedStyleType,lineSpacing,spaceAbove,spaceBelow))")
 _TAB_FIELDS = (f"tabProperties,documentTab(body(content({_PARA_FIELDS},"
                f"table(tableRows(tableCells(content({_PARA_FIELDS})))))))")
@@ -2530,12 +2655,12 @@ def fetch_tab_markdown(service, docs_service, master_id: str, links: dict,
     """`relpath`'s tab as normalized markdown, split out of the whole-Doc
     export exactly as pull_doc splits it; None when the export has no
     section for it."""
-    boundaries, order, anchors = _tab_boundaries(links, bridge, docs_service,
-                                        master_id)
+    boundaries, order, tab_doc = _tab_boundaries(links, bridge, docs_service,
+                                                 master_id)
     whole = unescape_export_math(
         master_export(service, docs_service, master_id, db))
     sections = split_tabbed_export(whole, boundaries, order=order,
-                                   anchors=anchors)
+                                   tab_doc=tab_doc)
     if relpath not in sections:
         return None
     return normalize_markdown(sections[relpath])
@@ -2754,7 +2879,7 @@ def tab_marked_markdown(db: Database, manuscript: dict, file: str,
     # title must never be mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
     sections = split_tabbed_export(whole, boundaries, order=tab_order,
-                                   anchors=tab_anchors(tab_doc))
+                                   tab_doc=tab_doc)
     if file not in sections:
         return {"marked": None, "state": "missing", "dangling": [],
                 "marker_warnings": []}
@@ -2859,7 +2984,7 @@ def read_manuscript(db: Database, manuscript: dict, service,
                   | set(pmapped) | {t for _, t in tab_props if t})
     tab_order = [t for _, t in tab_props if t]
     sections = split_tabbed_export(whole, boundaries, order=tab_order,
-                                   anchors=tab_anchors(tab_doc))
+                                   tab_doc=tab_doc)
 
     for name in names:
         entry = blank(name)
@@ -3031,7 +3156,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     # never mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
     sections = split_tabbed_export(whole, boundaries, order=tab_order,
-                                   anchors=tab_anchors(tab_doc))
+                                   tab_doc=tab_doc)
     targets = mapped
     prompt_targets = sorted(pmapped)
     if query:
@@ -3406,7 +3531,7 @@ def reconcile(db: Database, manuscript: dict, service,
     # never mistaken for that tab's boundary (it-x7-2).
     tab_order = [t for _, t in tab_props if t]
     sections = split_tabbed_export(whole, known | titles, order=tab_order,
-                                   anchors=tab_anchors(tab_doc))
+                                   tab_doc=tab_doc)
     ignored = sorted(t for t in titles - known
                      if t != manuscript["name"])
     if ignored:
@@ -5562,8 +5687,22 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
     # used unconditionally below for paragraph reads and batchUpdate), so
     # this is not best-effort the way pull_doc/reconcile's is.
     def tab_markdown() -> str:
-        text = fetch_tab_markdown(service, docs_service, master_id, links,
-                                  bridge, relpath, db)
+        try:
+            text = fetch_tab_markdown(service, docs_service, master_id,
+                                      links, bridge, relpath, db)
+        except ExportMismatch as err:
+            # The export could not be cut into tabs at all: say, as
+            # `disagreement` does, whether this push had written yet.
+            if sent:
+                raise LookupError(
+                    f"diff push: {err} This push wrote {sent} edit(s) to "
+                    f"{relpath}'s tab before its read-back failed, so the "
+                    f"tab may hold part of it: see authorlm doc diff "
+                    f"{relpath}, then settle any margin threads and retry, "
+                    "or use a rebuild push. This is a bridge bug to file, "
+                    "not a Doc to fix by hand") from err
+            raise LookupError(f"diff push: {err} Nothing was written.") \
+                from err
         return text if text is not None else normalize_markdown("")
 
     # revs["now"]: the revision of the last paragraph read, which every

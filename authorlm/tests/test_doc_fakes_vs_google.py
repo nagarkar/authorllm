@@ -181,10 +181,15 @@ def replay(recs) -> tuple[int, list[str]]:
             for req in (c.get("body") or {}).get("requests", []):
                 spec = next(iter(req.values()))
                 rng = spec.get("range") or spec.get("location") or {}
+                # Writes the fake does not model (scenario 6 makes a
+                # page break, pictures and a footnote by hand).
                 if any(k in req for k in ("addDocumentTab", "deleteTab",
                                           "updateDocumentTabProperties",
                                           "createParagraphBullets",
-                                          "insertTable")):
+                                          "insertTable", "insertPageBreak",
+                                          "insertInlineImage",
+                                          "createFootnote")
+                       ) or rng.get("segmentId"):
                     touched = None
                     break
                 touched.add(rng.get("tabId"))
@@ -216,7 +221,7 @@ def sections(export: str, doc: dict, titles: list[str]) -> dict[str, str]:
     order = [t for _, t in tab_props if t]
     return gdocs.split_tabbed_export(
         gdocs.unescape_export_math(export), set(order) | set(links),
-        order=order, anchors=gdocs.tab_anchors(doc))
+        order=order, tab_doc=doc)
 
 
 def main_test() -> None:
@@ -233,6 +238,8 @@ def main_test() -> None:
     compared = 0
     for name, calls in recs.items():
         for label, doc, export in snapshots(calls):
+            if name == "6":     # tables and lists: the fake renders none
+                continue        # (test_tab_alignment.py reads these)
             fake, tabs = rebuild(doc)
             titles = [t["tabProperties"]["title"] for t in tabs
                       if t["tabProperties"]["title"].endswith(".md")]
