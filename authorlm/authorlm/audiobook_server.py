@@ -14,6 +14,9 @@ manuscript`, and `?m=` on the audio urls), and `-m` is only the one the
 page opens on. The phone reaches the
 port over Tailscale (`tailscale serve --bg <port>`); the server itself
 never leaves 127.0.0.1.
+
+`/try-text` plays pasted Markdown through the Mac preview voice.
+`/api/try-text` returns the MP3 directly and keeps it outside the manuscript.
 """
 
 from __future__ import annotations
@@ -25,11 +28,12 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from . import audiobook, branding
 
 _RANGE = re.compile(r"bytes=(\d*)-(\d*)")
+_PASTE_BODY_LIMIT = 64 * 1024
 
 
 def make_handler(workspace: str | None, manuscript: str | None):
@@ -88,7 +92,7 @@ def make_handler(workspace: str | None, manuscript: str | None):
 
         def _get(self, head: bool) -> None:
             path, _, query = self.path.partition("?")
-            if path in {"/", "/index.html"}:
+            if path in {"/", "/index.html", "/try-text"}:
                 payload = audiobook.app_html().encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -127,7 +131,53 @@ def make_handler(workspace: str | None, manuscript: str | None):
         def do_HEAD(self) -> None:
             self._get(head=True)
 
+        def _try_text(self) -> None:
+            # This request can start local synthesis. Accept only same-origin
+            # browser requests and bound the body before reading it.
+            self.close_connection = True
+            host = self.headers.get("Host", "")
+            name = host.partition(":")[0]
+            if name not in {"localhost", "127.0.0.1"} and not name.endswith(".ts.net"):
+                self._json(421, {"error": "Unknown host."})
+                return
+            try:
+                origin = self.headers.get("Origin")
+                if self.headers.get("X-AuthorLM") != "1" or (
+                    origin and urlsplit(origin).netloc != host
+                ):
+                    self._json(403, {"error": "Open Try text from the audiobook page."})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._json(415, {"error": "Expected a JSON request."})
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                if length > _PASTE_BODY_LIMIT:
+                    self._json(413, {"error": "This paste is too long. Try a shorter passage."})
+                    return
+                if length <= 0:
+                    raise ValueError("Paste some text to listen to.")
+                body = json.loads(self.rfile.read(length))
+                if not isinstance(body, dict) or not isinstance(body.get("markdown"), str):
+                    raise ValueError("Paste some text to listen to.")
+                s = audiobook.session(workspace, manuscript)
+                payload = audiobook.render_pasted_preview(s.manuscript, body["markdown"])
+            except (ValueError, RuntimeError) as err:
+                self._json(400, {"error": str(err)})
+                return
+            except Exception as err:  # noqa: BLE001 — the local server stays up
+                self._json(500, {"error": f"Could not prepare audio ({type(err).__name__})."})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+
         def do_POST(self) -> None:
+            if self.path == "/api/try-text":
+                self._try_text()
+                return
             # The pronunciation workbench lives on this page too (author's
             # ruling 2026-09-26: "all in one place"); its transport is
             # unchanged, so the standalone `authorlm workbench` still works.

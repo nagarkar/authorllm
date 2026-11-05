@@ -568,6 +568,29 @@ def _spoken(block: dict, config: dict) -> tuple[str, list[str]]:
                        config)
 
 
+def pasted_speech(markdown: str) -> str:
+    """Read pasted Markdown with the audiobook's text rules and block pauses."""
+    source = normalize_markdown(markdown)
+    # A paste need not have the blank lines between blocks that the
+    # manuscript exporter expects.
+    source = re.sub(r"(?m)^( {0,3}#{1,6}[ \t]+[^\n]*)$", r"\n\n\1\n\n", source)
+    source = re.sub(
+        r"(?m)^([^\n]+)\n(?= {0,3}(?:[-+*]|\d+[.)])[ \t]+| {0,3}>)",
+        lambda m: m[0] if _LIST_ITEM.match(m[1]) or _QUOTE.match(m[1])
+        else m[1] + "\n\n", source)
+    parts = []
+    for block in blocks_of(source):
+        if block["kind"] in ("footnote", "illustration", "rule", "voice"):
+            continue
+        if block["kind"] == "heading":
+            spoken, _ = speech_text(block["text"], _CONFIG_DEFAULTS)
+        else:
+            spoken, _ = _spoken(block, _CONFIG_DEFAULTS)
+        if spoken:
+            parts.append(spoken)
+    return "\n\n".join(parts)
+
+
 # --------------------------------------------------------- audio source
 
 def audio_source(name: str, raw: str) -> str:

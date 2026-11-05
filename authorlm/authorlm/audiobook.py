@@ -26,6 +26,7 @@ generate or retake job runs, and each one is the author's tap.
 from __future__ import annotations
 
 import queue
+import tempfile
 import threading
 import traceback
 from pathlib import Path
@@ -52,6 +53,18 @@ def app_html() -> str:
         raise RuntimeError("the audiobook page has not been built — "
                            "cd web/audiobook && npm install && npm run build")
     return path.read_text(encoding="utf-8")
+
+
+def render_pasted_preview(manuscript: dict, markdown: str) -> bytes:
+    """Render a free preview without saving a source, a chapter preview or a take."""
+    spoken = audio.pasted_speech(markdown)
+    if not spoken:
+        raise ValueError("Paste some text to listen to.")
+    voice, rate = gen.preview_settings(manuscript)
+    with tempfile.TemporaryDirectory(prefix="authorlm-try-text-") as directory:
+        renderer = PREVIEW_RENDERER or gen.render_preview
+        return renderer(Path(directory), {"id": "paste", "text": spoken},
+                        voice, rate).read_bytes()
 
 
 class Session:
