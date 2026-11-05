@@ -7618,6 +7618,10 @@ def main_test() -> None:
               "the bold the tab never held",
               tab_anchor_text("## **Why I wrote this book**") == "Why I wrote this book"
               and tab_anchor_text("Plain.") == "Plain.")
+        check("an insertion anchor on an exported link gives the link's text, "
+              "and a footnote tag keeps its brackets",
+              tab_anchor_text("[^J2]: Ann, [https://youtu.be/a?t=1](https://youtu.be/a?t=1)")
+              == "[^J2]: Ann, https://youtu.be/a?t=1")
         from authorlm import lenses as _lz_contract
         check("the lens contract asks for a judgment as concrete options, "
               "not one clause (author ruling 2026-09-27)",

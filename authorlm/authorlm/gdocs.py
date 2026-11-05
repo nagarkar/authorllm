@@ -147,6 +147,7 @@ def render_emphasis(markdown: str) -> tuple[str, list[tuple[int, int, dict]]]:
 
 
 _HEADING_MARK = re.compile(r"^#{1,6}\s+")
+_INLINE_LINK = re.compile(r"\[(?!\^)([^\]\n]+)\]\([^)\s]+\)")
 
 
 def tab_anchor_text(paragraph: str) -> str:
@@ -154,8 +155,11 @@ def tab_anchor_text(paragraph: str) -> str:
     the rendered text (emphasis dropped, hard breaks as line-break
     characters) with a heading's `## ` marker gone too — the importer
     turns the marker into a paragraph style, and a judgment tag planted
-    after a poem's title anchors on the title (found 2026-09-27)."""
-    return _HEADING_MARK.sub("", rendered_text(paragraph).strip())
+    after a poem's title anchors on the title (found 2026-09-27). An inline
+    link gives its text: the export writes a bare URL as `[url](url)`, while
+    the tab's text runs hold only the text."""
+    text = _INLINE_LINK.sub(r"\1", rendered_text(paragraph).strip())
+    return _HEADING_MARK.sub("", text)
 
 
 def rendered_text(markdown: str) -> str:
