@@ -10,7 +10,8 @@ Version history has one door, and it is this module. A caller asks for a
 `file_at`, `files_at`, `changes`. `record_version` is the only writer. No
 caller reads the `manuscript_versions` table or the JSON it holds, so
 where the text of a version is kept can change without a caller
-noticing.
+noticing. This module owns which versions exist (their rows);
+`history.py` owns where their text is kept, in the table or in git.
 """
 
 from __future__ import annotations
@@ -20,11 +21,11 @@ import hashlib
 import json
 import re
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 from . import form_grammar
-from .db import Database, ko_fields, loads
+from .db import Database, ko_fields
+from .history import FileChange, Version, store_for
 
 MANUSCRIPT_EXTENSIONS = {".md", ".markdown", ".txt"}
 
@@ -174,28 +175,6 @@ def checksum(files: dict[str, str]) -> str:
 
 # ------------------------------------------------------------ history
 
-@dataclass(frozen=True, slots=True)
-class Version:
-    """One collected version of a manuscript: which one it is, and when
-    and how it was recorded. It never carries the text; `file_at`,
-    `files_at` and `changes` read that."""
-    id: str
-    manuscript_id: str
-    version_no: int
-    checksum: str
-    source: str
-    session_id: str | None
-    created_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class FileChange:
-    """One file's text on the two sides of `changes`. `None` on a side
-    means the file is not in that version."""
-    old: str | None
-    new: str | None
-
-
 _VERSION_COLUMNS = ("id, manuscript_id, version_no, checksum, source, "
                     "session_id, created_at")
 
@@ -274,11 +253,7 @@ def file_at(db: Database, version_id: str | None, file: str) -> str | None:
     or the version does not hold the file. Reads that file only."""
     if not version_id:
         return None
-    row = db.one(
-        "SELECT entry.value AS text FROM manuscript_versions AS v, "
-        "json_each(v.files) AS entry WHERE v.id = ? AND entry.key = ?",
-        (version_id, file))
-    return row["text"] if row else None
+    return store_for(db).file(version_id, file)
 
 
 def files_at(db: Database, version_id: str | None) -> dict[str, str]:
@@ -286,16 +261,12 @@ def files_at(db: Database, version_id: str | None) -> dict[str, str]:
     is no such version."""
     if not version_id:
         return {}
-    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?",
-                 (version_id,))
-    return loads(row["files"], {}) if row else {}
+    return store_for(db).files(version_id)
 
 
 def file_counts(db: Database, manuscript_id: str) -> dict[str, int]:
     """How many files each version of the manuscript holds, by version id."""
-    return {row["id"]: row["n"] for row in db.all(
-        "SELECT id, (SELECT COUNT(*) FROM json_each(files)) AS n "
-        "FROM manuscript_versions WHERE manuscript_id = ?", (manuscript_id,))}
+    return store_for(db).file_counts(manuscript_id)
 
 
 def changes(db: Database, older_id: str | None,
@@ -303,13 +274,7 @@ def changes(db: Database, older_id: str | None,
     """The files that differ between two versions, by relative path, in
     path order. `older_id=None` compares against an empty manuscript, so
     every file reads as added."""
-    old_files = files_at(db, older_id)
-    new_files = files_at(db, newer_id)
-    return {
-        name: FileChange(old_files.get(name), new_files.get(name))
-        for name in sorted(set(old_files) | set(new_files))
-        if old_files.get(name) != new_files.get(name)
-    }
+    return store_for(db).changes(older_id, newer_id)
 
 
 def diff_pair(db: Database, manuscript_id: str,
@@ -339,23 +304,30 @@ def record_version(db: Database, manuscript_id: str, files: dict[str, str],
                    session_id: str | None,
                    source: str = "snapshot") -> Version | None:
     """Record `files` as the manuscript's next version. Returns it, or
-    None when they are what the latest version already holds."""
-    digest = checksum(files)
-    last = latest_version(db, manuscript_id)
-    if last and last.checksum == digest:
-        return None
+    None when they are what the latest version already holds.
 
-    row = ko_fields("mv")
-    row.update(
-        manuscript_id=manuscript_id,
-        version_no=(last.version_no + 1) if last else 1,
-        checksum=digest,
-        files=json.dumps(files),
-        source=source,
-        session_id=session_id,
-    )
-    db.insert("manuscript_versions", row)
-    return _version(row)
+    The text goes to the store first and the row second: the row is what
+    makes a version exist (`history.py` says what a crash between the
+    two leaves)."""
+    digest = checksum(files)
+    store = store_for(db)
+    with store.recording(manuscript_id):
+        last = latest_version(db, manuscript_id)
+        if last and last.checksum == digest:
+            return None
+        row = ko_fields("mv")
+        row.update(
+            manuscript_id=manuscript_id,
+            version_no=(last.version_no + 1) if last else 1,
+            checksum=digest,
+            source=source,
+            session_id=session_id,
+        )
+        version = _version(row)
+        row["files"] = store.put(version, files, last)
+        db.insert("manuscript_versions", row)
+        store.settled(version)
+    return version
 
 
 def collect_revision(

@@ -314,6 +314,24 @@ The takes: generate, retake, stitch and status, on the folder `audio export` wri
 
 Guidance Generator (RFC AuthorLM §17.10, Chapter 14).
 
+## `authorlm.history`
+
+`authorlm/authorlm/history.py`
+
+Where the text of a version is kept.
+
+## `authorlm.history_git`
+
+`authorlm/authorlm/history_git.py`
+
+The git adapter: the only code in AuthorLM that runs git.
+
+## `authorlm.history_replay`
+
+`authorlm/authorlm/history_replay.py`
+
+Copy a manuscript's version history from the table into git, and check that git gives back what was put in.
+
 ## `authorlm.hygiene`
 
 `authorlm/authorlm/hygiene.py`
@@ -955,6 +973,12 @@ Retake must not destroy a good paragraph take when the write fails mid-flight.
 `authorlm/tests/test_has_broken_forms.py`
 
 `threads.has_broken_forms` is the pull/skip gate for marker corruption.
+
+## `tests.test_history_git`
+
+`authorlm/tests/test_history_git.py`
+
+The private git history: the adapter, the git store, replay and check.
 
 ## `tests.test_hold_commented`
 
