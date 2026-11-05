@@ -30,6 +30,7 @@ from pathlib import Path
 from .concepts import VALID_RELATIONS, scoped_concepts
 from .db import Database, ko_fields, loads
 from .llm import LLMClient, resolve_temperature
+from .revisions import file_at
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "summarizer.md"
 DEFAULT_SUMMARIZER_MODEL = "gemini/gemini-2.5-flash"
@@ -149,11 +150,11 @@ def inflight_sources(db: Database, manuscript: dict) -> dict[str, str | None]:
     gone missing reads the same way, and honestly so: there is no
     pre-rewrite text to be had.)"""
     rows = db.all(
-        "SELECT w.file AS file, v.files AS files FROM writeups w "
-        "LEFT JOIN manuscript_versions v ON v.id = w.source_version_id "
-        "WHERE w.manuscript_id = ? AND w.status = 'active'",
+        "SELECT file, source_version_id FROM writeups "
+        "WHERE manuscript_id = ? AND status = 'active'",
         (manuscript["id"],))
-    return {r["file"]: loads(r["files"], {}).get(r["file"]) for r in rows}
+    return {r["file"]: file_at(db, r["source_version_id"], r["file"])
+            for r in rows}
 
 
 def _context_units(db: Database, manuscript: dict

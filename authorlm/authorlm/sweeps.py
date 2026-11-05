@@ -23,8 +23,8 @@ from pathlib import Path
 
 from . import proposals
 from .concepts import concept_pattern, node_names
-from .db import Database, loads
-from .revisions import read_manuscript_files
+from .db import Database
+from .revisions import changes, latest_versions, read_manuscript_files
 
 _PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
 
@@ -156,13 +156,10 @@ Return {"findings": []} when nothing conflicts."""
 
 
 def _changed_files(db: Database, mid: str) -> set[str] | None:
-    rows = db.all(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 2", (mid,))
-    if len(rows) < 2:
+    newest = latest_versions(db, mid, 2)
+    if len(newest) < 2:
         return None
-    new, old = loads(rows[0]["files"], {}), loads(rows[1]["files"], {})
-    return {f for f in new if old.get(f) != new[f]} | (set(old) - set(new))
+    return set(changes(db, newest[1].id, newest[0].id))
 
 
 def _claims_for(db: Database, mid: str, node: dict,

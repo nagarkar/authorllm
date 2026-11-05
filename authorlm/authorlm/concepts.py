@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from .db import Database, ko_fields, loads
+from .revisions import Version
 
 
 NODE_KINDS = frozenset({
@@ -312,12 +313,13 @@ def primary_location(items: list[tuple[str, str]], node) -> str | None:
     return None
 
 
-def scan_realizations(db: Database, manuscript_id: str, version: dict) -> list[dict]:
-    """Mark declared concepts as realized when they appear in text.
-    Returns newly realized concept rows."""
+def scan_realizations(db: Database, manuscript_id: str, version: Version,
+                      files: dict[str, str]) -> list[dict]:
+    """Mark declared concepts as realized when they appear in `files`,
+    the text of `version` as the caller wants it scanned. Returns newly
+    realized concept rows."""
     from .structure import ordered_items
 
-    files: dict[str, str] = loads(version["files"], {})
     # Reading order (TOC-authoritative): the first location in reading order
     # is the concept's primary location — definition precedence. Invariant
     # across nodes, so it's computed once rather than per declared concept.
@@ -331,7 +333,7 @@ def scan_realizations(db: Database, manuscript_id: str, version: dict) -> list[d
         if fname is None:
             continue
         meta = loads(node["metadata"], {})
-        meta.update(realized_at=version["created_at"], realized_version=version["id"])
+        meta.update(realized_at=version.created_at, realized_version=version.id)
         db.update(
             "concept_nodes", node["id"],
             {
@@ -345,8 +347,8 @@ def scan_realizations(db: Database, manuscript_id: str, version: dict) -> list[d
 
 
 def rescan_primary_locations(db: Database, manuscript_id: str,
-                             version: dict) -> tuple[list[dict], list[dict]]:
-    """Re-validate realized concepts against the current text.
+                             files: dict[str, str]) -> tuple[list[dict], list[dict]]:
+    """Re-validate realized concepts against the current text, `files`.
 
     Returns (repointed, vanished): `repointed` are concepts whose primary
     location moved because their introducing text no longer contains them —
@@ -356,7 +358,6 @@ def rescan_primary_locations(db: Database, manuscript_id: str,
     an author decision — never silently demoted."""
     from .structure import ordered_items
 
-    files: dict[str, str] = loads(version["files"], {})
     items = ordered_items(files)
     repointed, vanished = [], []
     for node in db.all(

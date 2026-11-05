@@ -1,8 +1,16 @@
-"""Revision Collector and Revision Analyzer (RFC AuthorLM §17.3–§17.4).
+"""Revision Collector, version history and Revision Analyzer (RFC AuthorLM
+§17.3–§17.4).
 
 The collector snapshots the manuscript directory into an immutable,
 checksummed version. The analyzer computes editorial transitions between
 successive versions by diffing paragraph sequences per file.
+
+Version history has one door, and it is this module. A caller asks for a
+`Version` (which version, when, how it was recorded) and then for text:
+`file_at`, `files_at`, `changes`. `record_version` is the only writer. No
+caller reads the `manuscript_versions` table or the JSON it holds, so
+where the text of a version is kept can change without a caller
+noticing.
 """
 
 from __future__ import annotations
@@ -12,6 +20,7 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import form_grammar
@@ -163,11 +172,197 @@ def checksum(files: dict[str, str]) -> str:
     return digest.hexdigest()
 
 
+# ------------------------------------------------------------ history
+
+@dataclass(frozen=True, slots=True)
+class Version:
+    """One collected version of a manuscript: which one it is, and when
+    and how it was recorded. It never carries the text; `file_at`,
+    `files_at` and `changes` read that."""
+    id: str
+    manuscript_id: str
+    version_no: int
+    checksum: str
+    source: str
+    session_id: str | None
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class FileChange:
+    """One file's text on the two sides of `changes`. `None` on a side
+    means the file is not in that version."""
+    old: str | None
+    new: str | None
+
+
+_VERSION_COLUMNS = ("id, manuscript_id, version_no, checksum, source, "
+                    "session_id, created_at")
+
+
+def _version(row) -> Version:
+    return Version(**{name: row[name] for name in Version.__slots__})
+
+
+def version_by_id(db: Database, version_id: str | None) -> Version | None:
+    if not version_id:
+        return None
+    row = db.one(f"SELECT {_VERSION_COLUMNS} FROM manuscript_versions "
+                 "WHERE id = ?", (version_id,))
+    return _version(row) if row else None
+
+
+def latest_versions(db: Database, manuscript_id: str,
+                    count: int) -> list[Version]:
+    """The `count` most recent versions, newest first."""
+    # Two steps, deliberately. `source` and `session_id` sit after `files`
+    # in the row, so SQLite walks a version's whole text to reach them;
+    # ordering on them would walk every version of the manuscript. The
+    # ids come from the leading columns alone, then each row is read by
+    # primary key.
+    ids = db.all(
+        "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+        "ORDER BY version_no DESC LIMIT ?", (manuscript_id, count))
+    found = (version_by_id(db, row["id"]) for row in ids)
+    return [version for version in found if version]
+
+
+def latest_version(db: Database, manuscript_id: str) -> Version | None:
+    newest = latest_versions(db, manuscript_id, 1)
+    return newest[0] if newest else None
+
+
+def version_by_number(db: Database, manuscript_id: str,
+                     version_no: int) -> Version | None:
+    row = db.one(
+        "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
+        "AND version_no = ?", (manuscript_id, version_no))
+    return version_by_id(db, row["id"]) if row else None
+
+
+def version_as_of(db: Database, manuscript_id: str,
+                  moment: str) -> Version | None:
+    """The version that was current at `moment` (an ISO time): the most
+    recent one recorded at or before it."""
+    row = db.one(
+        "SELECT id FROM manuscript_versions WHERE manuscript_id = ? AND "
+        "created_at <= ? ORDER BY version_no DESC LIMIT 1",
+        (manuscript_id, moment))
+    return version_by_id(db, row["id"]) if row else None
+
+
+def list_versions(db: Database, manuscript_id: str) -> list[Version]:
+    """Every version, oldest first."""
+    return [_version(row) for row in db.all(
+        f"SELECT {_VERSION_COLUMNS} FROM manuscript_versions "
+        "WHERE manuscript_id = ? ORDER BY version_no", (manuscript_id,))]
+
+
+def count_versions(db: Database, manuscript_id: str) -> int:
+    return db.one("SELECT COUNT(*) AS n FROM manuscript_versions "
+                  "WHERE manuscript_id = ?", (manuscript_id,))["n"]
+
+
+def last_recorded_at(db: Database, session_id: str) -> str | None:
+    """When the session last recorded a version, or None if it never did."""
+    return db.one("SELECT MAX(created_at) AS latest FROM manuscript_versions "
+                  "WHERE session_id = ?", (session_id,))["latest"]
+
+
+def file_at(db: Database, version_id: str | None, file: str) -> str | None:
+    """One file's text at a version. None when there is no such version
+    or the version does not hold the file. Reads that file only."""
+    if not version_id:
+        return None
+    row = db.one(
+        "SELECT entry.value AS text FROM manuscript_versions AS v, "
+        "json_each(v.files) AS entry WHERE v.id = ? AND entry.key = ?",
+        (version_id, file))
+    return row["text"] if row else None
+
+
+def files_at(db: Database, version_id: str | None) -> dict[str, str]:
+    """Every file's text at a version, by relative path. Empty when there
+    is no such version."""
+    if not version_id:
+        return {}
+    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?",
+                 (version_id,))
+    return loads(row["files"], {}) if row else {}
+
+
+def file_counts(db: Database, manuscript_id: str) -> dict[str, int]:
+    """How many files each version of the manuscript holds, by version id."""
+    return {row["id"]: row["n"] for row in db.all(
+        "SELECT id, (SELECT COUNT(*) FROM json_each(files)) AS n "
+        "FROM manuscript_versions WHERE manuscript_id = ?", (manuscript_id,))}
+
+
+def changes(db: Database, older_id: str | None,
+            newer_id: str) -> dict[str, FileChange]:
+    """The files that differ between two versions, by relative path, in
+    path order. `older_id=None` compares against an empty manuscript, so
+    every file reads as added."""
+    old_files = files_at(db, older_id)
+    new_files = files_at(db, newer_id)
+    return {
+        name: FileChange(old_files.get(name), new_files.get(name))
+        for name in sorted(set(old_files) | set(new_files))
+        if old_files.get(name) != new_files.get(name)
+    }
+
+
+def diff_pair(db: Database, manuscript_id: str,
+              numbers: list[int]) -> tuple[Version | None, Version]:
+    """The (older, newer) versions a diff compares: the lowest and highest
+    of two or more version numbers; or one numbered version and the one
+    numbered just below it; or, with no number, the latest two. The older
+    is None when there is nothing below the newer. Raises LookupError for
+    a number that is not a version."""
+    newest = latest_versions(db, manuscript_id, 2)
+    if not newest:
+        raise LookupError("no versions collected yet")
+    found = {n: version_by_number(db, manuscript_id, n) for n in numbers}
+    for number in numbers:
+        if found[number] is None:
+            raise LookupError(
+                f"no version v{number} (have v1..v{newest[0].version_no})")
+    if len(numbers) >= 2:
+        return found[min(numbers)], found[max(numbers)]
+    if numbers:
+        return (version_by_number(db, manuscript_id, numbers[0] - 1),
+                found[numbers[0]])
+    return (newest[1] if len(newest) > 1 else None), newest[0]
+
+
+def record_version(db: Database, manuscript_id: str, files: dict[str, str],
+                   session_id: str | None,
+                   source: str = "snapshot") -> Version | None:
+    """Record `files` as the manuscript's next version. Returns it, or
+    None when they are what the latest version already holds."""
+    digest = checksum(files)
+    last = latest_version(db, manuscript_id)
+    if last and last.checksum == digest:
+        return None
+
+    row = ko_fields("mv")
+    row.update(
+        manuscript_id=manuscript_id,
+        version_no=(last.version_no + 1) if last else 1,
+        checksum=digest,
+        files=json.dumps(files),
+        source=source,
+        session_id=session_id,
+    )
+    db.insert("manuscript_versions", row)
+    return _version(row)
+
+
 def collect_revision(
     db: Database, manuscript: dict, session_id: str | None, source: str = "snapshot"
-) -> dict | None:
-    """Snapshot the manuscript. Returns the new version row as a dict,
-    or None if nothing changed since the last version.
+) -> Version | None:
+    """Snapshot the manuscript. Returns the new version, or None if
+    nothing changed since the last version.
 
     Raises ManuscriptRootUnreadable — refuses to record a version — if
     the root is missing or unreadable, regardless of the caller: an
@@ -178,28 +373,8 @@ def collect_revision(
     otherwise bypass the mass-deletion guard entirely."""
     root = Path(manuscript["path"])
     check_manuscript_root(root)
-    files = read_manuscript_files(root)
-    digest = checksum(files)
-
-    last = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (manuscript["id"],),
-    )
-    if last and last["checksum"] == digest:
-        return None
-
-    row = ko_fields("mv")
-    row.update(
-        manuscript_id=manuscript["id"],
-        version_no=(last["version_no"] + 1) if last else 1,
-        checksum=digest,
-        files=json.dumps(files),
-        source=source,
-        session_id=session_id,
-    )
-    db.insert("manuscript_versions", row)
-    return row
+    return record_version(db, manuscript["id"], read_manuscript_files(root),
+                          session_id, source)
 
 
 def massive_deletions(db: Database, manuscript: dict,
@@ -208,14 +383,10 @@ def massive_deletions(db: Database, manuscript: dict,
     versus the last collected version — likely editor accidents. Returns
     (relative path, percent removed) pairs. Used only by the auto-collect
     path: a manual `collect` always proceeds."""
-    latest = db.one(
-        "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (manuscript["id"],),
-    )
+    latest = latest_version(db, manuscript["id"])
     if not latest:
         return []
-    old_files: dict[str, str] = loads(latest["files"], {})
+    old_files = files_at(db, latest.id)
     disk = read_manuscript_files(Path(manuscript["path"]))
     flagged = []
     for name, old_text in old_files.items():
@@ -246,20 +417,18 @@ def _snippet(text: str, limit: int = 80) -> str:
 
 
 def detect_transitions(
-    db: Database, manuscript_id: str, before: dict | None, after: dict
+    db: Database, manuscript_id: str, before: Version | None, after: Version
 ) -> list[dict]:
     """Compute editorial transitions between two manuscript versions and
     persist them as immutable observations."""
-    old_files: dict[str, str] = loads(before["files"], {}) if before else {}
-    new_files: dict[str, str] = loads(after["files"], {})
     transitions: list[dict] = []
 
     def record(kind: str, location: str, summary: str, detail: dict) -> None:
         row = ko_fields("tr")
         row.update(
             manuscript_id=manuscript_id,
-            version_before=before["id"] if before else None,
-            version_after=after["id"],
+            version_before=before.id if before else None,
+            version_after=after.id,
             kind=kind,
             location=location,
             summary=summary,
@@ -268,22 +437,21 @@ def detect_transitions(
         db.insert("editorial_transitions", row)
         transitions.append(row)
 
-    for name in sorted(set(old_files) | set(new_files)):
-        if name not in old_files:
+    changed = changes(db, before.id if before else None, after.id)
+    for name, change in changed.items():
+        if change.old is None:
             record(
                 "file_added", name,
                 f"New file: {name}",
-                {"paragraphs": len(_paragraphs(new_files[name]))},
+                {"paragraphs": len(_paragraphs(change.new))},
             )
             continue
-        if name not in new_files:
+        if change.new is None:
             record("file_removed", name, f"File removed: {name}", {})
             continue
-        if old_files[name] == new_files[name]:
-            continue
 
-        old_paras = _paragraphs(old_files[name])
-        new_paras = _paragraphs(new_files[name])
+        old_paras = _paragraphs(change.old)
+        new_paras = _paragraphs(change.new)
         matcher = difflib.SequenceMatcher(a=old_paras, b=new_paras, autojunk=False)
         for op, i1, i2, j1, j2 in matcher.get_opcodes():
             if op == "equal":
@@ -359,12 +527,3 @@ def marker_present(text: str) -> bool:
     """The weaker check: the marker line survived inside a file that is
     no longer just the placeholder. Warned about, never auto-repaired."""
     return MARKER in text
-
-
-def _version_text(db: Database, version_id: str | None,
-                  file: str) -> str | None:
-    if not version_id:
-        return None
-    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?",
-                 (version_id,))
-    return loads(row["files"], {}).get(file) if row else None

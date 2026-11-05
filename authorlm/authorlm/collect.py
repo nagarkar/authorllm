@@ -14,7 +14,6 @@ landing an edit, and it reads only areas at or below its own.
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -26,8 +25,9 @@ from .db import Database, loads
 from .guidance import compute_prerequisite_gaps
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
-from .revisions import (collect_revision, detect_transitions, is_placeholder,
-                        massive_deletions, read_manuscript_files)
+from .revisions import (collect_revision, detect_transitions, files_at,
+                        is_placeholder, latest_version, massive_deletions,
+                        read_manuscript_files)
 from .sessions import NO_EPISODE
 
 
@@ -116,17 +116,13 @@ def collect(db: Database, manuscript: dict, config: dict,
         media_keys = []
 
     session = ses.active_session(db, mid)
-    before = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (mid,),
-    )
+    before = latest_version(db, mid)
     version = collect_revision(db, manuscript, session["id"] if session else None,
                                source=source)
     if version is None:
         return {"unchanged": True}
 
-    transitions = detect_transitions(db, mid, dict(before) if before else None, version)
+    transitions = detect_transitions(db, mid, before, version)
     attached = False
     if episode is NO_EPISODE:
         # Filed under NO goal, deliberately (filter-pass design §1.8).
@@ -151,15 +147,14 @@ def collect(db: Database, manuscript: dict, config: dict,
     # presently rewritten" and be marked realized with introduced_in
     # pointing at a truncated file, silently rewriting the graph. Picking
     # "safe" words is not a fix: the author owns the concept vocabulary
-    # and can add the colliding word tomorrow. The version ROW is
+    # and can add the colliding word tomorrow. The recorded version is
     # untouched; only the scans' input is blinded.
     def _blinded(files: dict) -> dict:
         return {f: ("" if is_placeholder(t) else t) for f, t in files.items()}
 
-    _blind = _blinded(loads(version["files"], {}))
-    _scan_version = {**dict(version), "files": json.dumps(_blind)}
-    realized = cg.scan_realizations(db, mid, _scan_version)
-    repointed, vanished = cg.rescan_primary_locations(db, mid, _scan_version)
+    _blind = _blinded(files_at(db, version.id))
+    realized = cg.scan_realizations(db, mid, version, _blind)
+    repointed, vanished = cg.rescan_primary_locations(db, mid, _blind)
     # Summaries: mark, don't cascade. A changed unit's own row is already
     # stale by source_hash; downstream rows get the tolerated flag.
     from . import summaries as sums
@@ -209,7 +204,7 @@ def collect(db: Database, manuscript: dict, config: dict,
     # DELTA — gaps_resolved and gaps_new are set differences of these two
     # — which is the same defect wearing a subtraction sign.
     gaps_before = (
-        compute_prerequisite_gaps(db, mid, _blinded(loads(before["files"], {})))
+        compute_prerequisite_gaps(db, mid, _blinded(files_at(db, before.id)))
         if before else []
     )
     gaps_after = compute_prerequisite_gaps(db, mid, _blind)
@@ -217,8 +212,8 @@ def collect(db: Database, manuscript: dict, config: dict,
     after_keys = {g["edge_id"] for g in gaps_after}
 
     report = {
-        "version_no": version["version_no"],
-        "checksum": version["checksum"],
+        "version_no": version.version_no,
+        "checksum": version.checksum,
         "transitions": [
             {"kind": t["kind"], "location": t["location"], "summary": t["summary"]}
             for t in transitions

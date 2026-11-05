@@ -65,7 +65,7 @@ from pathlib import Path
 
 from .concepts import concept_pattern, node_names
 from .db import Database, loads, now_iso
-from .revisions import _paragraphs
+from .revisions import _paragraphs, files_at, list_versions
 
 TARGET_CONCEPTS = 0.70      # §2.5: concept candidates the author confirms
 TARGET_LINKS = 0.75         # §2.5: edge candidates confirmed or retyped
@@ -225,9 +225,9 @@ class _Versions:
 
     def __init__(self, db: Database, mid: str):
         self.db = db
-        self.rows = [dict(r) for r in db.all(
-            "SELECT id, version_no, created_at FROM manuscript_versions "
-            "WHERE manuscript_id = ? ORDER BY version_no", (mid,))]
+        self.rows = [{"id": v.id, "version_no": v.version_no,
+                      "created_at": v.created_at}
+                     for v in list_versions(db, mid)]
         self._files: dict[str, dict] = {}
         self._layout: dict[str, list] = {}
 
@@ -244,9 +244,7 @@ class _Versions:
 
     def files(self, vid: str) -> dict[str, str]:
         if vid not in self._files:
-            row = self.db.one("SELECT files FROM manuscript_versions WHERE "
-                              "id = ?", (vid,))
-            self._files[vid] = loads(row["files"], {}) if row else {}
+            self._files[vid] = files_at(self.db, vid)
         return self._files[vid]
 
     def layout(self, vid: str) -> list[tuple[str, list[tuple]]]:

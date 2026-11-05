@@ -31,7 +31,8 @@ from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
 from .db import Database, ko_fields
 from .llm import LLMClient
 from .loop import similarity as _similarity
-from .revisions import _paragraphs, is_placeholder, read_manuscript_files
+from .revisions import (_paragraphs, files_at, is_placeholder, latest_version,
+                        read_manuscript_files, version_as_of, version_by_id)
 
 # Materiality floor (Q/note-materiality): a note_update that says the same
 # thing in different words is not new information — see _note_update_blocked.
@@ -155,27 +156,20 @@ def changed_files_since_extraction(db: Database, manuscript: dict):
     """(changed relative paths, latest version id, watermark files, latest
     files) since the last extraction. changed is None when there is no
     watermark to diff against (→ process everything)."""
-    latest = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (manuscript["id"],),
-    )
+    latest = latest_version(db, manuscript["id"])
     if not latest:
         return None, None, None, None
     watermark = json.loads(manuscript["metadata"] or "{}").get("last_extracted_version")
     if not watermark:
-        return None, latest["id"], None, None
-    if watermark == latest["id"]:
-        return set(), latest["id"], None, None
-    previous = db.one(
-        "SELECT files FROM manuscript_versions WHERE id = ?", (watermark,)
-    )
-    if not previous:
-        return None, latest["id"], None, None
-    old_files = json.loads(previous["files"])
-    new_files = json.loads(latest["files"])
+        return None, latest.id, None, None
+    if watermark == latest.id:
+        return set(), latest.id, None, None
+    if not version_by_id(db, watermark):
+        return None, latest.id, None, None
+    old_files = files_at(db, watermark)
+    new_files = files_at(db, latest.id)
     changed = {name for name, text in new_files.items() if old_files.get(name) != text}
-    return changed, latest["id"], old_files, new_files
+    return changed, latest.id, old_files, new_files
 
 
 def _normalize(text: str | None) -> str:
@@ -1550,10 +1544,8 @@ def revival_due(db: Database, manuscript: dict, node: dict,
     if meta.get("retired_for_good"):
         return None
     since = retired_at(db, mid, node)
-    base = db.one(
-        "SELECT files FROM manuscript_versions WHERE manuscript_id = ? AND "
-        "created_at <= ? ORDER BY version_no DESC LIMIT 1", (mid, since))
-    old = ({_norm_paragraph(p) for text in loads(base["files"], {}).values()
+    base = version_as_of(db, mid, since)
+    old = ({_norm_paragraph(p) for text in files_at(db, base.id).values()
             for p in _paragraphs(text)} if base else set())
     fresh = {name: [p for p in _paragraphs(text)
                     if _norm_paragraph(p) not in old]
@@ -2002,14 +1994,13 @@ def run(db: Database, manuscript: dict, essays: list[tuple[str, list]], *,
         reports.append(run_essay(db, manuscript, payloads,
                                  extract_llm=extract_llm, judge_llm=judge_llm,
                                  knob=knob, run_id=run_id, files=files))
-    latest = db.one("SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-                    "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
-    realized = scan_realizations(db, manuscript["id"], dict(latest)) \
-        if latest else []
+    latest = latest_version(db, manuscript["id"])
+    realized = scan_realizations(db, manuscript["id"], latest,
+                                 files_at(db, latest.id)) if latest else []
     incomplete = bool(stopped) or any(
         r["answered"] < r["sections"] or not r["judged"] for r in reports)
     if advance_watermark and not incomplete and latest:
-        _set_extraction_watermark(db, manuscript, latest["id"])
+        _set_extraction_watermark(db, manuscript, latest.id)
     total = spent(extract_llm, judge_llm)
     entry = {"id": run_id, "started": started, "kind": "extract",
              "model": extract_llm.model, "adjudicator": judge_llm.model,

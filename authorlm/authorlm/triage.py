@@ -15,6 +15,7 @@ from typing import Any
 from . import concepts as cg
 from .db import Database, ko_fields, loads, now_iso
 from .extraction import record_triage
+from .revisions import checksum, latest_version, read_manuscript_files
 
 CONCEPT_TRIAGE_HELP = (
     "Keys: [k]eep  [r]etire  [s]kip (or Enter)  [n] reword notes  "
@@ -415,13 +416,6 @@ def list_rows(db: Database, manuscript: dict, triage_type: str) -> list[dict[str
     raise ValueError(f"unknown triage type '{triage_type}'")
 
 
-def _latest_manuscript_version(db: Database, manuscript_id: str) -> dict | None:
-    row = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1", (manuscript_id,))
-    return dict(row) if row else None
-
-
 def snapshot(db: Database, manuscript: dict, triage_type: str,
              profile_id: str | None = None,
              profile_version: str | None = None) -> dict[str, Any]:
@@ -434,14 +428,12 @@ def snapshot(db: Database, manuscript: dict, triage_type: str,
                if TRIAGE_SCHEMAS[triage_type].get("default_profile") else None)
     rows = list_rows(db, manuscript, triage_type)
     by_id = {row["id"]: row for row in rows}
-    current_version = _latest_manuscript_version(db, manuscript["id"])
+    current_version = latest_version(db, manuscript["id"])
     local_dirty = False
     if current_version:
-        from .revisions import checksum, read_manuscript_files
-
         try:
             local_dirty = checksum(read_manuscript_files(Path(manuscript["path"]))) \
-                != current_version["checksum"]
+                != current_version.checksum
         except OSError:
             local_dirty = True
     assessments = db.all(
@@ -460,7 +452,7 @@ def snapshot(db: Database, manuscript: dict, triage_type: str,
             continue
         seen.add(object_id)
         current = (current_version is not None and not local_dirty
-                   and item["manuscript_version_id"] == current_version["id"]
+                   and item["manuscript_version_id"] == current_version.id
                    and item["object_version"] == by_id[object_id]["version"])
         by_id[object_id]["analysis"] = {
             **loads(item["output"], {}),
@@ -498,9 +490,9 @@ def snapshot(db: Database, manuscript: dict, triage_type: str,
         run["remaining_ids"] = [i for i in run["requested_ids"] if i not in done]
     return {
         "manuscript": {"id": manuscript["id"], "name": manuscript["name"]},
-        "manuscript_version": ({"id": current_version["id"],
-                                "version_no": current_version["version_no"],
-                                "checksum": current_version["checksum"],
+        "manuscript_version": ({"id": current_version.id,
+                                "version_no": current_version.version_no,
+                                "checksum": current_version.checksum,
                                 "local_dirty": local_dirty}
                                if current_version else None),
         "schema": schema(triage_type, profile),

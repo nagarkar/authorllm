@@ -31,9 +31,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .db import Database, ko_fields, loads
+from .db import Database, ko_fields
 from . import passes
 from . import form_grammar
+from .revisions import file_at, version_by_id
 
 
 def is_marked(text: str) -> bool:
@@ -244,20 +245,17 @@ def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
 
 def rollback(db: Database, manuscript: dict, file: str,
              version_id: str) -> str:
-    """Restore the file from a pinned `manuscript_versions` row.
+    """Restore the file from a pinned version.
 
     The verdicts stay: they are evidence, and evidence is not undone by
     putting text back. Raises rather than guessing when the pinned
     version does not carry this file."""
-    row = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
-                 (version_id,))
-    if row is None:
+    if version_by_id(db, version_id) is None:
         raise LookupError(f"no pinned version {version_id}")
-    files = loads(row["files"], {})
-    if file not in files:
+    text = file_at(db, version_id, file)
+    if text is None:
         raise LookupError(
             f"the pinned version does not carry {file} — refusing to "
             "guess what its text was.")
-    text = files[file]
     (Path(manuscript["path"]) / file).write_text(text, encoding="utf-8")
     return text
