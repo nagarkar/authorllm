@@ -746,6 +746,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 `summaries._depends_on` turns model-named ordinals into earlier para hashes.
 
+## `tests.test_directive_landing`
+
+`authorlm/tests/test_directive_landing.py`
+
+`directives._spaced` / `_land_explain` / `_land_ref` / `_append_definition` are the byte-identical landing seam for Explain and Footnote applies.
+
 ## `tests.test_doc_add_toc`
 
 `authorlm/tests/test_doc_add_toc.py`
@@ -1250,6 +1256,12 @@ Lazy-preview stamp and orphan sweep (#227).
 
 `structure.refuse_sidecar` is the named door every filter / lens / intent verb shares for `pronunciations.md`.
 
+## `tests.test_remove_tag`
+
+`authorlm/tests/test_remove_tag.py`
+
+`directive_tags.remove_tag` — the shared cut used by landing and resolve.
+
 ## `tests.test_reply_records`
 
 `authorlm/tests/test_reply_records.py`
@@ -1279,6 +1291,12 @@ tests/run_all.py, the suite's one runner, against fixture trees: throwaway test 
 `authorlm/tests/test_section_summaries.py`
 
 Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5, §11.3): the section-summary pass. One call per section with the text as authority and the paragraph records as skeleton, conditioned on the earlier sections' POINT lines; MOVES coverage as set equality on the body paragraphs, misses reported; heading-only sections stored with no call; `ensure(level="section")` rebuilds the paragraph level first and prints one cost line per level. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `section-summary` section.
+
+## `tests.test_seed_margin_candidate`
+
+`authorlm/tests/test_seed_margin_candidate.py`
+
+`beliefs.seed_margin_candidate` — the margin-thread distiller door.
 
 ## `tests.test_select_chapters`
 
