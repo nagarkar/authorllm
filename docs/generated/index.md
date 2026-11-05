@@ -686,6 +686,12 @@ Issue #173: default voices are explicitly declared in audiobook.toml.
 
 Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
 
+## `tests.test_ci_red_proof`
+
+`authorlm/tests/test_ci_red_proof.py`
+
+Throwaway: proves the tests workflow turns red on a failing test (issue #363). Removed in the next commit.
+
 ## `tests.test_clamped_delta`
 
 `authorlm/tests/test_clamped_delta.py`
