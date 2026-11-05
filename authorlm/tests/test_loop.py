@@ -846,9 +846,10 @@ def test_retraction(db, ms, folded_proposal, law_entry):
 
 
 def test_cli_parity():
-    """`proposal screen` must exist on the CLI too: the MCP-only version of
-    this verb is how the illustration distiller ended up wired one way on
-    one surface and another way on the other."""
+    """`proposal screen` must exist on the CLI: a version of this verb
+    that lived only on the MCP server (since removed) is how the
+    illustration distiller ended up wired one way on one surface and
+    another way on the other."""
     from authorlm import cli
 
     parser_actions = None
@@ -859,7 +860,7 @@ def test_cli_parity():
             for a in action[1]._actions:
                 if isinstance(a, argparse._StoreAction) and a.dest == "action":
                     parser_actions = a.choices
-    check("CLI exposes 'proposal screen' alongside the MCP tool",
+    check("CLI exposes 'proposal screen'",
           parser_actions and "screen" in parser_actions, str(parser_actions))
 
 

@@ -1,5 +1,9 @@
 # Video Clips — Design Reference
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Grilled and ratified 2026-10-16 to 2026-10-17. Slice 1 built 2026-10-17
 (§10). §9 lists what is still open.
 

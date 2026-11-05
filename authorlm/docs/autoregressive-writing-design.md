@@ -1,5 +1,9 @@
 # Autoregressive Generation at the Paragraph Level — Design
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Design for a beat-by-beat co-writing loop: validated manuscript knowledge
 seeds a new chapter, the author ratifies a plan, and the system proposes
 one unit (paragraph / heading / epigraph) at a time — each conditioned on

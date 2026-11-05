@@ -1,5 +1,9 @@
 # Triage App Backend Integration: Change Record and Risk Guide
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Status: implemented in a dirty, uncommitted worktree; ownership review required  
 Date: 2026-08-15  
 Scope: backend changes that intersect the existing CLI, MCP server, database, and packaging

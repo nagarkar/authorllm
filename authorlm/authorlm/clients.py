@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -70,11 +69,6 @@ MARKER_TTL_HOURS = 12       # a marker older than this is not "live"
 MARKER_SWEEP_HOURS = 24     # SessionStart unlinks markers older than this
 MAX_CLIENTS = 32            # cap on a writeup's touched-by list
 MAX_VERBS = 12              # cap on the verb trail per client
-
-# One stdio MCP process serves exactly one client for its whole life, so
-# a per-process uuid is an exact — if anonymous — connection identity.
-# `mcp_server.CONNECTION_ID` re-exports this, unchanged in shape.
-CONNECTION_ID = f"mcp-{uuid.uuid4().hex[:12]}"
 
 _TS_FORMATS = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
                "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z")
@@ -144,7 +138,7 @@ class Context:
     Code Bash call and would otherwise detect the developer's own chat."""
 
     env: Mapping[str, str]
-    surface: str                 # "cli" | "mcp" | "api"
+    surface: str                 # "cli" | "api"
     workspace: Path
     now: str
 
@@ -230,7 +224,7 @@ def live_markers(workspace: str | Path, now: str | None = None) -> list[dict]:
 def marker_for_host(workspace: str | Path, engine: str, host: str,
                     now: str | None = None) -> str | None:
     """Branch B: map the Claude host pid — which reaches both the tool
-    subprocess and the stdio MCP server — to the session id the hook
+    subprocess — to the session id the hook
     recorded beside it.
 
     Deliberately does NOT apply the pid liveness filter: the host pid
@@ -693,25 +687,6 @@ def locate_by_session(client: Client, roots: tuple[str, ...]) -> Path | None:
     return Path(unique[0]) if len(unique) == 1 else None
 
 
-@dataclass(frozen=True)
-class McpStdioAdapter:
-    """Last-resort *engine identification* for a chat engine we do not
-    recognise. The id is exact — one process, one client, for its whole
-    life — but it names a CONNECTION, not a chat, so it cannot be joined
-    to a transcript. What is missing is not precision but identity, and
-    `engine` is what says so."""
-
-    name: str = "mcp-stdio"
-    setup: str | None = None
-
-    def detect(self, ctx: Context) -> Client | None:
-        if ctx.surface != "mcp":
-            return None
-        return Client(engine="mcp-stdio", session_id=CONNECTION_ID,
-                      precision="exact", adapter=self.name,
-                      label="stdio MCP connection (engine unidentified)")
-
-
 CLAUDE_CODE_SETUP = (
     "Register the SessionStart/SessionEnd hooks so a chat records its "
     "label, start time and transcript path:  authorlm client-hook "
@@ -734,8 +709,8 @@ def _claude_code_reader() -> JsonlTranscriptUsage | None:
 CLAUDE_CODE = UsageReadingAdapter(
     name="claude-code",
     engine="claude-code",
-    # CLAUDECODE=1 is the DOCUMENTED gate, set in both Bash-tool
-    # subprocesses and stdio MCP servers. The session-id variable behind
+    # CLAUDECODE=1 is the DOCUMENTED gate, set in Bash-tool
+    # subprocesses. The session-id variable behind
     # it is not documented, so the gate is what the adapter is pinned to.
     gate=lambda env: env.get("CLAUDECODE") == "1",
     session_keys=("CLAUDE_CODE_SESSION_ID",),
@@ -746,13 +721,11 @@ CLAUDE_CODE = UsageReadingAdapter(
     locator=locate_by_session,
 )
 
-MCP_STDIO = McpStdioAdapter()
-
-# Ordering IS the precedence rule. `claude-code` first, so a Claude Code
-# MCP server resolves to the real chat session and only an unrecognised
-# engine's server falls through to `mcp-stdio` — which therefore stays
-# last, always.
-ADAPTERS: tuple[Adapter, ...] = (CLAUDE_CODE, MCP_STDIO)
+# Ordering IS the precedence rule: the first adapter that detects its
+# engine wins. Rows written before the MCP server was removed (2026-11)
+# may carry the engine `mcp-stdio`, an anonymous stdio connection; no
+# adapter claims it any more, so `usage` reports it as unmeasurable.
+ADAPTERS: tuple[Adapter, ...] = (CLAUDE_CODE,)
 
 
 def adapter_for_engine(engine: str) -> Any:
@@ -783,7 +756,7 @@ _ENV_KEYS: tuple[str, ...] = (
 def configure(*, surface: str | None = None, workspace: str | None = None,
               verb: str | None = None) -> None:
     """Called once per invocation by the surface that owns it (CLI
-    dispatch, MCP `_guard`). This is what "resolved once per invocation"
+    dispatch). This is what "resolved once per invocation"
     means — not sniffing the call stack later."""
     if surface is not None:
         _STATE["surface"] = surface

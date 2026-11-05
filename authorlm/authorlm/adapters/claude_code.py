@@ -2,7 +2,7 @@
 
 On the measured versions (2.1.246 / 2.1.247) the adapter is already
 `exact` without any hook, because `CLAUDE_CODE_SESSION_ID` travels in the
-environment of both Bash-tool subprocesses and stdio MCP servers. **The
+environment of Bash-tool subprocesses. **The
 hook is enrichment, not correctness**: it supplies the label, the start
 time and the transcript path, which the adapter picks up from a marker
 *keyed by the session id it already knows*.

@@ -1,5 +1,9 @@
 # Auditors — Requirements
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Requirements for the retrospective auditors (style drift, concept/ontology
 pollution, policy conformance) and the seeding-time jurisdiction router.
 Distilled from the author's rulings in conversation (2026-07-31), the

@@ -782,9 +782,8 @@ def check_live_is_the_go_ahead() -> None:
 
 def check_paid_verbs_spend_only_with_live() -> None:
     """`audio generate`, `retake` and `say` print the cost and render nothing
-    until --live, on the CLI and through MCP; the same for the MCP audition
-    and dictionary push (metalm guidelines/cli.md)."""
-    from authorlm import generation as gen, mcp_server
+    until --live (metalm guidelines/cli.md)."""
+    from authorlm import generation as gen
 
     book = _book_copy()
     ws, _out = _workspace(book)
@@ -803,9 +802,8 @@ def check_paid_verbs_spend_only_with_live() -> None:
     def renders() -> list:
         return [u for _m, u, _b in log if "/text-to-speech/" in u]
 
-    real = audio.ElevenLabs, audio.api_key, mcp_server._WORKSPACE
+    real = audio.ElevenLabs, audio.api_key
     audio.ElevenLabs, audio.api_key = fake_client, lambda required=True: "k"
-    mcp_server._WORKSPACE = str(ws)
     base = ("-w", str(ws), "audio")
     try:
         out, code = run_cli(*base, "export", "--offline")
@@ -872,40 +870,8 @@ def check_paid_verbs_spend_only_with_live() -> None:
         check("say --live renders each respelling",
               code == 0 and len(renders()) == 2, out)
 
-        # MCP: the same shape, previewing unless live=True.
-        log.clear()
-        pre = mcp_server.say_term("Basilides", say=["x", "y"], settle="x",
-                                  manuscript="Scratch")["result"]
-        check("MCP say_term previews by default and states the cost",
-              pre.get("preview") is True and pre.get("characters", 0) > 0
-              and len(pre.get("clips", [])) == 2 and not log
-              and pron_file.read_text(encoding="utf-8") == pron_before, str(pre)[:300])
-        pre = mcp_server.audition_voices(["the_dead"], text="Hear this.",
-                                         manuscript="Scratch")["result"]
-        check("MCP audition_voices previews by default and states the cost",
-              pre.get("preview") is True and pre.get("characters", 0) > 0 and not log,
-              str(pre)[:300])
-        pre = mcp_server.push_pronunciations(manuscript="Scratch")["result"]
-        check("MCP push_pronunciations previews by default",
-              pre.get("preview") is True and pre.get("applied") is False
-              and not [e for e in log if e[0] != "GET"], str(pre)[:300])
-        log.clear()
-        done = mcp_server.say_term("Basilides", say=["x"], live=True,
-                                   manuscript="Scratch")["result"]
-        check("MCP say_term live=True renders", done.get("clips") and len(renders()) == 1,
-              str(done)[:300])
-        log.clear()
-        done = mcp_server.audition_voices(["the_dead"], text="Hear this.", live=True,
-                                          manuscript="Scratch")["result"]
-        check("MCP audition_voices live=True renders",
-              done.get("clips") and len(renders()) == 1, str(done)[:300])
-        log.clear()
-        done = mcp_server.push_pronunciations(live=True, manuscript="Scratch")["result"]
-        check("MCP push_pronunciations live=True applies",
-              done.get("applied") is True
-              and any(u.endswith("/add-from-rules") for _m, u, _b in log), str(done)[:300])
     finally:
-        audio.ElevenLabs, audio.api_key, mcp_server._WORKSPACE = real
+        audio.ElevenLabs, audio.api_key = real
         shutil.rmtree(book, ignore_errors=True)
         shutil.rmtree(ws, ignore_errors=True)
 

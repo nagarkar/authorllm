@@ -543,33 +543,6 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIn(f"--force: went past the spend cap: {cap}", out)
 
-    def test_mcp_clip_ensure_names_what_force_overrode(self):
-        from authorlm import mcp_server
-
-        key, ms = self._capped_clip()
-        cap = media_gen.plan(self._DB(), ms, key)["over_cap"][0]
-        os.environ["GEMINI_API_KEY"] = "test-key"
-        calls = []
-
-        def http(method, url, k, body=None, raw=False, timeout=120):
-            calls.append(url)
-            return {"name": "models/veo/operations/op1"}
-        # `_guard` writes its trace line to `_WORKSPACE`, and with none set
-        # that is the author's live ~/.authorlm: pin it to the test's own
-        # folder (every run of this test had been adding two lines there).
-        with mock.patch.object(mcp_server, "_db", return_value=self._DB()), \
-                mock.patch.object(mcp_server, "_WORKSPACE", str(self.root)), \
-                mock.patch.object(mcp_server, "_manuscript", return_value=ms), \
-                mock.patch.object(media_gen, "_http", http):
-            stopped = mcp_server.clip_ensure(key, generate=True, dry_run=False)
-            self.assertFalse(stopped["ok"])
-            self.assertIn("--force", stopped["error"])
-            self.assertEqual(calls, [])
-            went = mcp_server.clip_ensure(key, generate=True, dry_run=False,
-                                          force=True)
-        self.assertEqual(went["result"]["overrode"], [cap])
-        self.assertEqual(len(calls), 1)
-
     def test_clip_ensure_json_names_what_force_overrode(self):
         key, ms = self._capped_clip()
         cap = media_gen.plan(self._DB(), ms, key)["over_cap"][0]

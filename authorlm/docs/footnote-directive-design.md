@@ -1,5 +1,9 @@
 # Footnote Directive — Design Reference
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Grilled and ratified 2026-09-02. Built 2026-09-03 in
 `authorlm/directives.py` (shared with the explain directive —
 `explain-directive-design.md`). One amendment, ratified 2026-09-03:

@@ -469,7 +469,7 @@ def adopt(db: Database, manuscript_id: str, row: dict) -> str:
         #
         # `adopt` takes a manuscript ID rather than the row, so it has no
         # `path`. Smallest fix, inside this branch and nowhere else: the
-        # signature is used by cli, mcp and the triage app, and is not
+        # signature is used by cli and the triage app, and is not
         # worth changing for one branch.
         from pathlib import Path
 

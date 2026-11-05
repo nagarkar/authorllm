@@ -1,7 +1,6 @@
-"""API-layer tests + CLI/MCP parity checklist (P11).
+"""API-layer tests (P11).
 
-Exercises `authorlm.api` directly (the logic layer beneath every surface)
-and asserts the MCP server exposes the expected hand-curated tool set.
+Exercises `authorlm.api` directly (the logic layer beneath every surface).
 
 Run: python3 tests/test_api.py
 """
@@ -170,9 +169,9 @@ def check_show_verbs() -> None:
 def check_no_agreement_flags() -> None:
     """`yes` and `confirm` say nothing about what happens: `--dry-run`
     previews, `--live` goes ahead, `--force` overrides a stop, and a flag that
-    skips a question says so (metalm guidelines/cli.md). Walks every parser
-    and every MCP tool, so a new verb cannot bring the flag back, and parses
-    the old spellings, so they stay gone."""
+    skips a question says so (metalm guidelines/cli.md). Walks every parser,
+    so a new verb cannot bring the flag back, and parses the old spellings,
+    so they stay gone."""
     import argparse
 
     from authorlm.cli import build_parser
@@ -191,16 +190,6 @@ def check_no_agreement_flags() -> None:
                                for verb, sub in action.choices.items()
                                if isinstance(sub, argparse.ArgumentParser))
     check("no verb declares --yes, -y or --confirm", not seen, str(sorted(seen)))
-    from authorlm.mcp_server import mcp
-    agreeing = {tool.name for tool in mcp._tool_manager.list_tools()
-                if {"yes", "confirm"} & set(tool.parameters.get("properties", {}))}
-    check("no MCP tool takes yes or confirm", not agreeing, str(sorted(agreeing)))
-    tools = {tool.name: set(tool.parameters.get("properties", {}))
-             for tool in mcp._tool_manager.list_tools()}
-    for name in ("audition_voices", "push_pronunciations", "say_term"):
-        check(f"MCP {name} goes ahead with live", "live" in tools[name])
-    for name in ("clip_ensure", "clip_edit"):
-        check(f"MCP {name} passes a cap with force", "force" in tools[name])
     for argv in (["setup", "--workspace", "x", "--yes"],
                  ["setup", "--workspace", "x", "-y"],
                  ["audio", "audition", "--yes"],
@@ -791,7 +780,7 @@ def check_config_parity() -> None:
     <workspace-or-home>/.authorlm/config.toml while cli._load_config
     already read paths.config_path() (AUTHORLM_CONFIG override, else the
     project's config.toml) plus paths.load_env(). The two diverged: the
-    CLI had the LLM on and the MCP server (which calls api.load_config)
+    CLI had the LLM on and the MCP server (which called api.load_config)
     had it silently off. Pin AUTHORLM_CONFIG at a throwaway config with
     the LLM enabled and prove api.load_config sees it regardless of the
     `workspace` argument passed in — that's what proves it no longer
@@ -1082,7 +1071,7 @@ def check_manuscript_extraction_switch() -> None:
         except ExtractionDisabled as err:
             declined = str(err)
         check("run_extraction declines by name on a switched-off "
-              "manuscript (the writeup close's and the MCP tool's road)",
+              "manuscript (the writeup close's road)",
               declined is not None and "for this manuscript" in declined
               and "manuscript set --extraction on" in declined,
               str(declined))
@@ -1680,7 +1669,7 @@ def check_note_group() -> None:
         listed_group = next(
             (r for r in listed["open"] if r["kind"] == "note_update_group"),
             None)
-        check("list_proposals (the api/MCP surface) groups them too, "
+        check("list_proposals (the api surface) groups them too, "
               "without changing how they are stored",
               listed_group is not None
               and db.one(
@@ -1813,7 +1802,7 @@ def check_vanished_directory_guard() -> None:
     returns {} for a missing root with no error, which — before this fix —
     fed straight into collect_revision() and made every tracked file look
     removed. The auto-collect mass-deletion guard only ever ran when
-    `auto=True`, and _catch_up (reached by MCP get_briefing/get_guidance
+    `auto=True`, and _catch_up (reached by api.get_briefing and api.guide
     with no human present) always passes auto=False, so this was the
     exact unattended path that silently retired unconfirmed hypotheses."""
     import json as _json
@@ -1880,7 +1869,7 @@ def check_vanished_directory_guard() -> None:
         # unconfirmed hypothesis, realize both, then genuinely remove
         # their text (a real editorial deletion, not a vanished root) and
         # prove _catch_up's slimmer return shape still carries both
-        # fields through to MCP get_briefing/get_guidance.
+        # fields through to api.get_briefing and api.guide.
         ms.mkdir(parents=True)
         (ms / "01.md").write_text(
             "# Opening\n\nChoice enters here. A Fleeting Aside too.\n")
@@ -2018,7 +2007,7 @@ def check_unregister_safety() -> None:
 
         # And it must not become PERMANENT the next time anything else
         # commits on this connection (the ordinary case for a CLI process
-        # that keeps going, or a long-lived MCP connection).
+        # that keeps going, or a long-lived process).
         from authorlm.db import ko_fields as _ko_fields
 
         sentinel = _ko_fields("cn")
@@ -2814,23 +2803,6 @@ def check_intent_scope() -> None:
               and db.one("SELECT id FROM editorial_episodes WHERE "
                          "intent_id = ?", (plain["id"],)) is not None)
         api.abandon_intent(db, manuscript, plain["id"], "fixture")
-        from authorlm import mcp_server
-        prev_workspace = mcp_server._WORKSPACE
-        mcp_server._WORKSPACE = str(ws)
-        try:
-            mcp_result = mcp_server.declare_intent(
-                "A goal declared through MCP", scope="01-epictetus.md")
-        finally:
-            mcp_server._WORKSPACE = prev_workspace
-        check("declare_intent carries `scope` through the MCP surface too, "
-              "and says in words what the scope MEANS",
-              mcp_result["ok"]
-              and mcp_result["result"]["intent"]["scope"] == "01-epictetus.md"
-              and "serves this goal" in mcp_result["result"]["scope_means"],
-              str(mcp_result))
-        api.abandon_intent(db, manuscript,
-                           mcp_result["result"]["intent"]["id"], "fixture")
-
         with contextlib.redirect_stdout(io.StringIO()):
             started = api.write_start(db, manuscript, {}, "01-epictetus.md")
         writeup = dict(db.one("SELECT * FROM writeups WHERE id = ?",
@@ -3249,30 +3221,19 @@ def check_scope_evidence() -> None:
                   (explicit["id"],))["metadata"])["scope_history"][0]["to"]
               is None, "")
 
-        from authorlm import mcp_server
-        prev_workspace = mcp_server._WORKSPACE
-        mcp_server._WORKSPACE = str(ws)
-        try:
-            mcp_ruled = mcp_server.declare_intent(
-                "Explicit through MCP", book_wide=True)
-            mcp_absent = mcp_server.declare_intent("Absent through MCP")
-            evidence = mcp_server.list_intents(evidence=True)
-        finally:
-            mcp_server._WORKSPACE = prev_workspace
-        mcp_listed = {r["statement"] for r
-                      in evidence["result"]["unscoped_evidence"]}
-        check("MCP distinguishes them too — the surface the assistant uses "
-              "when it asks 'just this essay, the whole part, or the whole "
-              "book?' can record the answer as a ruling",
-              mcp_ruled["ok"] and mcp_absent["ok"]
-              and "Explicit through MCP" not in mcp_listed
-              and "Absent through MCP" in mcp_listed,
-              str(sorted(mcp_listed)))
-        check("and list_intents(evidence=True) carries the sitting's "
-              "closing numbers",
-              set(evidence["result"]["scope_tally"])
+        api.declare_intent(db, manuscript, "Explicit, declared later",
+                           book_wide=True)
+        api.declare_intent(db, manuscript, "Absent, declared later")
+        listed = {r["statement"]
+                  for r in api.scope_evidence(db, manuscript)}
+        check("the scope triage's read distinguishes them too — a goal "
+              "ruled book-wide at declaration never lands on the sheet",
+              "Explicit, declared later" not in listed
+              and "Absent, declared later" in listed, str(sorted(listed)))
+        check("and scope_tally carries the sitting's closing numbers",
+              set(api.scope_tally(db, manuscript))
               == {"active", "scoped", "ruled_book_wide", "no_place"},
-              str(evidence["result"].get("scope_tally")))
+              str(api.scope_tally(db, manuscript)))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -3488,7 +3449,7 @@ def check_briefing_active_writeups() -> None:
     front door.
 
     `build_briefing` knew nothing of the `writeups` table, so
-    `get_briefing`, its compact MCP projection and the CLI briefing were
+    `get_briefing` and the CLI briefing were
     all silent while the file sat truncated on disk and half-rebuilt. An
     author returning after a week and opening a conversation got a normal
     briefing with no signal that the essay was mid-surgery — the one
@@ -3550,18 +3511,10 @@ def check_briefing_active_writeups() -> None:
         check("AB-1: the CLI briefing names the resume verb",
               "write status" in rendered, rendered)
 
-        # The MCP surface serializes build_briefing's dict — but through
-        # compact_briefing, which projects a hand-listed set of keys. A
-        # key added to build_briefing alone would never reach the agent.
         full = api.get_briefing(db, manuscript)
-        check("AB-1: api.get_briefing (MCP verbose=True) carries it",
+        check("AB-1: api.get_briefing carries it",
               len(full.get("active_writeups", [])) == 1,
               str(full.get("active_writeups")))
-        compact = api.compact_briefing(full)
-        check("AB-1: compact_briefing (the MCP default) carries it too",
-              [w["file"] for w in compact.get("active_writeups", [])]
-              == ["01-epictetus.md"],
-              str(compact.get("active_writeups")))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -3749,16 +3702,12 @@ def check_client_resolution() -> None:
         check("Branch B still picks up the marker's enrichment",
               branch_b.transcript_hint == "/tmp/transcripts/b.jsonl")
 
-        # --- 4. the documented gate, and the mcp-stdio fallthrough. ---
+        # --- 4. the documented gate. ---
         ws = root / "gate"
         bare = clients.CLAUDE_CODE.detect(_client_ctx(
             {"CLAUDE_CODE_SESSION_ID": "orphan"}, ws))
         check("CLAUDECODE absent → the claude-code adapter declines",
               bare is None)
-        as_mcp = clients.current(_client_ctx({}, ws, surface="mcp"))
-        check("an unrecognised engine's stdio server is exact but anonymous",
-              (as_mcp.engine, as_mcp.session_id, as_mcp.precision)
-              == ("mcp-stdio", clients.CONNECTION_ID, "exact"), f"{as_mcp}")
         as_cli = clients.current(_client_ctx({}, ws, surface="cli"))
         check("a bare CLI run with nothing to go on is unknown/none",
               (as_cli.engine, as_cli.precision) == ("unknown", "none"))
@@ -4981,8 +4930,7 @@ def check_chat_usage_sweep() -> None:
         check("an adapter with no `usage` method is complete and correct: "
               "hasattr is the whole feature test, provenance has never "
               "depended on it, and the sweep simply skips that engine",
-              not hasattr(clients.MCP_STDIO, "usage")
-              and hasattr(clients.CLAUDE_CODE, "usage")
+              hasattr(clients.CLAUDE_CODE, "usage")
               and clients.adapter_for_engine("mcp-stdio") is None
               and usage.sweep_session(
                   clients.Client(engine="codex", session_id="c1",
@@ -5268,9 +5216,8 @@ def check_budget_seam() -> None:
               and "enforce = false" in message
               and "Nothing was sent and nothing was charged." in message,
               message)
-        check("BudgetExceeded is a RuntimeError subclass, so mcp_server."
-              "_guard already renders it as {'ok': false, 'error': …} — a "
-              "sentence, not a traceback",
+        check("BudgetExceeded is a RuntimeError subclass, so every caller "
+              "reports it as a sentence, not a traceback",
               isinstance(raised, RuntimeError), f"{type(raised)}")
         with _as_config("[budget]\napi_dollars_per_day = 0.50\n"
                         "warn_at = 0.8\n", root):
@@ -5597,8 +5544,6 @@ def check_directives() -> None:
               and (ms_dir / "becker.md").read_text() == becker, str(rows))
         check("get_status carries the same report (§8)",
               len(api.status(db, ms)["directives"]) == 5)
-        check("compact_collect carries it to the MCP surface",
-              len(api.compact_collect(base)["directives"]) == 5)
         v0 = base["version_no"]
 
         # Footnotes: two in one command, series minted in document order.
@@ -6216,7 +6161,7 @@ def check_workspace_guard() -> None:
               f"{raised!r}")
         check("MissingDatabase names the file it expected",
               raised is not None and raised.path == root / "fresh" / ".authorlm" / "authorlm.db")
-        check("MissingDatabase is a RuntimeError, which the MCP guard renders as a tool error",
+        check("MissingDatabase is a RuntimeError",
               isinstance(raised, RuntimeError))
 
         # 2. explicit -w: init bootstraps; any other verb refuses.
@@ -6957,7 +6902,7 @@ def main_test() -> None:
               and entry["manuscript"] == "book" and entry["duration_ms"] == 12
               and entry["ok"] is True and "ts" in entry, entry)
 
-        tracelog.record("get_briefing", surface="mcp", workspace=str(trace_ws),
+        tracelog.record("get_briefing", surface="api", workspace=str(trace_ws),
                         ok=False, error="boom" * 200)
         entries = [_tjson.loads(line)
                   for line in trace_path.read_text().splitlines()]
@@ -7863,9 +7808,7 @@ def main_test() -> None:
         report = api.collect(db, manuscript, {})
         check("collect reports new illustration slots",
               report["illustrations"]["unrendered"][0]["prompt"]
-              == "choice as a forking path"
-              and api.compact_collect(report)["illustrations"]
-              == report["illustrations"], str(report.get("illustrations")))
+              == "choice as a forking path", str(report.get("illustrations")))
 
         # --- illus rendering: candidates, pinning, style law, prune ---
         import struct
@@ -10216,9 +10159,7 @@ def main_test() -> None:
         report = api.collect(db, manuscript, {})
         check("collect marks the now-moot suggestion stale",
               any("Undertow" in s["suggestion"]
-                  for s in report.get("suggestions_stale", []))
-              and api.compact_collect(report)["suggestions_stale"]
-              == report["suggestions_stale"], str(report.get(
+                  for s in report.get("suggestions_stale", [])), str(report.get(
                   "suggestions_stale")))
         row = db.one(
             "SELECT * FROM guidance_history WHERE manuscript_id = ? "
@@ -11839,7 +11780,7 @@ def main_test() -> None:
         check("re-reconcile never re-ingests the same comment",
               not rep_h2.get("comments"), str(rep_h2.get("comments")))
 
-        # --- scoped concept fetch + batch curation (token plan) ---
+        # --- scoped concept fetch + curation ---
         api.add_concept(db, manuscript, "Winding Path",
                         notes="the road that bends")
         api.add_concept(db, manuscript, "Iron Gate",
@@ -11848,11 +11789,6 @@ def main_test() -> None:
                         notes="the orrery's cargo")
         api.link_concepts(db, manuscript, "Winding Path", "leads_to",
                           "Iron Gate")
-        over = api.concept_overview(db, manuscript)
-        check("unscoped fetch is a summary, never a dump",
-              "nodes" not in over and over["node_count"] >= 3
-              and "Winding Path" in over["recently_added"]
-              and "narrow" in over["guidance"].lower(), str(over)[:200])
         hit = api.scoped_concepts(db, manuscript, query="iron gate")
         check("query scope returns the matching slice only",
               hit["node_count"] == 1
@@ -11864,28 +11800,25 @@ def main_test() -> None:
               sliced["node_count"] == 1
               and any("Brass Planets" in str(n) for n in sliced["nodes"])
               and sliced["edge_count"] == 0, str(sliced))
-        batch = api.curate_concepts(db, manuscript, [
-            {"op": "confirm", "name": "Winding Path"},
-            {"op": "alias", "name": "Iron Gate", "aliases": ["Portcullis"]},
-            {"op": "retire", "name": "Brass Planets"},
-            {"op": "retire", "name": "No Such Concept"},
-            {"op": "frobnicate", "name": "x"},
-        ])
-        check("batch curation applies in order, isolating failures",
-              batch["applied"] == 3 and batch["failed"] == 2
-              and batch["results"][3]["ok"] is False
-              and "unknown op" in batch["results"][4]["error"], str(batch))
-        check("batch results landed in the graph",
+        api.confirm_concept(db, manuscript, "Winding Path")
+        api.alias_concept(db, manuscript, "Iron Gate", ["Portcullis"])
+        api.retire_concept(db, manuscript, "Brass Planets")
+        try:
+            api.retire_concept(db, manuscript, "No Such Concept")
+            missing = None
+        except LookupError as err:
+            missing = str(err)
+        check("retiring a concept that does not exist names it",
+              missing == "no concept named 'No Such Concept'", str(missing))
+        check("curation landed in the graph",
               api.scoped_concepts(db, manuscript,
                                   query="portcullis")["node_count"] == 1,
               "")
-        cleanup = api.curate_concepts(db, manuscript, [
-            {"op": "retire", "name": "Winding Path"},
-            {"op": "retire", "name": "Iron Gate"},
-        ])
-        check("cleanup batch retires the scaffolding",
-              cleanup["applied"] == 2 and cleanup["failed"] == 0,
-              str(cleanup))
+        for name in ("Winding Path", "Iron Gate"):
+            api.retire_concept(db, manuscript, name)
+        check("cleanup retires the scaffolding",
+              api.scoped_concepts(db, manuscript,
+                                  query="portcullis")["node_count"] == 0, "")
 
         # Deterministic guards: toc exclusion + pacing budget + arbiter.
         (ms / "toc.toml").write_text(
@@ -11962,10 +11895,9 @@ def main_test() -> None:
 
         # --- api.run_extraction: the non-interactive front on the
         # redesigned pipeline (init, the writeup close, an analysed
-        # collect, the MCP tool). Ruling §0.2 first: with the adjudicator
+        # collect). Ruling §0.2 first: with the adjudicator
         # unsettled it has no one to ask, so it stops before any call. ---
         from authorlm import extraction_adjudicator as _adj
-        from authorlm import mcp_server as _mcp
 
         (ms / "07-alpha.md").write_text(
             "# Alpha\n\nThe AlphaConcept appears here.\n\n"
@@ -12016,22 +11948,6 @@ def main_test() -> None:
                   .get("last_extracted_version")
                   == _json.loads(manuscript["metadata"] or "{}")
                   .get("last_extracted_version"))
-
-            # The same tool, over MCP, carries the argument through.
-            prev_workspace, prev_llm = _mcp._WORKSPACE, _mcp._llm
-            _mcp._WORKSPACE = str(ws)
-            try:
-                _mcp._llm = lambda: _SectionStub(alpha, front_cfg)
-                via_mcp = _mcp.extract_concepts(files=["07-alpha.md"],
-                                                adjudicator="stub-judge")
-                asked = _mcp.extract_concepts(files=["07-alpha.md"])
-            finally:
-                _mcp._WORKSPACE, _mcp._llm = prev_workspace, prev_llm
-            check("MCP extract_concepts runs the redesigned pipeline with "
-                  "`adjudicator`, and stops with the pointer without it",
-                  via_mcp["ok"] and via_mcp["result"]["run"]["adjudicator"]
-                  == "stub-judge" and asked["ok"]
-                  and "stopped" in asked["result"], str((via_mcp, asked)))
 
             # A section the model did not answer — no JSON, or a null
             # where the contract wants a list — leaves the run incomplete
@@ -13046,69 +12962,6 @@ def main_test() -> None:
         check("revive_doc restores the file once the collision clears",
               (ms / "60-alphadoc.md").exists())
 
-        # --- MCP payload caps (diff_versions / list_policies) ---
-        # Extracted helpers: chat context blew up to 185 KB / 52 KB on
-        # mature manuscripts before f3264e8; regressions reintroduce
-        # token blowups or silent stubbing mistakes.
-        from authorlm.mcp_server import cap_diff_files, compact_belief_rows
-
-        long_file = [f"line-{i}" for i in range(10)]
-        capped = cap_diff_files({"a.md": list(long_file)}, max_lines=4)
-        check("diff cap truncates a long file and names the escape hatch",
-              len(capped["a.md"]) == 5
-              and capped["a.md"][:4] == long_file[:4]
-              and "(+6 more lines" in capped["a.md"][-1]
-              and "file='a.md'" in capped["a.md"][-1],
-              str(capped["a.md"][-1]))
-
-        budgeted = cap_diff_files({
-            "a.md": ["1", "2"],
-            "b.md": ["1", "2"],
-            "c.md": ["1", "2"],
-            "d.md": ["1", "2"],  # spent reaches budget (max_lines*4 == 8)
-            "late.md": [f"l{i}" for i in range(20)],
-        }, max_lines=2)
-        check("diff cap stubs later files once the whole-answer budget is spent",
-              budgeted["d.md"] == ["1", "2"]
-              and len(budgeted["late.md"]) == 1
-              and "20 changed line(s)" in budgeted["late.md"][0]
-              and "file='late.md'" in budgeted["late.md"][0],
-              str(budgeted))
-
-        untouched = {"x.md": ["only", "two"]}
-        check("diff cap with max_lines<=0 leaves the payload untouched",
-              cap_diff_files(dict(untouched), max_lines=0) == untouched)
-
-        policy_rows = [
-            {"id": "pol-a", "statement": "Prefer short definitions",
-             "status": "candidate", "confidence": 0.4,
-             "supporting": 1, "contradicting": 0,
-             "questions": ["when?"], "source": "review-explanation"},
-            {"id": "pol-b", "statement": "Keep metaphors sparse",
-             "status": "validated", "confidence": 0.8,
-             "supporting": 5, "contradicting": 0,
-             "questions": [], "source": "episode_analysis"},
-        ]
-        compact = compact_belief_rows(policy_rows)
-        check("list_policies compact drops questions/provenance fields",
-              compact["belief_count"] == 2
-              and set(compact["beliefs"][0]) == {
-                  "id", "statement", "status", "confidence",
-                  "supporting", "contradicting"}
-              and "questions" not in compact["beliefs"][0],
-              str(compact))
-        filtered = compact_belief_rows(policy_rows, status="validated")
-        check("list_policies status= filter keeps only matching rows",
-              filtered["belief_count"] == 1
-              and filtered["beliefs"][0]["id"] == "pol-b",
-              str(filtered))
-        verbose = compact_belief_rows(policy_rows, verbose=True)
-        check("list_policies verbose=True returns full rows",
-              "belief_count" not in verbose
-              and verbose["beliefs"][0]["questions"] == ["when?"]
-              and verbose["beliefs"][0]["source"] == "review-explanation",
-              str(verbose))
-
         # --- Critique Doc mark requests (pure; feed write_pending_forms) ---
         from authorlm.gdocs import (_mark_insert_requests,
                                     _mark_replace_requests, _utf16_len)
@@ -13631,115 +13484,69 @@ def main_test() -> None:
               == {"Prefer terse fragments.",
                   "Address the reader in second person."})
 
-        # --- filter creation MCP tools (AS): add_filter/list_filters/
-        #     show_filter round-trip through the same envelope every
-        #     other tool uses, against the style-ws fixture above (no
-        #     LLM needed — filter creation makes no model call). ---
-        from authorlm import mcp_server
+        # --- filter creation (AS): add / list / show round-trip against
+        #     the style-ws fixture above (no LLM needed — filter creation
+        #     makes no model call). ---
+        from authorlm import filters as flt
 
-        prev_workspace = mcp_server._WORKSPACE
-        mcp_server._WORKSPACE = str(style_ws)
-        try:
-            bad_name = mcp_server.add_filter(
-                "Not A Slug", '---\nclass = "sequential"\n---\n\nBody.\n')
-            check("add_filter refuses a non-kebab-case name through the "
-                  "{ok:false, error} envelope",
-                  bad_name["ok"] is False and "kebab-case" in bad_name["error"],
-                  str(bad_name))
+        style_ms = api.get_manuscript(api.open_db(str(style_ws)))
 
-            empty_prompt = mcp_server.add_filter("empty-prompt", "")
-            check("add_filter refuses an empty prompt",
-                  empty_prompt["ok"] is False
-                  and "its prompt" in empty_prompt["error"],
-                  str(empty_prompt))
-
-            no_class = mcp_server.add_filter(
-                "no-class", "---\n---\n\nBody with no class.\n")
-            check("add_filter refuses front matter missing the required "
-                  "`class` key",
-                  no_class["ok"] is False
-                  and "class" in no_class["error"],
-                  str(no_class))
-
-            filter_text = (
-                '---\nclass = "sequential"\n'
-                'state = "a ledger of flagged words"\n---\n\n'
-                "# Duplicate words\n\nFlag a word used again too soon.\n")
-            added = mcp_server.add_filter("dupe-words", filter_text)
-            check("add_filter ratifies a well-formed artifact",
-                  added["ok"] and added["result"]["class"] == "sequential"
-                  and added["result"]["state"] == "a ledger of flagged words",
-                  str(added))
-
-            listed = mcp_server.list_filters()
-            check("list_filters shows the newly-added filter, compact "
-                  "(name/class/summary, no prompt body)",
-                  listed["ok"]
-                  and any(row["name"] == "dupe-words"
-                          and row["class"] == "sequential"
-                          and row["summary"] == "Duplicate words"
-                          and "prompt" not in row
-                          for row in listed["result"]["filters"]),
-                  str(listed))
-
-            shown = mcp_server.show_filter("dupe-words")
-            check("show_filter returns the byte-identical prompt body "
-                  "that was ratified",
-                  shown["ok"] and shown["result"]["prompt"]
-                  == "# Duplicate words\n\nFlag a word used again too soon.",
-                  str(shown))
-
-            missing = mcp_server.show_filter("no-such-filter")
-            check("show_filter names the filters that DO exist when asked "
-                  "for one that doesn't",
-                  missing["ok"] is False and "dupe-words" in missing["error"],
-                  str(missing))
-        finally:
-            mcp_server._WORKSPACE = prev_workspace
-
-        # --- MCP tool envelope (T4, risk-register §3): _guard's real
-        # contract at the @mcp.tool() seam — (LookupError, ValueError,
-        # RuntimeError) become an {"ok": False, "error": ...} dict every
-        # other exception type propagates instead of being swallowed. ---
-        from authorlm import mcp_server
-
-        # _guard's tracelog write defaults to ~/.authorlm when _WORKSPACE
-        # is None (its untouched default here) — pin it to a throwaway
-        # workspace first so this test can never write into the author's
-        # real trace log.
-        guard_ws = root / "mcp-guard-ws"
-        guard_ws.mkdir()
-        prev_workspace = mcp_server._WORKSPACE
-        mcp_server._WORKSPACE = str(guard_ws)
-        try:
-            for exc_cls, message in (
-                (LookupError, "no such manuscript"),
-                (ValueError, "bad argument"),
-                (RuntimeError, "operation failed"),
-            ):
-                def boom(exc_cls=exc_cls, message=message):
-                    raise exc_cls(message)
-                result = mcp_server._guard(boom)
-                check(f"_guard maps a bare {exc_cls.__name__} to an "
-                      "{ok: False, error} envelope",
-                      result == {"ok": False, "error": message}, str(result))
-
-            def crash():
-                raise TypeError("not one of the guarded error types")
+        def _refused(fn, *args):
             try:
-                mcp_server._guard(crash)
-                propagated = False
-            except TypeError as err:
-                propagated = str(err) == "not one of the guarded error types"
-            check("_guard re-raises exception types outside its guarded "
-                  "set instead of swallowing them into an ok:false envelope",
-                  propagated)
+                fn(*args)
+            except (LookupError, ValueError) as err:
+                return str(err)
+            return None
 
-            ok_result = mcp_server._guard(lambda: {"value": 42})
-            check("_guard wraps a successful call as {ok: True, result}",
-                  ok_result == {"ok": True, "result": {"value": 42}})
-        finally:
-            mcp_server._WORKSPACE = prev_workspace
+        bad_name = _refused(
+            api.filter_add, style_ms, "Not A Slug",
+            '---\nclass = "sequential"\n---\n\nBody.\n')
+        check("filter_add declines a non-kebab-case name and says why",
+              bad_name is not None and "kebab-case" in bad_name,
+              str(bad_name))
+
+        empty_prompt = _refused(api.filter_add, style_ms, "empty-prompt", "")
+        check("filter_add declines an empty prompt",
+              empty_prompt is not None and "its prompt" in empty_prompt,
+              str(empty_prompt))
+
+        no_class = _refused(api.filter_add, style_ms, "no-class",
+                            "---\n---\n\nBody with no class.\n")
+        check("filter_add declines front matter missing the required "
+              "`class` key",
+              no_class is not None and "class" in no_class, str(no_class))
+
+        filter_text = (
+            '---\nclass = "sequential"\n'
+            'state = "a ledger of flagged words"\n---\n\n'
+            "# Duplicate words\n\nFlag a word used again too soon.\n")
+        added = api.filter_add(style_ms, "dupe-words", filter_text)
+        check("filter_add ratifies a well-formed artifact",
+              added["class"] == "sequential"
+              and added["state"] == "a ledger of flagged words",
+              str(added))
+
+        listed = flt.list_filters(style_ms)
+        check("list_filters shows the newly-added filter, compact "
+              "(name/class/summary, no prompt body)",
+              any(row["name"] == "dupe-words"
+                  and row["class"] == "sequential"
+                  and row["summary"] == "Duplicate words"
+                  and "prompt" not in row
+                  for row in listed),
+              str(listed))
+
+        shown = flt.show_filter(style_ms, "dupe-words")
+        check("show_filter returns the byte-identical prompt body "
+              "that was ratified",
+              shown["prompt"]
+              == "# Duplicate words\n\nFlag a word used again too soon.",
+              str(shown))
+
+        missing = _refused(flt.show_filter, style_ms, "no-such-filter")
+        check("show_filter names the filters that DO exist when asked "
+              "for one that doesn't",
+              missing is not None and "dupe-words" in missing, str(missing))
 
         # --- the SKILL's one tripwire (§15.22, F4-minimal) ---
         #
@@ -13775,72 +13582,6 @@ def main_test() -> None:
               in skill_text,
               skill_text[-1200:])
 
-        # --- CLI/MCP parity checklist ---
-        from authorlm.mcp_server import mcp
-        tool_names = {t.name for t in mcp._tool_manager.list_tools()}
-        expected = {
-            "list_manuscripts", "get_manuscript_metadata",
-            "set_manuscript_metadata", "resolve_file", "get_status",
-            "declare_intent", "scope_intent",
-            "list_intents", "complete_intent", "abandon_intent",
-            "collect_revision", "get_guidance", "review_suggestion",
-            "get_briefing", "get_concepts", "add_concept", "link_concepts",
-            "confirm_concept", "retire_concept", "curate_concepts",
-            "confirm_edge", "reject_edge",
-            "list_proposals", "reconcile_proposals", "screen_proposals",
-            "resolve_proposal",
-            "analyze_episodes",
-            "diff_versions", "list_beliefs", "close_session",
-            "extract_concepts", "get_plan", "get_doc_links",
-            "file_improvement", "list_improvements", "improvement_bundle",
-            "resolve_improvement", "alias_concept", "merge_concepts",
-            "retire_belief", "demote_belief", "merge_beliefs", "convert_belief_to_law",
-            "define_style_guide", "add_style_law", "retire_style_law",
-            "attach_style", "get_style", "get_profile", "run_sweep",
-            "get_illustration_prompt", "scan_illustrations",
-            "triage_illustrations",
-            # The inline directives (footnote, explain): the tag report
-            # and the landing verb — drafting is chat, by design.
-            "list_footnote_tags", "apply_footnote", "resolve_footnotes",
-            "list_explain_tags", "apply_explain", "resolve_explains",
-            "list_suggestion_tags", "apply_suggestion", "resolve_suggestions",
-            "import_critique", "critique_status", "list_critique_items",
-            "list_critique_decisions",
-            "triage_critique", "list_critique_edits", "triage_critique_edits",
-            # The filter pass's conversational pair (AQ). `filter run` is
-            # deliberately NOT here — the same ruling the write loop
-            # gets: the loop is CLI-only so there is one call surface,
-            # and improving a verb improves every session.
-            "list_filter_edits", "triage_filter_edits",
-            # Filter CREATION (AS) is curation, the style-law precedent,
-            # so it is exposed here; the filter LOOP verbs it feeds
-            # (run/prelude/record/settle/…) stay CLI-only by the same
-            # one-call-surface ruling as `filter run` above.
-            "add_filter", "list_filters", "show_filter",
-            "move_style_law",
-            # The audiobook (audiobook-pipeline-design §11): the export,
-            # the readiness report, free voice discovery, the paid
-            # audition (live=True), the cast row, the dictionary push
-            # (live=True). `audio init` is CLI-only: a one-time seed.
-            "export_audio", "audio_readiness", "list_voices",
-            "audition_voices", "set_cast", "push_pronunciations", "say_term",
-            # Media for podcasts (video-clips-design §8f/§8g): the one
-            # umbrella listing; read-only, paths never bytes.
-            "list_media", "set_clip_spec", "set_clip_fields",
-            "resolve_clip_specs", "clip_ensure", "clip_job", "clip_pick",
-            "clip_attach", "clip_edit",
-            # The Triage App and the pronunciation workbench are NOT here:
-            # each is a local page served by its CLI verb (`triage-app`,
-            # `workbench`). The MCP App road was removed 2026-09-04 — it
-            # never rendered in the client the author uses.
-        }
-        check("MCP exposes the full hand-curated tool set",
-              expected == tool_names,
-              f"missing: {expected - tool_names}; extra: {tool_names - expected}")
-        for tool in mcp._tool_manager.list_tools():
-            check_desc = bool(tool.description and len(tool.description) > 40)
-            assert check_desc, f"tool {tool.name} lacks a real description"
-        check("every MCP tool carries a substantive description", True)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nAll {PASSED} checks passed.")

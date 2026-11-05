@@ -1,5 +1,9 @@
 # Illustration placement pipeline — spot-finding, staging, triage
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Grilled and ratified 2026-08-10. The author's ask, condensed: seed
 criteria for where illustrations belong, identify spots against them,
 pull the guidance, propose tags/revisions — with human triage before

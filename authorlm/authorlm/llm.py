@@ -557,11 +557,11 @@ class LLMClient:
     def _record_usage(self, prompt_tokens: int, completion_tokens: int,
                       cache_read: int = 0, cache_write: int = 0) -> None:
         """THE seam. It sits BELOW `stats_line()`, below `_report_llm`,
-        below the CLI and below the MCP server, which is the whole reason
+        below the CLI and every other surface, which is the whole reason
         the usage ledger is small and also its coverage argument: the two
         paths the spend audit found invisible — auto-collect extraction
-        and the entire MCP surface — reach the ledger anyway, because they
-        reach `complete_json` → `complete` → here like everything else.
+        and the MCP surface, since removed — reach the ledger anyway,
+        because they reach `complete_json` → `complete` → here like everything else.
         Sixteen of the seventeen audited call sites are covered with no
         call-site edit; `generate_image` is not a client and calls
         `usage.record_image` itself."""

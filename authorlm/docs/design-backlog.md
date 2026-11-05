@@ -1,5 +1,9 @@
 # Design backlog — ratified in conversation, awaiting build
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Deferred deliberately (YAGNI); each was designed far enough to know its
 shape. Build only when the need is felt.
 

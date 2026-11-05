@@ -374,12 +374,6 @@ The proposal learning loop, once, for every triage queue.
 
 The Reader load — a DERIVED report, recomputed on every push.
 
-## `authorlm.mcp_server`
-
-`authorlm/authorlm/mcp_server.py`
-
-AuthorLM MCP server — the conversational surface (P11: thin wrapper).
-
 ## `authorlm.media`
 
 `authorlm/authorlm/media.py`
@@ -648,7 +642,7 @@ Doc sync doors that silently corrupt when wrong.
 
 `authorlm/tests/test_api.py`
 
-API-layer tests + CLI/MCP parity checklist (P11).
+API-layer tests (P11).
 
 ## `tests.test_apply_accepted`
 
@@ -1152,7 +1146,7 @@ Fenced code must survive normalize_markdown byte-for-byte.
 
 `authorlm/tests/test_normalize_isbn13.py`
 
-`api._normalize_isbn13` / `_validate_format_isbns` are the catalog identity door for every paperback/hardcover ISBN the CLI and MCP accept.
+`api._normalize_isbn13` / `_validate_format_isbns` are the catalog identity door for every paperback/hardcover ISBN the CLI accepts.
 
 ## `tests.test_normalize_thematic_break`
 

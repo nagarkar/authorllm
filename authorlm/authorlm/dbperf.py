@@ -6,7 +6,7 @@ itself instead of us having to do one-off measurements … monitor the
 performance over all time."*
 
 `trace.jsonl` (see `tracelog`) is the **verb** timeline: one line per CLI
-command or MCP tool call, with the wall time of the whole operation. It
+command, with the wall time of the whole operation. It
 cannot say *where* that time went. This is the layer underneath it: every
 query through `Database.one/all/insert/update`, plus the `BEGIN
 IMMEDIATE` and the `COMMIT` that bracket a transaction, timed with
@@ -14,8 +14,7 @@ IMMEDIATE` and the `COMMIT` that bracket a transaction, timed with
 
 Two kinds of line land in `<workspace>/.authorlm/logs/db-perf.jsonl`:
 
-- **one aggregate line per invocation** — per CLI process, per MCP tool
-  dispatch — carrying `{ts, invocation, client, shapes, grand_total_ms}`,
+- **one aggregate line per invocation** — per CLI process — carrying `{ts, invocation, client, shapes, grand_total_ms}`,
   where `shapes` maps the normalized SQL to `[n, total_ms, max_ms]`.
   Aggregating in memory and writing once is what keeps this affordable
   enough to ship on: a verb issuing 900 queries costs 900 dict updates
@@ -130,8 +129,9 @@ def log_dir(workspace: str | Path | None = None) -> Path:
 
 # Recorders holding data not yet written. A recorder adds itself on its
 # first sample and drops itself on flush, so this never grows past the
-# number of databases with pending samples — which matters: the MCP
-# server opens a fresh `Database` per tool call and lives for days.
+# number of databases with pending samples — which matters to a process
+# that opens a fresh `Database` per request and lives for days (a served
+# page).
 _PENDING: list[Recorder] = []
 
 
@@ -195,8 +195,8 @@ class Recorder:
 
     def client(self) -> dict | None:
         """The provenance join key (§15.15), resolved once per recorder —
-        i.e. once per CLI process and once per MCP dispatch, which is what
-        "resolved once per invocation" means. Omitted entirely when
+        i.e. once per CLI process, which is what "resolved once per
+        invocation" means. Omitted entirely when
         detection is off, exactly as `tracelog` omits it."""
         if not self._client_resolved:
             self._client_resolved = True
@@ -265,9 +265,8 @@ def flush(invocation: str | None = None) -> None:
     """Write the aggregate line for every database with pending samples.
 
     Called by the CLI at the end of dispatch (which is reached on the
-    `sys.exit` paths too) and by the MCP server after each tool call;
-    also registered with `atexit` as the backstop for any path that
-    reaches neither."""
+    `sys.exit` paths too); also registered with `atexit` as the backstop
+    for any path that does not reach it."""
     for recorder in list(_PENDING):
         try:
             recorder.flush(invocation)

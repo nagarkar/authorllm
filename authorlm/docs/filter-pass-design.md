@@ -1,5 +1,9 @@
 # Filter Pass — Design Reference
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Ratified 2026-08-30. This document is the build reference for the filter
 pass: the autoregressive *editing* mode of the writing loop, where one
 ratified editorial concern is applied to one essay a paragraph at a time.

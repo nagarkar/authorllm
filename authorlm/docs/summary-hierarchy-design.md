@@ -1,5 +1,9 @@
 # Summary hierarchy — paragraph, section and essay summaries, and what each consumer reads
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Status: RATIFIED by the owner 2026-10-25, after a ten-question grill (the
 rulings are §0) and the owner's confirmation that §6.0's reading of the
 processes matches theirs. **Built** steps 1–5 (first slice, through

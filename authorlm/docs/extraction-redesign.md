@@ -1,5 +1,9 @@
 # Extraction redesign — concepts and edges, same schema
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Status: RATIFIED 2026-10-25 (the eight rulings in §0, recorded verbatim in intent). BUILT phases 1-5 of §9 (PR nagarkar/authorllm#271 and the phase-5 PR); phase 6 partly, phase 7 done — see the §9 notes. No code changed. Nothing in the
 live workspace was written; every number below came from read-only queries
 against `~/.authorlm/authorlm.db` (manuscript SMSTTD, `ms-b33871dc315c`,

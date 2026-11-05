@@ -34,8 +34,8 @@ Design:
   history.
 - Failure never blocks the caller: every exception is caught and
   reported back as `{"ok": False, "error": ...}`. `run()` additionally
-  prints a loud warning to stderr (never stdout — the MCP server speaks
-  JSON-RPC over stdout) so a broken backup is never silently swallowed.
+  prints a loud warning to stderr (never stdout, which a caller may be
+  parsing) so a broken backup is never silently swallowed.
 """
 
 from __future__ import annotations
@@ -123,8 +123,8 @@ def perform_backup(db: Database) -> dict:
 def run(db: Database) -> dict:
     """`perform_backup`, plus a loud stderr warning on failure. Called
     from `sessions.start_session` — see module docstring for why that's
-    the right trigger. stderr, never stdout: the MCP server's stdout is
-    a JSON-RPC stream and printing to it would corrupt the protocol."""
+    the right trigger. stderr, never stdout: a caller may be parsing the
+    verb's own output."""
     result = perform_backup(db)
     if not result.get("ok"):
         print(

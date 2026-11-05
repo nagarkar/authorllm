@@ -3479,8 +3479,7 @@ def _two_runs_one_essay(root: Path, subdir: str):
 
 
 def _chat_sees_each_run_s_transport(root: Path) -> None:
-    """P3b — `filter_edits` (and so `list_filter_edits` on MCP) must
-    report the transport PER RUN.
+    """P3b — `filter_edits` must report the transport PER RUN.
 
     Two filters on one essay is legitimate work. When their transports
     differ, collapsing them to a single value produced `mode=None` — read
@@ -6257,10 +6256,6 @@ def main_test() -> None:
               g2["status"] == "realized" and g2["introduced_in"] == "alpha.md"
               and ("depends_on", "declared") in edges
               and ("contrasts_with", "retired") in edges)
-        out = api.curate_concepts(db, manuscript,
-                                  [{"op": "revive", "name": "Nope"}])
-        check("curate_concepts revive op reports a missing concept per-op",
-              out["results"][0]["ok"] is False)
 
         print("style move:")
         from authorlm import styles
