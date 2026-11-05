@@ -1154,6 +1154,12 @@ Fenced code must survive normalize_markdown byte-for-byte.
 
 Regression: spaced CommonMark thematic breaks must survive normalize.
 
+## `tests.test_occurrence_tab_anchor`
+
+`authorlm/tests/test_occurrence_tab_anchor.py`
+
+Insertion anchors counted in the same universe `_locate_in_tab` searches.
+
 ## `tests.test_omni_helpers`
 
 `authorlm/tests/test_omni_helpers.py`
