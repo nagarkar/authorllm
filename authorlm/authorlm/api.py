@@ -3685,10 +3685,11 @@ def run_extraction(db: Database, manuscript: dict, llm: LLMClient,
                    files: list[str] | None = None, full: bool = False,
                    adjudicator: str | None = None) -> dict | None:
     """The non-interactive front on `extraction.run` (the redesigned
-    pipeline, docs/extraction-redesign.md) — the road a script takes. Extraction is lazy (ruling §0.9): nothing calls
-    this as a side effect; the author, or the chat on their word, asks for
-    a fresh graph. Incremental by default: the sections changed since the
-    watermark; `files` or `full` widen it.
+    pipeline, docs/extraction-redesign.md) — the road a script takes.
+    Extraction is lazy (ruling §0.9): nothing calls this as a side effect;
+    the author, or the chat on their word, asks for a fresh graph.
+    Incremental by default: the sections changed since the watermark;
+    `files` or `full` widen it.
 
     The adjudicator is chosen before the first call (ruling §0.2, never
     spend unasked): `adjudicator` answers it outright, `[extraction]

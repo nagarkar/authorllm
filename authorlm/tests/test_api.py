@@ -1523,8 +1523,8 @@ def check_alias_fates() -> None:
                  "sentence": retired}]}), _JudgeStub({"verdict": "new"}))
         written = report["essays"][0]["written"]
         check("the run reports each alias candidate's fate by name",
-              written["aliases"] == {"alias_fold_refused": 1,
-                                     "alias_retired_refused": 1,
+              written["aliases"] == {"alias_fold_declined": 1,
+                                     "alias_retired_declined": 1,
                                      "proposed": 1}, str(written))
         after = db.one("SELECT COUNT(*) AS n FROM knowledge_proposals WHERE "
                        "manuscript_id = ? AND kind = 'alias'", (mid,))["n"]
@@ -1537,7 +1537,7 @@ def check_alias_fates() -> None:
                 "evidence_type = 'extraction_adjudication' AND signal = ?",
                 (mid, signal))]
 
-        fold, ret = evidence("alias_fold_refused"), evidence("alias_retired_refused")
+        fold, ret = evidence("alias_fold_declined"), evidence("alias_retired_declined")
         check("the live-concept fold is recorded as low-weight "
               "system-provenance evidence, not silently dropped",
               len(fold) == 1 and fold[0]["weight"] == "low", str(fold))
@@ -6803,19 +6803,19 @@ def main_test() -> None:
         try:
             api.register_manuscript(
                 db, "book", str(ms), author="Duplicate Author")
-            duplicate_registration_refused = False
+            duplicate_registration_declined = False
         except ValueError:
-            duplicate_registration_refused = True
+            duplicate_registration_declined = True
         check("application API owns manuscript registration invariants",
-              duplicate_registration_refused)
+              duplicate_registration_declined)
         try:
             api.register_manuscript(
                 db, "missing-book", str(ws / "does-not-exist"))
-            invalid_path_refused = False
+            invalid_path_declined = False
         except ValueError:
-            invalid_path_refused = True
+            invalid_path_declined = True
         check("application API refuses a nonexistent manuscript directory",
-              invalid_path_refused)
+              invalid_path_declined)
         same_isbn_ms = ws / "same-isbn-book"
         same_isbn_ms.mkdir()
         try:
@@ -6823,11 +6823,11 @@ def main_test() -> None:
                 db, "same-isbn-book", str(same_isbn_ms),
                 paperback_isbn="979-8-90452-354-1",
                 hardcover_isbn="979-8-90452-354-1")
-            same_registration_isbn_refused = False
+            same_registration_isbn_declined = False
         except ValueError:
-            same_registration_isbn_refused = True
+            same_registration_isbn_declined = True
         check("registration requires distinct physical-format ISBNs",
-              same_registration_isbn_refused)
+              same_registration_isbn_declined)
         updated_identity = api.update_manuscript_metadata(
             db, manuscript, author="A. Author",
             copyright_owner="Author House LLC")
@@ -6838,30 +6838,30 @@ def main_test() -> None:
         try:
             api.update_manuscript_metadata(
                 db, manuscript, paperback_isbn="979-8-90452-354-2")
-            invalid_isbn_refused = False
+            invalid_isbn_declined = False
         except ValueError:
-            invalid_isbn_refused = True
+            invalid_isbn_declined = True
         check("publication identity refuses an invalid ISBN-13 checksum",
-              invalid_isbn_refused
+              invalid_isbn_declined
               and api.get_manuscript(db)["paperback_isbn"]
               == "9798904523541")
         try:
             api.update_manuscript_metadata(
                 db, manuscript, hardcover_isbn="4006381333931")
-            non_isbn_ean_refused = False
+            non_isbn_ean_declined = False
         except ValueError:
-            non_isbn_ean_refused = True
+            non_isbn_ean_declined = True
         check("publication identity requires the ISBN-13 book prefix",
-              non_isbn_ean_refused)
+              non_isbn_ean_declined)
         try:
             cli_main(["--workspace", str(ws), "manuscript", "set",
                       "--hardcover-isbn", "979-8-90452-354-1"])
-            same_cli_isbn_refused = False
+            same_cli_isbn_declined = False
         except SystemExit as err:
-            same_cli_isbn_refused = (
+            same_cli_isbn_declined = (
                 "paperback and hardcover ISBNs must be different" in str(err))
         check("CLI requires distinct physical-format ISBNs",
-              same_cli_isbn_refused
+              same_cli_isbn_declined
               and api.get_manuscript(db)["hardcover_isbn"]
               == "9798904523510")
         identity_out = io.StringIO()
@@ -9618,13 +9618,13 @@ def main_test() -> None:
             physics + "\n$$\norphan display\n", encoding="utf-8")
         try:
             publish_markdown(manuscript, "stripped", fmt="md")
-            trunc_refused = ""
+            trunc_declined = ""
         except ValueError as err:
-            trunc_refused = str(err)
+            trunc_declined = str(err)
         (ms / "03-physics.md").write_text(physics, encoding="utf-8")
         check("audio export refuses an unclosed display-math block",
-              "03-physics.md:" in trunc_refused
-              and "never closed" in trunc_refused, trunc_refused)
+              "03-physics.md:" in trunc_declined
+              and "never closed" in trunc_declined, trunc_declined)
         for bad, why in (("[Omit: audoi]\nx\n[/Omit]", "unknown output"),
                          ("[Omit: pdf]\nx", "never closed"),
                          ("x\n[/Only]", "closes nothing"),
@@ -9675,11 +9675,11 @@ def main_test() -> None:
               and (ms / "_exports" / "settings.toml").exists())
         try:
             set_setting(manuscript, "author", "Legacy Byline")
-            legacy_author_refused = False
+            legacy_author_declined = False
         except LookupError:
-            legacy_author_refused = True
+            legacy_author_declined = True
         check("author identity cannot drift into export settings",
-              legacy_author_refused)
+              legacy_author_declined)
         try:
             set_setting(manuscript, "nope", "x")
             refused = False
@@ -9837,11 +9837,11 @@ def main_test() -> None:
             export_published(
                 db, manuscript, fmt="epub", variant="images",
                 print_ready=True)
-            non_pdf_print_ready_refused = False
+            non_pdf_print_ready_declined = False
         except ValueError:
-            non_pdf_print_ready_refused = True
+            non_pdf_print_ready_declined = True
         check("publication interface restricts print-ready mode to PDF",
-              non_pdf_print_ready_refused)
+              non_pdf_print_ready_declined)
 
         # --- print geometry: trim size + bleed are manuscript properties;
         # the book profile is a print interior at that trim.
@@ -9856,31 +9856,31 @@ def main_test() -> None:
               and parse_trim_size("") == (0.0, 0.0))
         try:
             parse_trim_size("3x4")
-            tiny_trim_refused = False
+            tiny_trim_declined = False
         except ValueError:
-            tiny_trim_refused = True
+            tiny_trim_declined = True
         try:
             parse_trim_size("six by nine")
-            word_trim_refused = False
+            word_trim_declined = False
         except ValueError:
-            word_trim_refused = True
+            word_trim_declined = True
         check("trim size refuses the unprintable and the unparseable",
-              tiny_trim_refused and word_trim_refused)
+              tiny_trim_declined and word_trim_declined)
         try:
             export_published(db, manuscript, fmt="pdf", variant="images",
                              profile="book")
-            book_without_trim_refused = False
+            book_without_trim_declined = False
         except RuntimeError as err:
-            book_without_trim_refused = "trim size" in str(err)
+            book_without_trim_declined = "trim size" in str(err)
         check("book profile refuses to build without a trim size",
-              book_without_trim_refused)
+              book_without_trim_declined)
         try:
             export_published(db, manuscript, fmt="epub", variant="images",
                              profile="book")
-            book_non_pdf_refused = False
+            book_non_pdf_declined = False
         except ValueError:
-            book_non_pdf_refused = True
-        check("book profile is PDF-only", book_non_pdf_refused)
+            book_non_pdf_declined = True
+        check("book profile is PDF-only", book_non_pdf_declined)
         with contextlib.redirect_stdout(io.StringIO()):
             cli_main(["--workspace", str(ws), "manuscript", "set",
                       "--trim-size", "6x9", "--bleed", "no"])
@@ -10602,17 +10602,17 @@ def main_test() -> None:
         lenses.add_lens(vman, "plain-chapter", "# Plain\n\nFlag assertions.\n")
         try:
             lenses.parse_lens("---\nclass = \"chapter\"\ntargets = [\"siblings\"]\n---\n# x\n")
-            sib_refused = False
+            sib_declined = False
         except lenses.LensError:
-            sib_refused = True
+            sib_declined = True
         check("siblings needs the poem grain, and a chapter lens declares no "
-              "targets", sib_refused)
+              "targets", sib_declined)
         try:
             lenses.assemble(vdb, vman, "verse-law", "prose.md", poem="1")
-            prose_refused = False
+            prose_declined = False
         except ValueError as err:
-            prose_refused = "not a verse file" in str(err)
-        check("a poem-grain lens refuses a prose file by name", prose_refused)
+            prose_declined = "not a verse file" in str(err)
+        check("a poem-grain lens refuses a prose file by name", prose_declined)
         try:
             lenses.assemble(vdb, vman, "verse-law", "poems.md")
             unnamed = False
@@ -13491,26 +13491,26 @@ def main_test() -> None:
 
         style_ms = api.get_manuscript(api.open_db(str(style_ws)))
 
-        def _refused(fn, *args):
+        def _declined(fn, *args):
             try:
                 fn(*args)
             except (LookupError, ValueError) as err:
                 return str(err)
             return None
 
-        bad_name = _refused(
+        bad_name = _declined(
             api.filter_add, style_ms, "Not A Slug",
             '---\nclass = "sequential"\n---\n\nBody.\n')
         check("filter_add declines a non-kebab-case name and says why",
               bad_name is not None and "kebab-case" in bad_name,
               str(bad_name))
 
-        empty_prompt = _refused(api.filter_add, style_ms, "empty-prompt", "")
+        empty_prompt = _declined(api.filter_add, style_ms, "empty-prompt", "")
         check("filter_add declines an empty prompt",
               empty_prompt is not None and "its prompt" in empty_prompt,
               str(empty_prompt))
 
-        no_class = _refused(api.filter_add, style_ms, "no-class",
+        no_class = _declined(api.filter_add, style_ms, "no-class",
                             "---\n---\n\nBody with no class.\n")
         check("filter_add declines front matter missing the required "
               "`class` key",
@@ -13543,7 +13543,7 @@ def main_test() -> None:
               == "# Duplicate words\n\nFlag a word used again too soon.",
               str(shown))
 
-        missing = _refused(flt.show_filter, style_ms, "no-such-filter")
+        missing = _declined(flt.show_filter, style_ms, "no-such-filter")
         check("show_filter names the filters that DO exist when asked "
               "for one that doesn't",
               missing is not None and "dupe-words" in missing, str(missing))
