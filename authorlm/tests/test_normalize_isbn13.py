@@ -1,5 +1,5 @@
 """`api._normalize_isbn13` / `_validate_format_isbns` are the catalog
-identity door for every paperback/hardcover ISBN the CLI and MCP accept.
+identity door for every paperback/hardcover ISBN the CLI accepts.
 
 Integration coverage in `test_api` hits checksum/prefix/distinctness through
 `register_manuscript` / `manuscript set`. This file pins the pure parser

@@ -6033,8 +6033,9 @@ def cmd_interlocutor(args):
         for err in imp.get("errors", []):
             print(ui.yellow(f"warning: {err}"))
         if imp["intents"]:
-            print(ui.dim("Nothing is law yet — triage with 'critique triage "
-                         f"--scope <essay>' or list_critique_items."))
+            print(ui.dim("Nothing is law yet — list with 'critique list "
+                         "--scope <essay>', rule with 'critique "
+                         "triage --scope <essay>'."))
     except (il.InterlocutorError, LookupError) as err:
         raise SystemExit(f"error: {err}")
 

@@ -489,3 +489,71 @@ default; a `judgment` is planted as a [Judgment: …] tag, ruled in the tab
 (delete = reject, keep = accept, the form's verdict reaching the finding),
 and repaired by `lens repair` (rewrite | question | intent).
 
+
+## MCP server removed (2026-11-04)
+Issue #364, step 1a. The owner's ruling: "If there is no loss, we can
+drop it." What the trace log showed (`~/.authorlm/logs/trace.jsonl`,
+2026-08-06 to 2026-11-04 21:33 PST): 468 MCP calls against 9,696 CLI
+runs, by month 204, 144, 107, then 13 in November; 44 of the server's 91
+tools were ever called; the server was registered only in the repo's
+`.mcp.json`; every call that named its client came from Claude Code,
+which has a shell. (The log held 28 more lines for `clip_ensure`, all
+written by a test that left the trace workspace unset; nobody called
+that tool.) Removed: `mcp_server.py`, `.mcp.json`,
+the `authorlm-mcp` entry point, the `mcp` dependency, the compact
+projections the tools returned (`api.compact_collect`,
+`compact_briefing`, `compact_show_concept`, `concept_overview`), the
+one-call batch `api.curate_concepts`, the diff and belief payload caps,
+and the `mcp-stdio` client adapter. Kept: every `authorlm.api` function
+the tools called, and the trace log's old `mcp` lines.
+
+Four jobs had no full match on the CLI and got one first: `manuscript
+list [--file PATH]`, `concept list --file FILE | --query TEXT`, edge
+rulings that leave their `edge_triage` evidence row, and `proposal
+accept` reaching a proposal the screen folded away.
+
+What the tools did that the verbs do differently:
+- A tool opened an AuthorLM session when none was active
+  (`declare_intent`, `collect_revision`, `get_guidance`,
+  `review_suggestion`). On the CLI that is `session start`; `guide` and
+  `review` stop and name it, `intent declare` records the intent and
+  says no episode was opened.
+- `get_briefing` and `get_guidance` collected the manuscript before they
+  read it. `briefing` and `guide` do not; `session start` does, and so
+  does `collect`.
+- Tools returned JSON, shortened for a chat; verbs print text. `diff`
+  prints a whole diff where `diff_versions` stopped at 300 lines a file.
+- `curate_concepts` took several operations in one call; on the CLI
+  each is its own command (`concept retire` and `revive` take several
+  names).
+
+Where each tool's job is now (tools never called are marked ·):
+
+| MCP tool | CLI verb |
+|---|---|
+| `list_manuscripts`, `resolve_file` | `manuscript list [--file PATH]` |
+| `get_manuscript_metadata`, `set_manuscript_metadata` · | `manuscript show`, `manuscript set` |
+| `get_status` | `status` (open tags: `footnote list`, `explain list`, `suggestion list`; clips not ready: `media list`) |
+| `declare_intent`, `scope_intent` ·, `list_intents`, `complete_intent`, `abandon_intent` | `intent declare`, `intent scope`, `intent list` (`intent scope --triage` for the evidence), `intent complete`, `intent abandon` |
+| `collect_revision` | `collect` |
+| `get_guidance`, `review_suggestion`, `get_briefing`, `close_session` | `guide`, `review`, `briefing`, `session end` |
+| `get_concepts` | `concept show <name>`, `concept list --file FILE`, `concept list --query TEXT`; counts in `status` |
+| `add_concept`, `alias_concept`, `merge_concepts`, `link_concepts`, `confirm_concept`, `retire_concept`, `confirm_edge`, `reject_edge` | `concept add`, `alias`, `merge`, `link`, `confirm <name>`, `retire`, `confirm <edge> [relation]`, `reject-edge` |
+| `curate_concepts` | the `concept` verbs above, one command each |
+| `get_style`, `define_style_guide` ·, `attach_style` ·, `add_style_law`, `retire_style_law`, `move_style_law` · | `style show <file>` and `style guides`, `style guide`, `style attach`, `style add`, `style retire`, `style move` |
+| `get_profile` | `profile list`, `profile show <key>` |
+| `list_proposals` ·, `reconcile_proposals` ·, `screen_proposals` ·, `resolve_proposal` | `proposal list`, `proposal reconcile`, `proposal screen`, `proposal accept`, `edge`, `dismiss` |
+| `list_beliefs`, `retire_belief`, `demote_belief`, `merge_beliefs` ·, `convert_belief_to_law` · | `belief list`, `retire`, `demote`, `merge`, `convert` |
+| `analyze_episodes` ·, `get_plan` ·, `extract_concepts` ·, `run_sweep` · | `analyze`, `plan`, `extract`, `sweep hygiene`, `readiness`, `ontology` |
+| `diff_versions` | `diff [vN] [vM] [file]` |
+| `get_doc_links` | `doc list` |
+| `import_critique` ·, `critique_status`, `list_critique_items`, `list_critique_decisions`, `triage_critique` ·, `list_critique_edits` ·, `triage_critique_edits` · | `critique import`, `status`, `list`, `list --decided`, `triage`, `edits`, `triage --edits` |
+| `add_filter` ·, `list_filters`, `show_filter` ·, `list_filter_edits` ·, `triage_filter_edits` · | `filter add`, `list`, `show`, `edits`, `triage` |
+| `list_footnote_tags`, `apply_footnote`, `resolve_footnotes` · | `footnote list`, `apply`, `resolve` |
+| `list_explain_tags`, `apply_explain`, `resolve_explains` · | `explain list`, `apply`, `resolve` |
+| `list_suggestion_tags` ·, `apply_suggestion` ·, `resolve_suggestions` · | `suggestion list`, `apply`, `resolve` |
+| `scan_illustrations` ·, `triage_illustrations` ·, `get_illustration_prompt` · | `illus scan`, `triage`, `prompt` |
+| `list_media` · | `media list` |
+| `clip_ensure` ·, `set_clip_spec` ·, `set_clip_fields` ·, `resolve_clip_specs` ·, `clip_job` ·, `clip_edit` ·, `clip_pick` ·, `clip_attach` · | `clip ensure`, `spec`, `set`, `resolve`, `job`, `edit`, `pick`, `attach` |
+| `file_improvement`, `list_improvements`, `improvement_bundle` ·, `resolve_improvement` | `improve add`, `list`, `run`, `propose`, `close`, `dismiss` |
+| `export_audio` ·, `audio_readiness` ·, `list_voices` ·, `audition_voices` ·, `set_cast` ·, `say_term` ·, `push_pronunciations` · | `audio export`, `check`, `voices`, `audition`, `cast`, `say`, `dictionary` |

@@ -503,34 +503,9 @@ def scenario_editorial_loop(root: Path) -> None:
           resurrection_check["status"] == "candidate",
           str(resurrection_check))
 
-    # --- compact MCP projections: delta-only, no row boilerplate ---
+    # --- the compact concept listing: no row boilerplate ---
     from authorlm import api as _capi
     _cms = _capi.get_manuscript(_cdb, "book")
-    compact = _capi.compact_briefing(_capi.get_briefing(_cdb, _cms))
-    blob = json.dumps(compact)
-    check("compact briefing drops row boilerplate",
-          "created_by" not in blob and "schema_version" not in blob, blob[:400])
-    check("compact briefing carries counts",
-          isinstance(compact["unconfirmed_concepts"]["count"], int)
-          and isinstance(compact["proposals"]["count"], int)
-          and isinstance(compact["inferred_edges"]["count"], int), str(compact)[:400])
-    gap = {"edge_id": "ce-x", "relation": "depends_on", "status": "declared",
-           "from_name": "A", "to_name": "B", "first": "A", "second": "B",
-           "text": "'B' first appears before its prerequisite 'A' is introduced."}
-    synth = {"version_no": 1, "checksum": "x", "transitions": [],
-             "attached_to_episode": False, "realized": [], "repointed": [],
-             "vanished": [], "new_paragraphs": 0, "extract_hint": False,
-             "gaps_before": [gap], "gaps_after": [], "gaps_resolved": [gap],
-             "gaps_new": []}
-    ccollect = _capi.compact_collect(synth)
-    check("compact collect swaps before/after lists for counts",
-          "gaps_before" not in ccollect
-          and ccollect["gaps"] == {"before": 1, "after": 0}
-          and ccollect["gaps_resolved"] == [
-              {"edge_id": "ce-x", "text": gap["text"], "status": "declared"}],
-          str(ccollect))
-    check("compact collect passes non-version reports through",
-          _capi.compact_collect({"unchanged": True}) == {"unchanged": True})
     from authorlm import concepts as _cconcepts
     cgraph = _cconcepts.compact_concepts(_capi.list_concepts(_cdb, _cms))
     check("compact concept listing projects to name/kind/status",
@@ -1683,25 +1658,6 @@ def scenario_write_loop(root: Path) -> None:
         check("writeup history reconstructs from guidance rows",
               states == [(1, "accepted"), (2, "rejected"), (2, "modified"),
                          (4, "accepted")], repr(states))
-
-        # --- compact briefing stays bounded under a huge backlog -----------
-        fake_node = {"name": "N", "kind": "concept", "status": "declared",
-                     "introduced_in": None, "notes": "", "aliases": "[]"}
-        fake = {"since": "", "belief_changes": [], "new_beliefs": [],
-                "realized_concepts": [], "contradictions": [],
-                "outstanding_questions": [], "active_intents": [],
-                "active_writeups": [],
-                "focus_areas": [], "toc_unlisted": [], "learning_velocity": {},
-                "proposals": [],
-                "unconfirmed_concepts": [dict(fake_node, name=f"N{i}")
-                                         for i in range(300)],
-                "inferred_edges": []}
-        compact = _api.compact_briefing(fake)
-        uc = compact["unconfirmed_concepts"]
-        check("compact briefing bounds huge backlogs",
-              uc["count"] == 300 and len(uc["items"]) == _api.BRIEFING_HEAD
-              and "285 more" in uc.get("more", ""),
-              json.dumps(uc)[:300])
 
         # --- abandon restores the pinned source ----------------------------
         run(ws, "style", "attach", "01-choice.md", "House")

@@ -1,5 +1,9 @@
 # Audiobook review and generation from the phone — design
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Ratified 2026-09-25 after a grilling session (2026-09-23 to 09-25).
 Amends `audiobook-pipeline-design.md` §0, §1, §2, §10, §11 and §16:
 generation moves from audiostation into AuthorLM, and a served page

@@ -1,6 +1,6 @@
 """Shared concept/edge triage schemas and mutation service.
 
-The CLI, MCP tools, and web app all consume this module. Surfaces choose how
+The CLI and the web app both consume this module. Surfaces choose how
 to present a decision; this module owns what the decision means.
 """
 

@@ -24,8 +24,8 @@ Two kinds of quantity land in
 they are **never summed into one number** anywhere:
 
 - **`kind: "api"` — billable.** Folded in at `LLMClient._record_usage`,
-  one seam sitting *below* `stats_line()`, `_report_llm`, the CLI and the
-  MCP server, so the two currently-silent auto paths are covered with no
+  one seam sitting *below* `stats_line()`, `_report_llm` and the CLI, so
+  the two currently-silent auto paths are covered with no
   call-site edit. Sixteen of the seventeen audited sites reach it that
   way; `generate_image` is not a client and calls `record_image` itself.
   Tokens are exact (the provider reported them); `est_cost_usd` is an
@@ -571,8 +571,8 @@ def pending() -> dict:
 def flush(invocation: str | None = None) -> None:
     """Write this invocation's one aggregate line and start over.
 
-    Called from `cli._trace`, `mcp_server._guard` and `atexit` — the
-    three points `dbperf.flush` already uses."""
+    Called from `cli._trace` and `atexit` — the two points `dbperf.flush`
+    already uses."""
     global _LEDGER
     led = _LEDGER
     _LEDGER = None
@@ -732,8 +732,8 @@ def sweep_session(client, *, workspace: str | Path | None = None,
 def sweep_opportunistic(workspace: str | Path | None = None) -> dict | None:
     """The trigger. **No daemon, no thread, no cron, no new process.**
 
-    Runs at the flush point that already exists (`cli._trace`,
-    `mcp_server._guard`) and does nothing at all unless every one of:
+    Runs at the flush point that already exists (`cli._trace`) and does
+    nothing at all unless every one of:
     `[usage] chat = true`; `clients.current()` resolved `exact` WITH a
     session id — the chat driving AuthorLM right now, never a scan of
     every session on the machine; that engine's adapter implements the

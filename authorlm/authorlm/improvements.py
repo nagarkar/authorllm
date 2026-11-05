@@ -17,7 +17,7 @@ recorded a fix + encoded test) → resolved (author confirmed). Dismissal
 requires a reason, recorded as evidence like any rejected guidance.
 
 Improvement tasks are tool-knowledge, not manuscript-knowledge: they
-surface only in `improve list` / the MCP improve tools and a one-line
+surface only in `improve list` and a one-line
 count in `status` — never in briefings, guidance, or episode analysis.
 """
 

@@ -43,9 +43,7 @@ from pathlib import Path
 
 
 class BudgetExceeded(RuntimeError):
-    """Subclasses `RuntimeError`, which `mcp_server._guard` already catches
-    into `{"ok": false, "error": …}` and which the CLI verbs already
-    surface. Enforcement, if ever switched on, degrades the way every
+    """Subclasses `RuntimeError`, which the CLI verbs already surface. Enforcement, if ever switched on, degrades the way every
     other refusal in this system degrades — a sentence, not a
     traceback."""
 
@@ -134,7 +132,7 @@ def _today() -> str:
 def day_base(directory: Path | str) -> float:
     """Today's estimated spend already ON DISK, memoized per (directory,
     day) so the common (no `[budget]`) path never reads the file at all
-    and a long-lived MCP process reads it once per day."""
+    and a long-lived process reads it once per day."""
     day = _today()
     key = (str(directory), day)
     if key in _DAY_BASE:

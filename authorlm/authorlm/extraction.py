@@ -12,7 +12,7 @@ answers in the candidate contract, eight deterministic gates screen the
 reply, a per-essay adjudicator (extraction_adjudicator.py) rules on what
 survives, and `run` writes §4.8's shapes. `authorlm extract` drives it
 interactively; `api.run_extraction` is the non-interactive front for
-init, the writeup close, an analysed collect and the MCP tool. The old
+init, the writeup close and an analysed collect. The old
 single-call path was retired 2026-10-25 (§9 phase 6).
 """
 
@@ -234,8 +234,8 @@ def _set_extraction_watermark(db: Database, manuscript: dict,
 
 class ExtractionDisabled(RuntimeError):
     """Raised when LLM concept extraction is asked for while
-    `[extraction] enabled = false`. A RuntimeError so the MCP guard
-    renders it as a sentence."""
+    `[extraction] enabled = false`. A RuntimeError, so every caller
+    reports it as a sentence."""
 
 
 DISABLED_MESSAGE = (

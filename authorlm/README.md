@@ -16,7 +16,6 @@ no evidence, it abstains.
 - **LLM features** (concept extraction, belief distillation, bridge
   drafting): `pip install litellm` plus an API key for your chosen model
   (see Configuration).
-- **MCP server** (Claude Code / MCP-client integration): `pip install mcp`.
 - **Google Docs bridge** (`doc push/pull`, reconciliation):
   `pip install google-api-python-client google-auth-httplib2
   google-auth-oauthlib`, plus an OAuth client secret in
@@ -43,7 +42,7 @@ no evidence, it abstains.
 ```bash
 cd authorlm
 pip install -e .              # gives you the `authorlm` command
-pip install -e ".[llm,mcp]"   # …with the LLM and MCP extras in one step
+pip install -e ".[llm]"       # …with the LLM extra
 pip install -e ".[gdocs]"     # Google Docs bridge and session-start reconcile
 pip install -e ".[all]"       # everything above
 ```
@@ -55,9 +54,7 @@ The built pages are not tracked in git (`setup.py`). Without npm the install
 stops, unless the pages are already built or `AUTHORLM_SKIP_WEB_BUILD=1` is
 set (then the commands that serve a page say it has not been built). After a
 frontend change or a `git pull`, rebuild a page with `npm run build` in its
-`web/<page>/` directory, or reinstall. The MCP server is a long-running
-process; after changing its code or rebuilding the app, restart it with
-`pkill -f authorlm-mcp` (the MCP client respawns it on the next call).
+`web/<page>/` directory, or reinstall.
 
 AuthorLM keeps **one database per workspace** — by default `~/.authorlm/`
 — so `authorlm` works from any directory and manuscripts can live anywhere
@@ -92,11 +89,11 @@ authorlm setup --workspace "/Volumes/Crucial X6/authorlm" --no-questions
 ```
 
 This records `AUTHORLM_WORKSPACE=<dir>` in the checkout's gitignored
-`.env` and creates the database there. Both the CLI and the MCP server
-read that line, so they always open the same database.
+`.env` and creates the database there. Every `authorlm` command reads
+that line, so they all open the same database.
 
 **Moving a workspace:** copy the `.authorlm/` folder to its new parent,
-run `setup --workspace <new parent>`, then `pkill -f authorlm-mcp`.
+then run `setup --workspace <new parent>`.
 
 **If the database is missing**, for example because the drive is
 unplugged, every command stops and tells you so. Nothing ever creates an
@@ -196,7 +193,7 @@ outstanding questions.
 | `export-obsidian` | Export the Concept Graph as wikilinked stub notes for Obsidian's graph view (`--dir` to override `_concepts/`) |
 | `setup [--workspace DIR] [--no-questions]` | Point this checkout at a workspace (recorded as `AUTHORLM_WORKSPACE` in `.env`) and create its database; asks where when `--workspace` is omitted |
 | `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`. Never mines the Concept Graph; run `extract --native` when you want a fresh one. `--extraction off` registers a machine-kept manuscript with extraction switched off for good (`manuscript set --extraction on` later) |
-| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, ISBN-13 fields, `--extraction on\|off`); the CLI and MCP tools share this record |
+| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, ISBN-13 fields, `--extraction on\|off`) |
 | `manuscript list [--file PATH]` | Every registered manuscript with its directory (no `-m` needed); with `--file`, the one that holds that path or bare filename |
 | `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
 | `export <fmt> … --upload [--as-doc] [--drive-id ID]` | Also put the written file on Google Drive (the manuscript's folder); re-exporting replaces the same Drive file in place. `--as-doc` converts a DOCX to a Google Doc; `--drive-id` adopts a file already on Drive |
@@ -463,8 +460,8 @@ api_key_env = "AUTHORLM_LLM_KEY"
 
 What the LLM unlocks:
 
-- **Concept extraction** — on request only (`authorlm extract --native`,
-  or MCP `extract_concepts`). `init`, `collect`, and `write complete`
+- **Concept extraction** — on request only (`authorlm extract --native`).
+  `init`, `collect`, and `write complete`
   never mine. Extraction targets *load-bearing units of thought*
   (RFC §21.3) and types nodes by kind — people and works cited in
   passing become `historical_reference`, not concepts, and never drive
@@ -525,7 +522,7 @@ python3 tests/run_all.py --live # the same plus test_live_llm.py (bills for miss
 One file at a time:
 
 ```bash
-python3 tests/test_api.py       # API layer + CLI/MCP parity, hermetic
+python3 tests/test_api.py       # API layer, hermetic
 python3 tests/test_e2e.py       # hermetic: stub LLM server, no network/keys
 python3 tests/test_loop.py      # proposal learning loop, hermetic (scripted LLM)
 python3 tests/test_live_llm.py  # real LLM path, with record/replay
@@ -533,9 +530,7 @@ python3 tests/test_live_llm.py  # real LLM path, with record/replay
 
 **API suite**: exercises `authorlm.api` (the logic layer beneath every
 surface) directly — including the Google Docs bridge against an in-memory
-Drive/Docs fake — and asserts the MCP server exposes the exact
-hand-curated tool set (extend the `expected` list there when adding a
-tool).
+Drive/Docs fake.
 
 **Hermetic suite** (five scenarios): the full editorial loop
 (RFC Appendix A shape), prerequisite-gap detection, unanswered objections,
@@ -566,9 +561,10 @@ never a failure. In a worktree, symlink the main checkout's gitignored
 
 ## Logging & traces
 
-Every CLI command and MCP tool call appends one JSON line to
+Every CLI command appends one JSON line to
 `~/.authorlm/logs/trace.jsonl` (or `<workspace>/.authorlm/logs/` under
-`-w`): timestamp, surface (cli/mcp), verb, action, manuscript, duration in
+`-w`): timestamp, surface (`cli`; lines from before the MCP server was
+removed in 2026-11 say `mcp`), verb, action, manuscript, duration in
 milliseconds, ok/error. Always on, zero dependencies, best-effort (a
 broken trace never breaks the operation), and size-rotated at 5 MB to
 `trace.jsonl.1`.
@@ -590,8 +586,7 @@ jq -c 'select(.ok == false)' ~/.authorlm/logs/trace.jsonl | tail
 Beside it, `db-perf.jsonl` is the layer underneath: the trace log says a
 verb took 900 ms, this one says where those 900 ms went. Every query
 through the `Database` surface is timed and aggregated in memory per
-normalized SQL shape, and **one** line per CLI process / MCP tool call
-records `{n, total_ms, max_ms}` per shape plus the client provenance join
+normalized SQL shape, and **one** line per CLI process records `{n, total_ms, max_ms}` per shape plus the client provenance join
 key; any single query over `[db] slow_ms` (default 100) also writes its
 own line tagged `"slow": true`. On by default (`[db] perf_log`,
 config.toml), best-effort, same 5 MB rotation. Read it with:
@@ -608,7 +603,7 @@ Beside both, `usage.jsonl` is the third question: not which verbs ran and
 not where their time went, but **where their money went**. Every model
 call folds its tokens into an in-memory aggregate keyed by
 `purpose | model` — `purpose` being the config section that chose the
-model — and one line per CLI process / MCP tool call records
+model — and one line per CLI process records
 `{n, in, out, cache r/w, est_cost}` plus the same client join key; any
 single call estimated over `[usage] expensive_usd` (default 0.50) writes
 its own line tagged `"expensive": true`. On by default (`[usage] ledger`),
@@ -678,8 +673,8 @@ is the switch. `AUTHORLM_CLIENT=engine:session:label` (or a JSON object)
 forces a specific identity instead.
 
 **The hook is optional.** On Claude Code the chat is attributed *exactly*
-with no hook at all — `CLAUDE_CODE_SESSION_ID` reaches both Bash-tool
-subprocesses and stdio MCP servers. The `SessionStart` / `SessionEnd`
+with no hook at all — `CLAUDE_CODE_SESSION_ID` reaches Bash-tool
+subprocesses. The `SessionStart` / `SessionEnd`
 hooks only add the label, the start time and the transcript path (and are
 the fallback if that undocumented variable ever disappears). Hooks
 execute code, so nothing is installed for you — print the snippet and

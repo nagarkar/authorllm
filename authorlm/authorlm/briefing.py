@@ -189,7 +189,7 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
 
     # Profiles on record (declared context — market, positioning): one
     # line so every session knows they exist. Content stays on demand
-    # via get_profile.
+    # via 'profile show'.
     from pathlib import Path
 
     profiles = []

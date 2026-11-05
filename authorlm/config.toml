@@ -130,10 +130,10 @@ image_size = "1536x1024"
 # The kill switch for LLM concept extraction. Extraction is LAZY (ruling
 # 2026-10-25, docs/extraction-redesign.md §0.9): nothing mines the graph
 # as a side effect — not init, not a collect, not the end of a writeup.
-# `authorlm extract --native` and the MCP tool extract_concepts are the
-# only roads, taken when someone wants a fresh Concept Graph. The
-# zero-token graph upkeep — realizations, introduced_in, PROTECTED TERMS
-# in filter and lens payloads — is not governed by this switch.
+# `authorlm extract --native` is the only road, taken when someone wants
+# a fresh Concept Graph. The zero-token graph upkeep — realizations,
+# introduced_in, PROTECTED TERMS in filter and lens payloads — is not
+# governed by this switch.
 enabled = true
 # --- The redesigned pipeline (docs/extraction-redesign.md §7, ratified
 # 2026-10-25) — what `authorlm extract` runs. `extract <file>` prints the
@@ -191,8 +191,8 @@ run_cost_ceiling_usd = 20
 #
 # Every query through the Database surface is timed with perf_counter and
 # aggregated IN MEMORY per normalized SQL shape; ONE JSON line per CLI
-# process / MCP tool call then lands in
-# <workspace>/.authorlm/logs/db-perf.jsonl beside trace.jsonl, carrying
+# process then lands in <workspace>/.authorlm/logs/db-perf.jsonl beside
+# trace.jsonl, carrying
 # {n, total_ms, max_ms} per shape plus the client provenance join key
 # (§15.15). A verb issuing 900 queries therefore costs 900 dict updates
 # and one line of I/O — which is what makes shipping it on affordable.
@@ -216,9 +216,9 @@ slow_ms = 100
 # The always-on usage ledger (Sponsor ruling 2026-08-30: "it would be
 # good to track usage so if you ever want to take this to commercial
 # stage, we can have that ready-made"). Every model call folds its tokens
-# into an in-memory aggregate; ONE JSON line per CLI process / MCP tool
-# call then lands in <workspace>/.authorlm/logs/usage.jsonl beside
-# trace.jsonl and db-perf.jsonl, carrying per (purpose | model)
+# into an in-memory aggregate; ONE JSON line per CLI process then lands
+# in <workspace>/.authorlm/logs/usage.jsonl beside trace.jsonl and
+# db-perf.jsonl, carrying per (purpose | model)
 # {n, in, out, cache r/w, est_cost} plus the client provenance join key
 # (§15.15). Read it with `authorlm usage [--days N] [--by …]`.
 #

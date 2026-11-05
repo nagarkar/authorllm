@@ -1,6 +1,6 @@
 """Operation trace log: one JSONL line per verb invocation.
 
-Every CLI command and MCP tool call appends
+Every CLI command appends
 {ts, surface, verb, action, manuscript, duration_ms, ok, error} to
 <workspace>/.authorlm/logs/trace.jsonl (default workspace: ~/.authorlm).
 Zero-dependency and cheap enough to be always on. The log exists to be

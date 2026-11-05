@@ -250,7 +250,7 @@ def queue(db: Database, manuscript_id: str,
           scope: str | None = None) -> list[tuple[str, dict]]:
     """The pending queue in its one canonical order (intents in import
     order, then style elements). Every surface — CLI list numbering,
-    number-based verdicts, MCP listing — uses this, so a number always
+    number-based verdicts, the Triage App — uses this, so a number always
     means the same item within one scope."""
     p = pending(db, manuscript_id, scope)
     return ([("intent", it) for it in p["intents"]]

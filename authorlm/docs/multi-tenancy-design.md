@@ -1,5 +1,9 @@
 # Multi-tenancy and true multi-manuscript — design
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Status: DRAFT for grilling, 2026-09-02; the author's first-round rulings
 are recorded in §7 and folded into the decisions. Nothing here is built.
 Written against the working tree at 465b491 plus the uncommitted

@@ -1,5 +1,9 @@
 # Outside Callers — Design Reference
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Built 2026-10-02 (issues #128 to #132). This is the reference for the
 five entry points a tool that is not one of AuthorLM's own passes uses
 to keep a document as a manuscript. The first such tool is ytlm, which

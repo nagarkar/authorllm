@@ -1,5 +1,9 @@
 # Critique Pass — Design Reference
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Ratified 2026-08-13 in a grilling session with the author. This document is
 the build reference for (a) importing external critique into AuthorLM and
 (b) the essay-by-essay edit machinery that proposes revisions against it.

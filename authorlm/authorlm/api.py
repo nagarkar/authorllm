@@ -1,7 +1,7 @@
 """The application API — the single logic layer beneath every surface.
 
-P11 (Common Core §1.12A): CLI, MCP server, and conversational skills are
-logic-free wrappers over this module. Functions take a `Database` plus a
+P11 (Common Core §1.12A): the CLI, the web pages and conversational skills
+are logic-free wrappers over this module. Functions take a `Database` plus a
 manuscript row (dict) and return plain dicts/lists that serialize cleanly
 to JSON; errors are raised as ValueError/LookupError with author-readable
 messages for the surface to present.
@@ -27,7 +27,7 @@ from typing import Any
 from . import clients
 from . import concepts as cg
 from . import form_grammar
-from .concepts import _compact_concept, _compact_edge, _preview
+from .concepts import _preview
 from . import beliefs as bel
 from . import proposals as prop
 from . import sessions as ses
@@ -83,8 +83,8 @@ __all__ = [
 
 class MissingDatabase(RuntimeError):
     """The workspace has no database file, and the caller did not ask to
-    create one. A RuntimeError so the MCP guard renders it as a tool error
-    instead of crashing the server; `.path` is the file that was expected."""
+    create one. A RuntimeError, so a caller's ordinary error handling
+    reports it as a sentence; `.path` is the file that was expected."""
 
     def __init__(self, path: Path, message: str):
         super().__init__(message)
@@ -143,8 +143,8 @@ def load_config(workspace: str | None = None) -> dict:
     AUTHORLM_CONFIG override, else the project's config.toml) after
     `paths.load_env()` populates the environment from .env. This used to
     diverge from cli._load_config, which read this project config all
-    along — the divergence silently left the LLM off on the MCP server
-    and the triage app while the CLI had it on (ORCH-3)."""
+    along — the divergence silently left the LLM off on the triage app
+    (and the MCP server, since removed) while the CLI had it on (ORCH-3)."""
     from . import paths
 
     paths.load_env()
@@ -3640,213 +3640,11 @@ def convert_belief(db: Database, manuscript: dict, prefix: str, aspect: str,
     return bel.convert_belief(db, manuscript["id"], belief, element, reason)
 
 
-# ---------------------------------------- compact projections (MCP surface)
-# The conversational surface pays per token; the CLI renders full rows
-# itself. These projections drop row boilerplate (version, created_at,
-# created_by, schema_version, metadata, manuscript_id) and keep what a
-# conversation can act on: names, kinds, statuses, and the ids the
-# follow-up tools need (proposal / edge resolution). Full rows remain one
-# verbose=True away.
-
-def _compact_gap(gap: dict) -> dict:
-    return {"edge_id": gap["edge_id"], "text": gap["text"],
-            "status": gap["status"]}
-
-
-def _compact_belief(belief: dict) -> dict:
-    return {"id": belief["id"], "statement": belief["statement"],
-            "status": belief["status"], "confidence": belief["confidence"],
-            "support": f"{belief['supporting']}+/{belief['contradicting']}-"}
-
-
-def compact_collect(report: dict) -> dict:
-    """Delta-only projection of a collect report: gap counts plus the
-    resolved/new gaps, never the full before/after lists."""
-    if "version_no" not in report:
-        return report  # {"unchanged": True} or {"staged": [...]}
-    out = {key: report[key] for key in (
-        "version_no", "checksum", "transitions", "attached_to_episode",
-        "realized", "repointed", "vanished", "hypotheses_dropped",
-        "new_paragraphs", "extract_hint",
-    ) if key in report}
-    out["gaps"] = {"before": len(report["gaps_before"]),
-                   "after": len(report["gaps_after"])}
-    out["gaps_resolved"] = [_compact_gap(g) for g in report["gaps_resolved"]]
-    out["gaps_new"] = [_compact_gap(g) for g in report["gaps_new"]]
-    if "illustrations" in report:
-        out["illustrations"] = report["illustrations"]
-    if "directives" in report:
-        out["directives"] = report["directives"]
-    if "suggestions_stale" in report:
-        out["suggestions_stale"] = report["suggestions_stale"]
-    return out
-
-
-# A "compact" briefing must stay readable in one MCP response even when the
-# triage backlog is huge (271 unconfirmed concepts once produced a 144KB
-# "compact" result — the R6.3 anti-pattern). Counts stay exact; item lists
-# carry at most this many rows plus a pointer to the bulk surface.
-BRIEFING_HEAD = 15
-
-
-def _head(items: list, more_hint: str) -> dict:
-    """Bounded head of a briefing list: exact count, first BRIEFING_HEAD
-    items, and where to see the rest when truncated."""
-    out = {"count": len(items), "items": items[:BRIEFING_HEAD]}
-    if len(items) > BRIEFING_HEAD:
-        out["more"] = f"{len(items) - BRIEFING_HEAD} more — {more_hint}"
-    return out
-
-
-def compact_briefing(briefing: dict) -> dict:
-    """Compact projection of the session briefing: counts + a bounded head
-    of actionable items, no raw rows (bulk piles live on their dedicated
-    surfaces: triage, list_proposals, get_plan)."""
-    from collections import Counter
-
-    out = {"since": briefing["since"]}
-    if "caught_up" in briefing:
-        out["caught_up"] = briefing["caught_up"]
-    if briefing.get("profiles"):
-        out["profiles"] = briefing["profiles"]
-    out["belief_changes"] = briefing["belief_changes"]  # built compact
-    out["new_beliefs"] = [_compact_belief(p) for p in briefing["new_beliefs"]]
-    out["realized_concepts"] = {
-        "count": len(briefing["realized_concepts"]),
-        "names": [n["name"] for n in briefing["realized_concepts"]],
-    }
-    out["unconfirmed_concepts"] = _head(
-        [_compact_concept(n) for n in briefing["unconfirmed_concepts"]],
-        "triage with 'authorlm concept triage'")
-    out["proposals"] = {
-        **_head([{"id": p["id"], "kind": p["kind"], "summary": p["summary"]}
-                 for p in briefing["proposals"]],
-                "review via list_proposals"),
-        "by_kind": dict(Counter(p["kind"] for p in briefing["proposals"])),
-    }
-    out["inferred_edges"] = _head(
-        [_compact_edge(e) for e in briefing["inferred_edges"]],
-        "triage with 'authorlm concept triage --edges'")
-    out["contradictions"] = [
-        {"suggestion": c["suggestion"], "explanation": c["explanation"]}
-        for c in briefing["contradictions"]
-    ]
-    out["outstanding_questions"] = briefing["outstanding_questions"]
-    out["active_intents"] = [
-        {"id": i["id"], "statement": i["statement"], "status": i["status"]}
-        for i in briefing["active_intents"]
-    ]
-    # Small and always whole: an open writeup means a truncated file, and
-    # a count would be useless — the agent needs the name to say it aloud.
-    out["active_writeups"] = briefing["active_writeups"]
-    out["focus_areas"] = _head(
-        [{"name": f["node"]["name"],
-          "related": [f"{r['name']} ({r['relation']})" for r in f["related"]]}
-         for f in briefing["focus_areas"]],
-        "full plan via get_plan")
-    out["toc_unlisted"] = briefing["toc_unlisted"]
-    out["learning_velocity"] = briefing["learning_velocity"]
-    return out
-
-
-def concept_overview(db: Database, manuscript: dict) -> dict:
-    """The graph at a glance — counts by kind and status, edge count,
-    recently added names — never the rows themselves. This is what an
-    unscoped chat fetch gets: the full compact dump measured ~59K tokens
-    on a mature graph, a third of a context window (ratified 2026-08-10:
-    dumps impossible by construction; narrow with name=, file=, query=)."""
-    mid = manuscript["id"]
-    by_kind: dict[str, int] = {}
-    by_status: dict[str, int] = {}
-    for row in db.all(
-            "SELECT kind, status, COUNT(*) AS n FROM concept_nodes "
-            "WHERE manuscript_id = ? AND status != 'retired' "
-            "GROUP BY kind, status", (mid,)):
-        by_kind[row["kind"]] = by_kind.get(row["kind"], 0) + row["n"]
-        by_status[row["status"]] = by_status.get(row["status"], 0) + row["n"]
-    recent = [r["name"] for r in db.all(
-        "SELECT name FROM concept_nodes WHERE manuscript_id = ? "
-        "AND status != 'retired' ORDER BY created_at DESC LIMIT 12",
-        (mid,))]
-    edge_count = db.one(
-        "SELECT COUNT(*) AS n FROM concept_edges WHERE manuscript_id = ? "
-        "AND status NOT IN ('rejected', 'retired')", (mid,))["n"]
-    return {
-        "node_count": sum(by_kind.values()),
-        "edge_count": edge_count,
-        "by_kind": by_kind,
-        "by_status": by_status,
-        "recently_added": recent,
-        "guidance": ("The graph is too large to list whole. Narrow with "
-                     "name= (one concept, full notes), query= (name/notes/"
-                     "alias match), or file= (concepts realized in an "
-                     "essay)."),
-    }
-
-
 def scoped_concepts(db: Database, manuscript: dict,
                     file: str | None = None,
                     query: str | None = None,
                     text: str | None = None) -> dict:
     return cg.scoped_concepts(db, manuscript, file=file, query=query, text=text)
-
-
-def curate_concepts(db: Database, manuscript: dict,
-                    operations: list[dict]) -> dict:
-    """Batch graph curation for naturally-plural moments: an operations
-    array of confirm / retire / link / reject_edge / alias, applied in
-    order with per-op status — one failed op never blocks the rest.
-    review_suggestion is deliberately NOT batchable: per-verdict
-    explanations are the evidence stream (ratified 2026-08-10)."""
-    results = []
-    for op in operations:
-        kind = op.get("op")
-        try:
-            if kind == "confirm":
-                out = confirm_concept(db, manuscript, op["name"],
-                                      kind=op.get("kind"))
-            elif kind == "retire":
-                out = retire_concept(db, manuscript, op["name"])
-            elif kind == "revive":
-                row = db.one(
-                    "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND "
-                    "lower(name) = lower(?) AND status = 'retired'",
-                    (manuscript["id"], op["name"]))
-                if not row:
-                    raise LookupError(f"no retired concept named '{op['name']}'")
-                out = {"name": row["name"],
-                       **cg.revive_concept(db, manuscript["id"], dict(row))}
-            elif kind == "link":
-                out = link_concepts(db, manuscript, op["from"],
-                                    op["relation"], op["to"])
-            elif kind == "reject_edge":
-                out = reject_edge(db, manuscript, op["edge_id"])
-            elif kind == "alias":
-                out = alias_concept(db, manuscript, op["name"],
-                                    op.get("aliases", []),
-                                    remove=bool(op.get("remove")))
-            else:
-                raise ValueError(f"unknown op '{kind}' — expected confirm"
-                                 " | retire | link | reject_edge | alias")
-            results.append({"op": kind, "ok": True, "result": out})
-        except Exception as err:
-            results.append({"op": kind, "ok": False, "error": str(err)})
-    return {"applied": sum(1 for r in results if r["ok"]),
-            "failed": sum(1 for r in results if not r["ok"]),
-            "results": results}
-
-
-def compact_show_concept(result: dict) -> dict:
-    """Single-concept detail: the node keeps full notes (they are the
-    ratified definition); only row boilerplate and edge rows compact."""
-    node = dict(result["node"])
-    keep = {key: node[key]
-            for key in ("id", "name", "kind", "status", "introduced_in", "notes")
-            if node.get(key) is not None}
-    aliases = loads(node.get("aliases"), [])
-    if aliases:
-        keep["aliases"] = aliases
-    return {"node": keep, "edges": [_compact_edge(e) for e in result["edges"]]}
 
 
 def extraction_scope(db: Database, manuscript: dict, knob: dict,
@@ -3887,11 +3685,11 @@ def run_extraction(db: Database, manuscript: dict, llm: LLMClient,
                    files: list[str] | None = None, full: bool = False,
                    adjudicator: str | None = None) -> dict | None:
     """The non-interactive front on `extraction.run` (the redesigned
-    pipeline, docs/extraction-redesign.md) — the MCP tool's road, and the
-    one a script takes. Extraction is lazy (ruling §0.9): nothing calls
-    this as a side effect; the author, or the chat on their word, asks for
-    a fresh graph. Incremental by default: the sections changed since the
-    watermark; `files` or `full` widen it.
+    pipeline, docs/extraction-redesign.md) — the road a script takes.
+    Extraction is lazy (ruling §0.9): nothing calls this as a side effect;
+    the author, or the chat on their word, asks for a fresh graph.
+    Incremental by default: the sections changed since the watermark;
+    `files` or `full` widen it.
 
     The adjudicator is chosen before the first call (ruling §0.2, never
     spend unasked): `adjudicator` answers it outright, `[extraction]

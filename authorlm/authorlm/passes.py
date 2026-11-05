@@ -7,7 +7,7 @@ advance. The file is only ever pristine or fully resolved.
 This module owns the state machine, the preflight gate, the context
 package, the output contract with echo validation, staging as
 doc_threads (origin_type='critique'), triage verdicts, and the resolve /
-rollback logic. Drive I/O is delegated to gdocs (CLI-gated, never MCP).
+rollback logic. Drive I/O is delegated to gdocs (CLI-gated).
 """
 
 from __future__ import annotations

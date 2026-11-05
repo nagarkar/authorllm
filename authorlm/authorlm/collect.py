@@ -288,8 +288,8 @@ def collect(db: Database, manuscript: dict, config: dict,
 
     # No LLM runs at collect. Concept extraction is LAZY (ruling
     # 2026-10-25, docs/extraction-redesign.md §0.9): the graph is mined
-    # when someone asks for a fresh one — `authorlm extract --native` or
-    # the MCP tool — never as a side effect of observing an edit. The
+    # when someone asks for a fresh one — `authorlm extract --native` —
+    # never as a side effect of observing an edit. The
     # extract hint above is all a collect says about it.
     # Inline directives — [Footnote: …], [Explain: …] and [Suggestion: …]
     # — are REPORTED here, beside the illustration slots, and never

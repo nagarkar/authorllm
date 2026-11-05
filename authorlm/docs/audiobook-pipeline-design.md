@@ -1,5 +1,9 @@
 # Audiobook Pipeline — Design Reference
 
+> Note, 2026-11-04: the MCP server was removed (issue #364). Where this
+> document names an MCP tool, the CLI verb in `design-record.md`, section
+> "MCP server removed", does the same job.
+
 Grilled and ratified 2026-09-03. Built 2026-09-04 (all four slices of
 §13; see §18 for what was verified and what awaits a live key). This is
 the reference for

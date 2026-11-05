@@ -29,7 +29,7 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 @dataclass(frozen=True)
 class Prompt:
     name: str            # registry key
-    verbs: str           # which CLI verbs / MCP tools send it
+    verbs: str           # which CLI verbs send it
     purpose: str         # one line
     file: str | None = None     # prompts/<file> when file-backed
     module: str | None = None   # authorlm/<module>.py:<symbol> when rendered in code
@@ -126,32 +126,31 @@ REGISTRY: list[Prompt] = [
            "drop | retype (relations), a reason per verdict (§4.5)",
            file="adjudication.md",
            module="extraction_adjudicator.py:adjudicator_system"),
-    Prompt("episode-analysis", "intent complete; analyze; complete_intent",
+    Prompt("episode-analysis", "intent complete; analyze",
            "reconstruct the editorial decisions an episode's edits show",
            file=None, module="analysis.py:ANALYSIS_SYSTEM"),
-    Prompt("belief-distill", "review (explained verdicts); review_suggestion; "
-           "proposal dismissal",
+    Prompt("belief-distill", "review (explained verdicts); proposal dismissal",
            "match an author's explanation to an existing belief, distil a new "
            "one, or decline",
            file="belief-distill.md"),
-    Prompt("triage-screen", "proposal screen; scan_illustrations",
+    Prompt("triage-screen", "proposal screen; illus scan",
            "cut queued proposals that violate the author's active law",
            file="triage-screen.md"),
     Prompt("margin-distill", "doc pull (comment verdicts); illus triage",
            "distill a batch of margin/placement explanations into a "
            "scoped candidate",
            file="margin-distill.md"),
-    Prompt("guidance-draft", "guide; get_guidance",
+    Prompt("guidance-draft", "guide",
            "draft a bridge paragraph for a guidance suggestion",
            file=None, module="guidance.py:BRIDGE_DRAFT_SYSTEM"),
-    Prompt("lens", "analyze --lens; analyze_episodes",
+    Prompt("lens", "analyze --lens",
            "run a reflective-analysis lens over the record (this preamble "
            "+ the author's _lenses/<name>.md file)",
            file=None, module="lenses.py:LENS_SYSTEM"),
-    Prompt("ontology-sweep", "sweep ontology; run_sweep",
+    Prompt("ontology-sweep", "sweep ontology",
            "graph hygiene: duplicates, mis-typed nodes, missing edges",
            file=None, module="sweeps.py:ONTOLOGY_SYSTEM"),
-    Prompt("illus-placement", "illus scan; scan_illustrations",
+    Prompt("illus-placement", "illus scan",
            "spot-find illustration placements against ratified criteria",
            file="illus-placement.md", module="placement.py:placement_system"),
     Prompt("illus-arbiter", "illus scan (revision judgement)",
