@@ -208,8 +208,27 @@ def cmd_init(args):
 
 
 def cmd_manuscript(args):
-    """Show or update the publication identity of a manuscript."""
+    """Show or update the publication identity of a manuscript, or list
+    every registered one."""
     db = _open_db(args)
+    if args.action == "list":
+        # No -m needed: this is how a caller learns which names exist, and
+        # with --file which manuscript holds a path or a bare filename.
+        if args.file:
+            found = api.resolve_file(db, args.file)
+            if not found:
+                sys.exit(f"error: '{args.file}' is not inside any registered "
+                         "manuscript. authorlm manuscript list")
+            rows = [found]
+        else:
+            rows = api.list_manuscripts(db)
+        if not rows:
+            print("No manuscript registered. Register one: "
+                  "init --name <name> --path <dir>")
+        for row in rows:
+            print(f"{row['name']}  {row['path']}"
+                  + (ui.dim(f"  — {row['author']}") if row["author"] else ""))
+        return
     manuscript = _manuscript(db, args)
     if args.action == "set":
         try:
@@ -2497,15 +2516,13 @@ def cmd_concept(args):
             _confirm_node(db, mid, dict(node), args.kind)
             print(f"Confirmed concept '{node['name']}' ({args.kind or node['kind']}).")
         else:
-            edge = _find_by_prefix(db, "concept_edges", args.name, mid)
-            db.update(
-                "concept_edges", edge["id"],
-                {"relation": args.relation or edge["relation"], "status": "declared"},
-            )
-            print(
-                f"Confirmed: {cg.node_name(db, edge['from_node'])} "
-                f"—{args.relation or edge['relation']}→ {cg.node_name(db, edge['to_node'])}"
-            )
+            try:
+                edge = api.confirm_edge(db, manuscript, args.name,
+                                        args.relation)
+            except LookupError as err:
+                sys.exit(f"error: {err}.")
+            print(f"Confirmed: {edge['from_name']} —{edge['relation']}→ "
+                  f"{edge['to_name']}")
     elif args.action == "unconfirm":
         # Undo a confirmation: back to hypothesis status, so it re-enters
         # triage for a fresh decision.
@@ -2525,8 +2542,10 @@ def cmd_concept(args):
                 "— it will reappear in 'concept triage --edges'."
             )
     elif args.action == "reject-edge":
-        edge = _find_by_prefix(db, "concept_edges", args.name, mid)
-        db.update("concept_edges", edge["id"], {"status": "rejected"})
+        try:
+            api.reject_edge(db, manuscript, args.name)
+        except LookupError as err:
+            sys.exit(f"error: {err}.")
         print("Edge rejected (kept for history).")
     elif args.action == "retire":
         if args.all_kind:
@@ -2646,6 +2665,34 @@ def cmd_concept(args):
                 _run_triage(db, mid)
             if run_edges:
                 _run_edge_triage(db, mid)
+    elif args.file or args.query:
+        # The scoped slice: concepts realized in one essay, or matching a
+        # name, a note or an alias. Notes are previews here; 'concept show'
+        # prints one concept's notes whole.
+        try:
+            graph = api.scoped_concepts(db, manuscript, file=args.file,
+                                        query=args.query)
+        except LookupError as err:
+            sys.exit(f"error: {err}. authorlm doc list")
+        scope = " and ".join(
+            ([f"realized in {args.file}"] if args.file else [])
+            + ([f"matching '{args.query}'"] if args.query else []))
+        if not graph["nodes"]:
+            print(f"No concepts {scope}.")
+            return
+        print(f"Concepts {scope} ({graph['node_count']}):")
+        for node in graph["nodes"]:
+            where = (f", introduced in {node['introduced_in']}"
+                     if node.get("introduced_in") else "")
+            aliases = (ui.dim(f" (also: {', '.join(node['aliases'])})")
+                       if node.get("aliases") else "")
+            notes = ui.dim(f" — {node['notes']}") if node.get("notes") else ""
+            print(f"  {node['name']} ({node['kind']}, {node['status']}{where})"
+                  f"{aliases}{notes}")
+        if graph["edges"]:
+            print(f"Relationships among them ({graph['edge_count']}):")
+            for edge in graph["edges"]:
+                print(f"  [{edge['id'][:8]}] {edge['edge']} ({edge['status']})")
     else:  # list / graph
         node_filter = "" if args.all else " AND status != 'retired'"
         nodes = db.all(
@@ -8370,16 +8417,23 @@ def cmd_proposal(args):
         print(f"Proposals: adopted {adopted}, dismissed {dismissed}, skipped {skipped}.")
         return
 
-    # accept / dismiss by id
-    row = _find_by_prefix(db, "knowledge_proposals", args.id, mid)
-    if row["state"] != "open":
-        sys.exit(f"error: proposal is already {row['state']}.")
-    if args.action == "accept":
-        print(prop.adopt(db, mid, dict(row)))
-    elif args.action == "edge":
-        print(prop.demote_to_edge(db, mid, dict(row)))
-    else:
-        print(prop.dismiss(db, mid, dict(row), reason=args.why))
+    # accept / edge / dismiss by id
+    llm = LLMClient(_load_config(args))
+    try:
+        result = api.resolve_proposal(db, manuscript, args.id, args.action,
+                                      args.why, llm=llm)
+    except (LookupError, ValueError) as err:
+        sys.exit(f"error: {err}. authorlm proposal list")
+    print(result["message"])
+    if result.get("belief"):
+        print(ui.dim(f"  seeded belief: \"{result['belief']['statement']}\" "
+                     f"[{result['belief']['status']}]"))
+    if result.get("contradicted"):
+        cut = result["contradicted"]
+        print(ui.dim(f"  counted against the belief that folded it: "
+                     f"\"{cut['statement']}\" → confidence "
+                     f"{cut['confidence']} [{cut['status']}]"))
+    _report_llm(llm)
 
 
 def cmd_style(args):
@@ -9146,8 +9200,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser(
-        "manuscript", help="show or set manuscript publication metadata")
-    p.add_argument("action", choices=["show", "set"])
+        "manuscript", help="show or set manuscript publication metadata; "
+                           "list every registered manuscript")
+    p.add_argument("action", choices=["show", "set", "list"])
+    p.add_argument("--file", default=None, metavar="PATH",
+                   help="list: only the manuscript that holds this path or "
+                        "bare filename")
     p.add_argument("--author", default=None,
                    help="author or pen name used for publication")
     p.add_argument("--copyright-owner", default=None,
@@ -9353,6 +9411,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="triage --deterministic: apply every reported decision")
     p.add_argument("--remove", nargs="+", metavar="ALIAS",
                    help="alias: withdraw these aliases instead of adding")
+    p.add_argument("--file", default=None, metavar="FILE",
+                   help="list: only the concepts realized in this essay "
+                        "(introduced there, or named in its text)")
+    p.add_argument("--query", default=None, metavar="TEXT",
+                   help="list: only the concepts whose name, notes or "
+                        "aliases contain this text")
     p.set_defaults(func=cmd_concept)
 
     p = sub.add_parser("collect", help="snapshot the manuscript and detect transitions")
@@ -10445,6 +10509,8 @@ def _dispatch(argv: list[str] | None = None) -> None:
         args.relation = params[1] if len(params) > 1 else None
         args.to_name = params[2] if len(params) > 2 else None
         args.names = params
+        if (args.file or args.query) and args.action != "list":
+            sys.exit("usage: concept list [--file FILE] [--query TEXT]")
         if (args.deterministic or args.apply) and args.action != "triage":
             sys.exit("usage: concept triage --deterministic [--apply] "
                      "[--nodes|--edges]")
