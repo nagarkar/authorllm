@@ -4164,7 +4164,8 @@ def pending_write_order(threads: list[dict]) -> list[dict]:
     )
 
 
-def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
+def _occurrence(paragraphs: list[str], n: int, needle: str,
+                view=None) -> int:
     """The occurrence index of unit `n`'s own text, counted in the SAME
     universe `_locate_in_tab` searches.
 
@@ -4193,15 +4194,21 @@ def _occurrence(paragraphs: list[str], n: int, needle: str) -> int:
     wrapped — their old text still occurs inside the wrapper — but they
     sit past n and cannot shift a lower occurrence index. Descending
     order and occurrence-from-original are jointly correct or not at all
-    (design-filter-doc-settle §9.3)."""
+    (design-filter-doc-settle §9.3).
+
+    `view` maps each local paragraph (and the needle) to the text the
+    locator will search for. Default is `rendered_text` — emphasis gone,
+    which is what a replace fallback searches. An insertion that falls
+    back through `tab_anchor_text` must pass that view: headings drop
+    their `## ` marker and links keep only their text, and counting in
+    the rendered universe then searching the stripped one planted the
+    form on an earlier substring match (a topic name before its heading,
+    or a bare URL before the same URL as `[url](url)`)."""
     if n <= 0 or not needle:
         return 0
-    # Counted in the RENDERED universe — the tab's text has no emphasis
-    # markers (see `rendered_text`), and the writer searches it for the
-    # rendered needle when the raw one is not there. A plain paragraph
-    # renders to itself, so the count is unchanged where no markup is.
-    paragraphs = [rendered_text(p) for p in paragraphs]
-    needle = rendered_text(needle)
+    view = view or rendered_text
+    paragraphs = [view(p) for p in paragraphs]
+    needle = view(needle)
     full = "".join(p + "\n" for p in paragraphs)
     start = sum(len(p) + 1 for p in paragraphs[: n - 1])
     count, at = 0, full.find(needle)
@@ -4269,12 +4276,17 @@ def _locate_form(t: dict, paragraphs: list[str], docs_service,
             _occurrence(paragraphs, n, anchor), runs=runs)
         if span is None and tab_anchor_text(anchor) != anchor:
             # A stanza (hard breaks), an italic paragraph (an
-            # illustration caption), or a heading: the tab holds it
-            # rendered — same fallback the replace path takes, plus the
-            # heading marker the importer turned into style.
+            # illustration caption), a heading, or an inline link: the
+            # tab holds it as `tab_anchor_text` shows. Occurrence must
+            # be recounted in that universe — the rendered count steps
+            # over `## Title` / `[url](url)`, while the locator searches
+            # for `Title` / `url` and would otherwise land on an earlier
+            # plain-text match of the stripped needle.
+            tab_anchor = tab_anchor_text(anchor)
             span = _locate_in_tab(
-                docs_service, master_id, tab_id, tab_anchor_text(anchor),
-                _occurrence(paragraphs, n, anchor), runs=runs)
+                docs_service, master_id, tab_id, tab_anchor,
+                _occurrence(paragraphs, n, anchor, view=tab_anchor_text),
+                runs=runs)
         if span is None:
             raise LookupError("anchor paragraph not found "
                               "verbatim in the tab")
