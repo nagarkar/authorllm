@@ -44,8 +44,9 @@ from .normalize import clamp, normalize_markdown
 from .sessions import NO_EPISODE
 from .summaries import drafting_context_for_write_status, drafting_context_for_writeup
 from .revisions import (
-    MARKER, PLACEHOLDER, _version_text, is_placeholder, marker_present,
-    read_manuscript_files,
+    MARKER, PLACEHOLDER, Version, changes, count_versions, diff_pair,
+    file_at, files_at, is_placeholder, last_recorded_at, latest_version,
+    marker_present, read_manuscript_files, version_by_id, version_by_number,
 )
 # The filter pass's two collaborators, at module scope because its
 # verbs are ordinary members of this module rather than a lazily
@@ -422,17 +423,18 @@ def resolve_file(db: Database, path: str) -> dict | None:
 def status(db: Database, manuscript: dict) -> dict:
     mid = manuscript["id"]
     session = ses.active_session(db, mid)
-    counts = {
+    counts = {"manuscript_versions": count_versions(db, mid)}
+    counts.update({
         table: db.one(
             f"SELECT COUNT(*) AS n FROM {table} WHERE manuscript_id = ?", (mid,)
         )["n"]
         for table in (
-            "manuscript_versions", "editorial_transitions", "editorial_episodes",
+            "editorial_transitions", "editorial_episodes",
             "declared_intents", "concept_nodes", "concept_edges",
             "editorial_beliefs", "guidance_history", "editorial_reviews",
             "evidence", "knowledge_proposals",
         )
-    }
+    })
     # Open [Footnote: …] / [Explain: …] / [Suggestion: …] tags ride here (footnote design
     # §8): the author learns about an undrafted request without having
     # to remember to ask.
@@ -483,7 +485,10 @@ def expire_idle_session(db: Database, manuscript: dict, config: dict) -> dict | 
         return None
     idle_hours = config.get("session", {}).get("idle_hours", 3)
     candidates = [session["started_at"]]
-    for table in ("manuscript_versions", "guidance_history", "declared_intents"):
+    recorded = last_recorded_at(db, session["id"])
+    if recorded:
+        candidates.append(recorded)
+    for table in ("guidance_history", "declared_intents"):
         row = db.one(
             f"SELECT MAX(created_at) AS latest FROM {table} WHERE session_id = ?",
             (session["id"],),
@@ -1471,11 +1476,7 @@ def write_start(db: Database, manuscript: dict, config: dict,
     # was already doing, and filing it against a goal declared a moment
     # later would be back-dating. It stays ambient, deliberately.
     collect(db, manuscript, config, source="write-start")
-    source = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (mid,),
-    )
+    source = latest_version(db, mid)
     if source is None:
         raise LookupError("no collected version to pin — is the manuscript empty?")
     # Create (--new) or truncate. Either way the file's pre-writeup state
@@ -1513,7 +1514,7 @@ def write_start(db: Database, manuscript: dict, config: dict,
     row = ko_fields("wu")
     row.update(
         manuscript_id=mid, intent_id=intent["id"], file=relpath, mode="fresh",
-        status="active", source_version_id=source["id"], plan="[]",
+        status="active", source_version_id=source.id, plan="[]",
         cursor=0, learnings="[]",
         metadata=json.dumps({"next_n": 1, "placement": placement,
                              "created_file": bool(new),
@@ -1521,7 +1522,7 @@ def write_start(db: Database, manuscript: dict, config: dict,
                              "intents": block}),
     )
     db.insert("writeups", row)
-    source_text = loads(source["files"], {}).get(relpath, "")
+    source_text = file_at(db, source.id, relpath) or ""
     # Q3: a `--new` file has no toc entry yet, so `scope_chain` is
     # [file, None] and no chapter-scoped intent can be derived. Say so
     # at the start rather than letting the author discover the absence.
@@ -1534,7 +1535,7 @@ def write_start(db: Database, manuscript: dict, config: dict,
             "outside_scope": [m["id"] for m in outside],
             "proposed_in_scope": proposed_in_scope,
             "chapter_undecidable": unplaced,
-            "source_version_no": source["version_no"],
+            "source_version_no": source.version_no,
             "source_chars": len(source_text),
             "created": bool(new), "brief": brief or None,
             "style": guide["name"] if guide else None,
@@ -2024,10 +2025,9 @@ def write_digest(db: Database, manuscript: dict, payload=None,
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
     meta = loads(writeup["metadata"], {})
-    source = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
-                    (writeup["source_version_id"],))
-    source_text = (loads(source["files"], {}).get(writeup["file"], "")
-                   if source else "")
+    source = version_by_id(db, writeup["source_version_id"])
+    source_text = file_at(db, writeup["source_version_id"],
+                          writeup["file"]) or ""
     # Two conditions, two truths. Collapsing them into one message told a
     # rewrite over a blank source that "this writeup created" its file,
     # which it did not — a small lie about the writeup's own history, in
@@ -2109,7 +2109,7 @@ def write_digest(db: Database, manuscript: dict, payload=None,
 
     return {"mode": "source", "writeup_id": writeup["id"],
             "file": writeup["file"], "source_text": source_text,
-            "source_version_no": source["version_no"],
+            "source_version_no": source.version_no,
             "source_chars": len(source_text)}
 
 
@@ -2258,8 +2258,8 @@ def write_show(db: Database, manuscript: dict, prefix: str | None = None
     if not proposal:
         raise LookupError(f"nothing proposed for beat {beat['n']} — "
                           "write propose first")
-    original = _version_text(db, writeup.get("source_version_id"),
-                             writeup["file"])
+    original = file_at(db, writeup.get("source_version_id"),
+                       writeup["file"])
     if original and is_placeholder(original):
         original = None
     draft = proposal["suggestion"]
@@ -2914,9 +2914,7 @@ def write_abandon(db: Database, manuscript: dict, config: dict,
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
     path = Path(manuscript["path"]) / writeup["file"]
     if loads(writeup["metadata"], {}).get("created_file"):
-        preserved = db.one(
-            "SELECT version_no FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        preserved = latest_version(db, manuscript["id"])
         had_text = path.exists() and bool(
             path.read_text(encoding="utf-8").strip())
         path.unlink(missing_ok=True)
@@ -2940,17 +2938,14 @@ def write_abandon(db: Database, manuscript: dict, config: dict,
         return {"writeup_id": writeup["id"], "restored": False,
                 "deleted": True, "had_text": had_text,
                 "attachment_removed": bool(removed),
-                "preserved_in_version": (preserved["version_no"]
+                "preserved_in_version": (preserved.version_no
                                          if preserved else None),
                 "file": writeup["file"], "collect": report}
-    source = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
-                    (writeup["source_version_id"],))
     restored = False
-    if source:
-        content = loads(source["files"], {}).get(writeup["file"])
-        if content is not None:
-            path.write_text(content, encoding="utf-8")
-            restored = True
+    content = file_at(db, writeup["source_version_id"], writeup["file"])
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+        restored = True
     report = collect(db, manuscript, config, source="write-abandon")
     db.update("writeups", writeup["id"], {"status": "abandoned"})
     return {"writeup_id": writeup["id"], "restored": restored,
@@ -2995,36 +2990,16 @@ def analyze(db: Database, manuscript: dict, llm: LLMClient) -> list[dict]:
 
 def diff_versions(db: Database, manuscript: dict, older: int | None = None,
                   newer: int | None = None, file_filter: str | None = None) -> dict:
-    versions = db.all(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? ORDER BY version_no",
-        (manuscript["id"],),
-    )
-    if not versions:
-        raise LookupError("no versions collected yet")
-    by_no = {v["version_no"]: v for v in versions}
-    for number in (older, newer):
-        if number is not None and number not in by_no:
-            raise LookupError(
-                f"no version v{number} (have v1..v{versions[-1]['version_no']})")
-    if older is not None and newer is not None:
-        old_v, new_v = by_no[min(older, newer)], by_no[max(older, newer)]
-    elif newer is not None or older is not None:
-        number = newer if newer is not None else older
-        new_v = by_no[number]
-        old_v = by_no.get(number - 1)
-    else:
-        new_v = versions[-1]
-        old_v = versions[-2] if len(versions) > 1 else None
-
-    old_files = loads(old_v["files"], {}) if old_v else {}
-    new_files = loads(new_v["files"], {})
-    old_label = f"v{old_v['version_no']}" if old_v else "∅"
-    new_label = f"v{new_v['version_no']}"
+    numbers = [n for n in (older, newer) if n is not None]
+    old_v, new_v = diff_pair(db, manuscript["id"], numbers)
+    old_label = f"v{old_v.version_no}" if old_v else "∅"
+    new_label = f"v{new_v.version_no}"
     files: dict[str, list[str]] = {}
-    for name in sorted(set(old_files) | set(new_files)):
+    for name, change in changes(db, old_v.id if old_v else None,
+                                new_v.id).items():
         if file_filter and file_filter.lower() not in name.lower():
             continue
-        old_text, new_text = old_files.get(name, ""), new_files.get(name, "")
+        old_text, new_text = change.old or "", change.new or ""
         if old_text == new_text:
             continue
         files[name] = list(difflib.unified_diff(
@@ -3035,19 +3010,14 @@ def diff_versions(db: Database, manuscript: dict, older: int | None = None,
     return {"old": old_label, "new": new_label, "files": files}
 
 
-def get_version(db: Database, manuscript: dict, version_no: int) -> dict:
-    """A single collected revision snapshot, by version number."""
-    version = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? AND version_no = ?",
-        (manuscript["id"], version_no),
-    )
+def get_version(db: Database, manuscript: dict, version_no: int) -> Version:
+    """A single collected version, by version number. Its text is read
+    with `revisions.files_at` or `revisions.file_at`."""
+    version = version_by_number(db, manuscript["id"], version_no)
     if not version:
-        last = db.one(
-            "SELECT version_no FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],),
-        )
+        last = latest_version(db, manuscript["id"])
         raise LookupError(
-            f"no version v{version_no} (have v1..v{last['version_no'] if last else 0})")
+            f"no version v{version_no} (have v1..v{last.version_no if last else 0})")
     return version
 
 
@@ -3061,7 +3031,7 @@ def restore_version(db: Database, manuscript: dict, version_no: int, config: dic
     # (BUG-2 / A1). A no-op when there is nothing uncollected.
     collect(db, manuscript, config, source=f"pre-restore:v{version_no}")
     version = get_version(db, manuscript, version_no)
-    files = loads(version["files"], {})
+    files = files_at(db, version.id)
     root = Path(manuscript["path"])
     for name in set(read_manuscript_files(root)) - set(files):
         (root / name).unlink()
@@ -3953,13 +3923,10 @@ def file_improvement(db: Database, title: str, evidence: str, given: str,
     context: dict = {}
     if manuscript:
         session = ses.active_session(db, manuscript["id"])
-        version = db.one(
-            "SELECT id, version_no FROM manuscript_versions WHERE "
-            "manuscript_id = ? ORDER BY version_no DESC LIMIT 1",
-            (manuscript["id"],))
+        version = latest_version(db, manuscript["id"])
         if version:
-            context["manuscript_version_id"] = version["id"]
-            context["manuscript_version_no"] = version["version_no"]
+            context["manuscript_version_id"] = version.id
+            context["manuscript_version_no"] = version.version_no
         intent = db.one(
             "SELECT id FROM declared_intents WHERE manuscript_id = ? AND "
             "status = 'active' ORDER BY created_at DESC LIMIT 1",
@@ -4223,10 +4190,8 @@ def _touched_filter_run(db: Database, row: dict) -> dict:
 
 
 def _latest_version_id(db: Database, manuscript_id: str) -> str | None:
-    row = db.one(
-        "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1", (manuscript_id,))
-    return row["id"] if row else None
+    latest = latest_version(db, manuscript_id)
+    return latest.id if latest else None
 
 
 def _settled_runs(db: Database, manuscript_id: str, name: str,
@@ -4343,7 +4308,7 @@ def filter_run(db: Database, manuscript: dict, config: dict, name: str,
         # the text a prior settled run produced.
         if not again:
             for prior in _settled_runs(db, mid, name, rel):
-                produced = _version_text(db, prior["result_version_id"], rel)
+                produced = file_at(db, prior["result_version_id"], rel)
                 if produced is not None and produced == text:
                     t = _run_tallies(_run_threads(db, mid, prior))
                     raise ValueError(
@@ -4631,7 +4596,7 @@ def filter_record(db: Database, manuscript: dict, config: dict,
     rel, text, _capture, dictionary = _filter_capture(db, manuscript, file,
                                                       "filter record")
     run = _filter_run_row(db, manuscript, rel, name)
-    pinned = _version_text(db, run["source_version_id"], rel)
+    pinned = file_at(db, run["source_version_id"], rel)
     if pinned is not None and pinned != text:
         raise ValueError(
             f"{rel} has changed since this run pinned it, so a reply "

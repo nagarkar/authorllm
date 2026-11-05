@@ -8,19 +8,26 @@ text differs from the same position in the previous version (a
 paragraph past the old file's end counts as changed); and None, never
 an empty list, when nothing changed — `run` reads a falsy result as
 "nothing changed" and makes no model call. This file calls `targets`
-directly against a tiny fake database, and pins `morph._window` at both
+directly against a throwaway database, and pins `morph._window` at both
 ends.
 """
 
 from __future__ import annotations
 
-import json
-import sys
-from pathlib import Path
+import os
+
+os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
+os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+
+import sys  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from authorlm import morph
+from authorlm import morph  # noqa: E402
+from authorlm.db import Database  # noqa: E402
+from authorlm.revisions import record_version  # noqa: E402
 
 
 REL = "essay.md"
@@ -29,17 +36,16 @@ CURRENT = "\n\n".join(["# Heading", "Alpha prose.", "Beta prose.",
 MANUSCRIPT = {"id": "m-1"}
 
 
-class FakeDB:
-    """Stands in for `Database`: `targets` only calls `all(sql, params)`
-    and reads `row["files"]`, newest version first."""
-
-    def __init__(self, versions: list[dict[str, str]]) -> None:
-        self.rows = [{"files": json.dumps(v)} for v in versions]
-        self.calls: list[tuple] = []
-
-    def all(self, sql: str, params: tuple = ()) -> list[dict]:
-        self.calls.append((sql, params))
-        return list(self.rows)
+def _history(versions: list[dict[str, str]], mid: str = "m-1") -> Database:
+    """A throwaway database holding `versions`, given newest first. Each
+    gets a numbered filler file, so two versions with the same essay text
+    are still two versions."""
+    folder = tempfile.mkdtemp(prefix="authorlm-morph-")
+    db = Database(Path(folder) / "authorlm.db")
+    for number, files in enumerate(reversed(versions), 1):
+        record_version(db, mid, {**files, "filler.md": f"{number}\n"}, None,
+                       source="test")
+    return db
 
 
 def check(label: str, cond: bool, detail: object = "") -> None:
@@ -52,7 +58,7 @@ def check(label: str, cond: bool, detail: object = "") -> None:
 
 def _targets(versions: list[dict[str, str]], text: str = CURRENT, *,
              full: bool = False):
-    return morph.targets(FakeDB(versions), MANUSCRIPT, REL, {REL: text},
+    return morph.targets(_history(versions), MANUSCRIPT, REL, {REL: text},
                          full=full)
 
 
@@ -102,14 +108,13 @@ def test_old_version_lacks_file() -> None:
 
 
 def test_queries_this_manuscript() -> None:
-    db = FakeDB([{REL: CURRENT}, {REL: CURRENT}])
-    morph.targets(db, MANUSCRIPT, REL, {REL: CURRENT})
-    check("history is read for this manuscript's id",
-          len(db.calls) == 1 and db.calls[0][1] == ("m-1",),
-          repr(db.calls))
-    db = FakeDB([])
-    morph.targets(db, MANUSCRIPT, REL, {REL: CURRENT}, full=True)
-    check("full=True reads no history", db.calls == [], repr(db.calls))
+    old = _units("# Heading", "Alpha prose.", "Beta CHANGED.")
+    db = _history([{REL: CURRENT}, {REL: old}], mid="m-other")
+    got = morph.targets(db, MANUSCRIPT, REL, {REL: CURRENT})
+    check("history is read for this manuscript's id: another "
+          "manuscript's versions give None", got is None, repr(got))
+    got = morph.targets(None, MANUSCRIPT, REL, {REL: CURRENT}, full=True)
+    check("full=True reads no history", got == [2, 3, 4, 5], repr(got))
 
 
 def test_window() -> None:

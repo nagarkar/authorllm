@@ -43,7 +43,7 @@ from pathlib import Path
 from .concepts import show_concept
 from .db import Database, loads
 from .passes import INTENT_TIER_RANK, UNKNOWN_TIER_RANK
-from .revisions import _version_text, is_placeholder
+from .revisions import file_at, is_placeholder
 from .summaries import drafting_context_for_writeup
 
 NONE = "(none)"
@@ -216,8 +216,8 @@ def _original_block(db: Database, writeup: dict) -> str:
     ("use the language of the original as much as you can", author,
     2026-09-03). Pinned at `write start`, so byte-stable across beats.
     The DIGEST stays the authority on what the original CLAIMS."""
-    text = _version_text(db, writeup.get("source_version_id"),
-                         writeup["file"])
+    text = file_at(db, writeup.get("source_version_id"),
+                   writeup["file"])
     if not text or is_placeholder(text):
         return ""
     return text

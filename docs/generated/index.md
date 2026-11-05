@@ -468,7 +468,7 @@ Proposals against settled knowledge.
 
 `authorlm/authorlm/revisions.py`
 
-Revision Collector and Revision Analyzer (RFC AuthorLM §17.3–§17.4).
+Revision Collector, version history and Revision Analyzer (RFC AuthorLM §17.3–§17.4).
 
 ## `authorlm.sessions`
 
@@ -1435,6 +1435,12 @@ _No docstring._
 `authorlm/tests/test_verse_poem_level.py`
 
 `verse.poem_level` and `verse.heading_levels` decide where poems sit in a verse file and what the collect report warns about.
+
+## `tests.test_version_history`
+
+`authorlm/tests/test_version_history.py`
+
+Version history has one door: the functions in `authorlm.revisions`.
 
 ## `tests.test_write_accept_idempotent`
 

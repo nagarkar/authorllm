@@ -7051,6 +7051,7 @@ def main_test() -> None:
         # scoped decode call in illus.maintain_excerpts (also invoked by
         # api.collect(), not part of this finding). ---
         from authorlm.revisions import (collect_revision as collect_rev_bad_utf8,
+                                        files_at as files_at_bad_utf8,
                                         massive_deletions as massive_del_bad_utf8,
                                         read_manuscript_files as read_files_bad_utf8)
 
@@ -7076,8 +7077,8 @@ def main_test() -> None:
         v1 = collect_rev_bad_utf8(bad_db, bad_manuscript, None)
         check("collect_revision() completes through a mixed-encoding "
               "manuscript instead of raising",
-              v1 is not None and v1["version_no"] == 1, str(v1))
-        stored_files = loads(v1["files"], {})
+              v1 is not None and v1.version_no == 1, str(v1))
+        stored_files = files_at_bad_utf8(bad_db, v1.id)
         check("the unreadable file is still present in the persisted "
               "snapshot, not silently dropped as a phantom deletion",
               "02-bad.md" in stored_files, str(sorted(stored_files)))
@@ -7146,7 +7147,7 @@ def main_test() -> None:
         (dt_ms1 / "a.md").write_text(
             "# Heading\n\nP2 text here.\n\nP1 text here.\n\nP3 text here.\n")
         v2 = collect_revision(dt_db, row_reorder, None, source="test")
-        reorder_trans = detect_transitions(dt_db, row_reorder["id"], dict(v1), v2)
+        reorder_trans = detect_transitions(dt_db, row_reorder["id"], v1, v2)
         check("paragraph reorder is an insert of the moved text at its new "
               "position plus a delete at its old one, not a single move",
               [(t["kind"], t["location"]) for t in reorder_trans]
@@ -7171,7 +7172,7 @@ def main_test() -> None:
             "# Heading\n\nP1 unchanged.\n\nP2 REWRITTEN.\n\nP3 unchanged.\n\n"
             "P4 REWRITTEN.\n\nP5 unchanged.\n")
         h2 = collect_revision(dt_db, row_hunks, None, source="test")
-        hunk_trans = detect_transitions(dt_db, row_hunks["id"], dict(h1), h2)
+        hunk_trans = detect_transitions(dt_db, row_hunks["id"], h1, h2)
         check("two non-adjacent hunks in one file produce two separate "
               "rewrite transitions, not one spanning edit",
               len(hunk_trans) == 2
@@ -7192,7 +7193,7 @@ def main_test() -> None:
             "Just prose, no headings at all.\n\nSecond paragraph, edited.\n")
         n2 = collect_revision(dt_db, row_noheading, None, source="test")
         noheading_trans = detect_transitions(
-            dt_db, row_noheading["id"], dict(n1), n2)
+            dt_db, row_noheading["id"], n1, n2)
         check("a heading-less file's transition location is the bare "
               "filename, with no '#heading' suffix",
               len(noheading_trans) == 1
@@ -7207,9 +7208,11 @@ def main_test() -> None:
         except LookupError as err:
             check("get_version rejects an unknown version number", "v99" in str(err))
 
+        from authorlm.revisions import file_at, files_at
+
         v1 = api.get_version(md_db, md_manuscript, 1)
         check("get_version returns the requested snapshot",
-              loads(v1["files"], {})["safety.md"] == big_text)
+              file_at(md_db, v1.id, "safety.md") == big_text)
 
         restored = api.restore_version(md_db, md_manuscript, 1, {})
         check("restore_version writes the old content back to disk",
@@ -7221,8 +7224,8 @@ def main_test() -> None:
               and restored["transitions"])
         latest = api.get_version(md_db, md_manuscript, 6)
         check("the restored snapshot is itself a new, real version",
-              loads(latest["files"], {})["safety.md"] == big_text
-              and "tiny.md" not in loads(latest["files"], {}))
+              file_at(md_db, latest.id, "safety.md") == big_text
+              and "tiny.md" not in files_at(md_db, latest.id))
 
         # --- BUG-2 / A1 regression: restore_version must snapshot the
         # current on-disk state into history BEFORE unlinking/overwriting
@@ -11131,7 +11134,8 @@ def main_test() -> None:
                    {"introduced_in": "04-last.md"})
         lv = ldb.one("SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
                      "ORDER BY created_at DESC LIMIT 1", (lm["id"],))
-        moved, _van = _cg.rescan_primary_locations(ldb, lm["id"], dict(lv))
+        moved, _van = _cg.rescan_primary_locations(
+            ldb, lm["id"], loads(lv["files"], {}))
         check("the re-scan moves a pointer to the first mention unconditionally, "
               "even when the old chapter still carries the term",
               any(m["name"] == "Ground" and m["new"] == "01-first.md"

@@ -23,10 +23,10 @@ import re
 from pathlib import Path
 
 from .concepts import concept_pattern, node_names
-from .db import Database, loads
+from .db import Database
 from .findings import store_findings
 from .passes import paragraphs_of
-from .revisions import read_manuscript_files
+from .revisions import file_at, latest_versions, read_manuscript_files
 from .sweeps import _claims_for
 
 MORPH_DIR = "_morph"
@@ -130,16 +130,12 @@ def targets(db: Database, manuscript: dict, relpath: str,
     units = paragraphs_of(files[relpath])
     if full:
         return [i for i, u in enumerate(units, 1) if _is_prose(u)] or None
-    rows = db.all(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 2", (manuscript["id"],))
-    if len(rows) < 2:
+    newest = latest_versions(db, manuscript["id"], 2)
+    if len(newest) < 2:
         return None
-    new_files = loads(rows[0]["files"], {})
-    old_files = loads(rows[1]["files"], {})
-    if relpath not in new_files:
+    if file_at(db, newest[0].id, relpath) is None:
         return None
-    old_units = paragraphs_of(old_files.get(relpath, ""))
+    old_units = paragraphs_of(file_at(db, newest[1].id, relpath) or "")
     changed = [i for i, u in enumerate(units, 1)
               if _is_prose(u)
               and (i > len(old_units) or old_units[i - 1] != u)]

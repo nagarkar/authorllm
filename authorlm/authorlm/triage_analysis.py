@@ -15,6 +15,7 @@ from typing import Any
 from .db import Database, ko_fields, loads, now_iso
 from .llm import LLMClient
 from . import triage
+from .revisions import Version, files_at, latest_version, version_by_id
 
 
 ONTOLOGY_SYSTEM = """You are building a compact consistency map for a philosophy
@@ -33,18 +34,16 @@ may cite only passage IDs supplied for that object. Empty evidence is valid when
 the manuscript does not support the item. Do not turn analysis into a decision."""
 
 
-def _latest_version(db: Database, manuscript_id: str) -> dict:
-    row = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1", (manuscript_id,))
-    if not row:
+def _latest_version(db: Database, manuscript_id: str) -> Version:
+    version = latest_version(db, manuscript_id)
+    if not version:
         raise RuntimeError("collect the manuscript before analyzing it")
-    return dict(row)
+    return version
 
 
-def _paragraphs(version: dict) -> list[dict[str, str]]:
+def _paragraphs(files: dict[str, str]) -> list[dict[str, str]]:
     passages: list[dict[str, str]] = []
-    for file, text in sorted(loads(version["files"], {}).items()):
+    for file, text in sorted(files.items()):
         heading = ""
         occurrences: dict[str, int] = {}
         for block in re.split(r"\n\s*\n", text):
@@ -95,7 +94,7 @@ def _reuse_context(db: Database, manuscript_id: str,
     return None
 
 
-def _build_context(client: LLMClient, version: dict,
+def _build_context(client: LLMClient, version: Version,
                    passages: list[dict[str, str]]) -> dict[str, Any]:
     manuscript = "\n\n".join(
         f"[{p['id']}] {p['file']}#{p['heading']}\n{p['text']}" for p in passages)
@@ -105,7 +104,7 @@ def _build_context(client: LLMClient, version: dict,
     return {
         "ontology": ontology,
         "passage_count": len(passages),
-        "manuscript_checksum": version["checksum"],
+        "manuscript_checksum": version.checksum,
         "model": client.model,
     }
 
@@ -131,8 +130,8 @@ def start_run(db: Database, manuscript: dict, config: dict[str, Any],
     client = _llm(config, profile)
     if not client.enabled:
         raise RuntimeError("the LLM is disabled in AuthorLM configuration")
-    passages = _paragraphs(version)
-    context = _reuse_context(db, manuscript["id"], version["id"], client.model)
+    passages = _paragraphs(files_at(db, version.id))
+    context = _reuse_context(db, manuscript["id"], version.id, client.model)
     reused = context is not None
     if context is None:
         context = _build_context(client, version, passages)
@@ -142,7 +141,7 @@ def start_run(db: Database, manuscript: dict, config: dict[str, Any],
     run.update(
         manuscript_id=manuscript["id"], triage_type=triage_type,
         profile_id=profile["id"], profile_version=str(profile["version"]),
-        profile_snapshot=snapshot, manuscript_version_id=version["id"],
+        profile_snapshot=snapshot, manuscript_version_id=version.id,
         requested_ids=json.dumps(list(dict.fromkeys(object_ids))),
         context=json.dumps(context), status="incomplete", completed_at=None,
     )
@@ -151,7 +150,7 @@ def start_run(db: Database, manuscript: dict, config: dict[str, Any],
         "run_id": run["id"],
         "requested_ids": loads(run["requested_ids"], []),
         "batch_size": int(profile.get("batch_size", 12)),
-        "manuscript_version": version["version_no"],
+        "manuscript_version": version.version_no,
         "profile": {"id": profile["id"], "version": str(profile["version"]),
                     "label": profile["label"]},
         "context_reused": reused,
@@ -255,12 +254,10 @@ def analyze_batch(db: Database, manuscript: dict, config: dict[str, Any],
     max_batch = int(profile.get("batch_size", 12))
     if len(batch) > max_batch:
         raise ValueError(f"analyzer batches are limited to {max_batch} rows")
-    version_row = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
-                         (run["manuscript_version_id"],))
-    if not version_row:
+    version = version_by_id(db, run["manuscript_version_id"])
+    if not version:
         raise RuntimeError("the pinned manuscript version is missing")
-    version = dict(version_row)
-    passages = _paragraphs(version)
+    passages = _paragraphs(files_at(db, version.id))
     context = loads(run["context"], {})
     rows = context.get("objects", {})
     if any(object_id not in rows for object_id in batch):

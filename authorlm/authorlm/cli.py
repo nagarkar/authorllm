@@ -34,6 +34,7 @@ from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
 from .normalize import clamp
 from .pronunciations import parse_cast
+from . import revisions as revisions_mod
 from .revisions import collect_revision, detect_transitions
 
 
@@ -471,9 +472,7 @@ def cmd_session(args):
         # realizations) so nothing arrives unacknowledged.
         # Virgin manuscripts (no baseline version) keep the classic flow:
         # first collect runs after the author declares their concepts.
-        has_baseline = db.one(
-            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
-            "LIMIT 1", (manuscript["id"],))
+        has_baseline = revisions_mod.count_versions(db, manuscript["id"])
         if has_baseline:
             try:
                 opening = api.collect(db, manuscript, _load_config(args),
@@ -1423,15 +1422,11 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
     except ValueError as err:
         sys.exit(f"error: {err}")
     # Pristine check + pin: the pass row remembers what to roll back to.
-    from .revisions import collect_revision
-    version = collect_revision(db, manuscript, session_id=None,
-                               source="critique-pin")
-    if version is None:
-        row = db.one("SELECT id FROM manuscript_versions WHERE manuscript_id "
-                     "= ? ORDER BY version_no DESC LIMIT 1", (mid,))
-        version = dict(row) if row else None
+    version = (collect_revision(db, manuscript, session_id=None,
+                                source="critique-pin")
+               or revisions_mod.latest_version(db, mid))
     if version:
-        passes.pin_version(db, p, file, version["id"])
+        passes.pin_version(db, p, file, version.id)
     config = _load_config(args)
     try:
         service = gdocs.get_service(config, args.workspace, interactive=True)
@@ -1589,11 +1584,10 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
     pin = passes.pinned_version(p, file)
     if not pin:
         sys.exit(f"error: no pinned version for {file} — nothing was written.")
-    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?", (pin,))
-    if not row:
+    if not revisions_mod.version_by_id(db, pin):
         sys.exit("error: pinned version is missing from the record.")
-    files = loads(row["files"], {})
-    if file not in files:
+    pinned_text = revisions_mod.file_at(db, pin, file)
+    if pinned_text is None:
         sys.exit(f"error: pinned version has no {file}.")
     # Snapshot the current disk state before it's overwritten below — an
     # uncollected local edit made since the pin must not be silently
@@ -1602,7 +1596,7 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
     config = _load_config(args)
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="pre-critique-rollback")
-    (Path(manuscript["path"]) / file).write_text(files[file], encoding="utf-8")
+    (Path(manuscript["path"]) / file).write_text(pinned_text, encoding="utf-8")
     for t in passes.staged_threads(db, mid, file,
                                    states=("written", "accepted", "proposed",
                                            "rejected")):
@@ -7056,7 +7050,7 @@ def cmd_extract(args):
     version = collect_revision(db, manuscript, session_id=None,
                                source="extract")
     if version:
-        print(f"Collected revision v{version['version_no']}.")
+        print(f"Collected revision v{version.version_no}.")
     essays = _extract_payloads(db, manuscript, args, knob)
     if not essays:
         print("Nothing to extract — no section changed since the last "
@@ -8462,11 +8456,12 @@ def cmd_status(args):
     counts = {
         table: db.one(f"SELECT COUNT(*) AS n FROM {table} WHERE manuscript_id = ?", (mid,))["n"]
         for table in (
-            "manuscript_versions", "editorial_transitions", "editorial_episodes",
+            "editorial_transitions", "editorial_episodes",
             "declared_intents", "concept_nodes", "concept_edges",
             "editorial_beliefs", "guidance_history", "editorial_reviews", "evidence",
         )
     }
+    counts["manuscript_versions"] = revisions_mod.count_versions(db, mid)
     print(f"Manuscript: {manuscript['name']} ({manuscript['path']})")
     print(f"Session: {'active — ' + session['id'] if session else 'none'}")
     print(
@@ -8563,13 +8558,6 @@ def cmd_diff(args):
 
     db = _open_db(args)
     manuscript = _manuscript(db, args)
-    versions = db.all(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? ORDER BY version_no",
-        (manuscript["id"],),
-    )
-    if not versions:
-        sys.exit("error: no versions collected yet.")
-
     numbers, file_filter = [], None
     for param in args.params:
         token = param.lstrip("v")
@@ -8577,33 +8565,24 @@ def cmd_diff(args):
             numbers.append(int(token))
         else:
             file_filter = param
-    by_no = {v["version_no"]: v for v in versions}
-    for number in numbers:
-        if number not in by_no:
-            sys.exit(f"error: no version v{number} (have v1..v{versions[-1]['version_no']}).")
-    if len(numbers) >= 2:
-        old_v, new_v = by_no[min(numbers)], by_no[max(numbers)]
-    elif len(numbers) == 1:
-        new_v = by_no[numbers[0]]
-        old_v = by_no.get(numbers[0] - 1)
-    else:
-        new_v = versions[-1]
-        old_v = versions[-2] if len(versions) > 1 else None
+    try:
+        old_v, new_v = revisions_mod.diff_pair(db, manuscript["id"], numbers)
+    except LookupError as err:
+        sys.exit(f"error: {err}.")
 
-    old_files = loads(old_v["files"], {}) if old_v else {}
-    new_files = loads(new_v["files"], {})
-    old_label = f"v{old_v['version_no']}" if old_v else "∅"
+    old_label = f"v{old_v.version_no}" if old_v else "∅"
     printed = False
-    for name in sorted(set(old_files) | set(new_files)):
+    for name, change in revisions_mod.changes(
+            db, old_v.id if old_v else None, new_v.id).items():
         if file_filter and file_filter.lower() not in name.lower():
             continue
-        old_text, new_text = old_files.get(name, ""), new_files.get(name, "")
+        old_text, new_text = change.old or "", change.new or ""
         if old_text == new_text:
             continue
         printed = True
         for line in difflib.unified_diff(
             old_text.splitlines(), new_text.splitlines(),
-            fromfile=f"{old_label}/{name}", tofile=f"v{new_v['version_no']}/{name}",
+            fromfile=f"{old_label}/{name}", tofile=f"v{new_v.version_no}/{name}",
             lineterm="",
         ):
             if line.startswith(("+++", "---")):
@@ -8617,7 +8596,7 @@ def cmd_diff(args):
             else:
                 print(line)
     if not printed:
-        print(f"No differences between {old_label} and v{new_v['version_no']}"
+        print(f"No differences between {old_label} and v{new_v.version_no}"
               + (f" for '{file_filter}'" if file_filter else "") + ".")
 
 
@@ -9036,14 +9015,11 @@ def cmd_history(args):
     action = args.action or "list"
 
     if action == "list":
-        for row in db.all(
-            "SELECT * FROM manuscript_versions WHERE manuscript_id = ? ORDER BY version_no",
-            (manuscript["id"],),
-        ):
-            files = loads(row["files"], {})
+        counts = revisions_mod.file_counts(db, manuscript["id"])
+        for version in revisions_mod.list_versions(db, manuscript["id"]):
             print(
-                f"v{row['version_no']}  {row['created_at']}  {row['checksum'][:12]}  "
-                f"{len(files)} file(s)  session={row['session_id'] or '-'}"
+                f"v{version.version_no}  {version.created_at}  {version.checksum[:12]}  "
+                f"{counts[version.id]} file(s)  session={version.session_id or '-'}"
             )
         return
 
@@ -9056,7 +9032,7 @@ def cmd_history(args):
             version = api.get_version(db, manuscript, number)
         except LookupError as err:
             sys.exit(f"error: {err}")
-        for name, text in sorted(loads(version["files"], {}).items()):
+        for name, text in sorted(revisions_mod.files_at(db, version.id).items()):
             print(ui.dim(f"--- {name} ---"))
             print(text)
         return
