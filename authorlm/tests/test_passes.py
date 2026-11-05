@@ -4931,8 +4931,9 @@ def _footnotes_after_a_closing_illustration(root: Path) -> None:
     meta = gdocs._mapping(db3, ms3)
     meta["gdocs"]["solo.md"]["checked_out"] = True
     gdocs._save_mapping(db3, ms3, meta)
-    fake3 = _CommentedDocFake([("book", ""), ("solo.md", SKY_ESSAY)],
-                              "Beta holds.", "solo.md", render=True)
+    fake3 = _CommentedDocFake(
+        [("book", ""), ("solo.md", gdocs.strip_embed_lines(SKY_ESSAY))],
+        "Beta holds.", "solo.md", render=True)
     real_insertion = gdocs.form_grammar.render_insertion
 
     def job_never_reads_back(new):
@@ -5043,8 +5044,10 @@ def _outside_fixture(root: Path, subdir: str, essay: str = OUTSIDE_ESSAY,
     manuscript = api.get_manuscript(db)
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, {})
+    # The tab as a push leaves it: without the local embed lines.
     fake = (fake_class or _SurgicalDocFake)(
-        [("book", ""), ("solo.md", essay)], render=True)
+        [("book", ""), ("solo.md", gdocs.strip_embed_lines(essay))],
+        render=True)
     meta = gdocs._mapping(db, manuscript)
     links = meta.setdefault("gdocs", {})
     links["_master_id"] = "doc-fake"
