@@ -11,7 +11,11 @@ concurrency:
   cancel-in-progress: true
 jobs:
   suite:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -34,9 +38,17 @@ jobs:
           cache: npm
           cache-dependency-path: authorllm/authorlm/web/*/package-lock.json
       # Optional for the suite: without them run_all.py reports those checks as skipped.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pandoc ffmpeg
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pandoc ffmpeg
+      - if: runner.os == 'macOS'
+        run: brew install pandoc ffmpeg
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
       # The install builds the three web pages (authorlm/setup.py), which the suite reads.
-      - run: pip install -e ../../llmlm -e ".[all]"
+      # dev: metalm-gendocs, which test_generated_docs.py imports. pymupdf: the pdf2md tests' import,
+      # declared in no extra yet.
+      - run: pip install -e ../../llmlm -e ".[all,dev]" pymupdf
         working-directory: authorllm/authorlm
       - run: python3 tests/run_all.py
         working-directory: authorllm/authorlm
