@@ -1,0 +1,35 @@
+# Reading order of the Amazon edition. Flags: cont (runs on, no page break), chapter (contents styling), notoc, back.
+preface.md
+chapter1.md chapter
+sermons_new.md
+ecce-homo.md
+recapitulation.md
+recap-sermon-two.md cont
+recap-sermon-three.md cont
+recap-sermon-four.md cont
+recap-sermon-five.md cont
+recap-sermon-six.md cont
+recap-sermon-seven.md cont
+ascending.md chapter
+discernment.md
+good-choice.md
+rebirth.md
+good-life.md
+impulses.md
+kindness.md
+hierarchy.md
+intelligent.md
+redemption.md
+god.md
+connections.md chapter
+basilides.md
+epictetus.md
+indic.md
+buddhist.md
+christic.md
+nietzsche.md
+becker.md
+coda.md
+note-on-this-edition.md back
+glossary.md back
+about.md back
