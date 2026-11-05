@@ -9009,10 +9009,79 @@ def cmd_client_hook(args):
         pass
 
 
+def _megabytes(size: int | None) -> str:
+    if size is None:
+        return ""
+    if size < 1_000_000:
+        return f" ({size / 1_000:.0f} kB)"
+    return f" ({size / 1_000_000:.1f} MB)"
+
+
+def _history_git(db: Database, args, action: str) -> None:
+    """`history replay` copies the versions kept in the table into the
+    private git history (`--dry-run` says what it would copy and writes
+    nothing); `history check` reads every file of every version back
+    from git and compares. Neither changes the table."""
+    from . import history, history_replay
+    from .history_git import GitError
+
+    manuscripts = (api.list_manuscripts(db) if args.all
+                   else [_manuscript(db, args)])
+    identical = True
+    for manuscript in manuscripts:
+        try:
+            if action == "replay":
+                report = history_replay.replay(db, manuscript,
+                                               dry_run=args.dry_run)
+            else:
+                report = history_replay.check(db, manuscript)
+        except (GitError, history.HistoryMismatch) as err:
+            sys.exit(f"error: {err}")
+        head = f"{report['manuscript']}: {report['versions']} version(s)"
+        if action == "replay":
+            verb = "would replay" if report["dry_run"] else "replayed"
+            count = report["to_replay"] if report["dry_run"] else report["replayed"]
+            print(f"{head}, {report['already_in_history']} already in the git "
+                  f"history, {verb} {count} → {report['repository']}"
+                  f"{_megabytes(report['bytes'])}")
+            continue
+        problems = []
+        if report["missing"]:
+            problems.append(f"{len(report['missing'])} not in the git history ("
+                            + ", ".join(f"v{n}" for n in report["missing"][:8])
+                            + ("…" if len(report["missing"]) > 8 else "") + ")")
+        for entry in report["differing"][:8]:
+            problems.append(f"v{entry['version_no']} differs: "
+                            + ", ".join(entry["files"][:4]))
+        identical = identical and report["identical"]
+        print(f"{head}, {report['files_compared']} file(s) read back, "
+              + ("identical" if report["identical"] else "; ".join(problems))
+              + _megabytes(report["bytes"]))
+        if report["unnamed"]:
+            print(f"  {len(report['unnamed'])} commit(s) no version names "
+                  f"(left by a record that did not finish): "
+                  + ", ".join(report["unnamed"][:4]))
+    if action == "replay" and args.dry_run:
+        print("Nothing was written. next: authorlm history replay"
+              + (" --all" if args.all else ""))
+    elif action == "replay":
+        print("The table is unchanged. next: authorlm history check"
+              + (" --all" if args.all else ""))
+    elif not identical:
+        sys.exit("error: the git history does not match the table. "
+                 "Run: authorlm history replay" + (" --all" if args.all else ""))
+    else:
+        print("The git history matches. New versions go to git once [history] "
+              f"backend = \"git\" is set in {paths_mod.config_path()}.")
+
+
 def cmd_history(args):
     db = _open_db(args)
-    manuscript = _manuscript(db, args)
     action = args.action or "list"
+    if action in ("replay", "check"):
+        _history_git(db, args, action)
+        return
+    manuscript = _manuscript(db, args)
 
     if action == "list":
         counts = revisions_mod.file_counts(db, manuscript["id"])
@@ -10397,9 +10466,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-setup", dest="print_setup", action="store_true")
     p.set_defaults(func=cmd_client_hook)
 
-    p = sub.add_parser("history", help="list/show/restore collected manuscript versions")
-    p.add_argument("action", nargs="?", default="list", choices=["list", "show", "restore"])
+    p = sub.add_parser(
+        "history",
+        help="list/show/restore collected manuscript versions; replay them "
+             "into the private git history and check it")
+    p.add_argument("action", nargs="?", default="list",
+                   choices=["list", "show", "restore", "replay", "check"])
     p.add_argument("version", nargs="?", help="version number, e.g. '3' or 'v3' (show/restore)")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="replay: say what would be copied and write nothing")
+    p.add_argument("--all", action="store_true",
+                   help="replay/check: every manuscript in the workspace")
     p.set_defaults(func=cmd_history)
 
     return parser

@@ -212,6 +212,22 @@ perf_log = true
 # aggregate already counts it; this is the detail — when, and under whom.
 slow_ms = 100
 
+[history]
+# Where the text of a collected version is kept (authorlm/history.py).
+#
+#   "table"  in the version's own row in the workspace database: the
+#            whole manuscript as one JSON object per version.
+#   "git"    in a private git repository per manuscript, under
+#            <workspace>/.authorlm/history/<manuscript id>.git. No remote;
+#            nothing is written inside the book folder.
+#
+# A workspace uses one at a time. Before changing "table" to "git", run
+# `authorlm history replay --all` and then `authorlm history check --all`:
+# the first copies the versions kept in the table into git, the second
+# reads every file of every version back and compares. Every checkout
+# that writes to the same workspace must carry the same value.
+backend = "table"
+
 [usage]
 # The always-on usage ledger (Sponsor ruling 2026-08-30: "it would be
 # good to track usage so if you ever want to take this to commercial

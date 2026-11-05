@@ -3,8 +3,9 @@
 A caller gets a `Version` (which one, when, how recorded) and asks for
 text with `file_at`, `files_at` or `changes`; `record_version` is the only
 writer. These checks pin what each of them answers, on a throwaway
-database, and that no other module reads the `manuscript_versions` table
-except the ones still waiting to be moved.
+database, once for each place the text can be kept (`[history] backend`:
+the table, then git), and that no other module reads the
+`manuscript_versions` table except the ones still waiting to be moved.
 
 Standalone, hermetic:  python3 tests/test_version_history.py
 """
@@ -18,6 +19,7 @@ os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
 
 import dataclasses  # noqa: E402
 import re  # noqa: E402
+import shutil  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -231,9 +233,9 @@ def test_one_door() -> None:
     package = Path(rev.__file__).resolve().parent
     direct = {path.name for path in package.glob("*.py")
               if _TABLE_READ.search(path.read_text(encoding="utf-8"))}
-    direct -= {"revisions.py", "mcp_server.py"}
-    check("only revisions.py and the modules listed as waiting read the "
-          "versions table", direct <= STILL_DIRECT,
+    direct -= {"revisions.py", "history.py", "mcp_server.py"}
+    check("only revisions.py, its stores in history.py and the modules "
+          "listed as waiting read the versions table", direct <= STILL_DIRECT,
           f"move behind authorlm.revisions: {sorted(direct - STILL_DIRECT)}")
     present = {name for name in STILL_DIRECT if (package / name).exists()}
     check("every module listed as waiting still reads the table",
@@ -241,16 +243,31 @@ def test_one_door() -> None:
           f"drop from STILL_DIRECT: {sorted(present - direct)}")
 
 
+def use_backend(root: Path, backend: str) -> None:
+    """Point this process at a config.toml that names `backend`."""
+    config = root / f"{backend}.toml"
+    config.write_text(f'[history]\nbackend = "{backend}"\n', encoding="utf-8")
+    os.environ["AUTHORLM_CONFIG"] = str(config)
+
+
 def main() -> None:
+    backends = ["table", "git"]
+    if shutil.which("git") is None:
+        backends.remove("git")
+        print("SKIP: the interface on the git backend, git is not installed")
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        for index, test in enumerate((
-                test_record_and_look_up, test_text_at_a_version,
-                test_changes, test_diff_pair)):
-            print(f"{test.__name__}:")
-            test(Database(root / f"{index}.db"))
-        print("test_collect_revision:")
-        test_collect_revision(root, Database(root / "collect.db"))
+        for backend in backends:
+            root = Path(tmp) / backend
+            root.mkdir()
+            use_backend(root, backend)
+            for test in (test_record_and_look_up, test_text_at_a_version,
+                         test_changes, test_diff_pair):
+                print(f"{test.__name__} [{backend}]:")
+                folder = root / test.__name__
+                folder.mkdir()
+                test(Database(folder / "authorlm.db"))
+            print(f"test_collect_revision [{backend}]:")
+            test_collect_revision(root, Database(root / "authorlm.db"))
     print("test_one_door:")
     test_one_door()
     print(f"All {PASSED} checks passed.")
