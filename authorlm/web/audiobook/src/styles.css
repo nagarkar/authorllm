@@ -110,6 +110,11 @@ footer audio{max-width:640px;display:block;margin:0 auto}
 /* mode switch */
 .modes{display:flex;gap:8px;margin-top:8px}
 .modes .chip{min-height:38px;font-size:14px}
+.modes a.chip{display:inline-flex;align-items:center;text-decoration:none}
+.try-text p{margin:4px 0 10px;color:var(--muted);font-size:14px}
+.try-text p.bad{color:var(--bad);margin-top:10px}
+.try-text textarea{display:block;width:100%;min-height:clamp(10rem,35dvh,22rem);resize:vertical;margin-bottom:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--ground);color:var(--ink);font:inherit}
+.try-text textarea:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .alias{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .alias .word{font:inherit;font-family:ui-monospace,Menlo,monospace;font-weight:600;font-size:12px;padding:4px 10px;border-radius:999px;border:1.5px solid var(--line);background:var(--chip);color:var(--band);cursor:pointer;min-height:30px}
 

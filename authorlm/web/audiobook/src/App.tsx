@@ -194,6 +194,7 @@ export function App() {
         <div className="modes">
           <button className={`chip${mode === "chapters" ? " on" : ""}`} aria-pressed={mode === "chapters"} onClick={() => setMode("chapters")}>Chapters</button>
           <button className={`chip${mode === "pron" ? " on" : ""}`} aria-pressed={mode === "pron"} onClick={() => setMode("pron")}>Pronunciations</button>
+          <a className="chip" href={`/try-text${location.hash}`}>Try text</a>
         </div>
         {mode === "chapters" && <div className="bar">
           <select value={stem} onChange={e => { setNow(null); setStem(e.target.value); }} aria-label="Chapter">

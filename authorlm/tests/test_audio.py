@@ -2474,6 +2474,55 @@ def check_audiobook_page() -> None:
             check("the same server answers the pronunciation workbench's road",
                   body["ok"] and body["result"]["manuscript"] == "Scratch"
                   and "Basilides" in [t["term"] for t in body["result"]["terms"]], str(body)[:200])
+
+            # CUJ: open Try text and listen to pasted Markdown independently
+            # of chapter takes, previews, or manuscript edits.
+            try:
+                with urllib.request.urlopen(f"{base}/try-text") as resp:
+                    check("Try text opens its own view", "Try text" in resp.read().decode())
+            except urllib.error.HTTPError as err:
+                check("Try text opens its own view", False, str(err))
+            original_files = {p.relative_to(book): p.read_bytes()
+                              for p in book.rglob("*") if p.is_file()}
+            rendered = []
+
+            def pasted_preview(root, speech, voice, rate):
+                rendered.append((speech["text"], voice, rate))
+                return stub(root, speech, voice, rate)
+
+            audiobook.PREVIEW_RENDERER = pasted_preview
+            headers = {"Content-Type": "application/json", "X-AuthorLM": "1",
+                       "Origin": base}
+
+            def try_text(markdown, request_headers=headers):
+                return urllib.request.urlopen(urllib.request.Request(
+                    f"{base}/api/try-text", method="POST",
+                    data=json.dumps({"markdown": markdown}).encode(),
+                    headers=request_headers))
+
+            with try_text("# A heading\r\nA **bold** [link](https://example.org)."
+                          "\r\n- A list item\r\n\r\n> A quote") as resp:
+                check("pasted Markdown returns a playable MP3 response",
+                      resp.headers["Content-Type"] == "audio/mpeg"
+                      and resp.headers["Cache-Control"] == "no-store"
+                      and resp.read().startswith(b"PREVIEW-"))
+            voice, rate = gen.preview_settings(s.manuscript)
+            check("Try text strips Markdown and uses the Mac preview voice",
+                  rendered == [("A heading\n\nA bold link.\n\nA list item\n\nA quote",
+                                voice, rate)], str(rendered))
+            for paste, request_headers, status in (
+                    ("![Only an image](pic.png)", headers, 400),
+                    ("a" * 65536, headers, 413),
+                    ("some text", {**headers, "Origin": "https://example.org"}, 403)):
+                try:
+                    with try_text(paste, request_headers):
+                        check(f"Try text returns HTTP {status} for invalid input", False)
+                except urllib.error.HTTPError as err:
+                    check(f"Try text returns HTTP {status} for invalid input",
+                          err.code == status, str(err))
+            check("Try text leaves the manuscript and its audio files alone",
+                  original_files == {p.relative_to(book): p.read_bytes()
+                                     for p in book.rglob("*") if p.is_file()})
         finally:
             server.shutdown()
             server.server_close()
