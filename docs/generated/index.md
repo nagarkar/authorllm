@@ -680,6 +680,12 @@ Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_beat_already_on_disk`
+
+`authorlm/tests/test_beat_already_on_disk.py`
+
+`api._beat_already_on_disk` is the write_accept crash-window guard.
+
 ## `tests.test_branding`
 
 `authorlm/tests/test_branding.py`
@@ -1118,6 +1124,12 @@ Pure helpers behind Veo clip generation: duration buckets, day spend, prompt com
 
 `gdocs._merge_changes` writes one caller's mapping edits onto current metadata.
 
+## `tests.test_merge_local_edits`
+
+`authorlm/tests/test_merge_local_edits.py`
+
+`api._merge_local_edits` keeps local file edits across a door resolve.
+
 ## `tests.test_mint_name`
 
 `authorlm/tests/test_mint_name.py`
@@ -1207,6 +1219,12 @@ The critique pass (design §5–§7): preflight gate, context package, output co
 `authorlm/tests/test_passes_contract_shapes.py`
 
 The critique editor's output contract holds against wrong SHAPES, not only wrong values: a list element that is not a JSON object, or an `insertions`/`suggestions` field that is not a list, is a ContractError (so run_editor retries with the violation named), never an AttributeError that aborts the run.
+
+## `tests.test_pasted_speech`
+
+`authorlm/tests/test_pasted_speech.py`
+
+`audio.pasted_speech` is the Try-text spoken-text door (#381).
 
 ## `tests.test_paths_env`
 
@@ -1423,6 +1441,12 @@ _No docstring._
 `authorlm/tests/test_usage_money.py`
 
 `usage._money` formats the cost column on every usage report row.
+
+## `tests.test_validate_dispositions`
+
+`authorlm/tests/test_validate_dispositions.py`
+
+`api._validate_dispositions` gates the digest's per-point verdicts.
 
 ## `tests.test_validate_reply`
 
