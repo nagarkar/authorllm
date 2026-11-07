@@ -135,8 +135,17 @@ _REPLACE_MARKER = re.compile(r"<<|>>")
 
 def _collapse(text: str, keep: str) -> str:
     """Resolve every pending form to one half. Replaces first (their
-    {{new}} halves are consumed by the PENDING match), then
-    paragraph-scoped insertions only.
+    {{new}} halves are consumed by the PENDING match), then every
+    own-line insertion `pending_forms` would list.
+
+    Blank-line-bounded and start-of-text insertions use the paragraph
+    patterns so pull stays byte-clean with the compose/`\n\n` shape.
+    Stacked own-line inserts joined by a single newline (Docs export of
+    footnote definitions) are the same forms: a one-shot paragraph
+    `.sub` dropped only the first of a blank-then-stack and left the
+    rest, and a single-newline stack never matched — pull/reconcile then
+    wrote `{{[^2]: …}}` into the local file. Those leftovers are cleared
+    here by the same own-line rule, last first, until none remain.
 
     Bare inline `{{…}}` is left alone. Author prose (`{{title}}`, set
     notation, TeX grouping) reaches Doc tabs through `doc push`, and the
@@ -144,28 +153,47 @@ def _collapse(text: str, keep: str) -> str:
     silently, because local still matched `pushed_hash` while the
     stripped tab looked like a Doc-only edit."""
     text = PENDING.sub(lambda m: m.group(keep), text)
-    if keep == "old":
-        while True:
-            nxt = _INSERTION_START.sub("", text, count=1)
-            if nxt == text:
-                break
-            text = nxt
-        spans = math_spans(text)
-        return _INSERTION_PARA.sub(
-            lambda m: m.group(0) if in_math(text, m.start("new"), spans)
-            else "", text)
     while True:
-        m = _INSERTION_START.match(text)
-        if not m:
+        if keep == "old":
+            nxt = _INSERTION_START.sub("", text, count=1)
+            if nxt != text:
+                text = nxt
+                continue
+        else:
+            m = _INSERTION_START.match(text)
+            if m:
+                # Keep a blank-line separator when more content follows so
+                # the unwrapped insertion stays its own paragraph.
+                rest = text[m.end():]
+                text = m.group("new") + ("\n\n" + rest if rest else "")
+                continue
+        spans = math_spans(text)
+        para = next((m for m in _INSERTION_PARA.finditer(text)
+                     if not in_math(text, m.start("new"), spans)), None)
+        if para is not None:
+            if keep == "old":
+                text = text[:para.start()] + text[para.end():]
+            else:
+                text = (text[:para.start()] + "\n\n" + para.group("new")
+                        + text[para.end():])
+            continue
+        # Own-line leftovers: single-newline stacks, or a sibling that
+        # lost its blank-line prefix when an earlier form was dropped.
+        forms = [f for f in pending_forms(text) if f["kind"] == "insert"]
+        if not forms:
             break
-        # Keep a blank-line separator when more content follows so the
-        # unwrapped insertion stays its own paragraph.
-        rest = text[m.end():]
-        text = m.group("new") + ("\n\n" + rest if rest else "")
-    spans = math_spans(text)
-    return _INSERTION_PARA.sub(
-        lambda m: m.group(0) if in_math(text, m.start("new"), spans)
-        else "\n\n" + m.group("new"), text)
+        form = forms[-1]
+        if keep == "old":
+            line_start = text.rfind("\n", 0, form["start"]) + 1
+            line_end = text.find("\n", form["end"])
+            if line_end == -1:
+                lo = line_start - 1 if line_start > 0 else 0
+                text = text[:lo] + text[form["end"]:]
+            else:
+                text = text[:line_start] + text[line_end + 1:]
+        else:
+            text = text[:form["start"]] + form["new"] + text[form["end"]:]
+    return text
 
 
 def strip_pending(text: str) -> tuple[str, list[str]]:
@@ -247,8 +275,9 @@ def strip_replacements(text: str) -> tuple[str, list[str]]:
     about.
 
     Doc pull/reconcile uses `strip_pending`, which still drops
-    paragraph-scoped critique insertions but now leaves inline author
-    braces alone for the same reason (they arrive in the tab via push).
+    own-line critique insertions (blank-line or single-newline stacks)
+    but now leaves inline author braces alone for the same reason
+    (they arrive in the tab via push).
 
     So: only `<<old>>{{new}}` collapses here, and only to its old half.
     Stray `<<` or `>>` surviving the collapse is an unbalanced replace
