@@ -884,6 +884,12 @@ The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, �
 
 `filtering.reply_json` is the first parser every pasted filter reply goes through (registry prelude, pronunciation prelude, filter record).
 
+## `tests.test_filter_settle_helpers`
+
+`authorlm/tests/test_filter_settle_helpers.py`
+
+Filter-settle warning helpers: uncovered units, pushed_from recovery, falsified prefix, and the dual-active-filter warning.
+
 ## `tests.test_filtered_prefix`
 
 `authorlm/tests/test_filtered_prefix.py`
@@ -1256,6 +1262,12 @@ Lazy-preview stamp and orphan sweep (#227).
 
 Paragraph-record reply unwrap (`_reply_records`) and JSON schema shape.
 
+## `tests.test_request_body`
+
+`authorlm/tests/test_request_body.py`
+
+`media_gen.request_body` is the Veo predictLongRunning wire shape.
+
 ## `tests.test_resolve_pointers`
 
 `authorlm/tests/test_resolve_pointers.py`
@@ -1405,6 +1417,12 @@ toc.toml `outside`: Doc tabs that are not part of the book.
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_twin_warning`
+
+`authorlm/tests/test_twin_warning.py`
+
+`api._twin_warning` is §9.2's informational line for byte-identical accepted replacements.
 
 ## `tests.test_unchanged_since_push`
 
