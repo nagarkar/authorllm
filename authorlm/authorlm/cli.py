@@ -5517,7 +5517,8 @@ def cmd_audio(args):
     rest = list(args.rest or [])
     try:
         if args.action == "init":
-            result = audio.init(manuscript)
+            result = audio.init(
+                manuscript, compiled=bool(api.outside_callers(db, manuscript)))
             for path in result["written"]:
                 print(f"Wrote {path}.")
             for path in result["unchanged"]:

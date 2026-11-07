@@ -6887,6 +6887,25 @@ def caller_metadata(db: Database, manuscript: dict, origin: str) -> dict:
     return dict(own or {})
 
 
+# Callers that kept their settings at the top level of the column, under
+# their own name, before `callers` existed (`caller_metadata` reads them).
+LEGACY_CALLERS = ("ytlm", "beelm", "corpuslm")
+
+
+def outside_callers(db: Database, manuscript: dict) -> list[str]:
+    """The outside callers that keep settings on this manuscript, sorted;
+    empty for the owner's own books. Read from the row: a manuscript kept
+    by ytlm or beelm (through corpuslm) is one whose metadata names its
+    caller. The extraction switch is no test, since the owner turns it
+    off on books of their own."""
+    meta = _metadata_row(db, manuscript)
+    names = {name for name, own in (meta.get(CALLERS_KEY) or {}).items()
+             if isinstance(own, dict)}
+    names.update(name for name in LEGACY_CALLERS
+                 if isinstance(meta.get(name), dict))
+    return sorted(names)
+
+
 def set_caller_metadata(db: Database, manuscript: dict, origin: str,
                         values: dict) -> dict:
     """Merge `values` into `origin`'s settings on this manuscript, key by

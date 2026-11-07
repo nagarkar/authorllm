@@ -943,6 +943,66 @@ def check_live_is_rejected_where_it_means_nothing() -> None:
         shutil.rmtree(ws, ignore_errors=True)
 
 
+def check_compiled_by_for_an_outside_callers_manuscript() -> None:
+    """`audio init` seeds "Compiled by" credits for a manuscript an outside
+    caller keeps (caller metadata under `callers` in the row, written by
+    `api.set_caller_metadata`), and "Written by" for every other one, even
+    one whose extraction switch is off (the owner's own books use it)."""
+    def seed(name: str, caller: bool, extraction_off: bool = False) -> str:
+        book = Path(tempfile.mkdtemp(prefix="authorlm-audio-credits-"))
+        ws = Path(tempfile.mkdtemp(prefix="authorlm-audio-credits-ws-"))
+        try:
+            (book / "one.md").write_text("# One\n\nText.\n", encoding="utf-8")
+            argv = ["-w", str(ws), "init", "--name", name, "--path", str(book),
+                    "--author", "Chinmay Nagarkar"]
+            if extraction_off:
+                argv += ["--extraction", "off"]
+            out, code = run_cli(*argv)
+            assert code == 0, out
+            if caller:
+                db = api.open_db(str(ws))
+                api.set_caller_metadata(db, api.get_manuscript(db, name),
+                                        "ytlm", {"corpus": "cor-x"})
+            out, code = run_cli("-w", str(ws), "-m", name, "audio", "init")
+            assert code == 0, out
+            return (book / "_audio" / "audiobook.toml").read_text(encoding="utf-8")
+        finally:
+            shutil.rmtree(book, ignore_errors=True)
+            shutil.rmtree(ws, ignore_errors=True)
+
+    corpus = seed("Corpus", caller=True, extraction_off=True)
+    check("an outside caller's manuscript is seeded with Compiled by",
+          'opening = "{title}. {subtitle}. Compiled by {author}. Narrated by '
+          '{narrator}."' in corpus
+          and 'closing = "This has been {title}, compiled by {author} and '
+          'narrated by {narrator}.' in corpus
+          and "ritten by {author}" not in corpus, corpus)
+    check("only the two credit lines change",
+          corpus.replace("Compiled by {author}", "Written by {author}")
+          .replace("compiled by {author}", "written by {author}")
+          == audio.DEFAULT_CONFIG_TEXT.replace(
+              'dictionary = ""', 'dictionary = "Corpus"', 1))
+    ws = Path(tempfile.mkdtemp(prefix="authorlm-audio-credits-legacy-"))
+    try:
+        out, code = run_cli("-w", str(ws), "init", "--name", "Old", "--path",
+                            str(ws), "--author", "Chinmay Nagarkar")
+        assert code == 0, out
+        db = api.open_db(str(ws))
+        old = api.get_manuscript(db, "Old")
+        db.update("manuscripts", old["id"], {"metadata": json.dumps(
+            {"ytlm": {"a": 1}, "gdocs": {}})})
+        check("settings a caller kept at the top level, before `callers`, "
+              "still mark its manuscript", api.outside_callers(db, old) == ["ytlm"])
+        db.update("manuscripts", old["id"], {"metadata": json.dumps({"gdocs": {}})})
+        check("a Doc mapping alone marks nothing", api.outside_callers(db, old) == [])
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+    own = seed("Own", caller=False, extraction_off=True)
+    check("the owner's own book keeps Written by, extraction off or not",
+          "Written by {author}" in own and "written by {author}" in own
+          and "ompiled by" not in own, own)
+
+
 def check_dictionary_by_default() -> None:
     """Every book that renders audio has a dictionary (ruling 2026-10-18):
     an empty `[tts].dictionary` means the manuscript's name, init seeds
@@ -2719,6 +2779,7 @@ def main_test() -> None:
     check_paid_verbs_spend_only_with_live()
     check_live_is_rejected_where_it_means_nothing()
     check_dictionary_by_default()
+    check_compiled_by_for_an_outside_callers_manuscript()
     check_say()
     check_workbench()
     check_audiostation_launch()
