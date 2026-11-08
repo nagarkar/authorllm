@@ -632,6 +632,12 @@ Drive the Doc-road failure scenarios (test_doc_road_failures.py) against the LIV
 
 The one way to run the whole test suite.
 
+## `tests.test_accounting`
+
+`authorlm/tests/test_accounting.py`
+
+`api._accounting` tallies kept / removed / unaccounted digest points.
+
 ## `tests.test_alias_canonical_conflict`
 
 `authorlm/tests/test_alias_canonical_conflict.py`
@@ -1166,6 +1172,12 @@ Pure Omni helpers: model gate, duration clamp, billed USD from token usage, and 
 
 `threads.own_line_form` / `math_spans` / `in_math` / `pending_forms` decide which bare `{{…}}` count as staged insertions on Doc-road resolve.
 
+## `tests.test_owning_filter`
+
+`authorlm/tests/test_owning_filter.py`
+
+`api._owning_filter` names the filter on a refusal by its run id.
+
 ## `tests.test_paragraph_records`
 
 `authorlm/tests/test_paragraph_records.py`
@@ -1273,6 +1285,12 @@ tests/run_all.py, the suite's one runner, against fixture trees: throwaway test 
 `authorlm/tests/test_same_para.py`
 
 `gdocs._norm_para` / `_same_para` / `first_divergence` / `divergence_note` align Doc paragraphs with the markdown export for diff-push.
+
+## `tests.test_scrub`
+
+`authorlm/tests/test_scrub.py`
+
+`media_gen._scrub` replaces base64 blobs with their length in job logs.
 
 ## `tests.test_section_summaries`
 
