@@ -1250,6 +1250,12 @@ Lazy-preview stamp and orphan sweep (#227).
 
 `structure.refuse_sidecar` is the named door every filter / lens / intent verb shares for `pronunciations.md`.
 
+## `tests.test_replace_block_concurrent`
+
+`authorlm/tests/test_replace_block_concurrent.py`
+
+Concurrent audiobook paragraph edits must not erase each other.
+
 ## `tests.test_reply_records`
 
 `authorlm/tests/test_reply_records.py`
