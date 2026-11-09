@@ -668,6 +668,12 @@ API-layer tests + CLI/MCP parity checklist (P11).
 
 `staging.apply_accepted` is the local-road compose that turns accepted filter/critique threads into finished essay bytes.
 
+## `tests.test_apply_item_unique`
+
+`authorlm/tests/test_apply_item_unique.py`
+
+`devedit.apply_item` must see the original passage exactly once.
+
 ## `tests.test_audio`
 
 `authorlm/tests/test_audio.py`
@@ -1015,6 +1021,12 @@ Interlocutor tests (docs/interlocutor-design.md).
 `authorlm/tests/test_iter_manuscript_paths.py`
 
 `revisions.iter_manuscript_paths` is the observation visibility gate.
+
+## `tests.test_jobs_loader`
+
+`authorlm/tests/test_jobs_loader.py`
+
+`media_gen._jobs` — the job-log loader edit_plan uses to find a take's Omni interaction.
 
 ## `tests.test_label_opt`
 
@@ -1405,6 +1417,12 @@ Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): p
 `authorlm/tests/test_tab_is_empty.py`
 
 `gdocs._tab_is_empty` chooses full rewrite vs surgical Doc push.
+
+## `tests.test_terms_index`
+
+`authorlm/tests/test_terms_index.py`
+
+`terms.Terms.index` — the book-wide term index (#389).
 
 ## `tests.test_threads_reply_unstrike`
 
