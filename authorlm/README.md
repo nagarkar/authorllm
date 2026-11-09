@@ -204,7 +204,10 @@ outstanding questions.
 | `audio voices/audition/cast set` | Free voice discovery with preview clips into an audition gallery (`--library` for the shared library); paid auditions on the book's own words (`--file F --paragraphs N-M`; states the cost, and `--live` spends it); write one row of `cast.md` |
 | `audio dictionary push [--dry-run \| --live]` | Shows the plan from `pronunciations.md` to the ElevenLabs dictionary named in `audiobook.toml`; `--live` applies it, append-only with replacement |
 | `audio say <term> [--say S,S] [--cast K] [--dictionary] [--settle] [--dry-run \| --live]` | The fast pronunciation loop from the terminal: the word's own sentence, in the voice that says it, with each respelling substituted inline as the alias rule would (no push); states the cost, and `--live` renders and plays the clips; `--settle --live` writes the row |
-| `workbench [--port N] [--no-open]` | Serve the pronunciation workbench on a local port and open it, like `triage-app`: every word in the table (or a new one from the book), every voice that says it, a respelling box, Regenerate and listen per voice (the respelling, the voice's default with no rule, or via the pushed dictionary), Save to `pronunciations.md`, Remove a row (and its one remote rule) when the default sounds better, Push to ElevenLabs, Export. Built from `web/workbench/` into `authorlm/workbench_dist/` |
+| `audio preview/generate/retake/stitch/status` | Free Mac `say` previews by paragraph id; paid ElevenLabs takes (`generate` / `retake`) print cost and spend only with `--live` (docs/audiobook-review-design.md); `stitch` builds the chapter mp3; `status [--find words]` is the board |
+| `audio serve [--port N] [--no-open]` | Local audiobook review page (`web/audiobook/`): previews, takes, stitch, Push, pronunciation workbench mode, Dev edit mode (`#<ms>/devedit`), and **Try text** at `/try-text` (pasted Markdown → Mac preview MP3, kept outside the manuscript). Phone reaches it over Tailscale |
+| `devedit new/coverage/status/…` | Whole-book developmental edit run under `<manuscript>/_devedit/<run-id>/` (driven by the `developmental-editing` skill): lock coverage from `toc.toml`, mark steps, term index, agent packs, letter decisions, review queue (`next` / `verdict`). Review surface: audio page Dev edit mode. See [Developmental edit](#developmental-edit) |
+| `workbench [--port N] [--no-open]` | Serve the pronunciation workbench on a local port and open it, like `triage-app`: every word in the table (or a new one from the book), every voice that says it, a respelling box, Regenerate and listen per voice (the respelling, the voice's default with no rule, or via the pushed dictionary), Save to `pronunciations.md`, Remove a row (and its one remote rule) when the default sounds better, Push to ElevenLabs, Export. Built from `web/workbench/` into `authorlm/workbench_dist/` (also a mode of `audio serve`) |
 | `audiostation [--dry-run]` | Open the audiostation studio on the manuscript's `_audio/` folder: a built `.app` bundle if there is one, else the dev server (`AUDIOSTATION_APP` overrides) |
 | `unregister <name>` | **Delete** a manuscript and all its data — clean slate for prototyping and hermetic tests (files on disk untouched) |
 | `extract [file…] [--native\|--full\|--section]` | Concept/edge extraction (docs/extraction-redesign.md): prints per-section payloads; `--native` makes the model calls. Incremental by default (sections changed since the last run). Subcommands: `screened`, `calibrate`, `backup`, `migrate`, `runs`. Lazy — `init` / `collect` / `write complete` never mine |
@@ -242,6 +245,54 @@ outstanding questions.
 | `guide` | Generate explained suggestions, or abstain |
 | `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; explanations seed candidate beliefs |
 | `status`, `log`, `history` | Inspect state, transitions, versions |
+
+**Audio spend flags.** Only the paid/send verbs take `--live` or
+`--dry-run`: `audition`, `dictionary`, `generate`, `retake`, `say`. On
+those verbs, omit both to preview the plan; `--live` spends or sends;
+`--dry-run` is the same preview. Passing either flag on a free audio
+action (`init`, `export`, `check`, `preview`, `stitch`, `status`,
+`serve`, …) is a usage error. Clip spend caps surface as `over_cap` and
+need `--force` to proceed (design: docs/video-clips-design.md).
+
+## Developmental edit
+
+A whole-book developmental edit is one run folder,
+`<manuscript>/_devedit/<run-id>/`, owned by `devedit.py`. The
+`developmental-editing` skill drives the agents; `authorlm devedit` is
+the chat surface; the audiobook page's Dev edit mode is the review
+surface. Steps, in order: coverage → summaries → terms → crossbook →
+letter → decisions → essays → integrate → check → review.
+
+```bash
+authorlm -m <ms> devedit new                 # propose coverage from toc.toml
+authorlm -m <ms> devedit coverage            # show edit vs reference lists
+authorlm -m <ms> devedit coverage --lock     # only after the author confirms
+authorlm -m <ms> summarize rebuild …         # covered files, before terms
+authorlm -m <ms> devedit status              # each step; stale when a covered file moved
+authorlm -m <ms> devedit pack --book         # cross-book / letter context
+authorlm -m <ms> devedit pack kindness.md    # one essay agent's pack
+authorlm -m <ms> devedit next                # next review item (diff in chat)
+authorlm -m <ms> devedit verdict <id> accept|reject|defer [--reason R] [--text …]
+```
+
+Constraints operators hit:
+
+- **Coverage before any step.** Only TOC-listed files are covered;
+  `outside` never is. Front matter starts as reference; move a Preface
+  into edit with `coverage --edit <file>` before `--lock`.
+- **Nothing stored is authoritative.** Summaries are rebuilt for the
+  run; the term index is computed from the text (`terms.Terms.index`)
+  and snapshotted to `terms.json`.
+- **Stale apply refuses.** Accepting an item rewrites the manuscript
+  only when the original passage still occurs exactly once; otherwise
+  the item is stale and must be checked again.
+- **Publish after accept.** Accepted items stay local until Push on the
+  Dev edit page or `doc push <file>`; a tab with pending suggested
+  edits is settled first.
+- **Models.** `[devedit]` in `config.toml` sets `session_model` /
+  `model` / `effort` per agent step; `devedit models` prints them.
+
+Agent protocol: `.claude/skills/authorlm/SKILL.md` (Developmental edit).
 
 ## Triage App analyzer profiles
 
@@ -318,10 +369,17 @@ untouched.
   an open comment; address the comment, then push again. While a
   proposal is pending in that paragraph, a push that would change it
   stops with "settle the thread first".
-- **Missing tab.** `doc pull` exits non-zero when a mapped tab is absent
-  from the Doc export (not "clean / nothing changed"). Tab titles must
-  stay exact filenames; Google's markdown export may omit titles — the
-  split then falls back to each tab's first paragraph.
+- **Missing tab / opening-heading anchors.** `doc pull` exits non-zero
+  when a mapped tab is absent from the Doc export (not "clean / nothing
+  changed"). Tab titles must stay exact filenames. Google's markdown
+  export omits tab-title headings, so the whole-Doc split anchors each
+  tab on its **opening heading** (level + text from the Docs API),
+  backing up over any epigraph paragraphs before that heading. An
+  opener must be unique and must not recur as any heading in an earlier
+  tab (the forward search would stop there); a chapter tab that opens
+  with plain text stops the pull and names the tab. A short dialogue
+  line is never an anchor (that used to steal the prior chapter's
+  tail).
 - **Broken / unterminated forms.** A tab form that lost a marker
   (`<<` / `>>` / `{{` / `}}`) is **not pulled**: the file is left alone
   and named under `unterminated` until the form is mended or removed in
