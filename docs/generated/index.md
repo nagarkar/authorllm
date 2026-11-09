@@ -734,6 +734,12 @@ Comment context on the pull (it adds where a Doc comment's anchor sits and the s
 
 Realization vs first-mention firewall (`concept_pattern` / `mention_pattern`).
 
+## `tests.test_concept_revive_dual_retire`
+
+`authorlm/tests/test_concept_revive_dual_retire.py`
+
+`revive_concept` after both endpoints of one edge were retired.
+
 ## `tests.test_context`
 
 `authorlm/tests/test_context.py`
