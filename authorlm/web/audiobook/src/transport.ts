@@ -1,7 +1,8 @@
 // POST /api/audiobook → audiobook.dispatch, POST /api/workbench →
-// workbench.dispatch (authorlm/audiobook_server.py). Every request names the
-// manuscript chosen in the page's dropdown (setManuscript); before one is
-// chosen the server falls back to its -m flag.
+// workbench.dispatch, POST /api/devedit → devedit.dispatch
+// (authorlm/audiobook_server.py). Every request names the manuscript chosen
+// in the page's dropdown (setManuscript); before one is chosen the server
+// falls back to its -m flag.
 export interface Transport {
   request<T>(method: string, params: Record<string, unknown>): Promise<T>;
 }
@@ -27,4 +28,5 @@ function road(path: string): Transport {
 
 export const audiobookTransport = road("/api/audiobook");
 export const workbenchTransport = road("/api/workbench");
+export const deveditTransport = road("/api/devedit");
 export const request = audiobookTransport.request;

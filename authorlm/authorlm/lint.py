@@ -5,7 +5,9 @@ Every check here encodes a ratified law or a recurring author verdict
 with "What", "this not that" distinctions, a term inside its own
 definition, stacked em-dashes, over-long sentences, reading grade,
 verbatim overlap with prose the book already has, and a paragraph that
-re-defines a concept another essay introduced. None of them needs a model
+re-defines a concept another essay introduced, and a term set in italics
+once (a borrowed concept: "italic on every use") that later appears in
+roman. None of them needs a model
 and none of them is a judgment: a finding names the sentence and the law,
 and the author (or the critic) decides.
 
@@ -275,7 +277,13 @@ def check_overlap(units: list[str], corpus: dict[str, list[str]],
 
     Eight words is long enough that a match is a sentence the book
     already has, not a shared idiom; a refrain the author repeats on
-    purpose is exactly what the override reason records."""
+    purpose is exactly what the override reason records.
+
+    Not copying, so not shingled on the draft side: a footnote definition
+    (`[^W7]: Whitehead, *Process and Reality*, p. 35.` — every citation
+    of a work repeats its form, and the label leaks in as a word), a
+    footnote anchor, and a span in double quotes (a quotation cited from
+    the book is a quotation). A shingle never bridges a masked span."""
     index: dict[tuple[str, ...], list[tuple[str, int]]] = {}
     for label, paras in corpus.items():
         for k, para in enumerate(paras, 1):
@@ -283,7 +291,7 @@ def check_overlap(units: list[str], corpus: dict[str, list[str]],
                 index.setdefault(sh, []).append((label, k))
     out = []
     for i, unit in enumerate(units, 1):
-        ws = _normalize_words(unit)
+        ws = _overlap_words(unit)
         hits: dict[tuple[str, int], list[int]] = {}
         for pos in range(0, max(0, len(ws) - n + 1)):
             sh = tuple(ws[pos:pos + n])
@@ -306,6 +314,22 @@ def check_overlap(units: list[str], corpus: dict[str, list[str]],
                 f"{n + best_len - 1} words verbatim from {label} ¶{k} — "
                 f"the book already says this; cite it or cut it",
                 ref=f"{label} ¶{k}"))
+    return out
+
+
+_DOUBLE_QUOTED = re.compile(r"“[^”\n]*”|\"[^\"\n]*\"")
+
+
+def _overlap_words(unit: str) -> list[str | None]:
+    """The unit's words for `check_overlap`, with `None` standing where a
+    footnote anchor or a double-quoted span was, so no shingle spans it;
+    a footnote definition line yields nothing."""
+    prose = "\n".join(line for line in unit.splitlines()
+                      if not line.lstrip().startswith("[^"))
+    out: list[str | None] = []
+    for piece in re.split(f"(?:{_FOOTNOTE.pattern}|{_DOUBLE_QUOTED.pattern})",
+                          prose):
+        out += _normalize_words(piece) + [None]
     return out
 
 
@@ -334,12 +358,154 @@ def check_redefinition(units: list[str], concepts: list[tuple[str, str]],
     return out
 
 
+# Italic terms. A borrowed concept is italic on every use (law); a model
+# drafting beat by beat sets it italic where it first meets it and drops
+# the italics two beats later, and the critic caught that by eye only.
+# The check is mechanical: a term the accepted text, the brief, or the
+# draft itself has set in italics is flagged wherever the draft then
+# writes it in roman. Quotations of a source keep the source's typography
+# and footnotes are citations, so both are masked out first, as are the
+# italic spans themselves. Emphasis italics ("*is*", "*for*") are the
+# false positive to fear: a span that is only function words, or a single
+# word under four letters, is not taken as a term. Severity warning: the
+# plain English word ("on this occasion") is legitimate prose too.
+
+_ITALIC = re.compile(r"(?<![*\w])\*(?![*\s])([^*\n]+?)(?<![*\s])\*(?![*\w])"
+                     r"|(?<![_\w])_(?![_\s])([^_\n]+?)(?<![_\s])_(?![_\w])")
+_QUOTED = re.compile(r"“[^”\n]*”|\"[^\"\n]*\"|‘[^‘\n]*?’(?!\w)"
+                     r"|(?<!\w)'[^'\n]*?'(?!\w)")
+_FOOTNOTE = re.compile(r"\[\^[^\]]*\]|\^\[[^\]]*\]")
+
+
+def _mask(text: str, pattern: re.Pattern) -> str:
+    """`text` with every match of `pattern` blanked to spaces, so match
+    positions in the result still index the original."""
+    return pattern.sub(lambda m: " " * len(m.group(0)), text)
+
+
+def _plain_prose(unit: str) -> str:
+    """The unit with footnotes and quotations masked, bold markers
+    blanked (so `***x***` reads as `*x*` and `**x**` as roman), the
+    italics left in place for `_ITALIC` to find."""
+    return _mask(_mask(unit.replace("**", "  "), _FOOTNOTE), _QUOTED)
+
+
+def _is_term(span: str) -> bool:
+    from .terms import _OPENERS
+
+    ws = words(span)
+    if not ws or len(ws) > 5:
+        return False
+    if len(ws) == 1 and len(ws[0]) < 4:
+        return False
+    function = {w.lower() for w in _OPENERS}
+    return any(w.lower() not in function for w in ws)
+
+
+def italic_terms(text: str) -> list[str]:
+    """The terms `text` sets in italics, outside quotations and
+    footnotes, in order of first appearance, de-duplicated."""
+    found: dict[str, None] = {}
+    for unit in paragraphs(text or ""):
+        if is_heading(unit) or unit.lstrip().startswith("[^"):
+            continue
+        for m in _ITALIC.finditer(_plain_prose(unit)):
+            span = _flat(m.group(1) or m.group(2)).strip(" .,;:!?")
+            if _is_term(span):
+                found.setdefault(span, None)
+    return list(found)
+
+
+def _term_pattern(term: str) -> re.Pattern:
+    """`terms.mention_pattern`, made plural-tolerant from either side: an
+    italic "*actual occasions*" must also catch a roman "actual
+    occasion", and mention_pattern only adds plurals to the name it is
+    given."""
+    from .terms import mention_pattern
+
+    forms = [term]
+    if term.endswith("ies"):
+        forms.append(term[:-3] + "y")
+    elif term.endswith("es"):
+        forms += [term[:-2], term[:-1]]
+    elif term.endswith("s") and not term.endswith("ss"):
+        forms.append(term[:-1])
+    alternatives = "|".join(f"(?:{mention_pattern(f).pattern})" for f in forms)
+    flags = mention_pattern(term).flags
+    return re.compile(alternatives, flags)
+
+
+def _sentence_at(unit: str, start: int, end: int) -> str:
+    """The sentence of `unit` around [start, end): from the last
+    sentence end before it to the next one after it."""
+    ends = [m.end() for m in re.finditer(
+        r"[.!?][\"'”’)\]]*(?:\[\^[^\]]*\])?\s+", unit)]
+    lo = max([e for e in ends if e <= start], default=0)
+    hi = min([e for e in ends if e >= end], default=len(unit))
+    return _flat(unit[lo:hi])
+
+
+def check_italic_terms(units: list[str], accepted: str = "",
+                       brief: str = "") -> list[Finding]:
+    """A term italic in the accepted text, the brief, or earlier in the
+    draft, that the draft later writes in roman. One finding per term
+    per unit, at its first roman use there."""
+    from .terms import sentence_initial
+
+    origin: dict[str, str] = {}
+    for term in italic_terms(accepted):
+        origin.setdefault(term.lower(), (term, "in the accepted text"))
+    for term in italic_terms(brief):
+        origin.setdefault(term.lower(), (term, "in the brief"))
+    patterns: dict[str, re.Pattern] = {}
+    out = []
+    for i, unit in enumerate(units, 1):
+        if is_heading(unit) or unit.lstrip().startswith("[^"):
+            continue
+        prose = _plain_prose(unit)
+        italics = []
+        for m in _ITALIC.finditer(prose):
+            span = _flat(m.group(1) or m.group(2)).strip(" .,;:!?")
+            if _is_term(span):
+                italics.append((m.start(), span))
+        roman = _mask(prose, _ITALIC)
+        candidates = dict(origin)
+        for _at, span in italics:
+            candidates.setdefault(span.lower(),
+                                  (span, "earlier in the draft"))
+        for key, (term, where) in candidates.items():
+            pattern = patterns.setdefault(key, _term_pattern(term))
+            for m in pattern.finditer(roman):
+                if key not in origin and not any(
+                        at < m.start() and span.lower() == key
+                        for at, span in italics):
+                    continue    # italic only LATER in this unit
+                if (" " not in term and term[:1].isupper()
+                        and sentence_initial(roman, m.start())):
+                    continue    # a capital that is only the sentence's
+                quote = _sentence_at(unit, m.start(), m.end())
+                out.append(Finding(
+                    "italic-term", "warning", i, quote,
+                    f"'{term}' is italic {where} but roman here (law: "
+                    f"concepts borrowed from other philosophies are italic "
+                    f"on every use) — italicize it, unless this is the "
+                    f"plain English word", ref=term))
+                break
+        for _at, span in italics:
+            origin.setdefault(span.lower(), (span, "earlier in the draft"))
+    return out
+
+
 # ------------------------------------------------------------ the entry
 
 def lint_text(text: str, *, corpus: dict[str, list[str]] | None = None,
               concepts: list[tuple[str, str]] | None = None,
               this_file: str | None = None, max_grade: float = 13.0,
-              long_sentence: int = 40, overlap_n: int = 8) -> Report:
+              long_sentence: int = 40, overlap_n: int = 8,
+              accepted: str = "", brief: str = "") -> Report:
+    """`accepted` and `brief` seed the italic-term check: the writeup's
+    accepted text and brief are where a borrowed term is first set in
+    italics, and the draft answers for keeping it so."""
     units = paragraphs(text)
     findings: list[Finding] = []
     findings += check_what_opener(units)
@@ -352,6 +518,7 @@ def lint_text(text: str, *, corpus: dict[str, list[str]] | None = None,
         findings += check_overlap(units, corpus, overlap_n)
     if concepts:
         findings += check_redefinition(units, concepts, this_file)
+    findings += check_italic_terms(units, accepted, brief)
     findings.sort(key=lambda f: (f.unit, {"error": 0, "warning": 1,
                                           "info": 2}[f.severity], f.code))
     return Report(findings)

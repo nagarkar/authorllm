@@ -185,7 +185,8 @@ def absent_confirmed(db: Database, manuscript: dict,
     would never admit them now, and they are retired on the same terms as
     a pending row that fails it). Author-declared concepts are not
     touched: declaration is ratification."""
-    from .concepts import concept_pattern, node_names
+    from .concepts import node_names
+    from .terms import concept_pattern
 
     out = []
     for row in db.all("SELECT * FROM concept_nodes WHERE manuscript_id = ? "

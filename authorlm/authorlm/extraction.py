@@ -24,9 +24,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import proposals
-from .concepts import (primary_location, NODE_KINDS, VALID_RELATIONS, add_concept, concept_pattern, get_concept,
-                       link_concepts, mention_pattern, node_names,
+from .concepts import (primary_location, NODE_KINDS, VALID_RELATIONS, add_concept, get_concept,
+                       link_concepts, node_names,
                        scan_realizations, scoped_concepts)
+from .terms import Terms, capitalised_terms, concept_pattern, fold, grounding_strength
 from .hygiene import RECURRENCE_GATED_KINDS, passes_recurrence_bar
 from .db import Database, ko_fields
 from .llm import LLMClient
@@ -625,13 +626,6 @@ def rejection_reasons(db: Database, mid: str) -> dict[str, str]:
     return out
 
 
-_CAPITALISED = re.compile(r"[A-Z][\w’'-]+(?:[ \t]+[A-Z][\w’'-]+)*")
-
-
-def capitalised_terms(text: str) -> set[str]:
-    return set(_CAPITALISED.findall(text.replace("*", "")))
-
-
 def precedent_rows(db: Database, manuscript: dict, rel: str, text: str,
                    nearest: int, exclude: set[str] | None = None
                    ) -> list[dict]:
@@ -1101,62 +1095,14 @@ def candidate_label(c: dict) -> str:
 
 # ------------------------------------------------------- the gates (§4.4)
 
-def _fold(text: str | None) -> str:
-    """Whitespace folded and emphasis markers dropped: the book's headings
-    are bold, and a model quoting `**Rankings**` as `Rankings` has still
-    quoted the text. Nothing else is forgiven — not a word, not a comma."""
-    return " ".join((text or "").replace("*", "").split())
-
-
 def span_in(span: str, paragraph: str) -> bool:
     """Gate 1: the span occurs verbatim in the paragraph."""
-    folded = _fold(span)
-    return bool(folded) and folded in _fold(paragraph)
+    folded = fold(span)
+    return bool(folded) and folded in fold(paragraph)
 
 
 def names_in(names: list[str], paragraph: str) -> bool:
     return any(concept_pattern(n).search(paragraph) for n in names if n)
-
-
-def _sentence_initial(text: str, at: int) -> bool:
-    i = at - 1
-    while i >= 0 and text[i] in " \t*_#>\"'“‘([":
-        i -= 1
-    return i < 0 or text[i] in ".!?\n"
-
-
-def is_term_of_art(name: str, files: dict[str, str]) -> bool:
-    """Gate 3: a single capitalised word must occur capitalised somewhere
-    a sentence does NOT start (`mention_pattern`, case kept). A name that
-    is only ever capitalised by its position is an English word, not a
-    term — the "Experience" failure of §2.4 #12. Multi-word and lowercase
-    names pass: `mention_pattern` keeps their tolerant match."""
-    if " " in name.strip() or not name[:1].isupper():
-        return True
-    pattern = mention_pattern(name)
-    return any(not _sentence_initial(text, m.start())
-               for text in files.values() for m in pattern.finditer(text))
-
-
-_DEFINES_AFTER = re.compile(
-    r"^[^.;:]{0,30}?\b(?:is|are|was|were|means|mean|names|denotes|refers "
-    r"to|is called|we call|ye call)\b")
-_DEFINES_BEFORE = re.compile(r"\b(?:call|calls|called|name|names|named)\b"
-                             r"[^.;:]{0,30}$")
-
-
-def grounding_strength(span: str, name: str, paragraph: str = "") -> float:
-    """§4.4's grounding term: 1.0 when the span is a heading or
-    definition-shaped about `name` ("X is …", "we call it X"), 0.7
-    otherwise."""
-    folded = _fold(span)
-    if paragraph.lstrip().startswith("#") or folded.startswith("#"):
-        return 1.0
-    m = concept_pattern(name).search(folded) if name else None
-    if m and (_DEFINES_AFTER.search(folded[m.end():])
-              or _DEFINES_BEFORE.search(folded[:m.start()])):
-        return 1.0
-    return 0.7
 
 
 @dataclass
@@ -1315,7 +1261,7 @@ def screen(candidates: list[dict], ctx: GateContext, knob: dict, *,
             c.update(existing=node["name"], existing_id=node["id"])
             c["score"] = score(c, ctx, knob)
             continue
-        if not is_term_of_art(c["name"], files):
+        if not Terms(files).is_term_of_art(c["name"]):
             fail(c, "common_word", f"'{c['name']}' is capitalised only where "
                  "a sentence starts — an English word, not a term")
             continue

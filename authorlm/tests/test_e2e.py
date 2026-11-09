@@ -209,7 +209,7 @@ def _stub_section_reply(user: str) -> str:
     of block E actually contain, each quoting a real span."""
     import re as _re
 
-    from authorlm.concepts import concept_pattern
+    from authorlm.terms import concept_pattern
 
     body = user.split("E — THE SECTION", 1)[1]
     paragraphs = [(int(m.group(1)), m.group(2).strip()) for m in _re.finditer(

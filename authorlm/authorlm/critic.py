@@ -10,6 +10,18 @@ report, and the draft itself. No database writes happen here and no
 model is called: the critic is whoever reads the payload — a subagent
 with an empty context in chat mode, a model on the native path later.
 
+The book here is the BOOK: the files toc.toml declares `outside`
+(papers, side pieces, the Metaphysic) are left out of the nearest
+passages and the lint corpus alike (`book`). They are mirrored to
+the Doc but are not part of what the reader holds, so a critic that
+ranked them sent the drafter to cite text that has left the book
+(whitehead.md, 2026-11-07: "re-defines locus in the Metaphysic's own
+words", against metaphysic.md, which is outside).
+
+The critic also sees the drafter's ALREADY IN THE BOOK block, built by
+the same function from the same beat (`writing._already_in_book`), so a
+REPEAT finding is judged on the ground the drafter was given.
+
 `parse_report` reads the critic's reply back. Its contract is the
 prompt's: VERDICT then PASS or FAIL, then FINDINGS lines.
 """
@@ -91,13 +103,28 @@ def nearest_passages(draft: str, files: dict[str, list[str]],
             for neg, _r, k, name, para in scored[:limit]]
 
 
+def book(manuscript: dict) -> tuple[dict[str, str], list[str]]:
+    """({file: text}, reading order) for the book's prose on disk:
+    structural files and every file toc.toml declares `outside` removed.
+    The one definition of "the book" for the write loop's critic, lint
+    and ALREADY IN THE BOOK block, so the three cannot disagree on what
+    the book already says. The order is read from toc.toml BEFORE the
+    structural files are dropped (dropping them first loses the TOC and
+    falls back to alphabetical order)."""
+    from .revisions import read_manuscript_files
+    from .structure import (TOC_FILENAME, content_files, is_outside,
+                            reading_order, toc_outside)
+
+    files = read_manuscript_files(Path(manuscript["path"]))
+    outside = toc_outside(files.get(TOC_FILENAME) or "")
+    order, _unlisted = reading_order(files)
+    return ({name: text for name, text in content_files(files).items()
+             if not is_outside(name, outside)}, order)
+
+
 def _book(manuscript: dict, exclude: str) -> tuple[dict[str, list[str]],
                                                    list[str]]:
-    from .revisions import read_manuscript_files
-    from .structure import content_files, reading_order
-
-    files = content_files(read_manuscript_files(Path(manuscript["path"])))
-    order, _unlisted = reading_order(files)
+    files, order = book(manuscript)
     paras = {name: lint.paragraphs(text) for name, text in files.items()
              if name != exclude}
     return paras, order
@@ -113,20 +140,28 @@ def concept_provenance(db: Database, manuscript_id: str
 
 
 def lint_draft(db: Database, manuscript: dict, file: str, draft: str,
-               include_self: bool = True) -> lint.Report:
+               include_self: bool = True,
+               writeup: dict | None = None) -> lint.Report:
     """The lint report for one draft against the book. The file being
     drafted stays IN the corpus by default: during a writeup the file on
     disk is the accepted text, and a beat that repeats an earlier beat
-    is the most common fault of all."""
-    from .revisions import read_manuscript_files
-    from .structure import content_files
+    is the most common fault of all.
 
-    files = content_files(read_manuscript_files(Path(manuscript["path"])))
+    With `writeup`, the italic-term check is seeded from the accepted
+    text and the brief, where a borrowed term is first set in italics."""
+    files, _order = book(manuscript)
     corpus = lint.corpus_from_files(files, exclude=None if include_self
                                     else file)
+    accepted = brief = ""
+    if writeup is not None:
+        path = Path(manuscript["path"]) / writeup["file"]
+        accepted = path.read_text(encoding="utf-8") if path.exists() else ""
+        if is_placeholder(accepted):
+            accepted = ""
+        brief = loads(writeup["metadata"], {}).get("brief") or ""
     return lint.lint_text(draft, corpus=corpus,
                           concepts=concept_provenance(db, manuscript["id"]),
-                          this_file=file)
+                          this_file=file, accepted=accepted, brief=brief)
 
 
 def assemble(db: Database, manuscript: dict, writeup: dict, beat: dict,
@@ -169,6 +204,11 @@ def assemble(db: Database, manuscript: dict, writeup: dict, beat: dict,
                  checklist(db, manuscript["id"], file, learnings)),
         _section("LAST VERDICT", writing._last_verdict(db, writeup)),
         _section("THIS BEAT", json.dumps(beat, indent=2)),
+        # The brief is ground for the drafter (block A), so it is ground for
+        # the critic too: a new essay's sources live only there, and without
+        # it every quotation the brief supplied reads as invented.
+        _section("THE BRIEF (the author's ratified ground for this essay)",
+                 loads(writeup["metadata"], {}).get("brief") or "(no brief)"),
         _section("CONCEPT NOTES",
                  writing._concept_notes(db, manuscript, [beat])),
         _section("PROTECTED TERMS", "\n".join(f"- {t}" for t in protected)),
@@ -180,6 +220,8 @@ def assemble(db: Database, manuscript: dict, writeup: dict, beat: dict,
                  "prose for this essay — the reference for voice and casing; "
                  "a rewrite may reuse its language freely)",
                  original or "(not a rewrite)"),
+        _section(writing.ALREADY_HEADING,
+                 writing._already_in_book(db, manuscript, writeup, beat)),
         _section("NEAREST PASSAGES ELSEWHERE IN THE BOOK (ranked by "
                  "resemblance; the book already says these)", nearest_text),
         _section("LINT", lint.render(report).split("\n", 1)[1]),

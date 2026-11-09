@@ -31,6 +31,24 @@ the obvious implementation would have broken that:
   takes no `db` argument at all, which is the enforceable form of the
   rule.
 - no row ids, no timestamps, no counters anywhere.
+
+**ALREADY IN THE BOOK** (block C, per beat): for each concept THIS BEAT
+carries, resolved through the graph to its name and aliases, the
+paragraphs of EARLIER essays (reading order before this file, files
+declared `outside` left out) where it is first defined, most fully
+stated, and first mentioned — verbatim, with file and paragraph number.
+The DRAFTING CONTEXT carries only summaries, and a drafter that knows
+an earlier essay settled "locus" only from its summary re-explains it,
+in words that turn out to be the original's: the critic, who sees the
+book's wording in NEAREST PASSAGES, flagged that on every beat of
+whitehead.md (2026-11-07). Giving the drafter the wording turns
+"don't restate" from a hope into something it can check. Bounded
+(PER_CONCEPT paragraphs, each cut at PARA_CAP, the block at
+ALREADY_CAP) and deterministic: paragraphs are numbered as
+`lint.paragraphs` numbers them, which is how the critic's NEAREST
+PASSAGES cite them. It sits in block C, not A: it follows this beat's
+concepts, and A is the cached prefix shared by every beat. The critic
+payload carries the same block (`critic.assemble`).
 """
 
 from __future__ import annotations
@@ -47,11 +65,20 @@ from .revisions import _version_text, is_placeholder
 from .summaries import drafting_context_for_writeup
 
 NONE = "(none)"
+ALREADY_HEADING = (
+    "ALREADY IN THE BOOK (earlier essays define or state these concepts, "
+    "in these words. Cite them by the essay's name — \"as the essay on "
+    "Rebirth shows\" — and build on them. Never restate or re-define "
+    "them.)")
+PER_CONCEPT = 3        # paragraphs shown per concept
+PARA_CAP = 1200        # characters of one paragraph
+ALREADY_CAP = 8000     # characters of the whole block
 EMPTY_ACCEPTED = "(nothing accepted yet)"
 OUTPUT_CONTRACT = """OUTPUT CONTRACT
 Reply in exactly one of the two shapes the prompt defines, and nothing else:
 WHY / SELF-CHECK / DRAFT (labels on their own lines, the prose running to the
 end of the reply), or BLOCKED / QUESTION when the beat cannot be grounded.
+WHY lists the sources you opened and what you quoted from each.
 Never emit the characters << or >> anywhere in the reply."""
 
 
@@ -288,11 +315,110 @@ def _previous_draft(db: Database, writeup: dict, n: int) -> str:
     return (row["suggestion"] or "").strip() if row else ""
 
 
-def _beat_block(db: Database, writeup: dict, beat: dict) -> str:
+def _concept_names(db: Database, manuscript_id: str, name: str
+                   ) -> list[str]:
+    """A beat concept's names: the graph node's name and aliases when
+    the graph has it, the beat's own spelling otherwise."""
+    from .concepts import get_concept, node_names
+
+    node = get_concept(db, manuscript_id, name)
+    names = node_names(dict(node)) if node else []
+    return list(dict.fromkeys(n for n in [name, *names] if n and n.strip()))
+
+
+def _earlier_paragraphs(manuscript: dict, file: str
+                        ) -> list[tuple[str, str, int, str]]:
+    """(file, title, ¶k, text) for every prose paragraph of the essays
+    before `file` in reading order, book files only. A file absent from
+    the reading order (itself outside the book) has the whole book
+    before it."""
+    from . import lint
+    from .critic import book
+    from .structure import title_of
+
+    files, order = book(manuscript)
+    earlier = order[:order.index(file)] if file in order else order
+    out = []
+    for name in earlier:
+        text = files.get(name, "")
+        title = title_of(text) or name
+        for k, para in enumerate(lint.paragraphs(text), 1):
+            if lint.is_heading(para) or para.lstrip().startswith("[^"):
+                continue
+            out.append((name, title, k, para))
+    return out
+
+
+def _already_in_book(db: Database, manuscript: dict, writeup: dict,
+                     beat: dict) -> str:
+    """The ALREADY IN THE BOOK block (see the module docstring). For each
+    concept: the first paragraph with a definition-shaped sentence about
+    it (`terms.grounding_strength`), the paragraph that mentions it most,
+    and its first mention, de-duplicated and shown in reading order. A
+    paragraph already shown under an earlier concept is pointed at, not
+    repeated."""
+    from . import lint
+    from .terms import grounding_strength, mention_pattern
+
+    wanted = [c.strip() for c in beat.get("concepts") or []
+              if isinstance(c, str) and c.strip()]
+    if not wanted:
+        return ""
+    paras = _earlier_paragraphs(manuscript, writeup["file"])
+    lines: list[str] = []
+    shown: set[tuple[str, int]] = set()
+    size = 0
+    for concept in wanted:
+        names = _concept_names(db, manuscript["id"], concept)
+        pats = [(n, mention_pattern(n)) for n in names]
+        hits = []          # (position, mentions, defines)
+        for pos, (_f, _t, _k, para) in enumerate(paras):
+            count = sum(len(p.findall(para)) for _n, p in pats)
+            if not count:
+                continue
+            defines = any(p.search(s) and grounding_strength(s, n) == 1.0
+                          for s in lint.sentences(para) for n, p in pats)
+            hits.append((pos, count, defines))
+        also = [n for n in names if n.lower() != concept.lower()]
+        label = concept + (f" (also: {', '.join(also)})" if also else "")
+        if not hits:
+            lines.append(f"{label}: no earlier essay states it.")
+            lines.append("")
+            continue
+        first_defined = next((h for h in hits if h[2]), None)
+        fullest = max(hits, key=lambda h: (h[1], -h[0]))
+        picks = {h[0]: why for h, why in reversed([
+            (first_defined, "first defined here"),
+            (fullest, "most fully stated here"),
+            (hits[0], "first mentioned here")]) if h is not None}
+        lines.append(label)
+        for pos in sorted(picks)[:PER_CONCEPT]:
+            name, title, k, para = paras[pos]
+            where = f"[{name} ¶{k} — the essay \"{title}\" — {picks[pos]}]"
+            if (name, k) in shown:
+                lines.append(f"{where} (shown above)")
+                continue
+            text = para if len(para) <= PARA_CAP else para[:PARA_CAP] + " …"
+            if size + len(text) > ALREADY_CAP:
+                lines.append(f"{where} (omitted: the block is capped at "
+                             f"{ALREADY_CAP} characters)")
+                continue
+            shown.add((name, k))
+            size += len(text)
+            lines.append(where)
+            lines.append(text)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _beat_block(db: Database, manuscript: dict, writeup: dict,
+                beat: dict) -> str:
     """Block C — everything that changes every beat."""
     learnings = loads(writeup["learnings"], [])
     sections = [
         _section("THIS BEAT", json.dumps(beat, indent=2)),
+        _section(ALREADY_HEADING,
+                 _already_in_book(db, manuscript, writeup, beat)),
         _section("LEARNINGS", "\n".join(f"- {x}" for x in learnings)),
         _section("LAST VERDICT", _last_verdict(db, writeup)),
     ]
@@ -317,7 +443,7 @@ def assemble(db: Database, manuscript: dict, writeup: dict, beat: dict,
                            drafting_context_for_writeup(db, manuscript, writeup,
                                                         capture=capture)),
         accepted=_accepted_block(manuscript, writeup),
-        beat=_beat_block(db, writeup, beat),
+        beat=_beat_block(db, manuscript, writeup, beat),
     )
 
 

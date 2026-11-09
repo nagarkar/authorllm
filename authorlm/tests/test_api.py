@@ -12158,7 +12158,7 @@ def main_test() -> None:
         # 20 files x 50 one-name concepts, one mentioned only in the last
         # file: the old per-file loop built 20*50 = 1000 patterns.
         import authorlm.guidance as _guidance
-        from authorlm.concepts import mention_pattern as _real_mention_pattern
+        from authorlm.terms import mention_pattern as _real_mention_pattern
         from authorlm.structure import ordered_items as _ordered_items
         perf_files = {f"{i:02d}.md": "Plain filler prose about nothing named.\n"
                       for i in range(20)}

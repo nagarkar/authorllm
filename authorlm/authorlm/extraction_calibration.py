@@ -63,7 +63,8 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-from .concepts import concept_pattern, node_names
+from .concepts import node_names
+from .terms import concept_pattern
 from .db import Database, loads, now_iso
 from .revisions import _paragraphs
 
@@ -278,7 +279,7 @@ def _best(hits: list[tuple], name: str, span_of) -> tuple | None:
     first mention alone sent "hierarchy" to be judged on "hierarchy of
     processes enveloped within each process" in another essay, and the
     adjudicator rightly dropped THAT span (2026-10-25)."""
-    from .extraction import grounding_strength
+    from .terms import grounding_strength
 
     if not hits:
         return None

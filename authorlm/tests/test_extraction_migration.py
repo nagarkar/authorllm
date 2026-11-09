@@ -421,7 +421,7 @@ def check_absent_apostrophe(root: Path) -> None:
     still match Doc-side curly `’` in the manuscript — else migrate
     retires it (and its edges) as 'absent' while the phrase is on the
     page."""
-    from authorlm.concepts import concept_pattern
+    from authorlm.terms import concept_pattern
 
     print("absent gate vs curly apostrophe:")
     ascii_name = "God's good graces"

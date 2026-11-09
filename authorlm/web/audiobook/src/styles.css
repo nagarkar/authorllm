@@ -188,3 +188,37 @@ footer audio{max-width:640px;display:block;margin:0 auto}
 .wb-footer .status{margin-bottom:8px;max-height:6rem;overflow-y:auto}
 .wb-footer .actions{margin-top:0}
 .wb-footer .dirty{flex:1 1 auto;font-size:13px}
+
+/* Dev edit mode (DevEdit.tsx): the letter, its decisions, one item at a time. */
+.pill{min-height:36px;border:1.5px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:6px 12px;font:inherit;font-size:13px;font-weight:700;cursor:pointer}
+.pill.on{background:var(--band);border-color:var(--band);color:#fff}
+.pill:disabled{opacity:.5;cursor:default}
+.muted{color:var(--muted);font-size:13px}
+.devedit-tabs,.devedit-actions,.devedit-push{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.devedit-push{margin-top:8px}
+.devedit-file{display:inline-flex;gap:6px;align-items:center;font-weight:700}
+.devedit-letter{white-space:pre-wrap;line-height:1.55;font-size:16px}
+.devedit-diff{font-size:18px;line-height:1.6;white-space:pre-wrap;margin:10px 0}
+.devedit-diff .add{background:var(--good-soft);color:var(--good)}
+.devedit-diff .del{background:var(--bad-soft);color:var(--bad)}
+.devedit-edit,.devedit-reason{box-sizing:border-box;width:100%;font:inherit;font-size:16px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--ground);color:var(--ink);margin:6px 0}
+.devedit-why{background:var(--warn-soft);color:var(--ink);border-radius:10px;padding:8px 12px;margin:6px 0;font-size:15px}
+.devedit-decision p{font-size:16px;margin:8px 0}
+
+.devedit-h{font-size:16px;margin:16px 14px 0;color:var(--ink)}
+.md-view{cursor:text;line-height:1.6;font-size:16px}
+.md-view:hover{outline:1px dashed var(--line);outline-offset:4px}
+.md-view h1{font-size:22px;margin:.4em 0} .md-view h2{font-size:19px;margin:1em 0 .4em} .md-view h3{font-size:17px;margin:1em 0 .3em}
+.md-view p{margin:.6em 0} .md-view ul,.md-view ol{padding-left:1.4em}
+.md-view blockquote{margin:.6em 0;padding:.2em .9em;border-left:3px solid var(--band);color:var(--muted)}
+.md-view code{background:var(--chip);border-radius:4px;padding:0 4px;font-size:.92em}
+.md-view table{border-collapse:collapse;width:100%;font-size:14px;display:block;overflow-x:auto}
+.md-view th,.md-view td{border:1px solid var(--line);padding:4px 6px;text-align:left;vertical-align:top}
+.md-view a{color:var(--focus)}
+.md-raw{box-sizing:border-box;width:100%;min-height:60vh;font:14px/1.5 ui-monospace,Menlo,monospace;padding:10px;border-radius:10px;border:1px solid var(--focus);background:var(--ground);color:var(--ink)}
+.md-note{margin-top:6px}
+
+/* The page's own pages, first thing in the header (author's ask). */
+.top-nav{margin:0 0 8px;flex-wrap:wrap}
+.listen{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 10px 0}
+.listen audio{flex:1 1 16rem;min-width:0}

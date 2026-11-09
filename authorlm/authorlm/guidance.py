@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import re
 
-from .concepts import concept_pattern, mention_pattern, node_name, node_names
+from .concepts import node_name, node_names
+from .terms import concept_pattern, mention_pattern
 from .db import Database, ko_fields, loads, new_id
 from .llm import LLMClient
 

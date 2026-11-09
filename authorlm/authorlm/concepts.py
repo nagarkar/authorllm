@@ -9,10 +9,10 @@ the author settles them in review or triage (§21.7).
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 from .db import Database, ko_fields, loads
+from .terms import concept_pattern
 
 
 NODE_KINDS = frozenset({
@@ -244,50 +244,6 @@ def link_concepts(
     )
     db.insert("concept_edges", row)
     return row
-
-
-# ASCII, curly, and modifier letter apostrophes: Docs round-trips and LLM
-# extraction disagree on the mark. A name stored with one form must still
-# match text that uses another (2026-10-28: extract migrate's absent gate
-# retired confirmed concepts whose only "absence" was ' vs ’).
-_APOSTROPHE = "['\u2018\u2019\u02bc]"
-
-
-def _escape_name(name: str) -> str:
-    """`re.escape`, but any apostrophe in the name matches any apostrophe."""
-    folded = (name.replace("\u2018", "'").replace("\u2019", "'")
-              .replace("\u02bc", "'"))
-    return _APOSTROPHE.join(re.escape(part) for part in folded.split("'"))
-
-
-def concept_pattern(name: str) -> re.Pattern:
-    """Word-boundary match tolerant of simple English plurals
-    (trajectory/trajectories, field/fields, class/classes) and of ASCII
-    vs curly apostrophes."""
-    if name and name[-1].lower() == "y":
-        stem = _escape_name(name[:-1])
-        return re.compile(rf"\b{stem}(?:y|ies)\b", re.IGNORECASE)
-    return re.compile(rf"\b{_escape_name(name)}(?:e?s)?\b", re.IGNORECASE)
-
-
-def mention_pattern(name: str) -> re.Pattern:
-    """Where a concept appears *as a term of art* — for ordering-sensitive
-    checks (first mentions, prerequisite gaps). Single-word names declared
-    with a capital keep it: the manuscripts capitalize their terms of art
-    ('ye name it Space'), so casual English reuse of the same word ('time
-    and space') must not count as the concept. Multi-word names collide
-    with casual prose far less, and keep the tolerant match — which
-    concept_pattern remains for existence checks (realization), where any
-    casing of 'the herdsman' is genuinely the concept."""
-    if " " not in name.strip() and name[:1].isupper():
-        if name[-1].lower() == "y":
-            stem = _escape_name(name[:-1])
-            return re.compile(rf"\b{stem}(?:y|ies)\b")
-        return re.compile(rf"\b{_escape_name(name)}(?:e?s)?\b")
-    return concept_pattern(name)
-
-
-_word_pattern = concept_pattern
 
 
 def primary_location(items: list[tuple[str, str]], node) -> str | None:

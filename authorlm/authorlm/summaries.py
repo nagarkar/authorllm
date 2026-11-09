@@ -1622,11 +1622,20 @@ def essay_llm(config: dict) -> LLMClient:
     return summarizer_llm(config)
 
 
-def clients(config: dict) -> dict[str, LLMClient]:
+def clients(config: dict, model: str | None = None,
+            effort: str | None = None) -> dict[str, LLMClient]:
     """One client per built level, for `ensure(llm=…)`: each level's
-    spend is its own ledger line and its own cost line."""
-    return {"paragraph": paragraph_llm(config), "section": section_llm(config),
+    spend is its own ledger line and its own cost line. `model` and
+    `effort` override every level for one run (`summarize rebuild --model
+    --effort`); each level keeps its own ledger purpose."""
+    llms = {"paragraph": paragraph_llm(config), "section": section_llm(config),
             "essay": essay_llm(config)}
+    for llm in llms.values():
+        if model:
+            llm.model = model
+        if effort:
+            llm.reasoning_effort = effort
+    return llms
 
 
 def stats_lines(llm) -> str | None:

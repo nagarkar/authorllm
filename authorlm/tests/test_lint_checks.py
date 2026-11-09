@@ -126,6 +126,43 @@ def test_overlap_and_redefinition() -> None:
               and "01-prior.md" in f.message for f in overlaps),
           [(f.message, f.ref) for f in overlaps])
 
+    # Citation boilerplate is not copying: a footnote definition repeats
+    # the cited work's form, and its label must not leak in as a word.
+    cite = ("[^W7]: Whitehead, *Process and Reality*, Category of "
+            "Explanation xii, p. 35.")
+    corpus = {"whitehead.md": [
+        "Becoming is concrescence.[^W3]",
+        "[^W3]: Whitehead, *Process and Reality*, Category of "
+        "Explanation xii, p. 35. See the gloss."]}
+    for unit in (cite, f"Prose first.\n{cite}",
+                 "Becoming is concrescence.[^W7]\n" + cite):
+        hits = lint.check_overlap([unit], corpus, n=8)
+        check(f"footnote citation is not an overlap: {unit[:30]!r}",
+              hits == [], [f.quote for f in hits])
+
+    # A quotation of the book, in straight or curly quotes, is not copying.
+    corpus = {"sermons_new.md": [
+        "Call it the Being upon which all Becoming may rest, and stop."]}
+    for q in ('"the Being upon which all Becoming may rest."',
+              "“the Being upon which all Becoming may rest.”"):
+        hits = lint.check_overlap(
+            [f"Sermon One calls The Dharma {q} It goes on."], corpus, n=8)
+        check(f"quoted passage is not an overlap: {q[:2]!r}",
+              hits == [], [f.quote for f in hits])
+
+    # Prose copying outside quotes is still caught, even beside a quote
+    # and a footnote anchor.
+    corpus = {"02-choice.md": [
+        "Habit is the repetition and recombination of choices already "
+        "made, nothing more."]}
+    unit = ('He calls it "a rest".[^C1] Habit is the repetition and '
+            "recombination of choices already made, he says.")
+    hits = lint.check_overlap([unit], corpus, n=8)
+    check("unquoted copied prose is still an overlap error",
+          any(f.severity == "error" and (
+              "the repetition and recombination of choices already made"
+              in f.quote) for f in hits), [f.quote for f in hits])
+
     redefs = lint.check_redefinition(
         ["A Monad is a simple substance without parts."],
         [("Monad", "01-prior.md"), ("Ground", "02-other.md")],

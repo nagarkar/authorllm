@@ -442,6 +442,12 @@ def normalize(text: str) -> str:
 
 _FOOTNOTE_REF = re.compile(r"\[\^[A-Za-z0-9_-]+\]")
 _FOOTNOTE_DEF = re.compile(r"^\[\^[A-Za-z0-9_-]+\]:")
+# An in-text page citation to a work cited throughout an essay, such as
+# "(*PR* 32)", "(*PR* 34–35)" or "(*PR* ix)": the page is for the reader
+# of the page, and the voice skips it as it skips a footnote anchor.
+_PAGE_CITE = re.compile(
+    r"\s*\(\*[A-Z][A-Za-z]{0,5}\*,? (?:pp?\. )?[0-9ivxlc]+(?:[–-][0-9ivxlc]+)?"
+    r"(?:, [0-9ivxlc]+(?:[–-][0-9ivxlc]+)?)*\)")
 _IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _LINK = re.compile(r"\[([^\]]+)\]\((?:[^)]*)\)")
 _REF_LINK = re.compile(r"\[([^\]]+)\]\[[^\]]*\]")
@@ -471,6 +477,7 @@ def speech_text(md: str, config: dict) -> tuple[str, list[str]]:
     t = re.sub(r"\\\n", "\n", t)
     t = _IMAGE.sub("", t)
     t = _FOOTNOTE_REF.sub("", t)
+    t = _PAGE_CITE.sub("", t)
     t = _LINK.sub(r"\1", t)
     t = _REF_LINK.sub(r"\1", t)
     t = _CODE.sub(r"\1", t)
