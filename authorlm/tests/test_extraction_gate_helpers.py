@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from authorlm import extraction
+from authorlm import extraction, terms
 
 
 def check(label: str, cond: bool, detail: object = "") -> None:
@@ -26,11 +26,11 @@ def check(label: str, cond: bool, detail: object = "") -> None:
 
 def test_fold_drops_emphasis_and_whitespace() -> None:
     check("_fold collapses whitespace",
-          extraction._fold("  a\n\tb  ") == "a b")
+          terms.fold("  a\n\tb  ") == "a b")
     check("_fold strips * and keeps words",
-          extraction._fold("**Rankings**") == "Rankings")
+          terms.fold("**Rankings**") == "Rankings")
     check("_fold on None / empty is empty",
-          extraction._fold(None) == "" and extraction._fold("") == "")
+          terms.fold(None) == "" and terms.fold("") == "")
 
 
 def test_span_in_gate1() -> None:
@@ -65,30 +65,30 @@ def test_names_in_gate2() -> None:
 def test_sentence_initial() -> None:
     text = "Sorting is common. Mid Experience shows it.\nExperience again."
     check("file start is sentence-initial",
-          extraction._sentence_initial(text, 0))
+          terms.sentence_initial(text, 0))
     mid = text.index("Mid Experience") + len("Mid ")
     check("after a letter is not sentence-initial",
-          not extraction._sentence_initial(text, mid))
+          not terms.sentence_initial(text, mid))
     after = text.index("Experience again")
     check("after newline is sentence-initial",
-          extraction._sentence_initial(text, after))
+          terms.sentence_initial(text, after))
     after_stop = text.index("Mid Experience")
     # "Mid" starts after ". "
     check("after period+space is sentence-initial",
-          extraction._sentence_initial(text, after_stop))
+          terms.sentence_initial(text, after_stop))
 
 
 def test_is_term_of_art_gate3() -> None:
     only_initial = {"a.md": "Sorting is common at the start."}
     check("capitalised only at sentence start → common word",
-          not extraction.is_term_of_art("Sorting", only_initial))
+          not terms.Terms(only_initial).is_term_of_art("Sorting"))
     mid = {"a.md": "The mid-sentence Experience shows the term."}
     check("capitalised mid-sentence → term of art",
-          extraction.is_term_of_art("Experience", mid))
+          terms.Terms(mid).is_term_of_art("Experience"))
     check("multi-word names always pass",
-          extraction.is_term_of_art("Accord Line", {"a.md": "nothing"}))
+          terms.Terms({"a.md": "nothing"}).is_term_of_art("Accord Line"))
     check("lowercase names always pass",
-          extraction.is_term_of_art("deme", {"a.md": "nothing"}))
+          terms.Terms({"a.md": "nothing"}).is_term_of_art("deme"))
 
 
 def main() -> None:

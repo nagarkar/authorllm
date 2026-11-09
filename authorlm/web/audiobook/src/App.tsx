@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { request, setManuscript, workbenchTransport } from "./transport";
+import { deveditTransport, request, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
+import { DevEdit } from "./DevEdit";
 
 // Mirrors audiobook.Session.status (authorlm/audiobook.py).
 interface ChapterSummary { stem: string; title: string; total: number; generated: number; previewed: number; remaining: number; remainingCharacters: number; stitched: string | null; stitchStale: boolean; }
@@ -34,8 +35,8 @@ const when = (iso: string | null | undefined) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
 const mmss = (s: number | null | undefined) => s == null ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-type PageMode = "chapters" | "pron";
-// #<manuscript>/<stem> or #<manuscript>/pron:<term>; a bare #<stem> opens
+type PageMode = "chapters" | "pron" | "devedit";
+// #<manuscript>/<stem>, #<manuscript>/pron:<term> or #<manuscript>/devedit; a bare #<stem> opens
 // on the server's -m manuscript.
 const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string} => {
   let h = decodeURIComponent(location.hash.replace(/^#/, ""));
@@ -43,6 +44,7 @@ const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string} =
   const slash = h.indexOf("/");
   if (slash >= 0) { ms = h.slice(0, slash); h = h.slice(slash + 1); }
   if (h.startsWith("pron")) return {ms, mode: "pron", stem: "", term: h.slice(5)};
+  if (h === "devedit") return {ms, mode: "devedit", stem: "", term: ""};
   return {ms, mode: "chapters", stem: h, term: ""};
 };
 
@@ -98,7 +100,7 @@ export function App() {
   useEffect(() => { latestStem.current = stem; latestMs.current = ms; load(stem); }, [ms, stem, load]);
   useEffect(() => {
     if (!ms) return;
-    const rest = mode === "pron" ? (term ? `pron:${term}` : "pron") : stem;
+    const rest = mode === "pron" ? (term ? `pron:${term}` : "pron") : mode === "devedit" ? "devedit" : stem;
     location.hash = `${encodeURIComponent(ms)}/${rest}`;
   }, [ms, stem, mode, term]);
   const switchManuscript = useCallback((name: string) => {
@@ -182,6 +184,12 @@ export function App() {
   return (
     <div className="page">
       <header>
+        <nav className="modes top-nav" aria-label="Pages">
+          <button className={`chip${mode === "chapters" ? " on" : ""}`} aria-pressed={mode === "chapters"} onClick={() => setMode("chapters")}>Audiobook</button>
+          <button className={`chip${mode === "pron" ? " on" : ""}`} aria-pressed={mode === "pron"} onClick={() => setMode("pron")}>Pronunciations</button>
+          <button className={`chip${mode === "devedit" ? " on" : ""}`} aria-pressed={mode === "devedit"} onClick={() => setMode("devedit")}>Dev edit</button>
+          <a className="chip" href={`/try-text${location.hash}`}>Try text</a>
+        </nav>
         <div className="title-row">
           <h1 className="display"><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />{book.title}</h1>
           <span className="count">{account ? `${fmt(account.remaining)} chars left` : book.quality}</span>
@@ -191,11 +199,6 @@ export function App() {
             {manuscripts.map(name => <option key={name} value={name}>{name}</option>)}
           </select>
         </div>}
-        <div className="modes">
-          <button className={`chip${mode === "chapters" ? " on" : ""}`} aria-pressed={mode === "chapters"} onClick={() => setMode("chapters")}>Chapters</button>
-          <button className={`chip${mode === "pron" ? " on" : ""}`} aria-pressed={mode === "pron"} onClick={() => setMode("pron")}>Pronunciations</button>
-          <a className="chip" href={`/try-text${location.hash}`}>Try text</a>
-        </div>
         {mode === "chapters" && <div className="bar">
           <select value={stem} onChange={e => { setNow(null); setStem(e.target.value); }} aria-label="Chapter">
             {book.chapters.map(c => (
@@ -227,6 +230,7 @@ export function App() {
 
       {error && <div className="status bad">{error}</div>}
       {mode === "pron" && <Workbench key={ms} transport={workbenchTransport} manuscript={ms} initialTerm={term || undefined} />}
+      {mode === "devedit" && <DevEdit key={ms} transport={deveditTransport} manuscript={ms} />}
       {mode === "chapters" && <JobStrip jobs={jobs} />}
 
       {mode === "chapters" && chapter && cur && (

@@ -2,4 +2,6 @@
 
 # Glossary
 
-None yet.
+- **item** (`authorlm.devedit`): one proposed change: an exact original passage and its proposed replacement, or a structural move stated in one line.
+- **run** (`authorlm.devedit`): one developmental edit of one manuscript, the folder `_devedit/<run-id>/`.
+- **term index** (`authorlm.terms`): every recurring term of the manuscript, with its locations (file, section heading, paragraph number) and its definition-shaped sentences, from `Terms.index()`.

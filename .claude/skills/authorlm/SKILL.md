@@ -345,6 +345,21 @@ not re-ask at each beat.
    plan's ORDERING is where "reorder for better flow" happens. A beat that
    discovers mid-draft that it needs an ungrounded fact triggers
    `write plan --replace` or a question to the author — never an invention.
+2b. **Sources and research — before the first beat of an essay that
+   draws on outside works.** Each such essay has ONE sources file,
+   `<manuscript>/_sources/<essay>-sources.md`: a short list of locations
+   (full texts stored in `_sources/`, encyclopedia and other URLs, and the
+   authorlm verbs that show the book's own essay and section summaries).
+   It is the same file for every beat. Build it in a research step: a
+   subagent finds the works and the best available texts, stores
+   public-domain texts in `_sources/`, and checks every link opens. Then
+   PRESENT THE LIST TO THE AUTHOR, one line per source, and let them add,
+   drop or replace sources before any beat is drafted (author ruling
+   2026-11-07: the research step is where the author confirms the sources
+   are reasonable). Pass its path to the drafter and the critic in their
+   spawn prompts (below). The payload's grounding rules say what may come
+   from memory and what must come from a source the agent opened.
+
 3. **Draft — NEVER in this conversation (ratified 2026-09-06).** The
    drafter and the critic are SUBAGENTS with empty contexts; you
    orchestrate and never draft. The review of 69 recorded rejections
@@ -364,10 +379,12 @@ not re-ask at each beat.
       context) with exactly this prompt, paths filled in:
 
       > You are the beat drafter for a philosophy manuscript. Read
-      > `<$S/beat-N.payload>` in full. It holds the prompt you work under
-      > and every block you may draw on, and it is your entire world: use
-      > nothing you know from elsewhere, read no other file, run no other
-      > tool, ask no questions. Reply in exactly the shape the payload's
+      > `<$S/beat-N.payload>` in full first: it holds the prompt you work
+      > under and every block you may draw on. The essay's sources file is
+      > `<the essay's sources file>`: open the sources it lists as the beat
+      > needs, and quote and cite only what you actually read there, as the
+      > payload's grounding rules say. Read no other file and use no other
+      > site; ask no questions. Reply in exactly the shape the payload's
       > OUTPUT CONTRACT demands (WHY / SELF-CHECK / DRAFT, or BLOCKED /
       > QUESTION). Write your reply to `<$S/beat-N.reply>` and say nothing
       > else.
@@ -392,18 +409,25 @@ not re-ask at each beat.
       point of the check.
 
       > You are the beat critic. Read `<$S/beat-N.critic>` in full; it holds
-      > the prompt you work under and everything you may use. Use nothing
-      > else, read no other file, run no other tool. Reply in exactly the
-      > shape its OUTPUT CONTRACT demands (VERDICT, then FINDINGS when
-      > FAIL). Write your reply to `<$S/beat-N.report>` and say nothing
-      > else.
+      > the prompt you work under. The essay's sources file is `<the essay's
+      > sources file>`: open its sources to check every quotation and
+      > citation in the draft. Read no other file and use no other site.
+      > Reply in exactly the shape its OUTPUT CONTRACT demands (VERDICT,
+      > then FINDINGS when FAIL). Write your reply to `<$S/beat-N.report>`
+      > and say nothing else.
 
-   f. **Redraft on FAIL, at most twice.** Spawn the drafter again with the
+   f. **Redraft on FAIL, up to four drafter–critic rounds.** Spawn the
+      drafter again with the
       prompt from (b) plus: "Then read `<$S/beat-N.report>`, the critic's
       findings on the previous draft at `<$S/beat-N.draft>`. Fix every
       finding. The rest of the payload still governs." Then (c), (d), (e)
-      again. After two FAILs, stop: bring the author the draft AND the
-      critic's open findings in one line each, and register it with
+      again. Stop at four rounds, or sooner when the last critic round's
+      findings are only minor line edits or footnote adjustments (author
+      ruling 2026-11-07: "up to four rounds or less, if the last round of
+      critic changes are only minor line edits or footnote adjustments").
+      On stopping with a FAIL: bring the author the draft AND the
+      critic's open findings in one line each, each with a proposed fix,
+      and register it with
       `--no-critic "critic still fails: <the findings, briefly>"` so the
       row records it.
    g. **Register.** `authorlm write propose --why "<concepts by id,
@@ -423,10 +447,16 @@ not re-ask at each beat.
       paragraphs"). **A beat with no change is said so, plainly, in
       orange (or bold): "No change against the original in this beat."**
       Never skip the showing: every beat is shown, even a verbatim one.
-      Say what the marks mean in one line the first time. Add the
-      WHY in one sentence and, in one more line, what the critic caught
-      and the redraft fixed (or that it passed clean). Never the payload,
-      the report, a hash or a path. For a new essay there is no original
+      Say what the marks mean in one line the first time. Then give the
+      beat and nothing about how it got there: no WHY, no account of
+      what the critic caught or the redraft fixed, no round count, no
+      progress notes while it runs (author ruling 2026-11-07: "I don't
+      really care what the critic issues you fixed because I don't know
+      where he started from. Just a waste of time. When you're done with
+      the wait, just give me the damn beat."). The only additions are the
+      OPEN findings, each with a proposed fix, when the loop stopped on a
+      FAIL, and a question that needs the author's ruling. Never the
+      payload, the report, a hash or a path. For a new essay there is no original
       and `write show` says so; present the plain draft.
       **Color when the surface allows it (author ruling 2026-09-06: "more
       than bold, like an orange color for dark theme").** When an inline
@@ -518,6 +548,17 @@ not re-ask at each beat.
    conversation never reaches them on a later beat (author ruling
    2026-11-01: "When I provide [feedback], you should be passing it back to
    the critic"). When a pattern recurs across verdicts, record that too.
+   **The same holds for the critic's findings and the lint's ERRORs.**
+   When, over several beats, the critic or the lint keeps catching the
+   same kind of fault (re-defining a concept another essay owns, copying
+   the book's wording, an inference the premise does not carry), do not
+   leave the redraft rounds to fix it beat after beat: generalize it into
+   guidance the drafter sees up front, so the first draft is stronger
+   (author ruling 2026-11-07). Record it with `write learn` between beats,
+   never while a beat's payload is out (a learning makes the assembled
+   payload stale); when it reads as a standing rule of the prose, also
+   propose it as a style law, and when it is a fault of the drafter
+   prompt itself, file it as a self-improvement task.
    Distill one line and send it on STDIN — `write learn` takes no
    positional lesson (a positional after `-m` trips argparse's greedy
    `nargs='*'`), so `authorlm write learn "<lesson>"` silently ignores the
@@ -700,6 +741,25 @@ question. Do not run it unasked, and do not suggest it after every edit.
 Division of labor: the app for bulk comparison and application; conversation
 for anything the author skips or hesitates over, where the why gets recorded
 in their own words.
+
+## Developmental edit (the `developmental-editing` skill, `authorlm devedit`)
+A whole-book developmental edit runs as the `developmental-editing` skill's
+workflow over `authorlm devedit` (devedit.py owns the run folder,
+`<manuscript>/_devedit/<run-id>/`). What this project supplies to that skill:
+- **Status and resume:** `authorlm -m <ms> devedit status`; `devedit new`
+  starts a run and proposes coverage from `toc.toml`. Show both lists and
+  confirm with `devedit coverage --lock` only on the author's yes.
+- **Summaries:** `summarize rebuild` for the covered files, with `--model`
+  and `--effort` when the author picks them.
+- **Read verbs** for every agent: `summarize show <file> [--section N |
+  --paragraph N]`, `summarize outline <file>`, the file itself.
+- **Packs:** `devedit pack <file>` (an essay agent's input), `devedit pack
+  --book` (the cross-book agent's and the letter's).
+- **Between agents:** `devedit terms`, `gather`, `group`, `build-queue`.
+- **Review:** the audio page's Dev edit mode (`#<ms>/devedit`), or chat with
+  `devedit next` / `devedit verdict`. Publish with the page's Push or `doc
+  push <file>`; a file whose tab has pending suggested edits is settled
+  first, never pushed over.
 
 ## External critique intake (critic input is never law until triaged)
 Design reference: `docs/critique-pass-design.md`. When the author brings a

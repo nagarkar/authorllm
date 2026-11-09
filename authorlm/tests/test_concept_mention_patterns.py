@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from authorlm.concepts import concept_pattern, mention_pattern
+from authorlm.terms import concept_pattern, mention_pattern
 
 
 def check(label: str, cond: bool, detail: object = "") -> None:

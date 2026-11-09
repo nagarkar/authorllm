@@ -149,6 +149,11 @@ def check_text_rules() -> None:
     check("bold, italic, links, footnote refs, code strip to plain text",
           text == "Bold and italic and under with a link, a note, code, "
                   "and E=mc^2.", text)
+    text, _ = audio.speech_text(
+        'He calls it "the principle of novelty" (*PR* 31). Pages '
+        '"in two" (*PR* 34–35) and "the preface" (*PR* ix), (*PR* 4).', cfg)
+    check("in-text page citations like (*PR* 31) are not spoken",
+          "PR" not in text and "34" not in text and "ix)" not in text, text)
     check("inline math warns once per span", warnings == [
         "inline math $E=mc^2$ read as written"], str(warnings))
     strict = json.loads(json.dumps(cfg))

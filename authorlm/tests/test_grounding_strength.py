@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from authorlm.extraction import grounding_strength
+from authorlm.terms import grounding_strength
 from authorlm.extraction_calibration import _best
 
 

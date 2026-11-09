@@ -4,7 +4,8 @@
 on a loopback port and opens it in the browser; the page posts to
 `/api/audiobook`, which is `audiobook.dispatch` (and `/api/workbench`,
 which is `workbench.dispatch` — the pronunciation workbench is a mode of
-the same page), and streams audio from
+the same page — and `/api/devedit`, `devedit.dispatch`, the developmental
+edit's review mode), and streams audio from
 `/preview/<stem>/<id>.mp3` (rendered on the request when missing — the
 lazy listen), `/take/<stem>/<id>.mp3` and `/stitched/<stem>.mp3`
 with HTTP ranges honoured so a phone can seek, and the brand icons
@@ -181,7 +182,7 @@ def make_handler(workspace: str | None, manuscript: str | None):
             # The pronunciation workbench lives on this page too (author's
             # ruling 2026-09-26: "all in one place"); its transport is
             # unchanged, so the standalone `authorlm workbench` still works.
-            if self.path not in ("/api/audiobook", "/api/workbench"):
+            if self.path not in ("/api/audiobook", "/api/workbench", "/api/devedit"):
                 self.send_error(404)
                 return
             try:
@@ -194,6 +195,12 @@ def make_handler(workspace: str | None, manuscript: str | None):
                     from . import workbench
                     result = workbench.dispatch(body.get("method", ""), params,
                                                 workspace=workspace)
+                elif self.path == "/api/devedit":
+                    # The developmental edit's review is a mode of this page
+                    # too: the letter, its decisions, and one item at a time.
+                    from . import devedit
+                    result = devedit.dispatch(body.get("method", ""), params,
+                                              workspace=workspace)
                 else:
                     result = audiobook.dispatch(body.get("method", ""), params,
                                                 workspace=workspace)

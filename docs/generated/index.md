@@ -218,6 +218,12 @@ Storage layer.
 
 Always-on database performance log.
 
+## `authorlm.devedit`
+
+`authorlm/authorlm/devedit.py`
+
+Developmental edit: one whole-book developmental edit as a run folder, and the verbs over it.
+
 ## `authorlm.directive_tags`
 
 `authorlm/authorlm/directive_tags.py`
@@ -518,6 +524,12 @@ Sweep framework vanguards (design: docs/sweep-framework.md).
 
 The author's on-camera passages of one file, for a teleprompter.
 
+## `authorlm.terms`
+
+`authorlm/authorlm/terms.py`
+
+Terms: recognising a manuscript's terms of art and finding where they occur.
+
 ## `authorlm.threads`
 
 `authorlm/authorlm/threads.py`
@@ -680,6 +692,12 @@ Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_beat_repetition`
+
+`authorlm/tests/test_beat_repetition.py`
+
+Beat-by-beat repetition: the drafter is shown what earlier essays already say about the beat's concepts, the critic and the lint read only the book (never the files toc.toml declares outside), and a borrowed term set in italics once stays italic.
+
 ## `tests.test_branding`
 
 `authorlm/tests/test_branding.py`
@@ -745,6 +763,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 `authorlm/tests/test_depends_on.py`
 
 `summaries._depends_on` turns model-named ordinals into earlier para hashes.
+
+## `tests.test_devedit`
+
+`authorlm/tests/test_devedit.py`
+
+The developmental edit's run folder: coverage from the TOC, step staleness, letter decisions, and verdicts that apply only to unchanged text.
 
 ## `tests.test_doc_add_toc`
 
@@ -1123,6 +1147,12 @@ Pure helpers behind Veo clip generation: duration buckets, day spend, prompt com
 `authorlm/tests/test_mint_name.py`
 
 `media.parse_sections` / `brief_terms` / `_mint_name` turn clip tag bodies into stable keys and search terms.
+
+## `tests.test_model_override`
+
+`authorlm/tests/test_model_override.py`
+
+`summarize rebuild --model --effort` reaches the API layer.
 
 ## `tests.test_morph_targets`
 

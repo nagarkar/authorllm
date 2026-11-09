@@ -466,7 +466,7 @@ def is_hard_to_say(term: str) -> bool:
 
 
 def _occurs(term: str, text: str) -> bool:
-    from .concepts import mention_pattern
+    from .terms import mention_pattern
 
     return bool(mention_pattern(term).search(text or ""))
 
@@ -617,7 +617,7 @@ def protected_loss(old: str, new: str, protected: list[str]) -> list[str]:
     refusal discards the WHOLE reply for a judgment the harness is not
     entitled to make. Flipping it to a refusal is one line if the Sponsor
     wants it."""
-    from .concepts import mention_pattern
+    from .terms import mention_pattern
 
     lost = []
     for name in protected:

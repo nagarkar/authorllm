@@ -26,6 +26,7 @@ from typing import Any
 
 from . import clients
 from . import concepts as cg
+from . import terms
 from . import form_grammar
 from .concepts import _compact_concept, _compact_edge, _preview
 from . import beliefs as bel
@@ -520,7 +521,7 @@ def intent_preview(db: Database, manuscript: dict, statement: str) -> dict:
         return {"matched": [], "suggestions": [], "graph_empty": True}
     matched = []
     for node in nodes:
-        if not any(cg.concept_pattern(nm).search(statement)
+        if not any(terms.concept_pattern(nm).search(statement)
                    for nm in cg.node_names(node)):
             continue
         entry: dict[str, Any] = {
@@ -2344,7 +2345,8 @@ def write_critique(db: Database, manuscript: dict, text: str,
         raise ValueError("no draft text on stdin")
     beat = _current_beat(writeup)
     _assembly_gate(writeup, beat, "write critique")
-    report = crt.lint_draft(db, manuscript, writeup["file"], text)
+    report = crt.lint_draft(db, manuscript, writeup["file"], text,
+                            writeup=writeup)
     payload = crt.assemble(db, manuscript, writeup, beat, text, report)
     meta = loads(writeup["metadata"], {})
     meta["critique"] = {"n": beat["n"], "seq": int(meta.get("seq", 0)),
@@ -2398,7 +2400,8 @@ def write_propose(db: Database, manuscript: dict, text: str, explanation: str,
             # DRAFTED beat needs both.
             stamp = _assembly_gate(writeup, beat, "write propose")
             provenance["assembly"] = stamp.get("hashes")
-        report = crt.lint_draft(db, manuscript, writeup["file"], text)
+        report = crt.lint_draft(db, manuscript, writeup["file"], text,
+                                writeup=writeup)
         provenance["lint"] = report.codes()
         if report.errors:
             if not (lint_override or "").strip():

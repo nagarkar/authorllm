@@ -118,6 +118,20 @@ paragraph_model = "gemini/gemini-3.1-flash-lite"
 # The model takes no temperature parameter (its MODEL_PROFILES row).
 temperature = "vendor-default"
 
+[devedit]
+# The developmental edit's model and reasoning effort per agent step
+# (devedit.py, the developmental-editing skill). Two axes, chosen apart:
+# the tier (frontier or cheaper) and the effort. `session_model` is the
+# host session's name for the model when the step runs as a subagent (today:
+# opus, sonnet, haiku, fable); `model` is the API string for when the step
+# runs through authorlm (nagarkar/llmlm#19). Summaries take their models from
+# [summaries] and [critique] unless `summarize rebuild --model` overrides them.
+crossbook  = { session_model = "opus", model = "anthropic/claude-opus-5", effort = "high" }
+letter     = { session_model = "opus", model = "anthropic/claude-opus-5", effort = "high" }
+essays     = { session_model = "opus", model = "anthropic/claude-opus-5", effort = "high" }
+integrate  = { session_model = "opus", model = "anthropic/claude-opus-5", effort = "high" }
+check      = { session_model = "opus", model = "anthropic/claude-opus-5", effort = "medium" }
+
 [illustrations]
 # Illustration rendering (authorlm illus render); text model above ([llm]
 # model) is unchanged — the image model is chosen independently.

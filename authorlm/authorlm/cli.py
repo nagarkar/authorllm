@@ -21,6 +21,7 @@ from pathlib import Path
 from . import api
 from . import clients
 from . import concepts as cg
+from . import terms
 from . import critique as crit
 from . import beliefs as bel
 from . import sessions as ses
@@ -668,7 +669,7 @@ def _intent_preview(db: Database, manuscript: dict, statement: str) -> None:
     if not nodes:
         return
     matched = [n for n in nodes
-               if any(cg.concept_pattern(nm).search(statement)
+               if any(terms.concept_pattern(nm).search(statement)
                       for nm in cg.node_names(n))]
     if not matched:
         names = [n["name"] for n in nodes]
@@ -1902,6 +1903,158 @@ def _summarize_show(args, db, manuscript: dict) -> None:
     print(row["summary"])
 
 
+def cmd_devedit(args):
+    """`authorlm devedit …`: the chat surface of a developmental edit run
+    (devedit.py). The `developmental-editing` skill drives these verbs."""
+    from . import devedit
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    if args.action == "new":
+        folder = devedit.new_run(manuscript)
+        print(ui.green(f"Started run {folder.name} at {folder}"))
+        args.action = "coverage"
+    try:
+        folder = devedit.run_dir(manuscript, args.run)
+    except LookupError as err:
+        sys.exit(f"error: {err}")
+    params = args.params or []
+    if args.action == "coverage":
+        try:
+            for name in args.edit or []:
+                devedit.move_coverage(folder, name, "edit")
+            for name in args.reference or []:
+                devedit.move_coverage(folder, name, "reference")
+        except (LookupError, RuntimeError, ValueError) as err:
+            sys.exit(f"error: {err}")
+        if args.lock:
+            devedit.confirm_coverage(folder)
+        cov = devedit.state(folder)["coverage"]
+        print(ui.bold(f"Run {folder.name} covers") + ui.dim(
+            f"  ({'confirmed ' + cov['confirmed'] if cov.get('confirmed') else 'NOT confirmed'})"))
+        print("  edit:      " + ", ".join(cov["edit"]))
+        print("  reference: " + ", ".join(cov["reference"]))
+        if not cov.get("confirmed"):
+            print(ui.dim("  confirm with 'authorlm devedit coverage --lock'"))
+        return
+    if args.action == "status":
+        rows = devedit.status(folder, manuscript)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return
+        print(ui.bold(f"Run {folder.name}") + ui.dim(f"  {folder}"))
+        for r in rows:
+            color = {"done": ui.green, "stale": ui.yellow,
+                     "running": ui.cyan}.get(r["status"], ui.dim)
+            who = " · ".join(x for x in (r.get("executor"), r.get("model"),
+                                         r.get("effort")) if x)
+            print(f"  {r['step']:<10} {color(r['status'])}"
+                  + (ui.dim(f"  {who}") if who else "")
+                  + (ui.yellow(f"  changed: {', '.join(r['changed'])}")
+                     if r.get("changed") else ""))
+        nxt = devedit.next_step(folder, manuscript)
+        print(ui.dim(f"  next: {nxt or 'nothing — the run is complete'}"))
+        return
+    if args.action == "step":
+        if len(params) != 2:
+            sys.exit("usage: devedit step <step> <pending|running|done> "
+                     "[--executor X] [--model M] [--effort E] [--note N]")
+        try:
+            entry = devedit.mark_step(folder, manuscript, params[0], params[1],
+                                      executor=args.executor, model=args.model,
+                                      effort=args.effort, note=args.note)
+        except (ValueError, RuntimeError) as err:
+            sys.exit(f"error: {err}")
+        print(ui.green(f"{params[0]}: {entry['status']}"))
+        return
+    if args.action == "terms":
+        try:
+            rows = devedit.term_index(folder, manuscript)
+        except RuntimeError as err:
+            sys.exit(f"error: {err}")
+        print(ui.green(f"{len(rows)} terms → {folder / 'terms.json'}"))
+        return
+    if args.action == "pack":
+        try:
+            text = (devedit.book_pack(db, manuscript, folder) if args.book
+                    else devedit.essay_pack(db, manuscript, folder, params[0]))
+        except (IndexError, LookupError, RuntimeError) as err:
+            sys.exit(f"error: {err or 'usage: devedit pack <file> | --book'}")
+        print(text)
+        return
+    if args.action == "models":
+        try:
+            rows = devedit.agent_settings(_load_config(args))
+        except ValueError as err:
+            sys.exit(f"error: {err}")
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return
+        for step, row in rows.items():
+            print(f"  {step:<10} " + (" · ".join(f"{k} {v}" for k, v in row.items())
+                                      or ui.yellow("not set in [devedit]")))
+        return
+    if args.action in ("gather", "group", "build-queue"):
+        fn = {"gather": devedit.gather, "group": devedit.group,
+              "build-queue": devedit.build_queue}[args.action]
+        try:
+            rows = fn(folder)
+        except (RuntimeError, ValueError) as err:
+            sys.exit(f"error: {err}")
+        name = {"gather": "items.json", "group": "groups.json",
+                "build-queue": "queue.json"}[args.action]
+        print(ui.green(f"{len(rows)} → {folder / name}"))
+        return
+    if args.action == "decisions":
+        rows = devedit.decisions(folder)
+        if args.json:
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+            return
+        for r in rows:
+            answer = (f"{r['answer']} ({'binding' if r.get('binding', True) else 'provisional'})"
+                      if r.get("answered") else ui.yellow("unanswered"))
+            print(f"  {r['n']}. {r['question']}  → {answer}")
+        return
+    if args.action == "decide":
+        if len(params) != 2:
+            sys.exit("usage: devedit decide <n> <answer> [--reason R] [--provisional]")
+        try:
+            row = devedit.decide(folder, int(params[0]), params[1],
+                                 args.reason or "", binding=not args.provisional)
+        except (LookupError, ValueError) as err:
+            sys.exit(f"error: {err}")
+        print(ui.green(f"Decision {row['n']}: {row['answer']}"))
+        return
+    if args.action == "next":
+        rest = devedit.pending(folder)
+        if not rest:
+            print(ui.green("No items left."))
+            return
+        item = rest[0]
+        if args.json:
+            print(json.dumps(item, indent=2, ensure_ascii=False))
+            return
+        print(ui.bold(f"#{item['id']} · {item.get('tier', '')}")
+              + ui.dim(f"  {len(rest)} left"))
+        if item.get("original") is not None:
+            print(devedit.markdown_diff(item["original"], item["proposed"]))
+        else:
+            print(item.get("move") or item.get("proposed") or "")
+        return
+    if args.action == "verdict":
+        if len(params) != 2:
+            sys.exit("usage: devedit verdict <id> accept|reject|defer "
+                     "[--text T] [--reason R]")
+        try:
+            item = devedit.verdict(folder, manuscript, params[0], params[1],
+                                   text=args.text, reason=args.reason or "")
+        except (LookupError, RuntimeError, ValueError) as err:
+            sys.exit(f"error: {err}")
+        print(ui.green(f"#{item['id']}: {item['verdict']}"))
+        return
+    sys.exit(f"error: unknown devedit action '{args.action}'")
+
+
 def _summarize_outline(args, db, manuscript: dict) -> None:
     """`summarize outline <file>`: the FLOW paragraph and each section's
     POINT, the one-screen map (§8)."""
@@ -1995,7 +2148,8 @@ def cmd_summarize(args):
     level = args.level or "essay"
     if level not in sums.LEVELS:
         sys.exit(f"error: --level must be one of {', '.join(sums.LEVELS)}.")
-    llms = sums.clients(_load_config(args))
+    llms = sums.clients(_load_config(args), model=args.model,
+                        effort=args.effort)
     if not llms[level].enabled:
         sys.exit("error: the LLM is disabled ([llm] enabled = false) — "
                  "summaries need it.")
@@ -9317,7 +9471,51 @@ def build_parser() -> argparse.ArgumentParser:
                    help="show: paragraph N's record")
     p.add_argument("--json", action="store_true",
                    help="show: machine-readable output")
+    p.add_argument("--model",
+                   help="rebuild: the model for every level this run builds, "
+                        "in place of [summaries]/[critique] (e.g. "
+                        "anthropic/claude-opus-5)")
+    p.add_argument("--effort", choices=["low", "medium", "high"],
+                   help="rebuild: the reasoning effort sent with each call, "
+                        "where the model's profile accepts one")
     p.set_defaults(func=cmd_summarize)
+
+    p = sub.add_parser(
+        "devedit",
+        help="a whole-book developmental edit run: coverage, steps, the term "
+             "index, agent context packs, letter decisions and the review "
+             "queue (the developmental-editing skill drives it)")
+    p.add_argument("action",
+                   choices=["new", "coverage", "status", "step", "terms",
+                            "pack", "decisions", "decide", "gather", "group",
+                            "build-queue", "next", "verdict", "models"])
+    p.add_argument("params", nargs="*",
+                   help="step: <step> <status>; pack: <file>; decide: <n> "
+                        "<answer>; verdict: <id> accept|reject|defer")
+    p.add_argument("--run", help="the run id (default: the latest)")
+    p.add_argument("--lock", action="store_true",
+                   help="coverage: lock the proposed coverage, so the steps "
+                        "can run")
+    p.add_argument("--edit", action="append", metavar="FILE",
+                   help="coverage: edit this covered file (e.g. a Preface the "
+                        "TOC files as front matter); repeatable")
+    p.add_argument("--reference", action="append", metavar="FILE",
+                   help="coverage: read this covered file only as reference; "
+                        "repeatable")
+    p.add_argument("--book", action="store_true",
+                   help="pack: the cross-book pack instead of one essay's")
+    p.add_argument("--executor", choices=["authorlm", "session"],
+                   help="step: who ran it")
+    p.add_argument("--model", help="step: the model the run reported")
+    p.add_argument("--effort", choices=["low", "medium", "high"],
+                   help="step: the reasoning effort used")
+    p.add_argument("--note", help="step: a short note")
+    p.add_argument("--reason", help="decide/verdict: the author's reason")
+    p.add_argument("--provisional", action="store_true",
+                   help="decide: record the answer as provisional")
+    p.add_argument("--text", help="verdict accept: the author's own wording")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_devedit)
 
     p = sub.add_parser(
         "prompts",

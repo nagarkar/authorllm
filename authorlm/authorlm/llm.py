@@ -457,6 +457,10 @@ class LLMClient:
         self.max_tokens = WRITING_DEFAULTS["max_tokens"]
         self.effort = WRITING_DEFAULTS["effort"]
         self.cache = bool(WRITING_DEFAULTS["cache"])
+        # The reasoning effort `complete()` sends ("low", "medium", "high"),
+        # set for a run by `summarize rebuild --effort` and the developmental
+        # edit. None leaves the model's default, as every other caller has it.
+        self.reasoning_effort: str | None = None
         self._shared_client: shared.Client | None = None
         self._scratch: tempfile.TemporaryDirectory | None = None
         self._scratch_calls = 0
@@ -743,9 +747,12 @@ class LLMClient:
         # on the same model but different configured temperatures must
         # never collide on one cache file.
         temperature = self.temperature if self.send_temperature() else None
+        effort = (self.reasoning_effort
+                  if self.reasoning_effort and self.profile().reasoning_effort
+                  else None)
         try:
             return self._call(messages, temperature=temperature,
-                              thinking_budget=thinking_budget,
+                              thinking_budget=thinking_budget, effort=effort,
                               response_format=response_format).raw
         except ReplayMiss:
             raise

@@ -42,7 +42,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .concepts import concept_pattern, node_names, scoped_concepts
+from .concepts import node_names, scoped_concepts
+from .terms import concept_pattern
 from .db import Database, ko_fields, loads, new_id
 from .findings import flag_rules  # re-exported: lenses.flag_rules is public
                                    # API (tests call it directly); the

@@ -22,7 +22,8 @@ import json
 import re
 from pathlib import Path
 
-from .concepts import concept_pattern, node_names
+from .concepts import node_names
+from .terms import concept_pattern
 from .db import Database, loads
 from .findings import store_findings
 from .passes import paragraphs_of

@@ -10,7 +10,8 @@ plan item into prose is `write start` + `write draft` (§15).
 from __future__ import annotations
 
 from .analysis import find_precedents
-from .concepts import concept_pattern, node_names
+from .concepts import node_names
+from .terms import concept_pattern
 from .db import Database, loads
 from .guidance import PREREQUISITE_FIRST, PREREQUISITE_SECOND
 from .structure import reading_order
