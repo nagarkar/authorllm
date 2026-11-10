@@ -28,7 +28,7 @@ const STATE_WORDS: Record<string, string> = {
   conflict: "changed on both sides", missing: "tab not found",
 };
 
-export interface FormsTab { file: string; count: number; }
+export interface FormsTab { file: string; count: number; toRule: number; }
 
 // One Doc tab at a time: the header's Tab menu (App) picks it from the tabs
 // this listing reports, which are only the tabs with open forms.
@@ -50,7 +50,7 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
     finally { setLoading(false); }
   }, [transport, manuscript]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { if (data) onTabs(data.files.map(g => ({file: g.file, count: g.count}))); }, [data, onTabs]);
+  useEffect(() => { if (data) onTabs(data.files.map(g => ({file: g.file, count: g.count, toRule: g.forms.filter(f => !f.ruling).length}))); }, [data, onTabs]);
   // Coming back to the page (from the Doc, where the author may have edited
   // a form) reloads it, as the Dev edit does.
   useEffect(() => {
@@ -124,7 +124,7 @@ function FileCard({ g, result, merging, busy, onMerge, onDecide }: {
     <section className="card forms-file">
       <div className="forms-file-head">
         <h2 className="forms-file-name">{g.file}</h2>
-        <span className="badge">{g.count} open</span>
+        <span className="badge">{g.count} not merged</span>
         <span className={`state${conflict ? " forms-conflict" : ""}`}>{STATE_WORDS[g.state] ?? g.state}</span>
         {g.url && <a className="pill" href={g.url} target="_blank" rel="noreferrer">Open tab ↗</a>}
       </div>

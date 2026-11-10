@@ -207,7 +207,7 @@ export function App() {
         {mode === "forms" && formsTabs.length > 0 && <div className="bar">
           <select value={formsTabs.some(t => t.file === formsTab) ? formsTab : formsTabs[0].file}
             onChange={e => setFormsTab(e.target.value)} aria-label="Tab">
-            {formsTabs.map(t => <option key={t.file} value={t.file}>{t.file.replace(/\.md$/, "")} — {t.count} open</option>)}
+            {formsTabs.map(t => <option key={t.file} value={t.file}>{t.file.replace(/\.md$/, "")} — {t.toRule ? `${t.toRule} to rule` : "all ruled, ready to merge"}{t.toRule && t.toRule < t.count ? `, ${t.count - t.toRule} decided` : ""}</option>)}
           </select>
         </div>}
         {mode === "chapters" && <div className="bar">
