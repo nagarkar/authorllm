@@ -244,6 +244,50 @@ def test_gather_group_and_build_queue() -> None:
               [i["id"] for i in devedit.queue(folder)] == ["one-1.1"])
 
 
+def test_build_queue_keeps_accepted_verdict_when_check_missing() -> None:
+    """An incomplete rebuild must not erase an accept that already wrote the
+    manuscript: losing `applied` left the item undecided forever because
+    re-accept finds the original text gone."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ms = _manuscript(Path(tmp))
+        folder = devedit.new_run(ms)
+        devedit.confirm_coverage(folder)
+        items = [
+            {"id": "one-1.1", "file": "one.md", "tier": "must", "order": 0,
+             "original": "The Dharma is the ground.",
+             "proposed": "The Dharma is the ground of all."},
+            {"id": "two-1.1", "file": "two.md", "tier": "should", "order": 1,
+             "original": "The Dharma returns here.",
+             "proposed": "The Dharma returns here, as promised."},
+        ]
+        (folder / "integrated.json").write_text(json.dumps(items))
+        (folder / "checks").mkdir()
+        for item in items:
+            (folder / "checks" / f"{item['id']}.json").write_text(
+                json.dumps({"result": "pass"}))
+        devedit.build_queue(folder)
+        devedit.verdict(folder, ms, "one-1.1", "accept")
+        check("accept rewrote the essay",
+              "ground of all." in (Path(ms["path"]) / "one.md").read_text())
+        (folder / "checks" / "one-1.1.json").unlink()
+        try:
+            devedit.build_queue(folder)
+            check("missing check still fails the rebuild", False)
+        except RuntimeError as err:
+            check("missing check still fails the rebuild",
+                  "one-1.1" in str(err), err)
+        mid = {i["id"]: i for i in devedit.queue(folder)}
+        check("the accepted item stays on the queue with its verdict",
+              mid["one-1.1"].get("verdict") == "accept"
+              and mid["one-1.1"].get("applied"), mid.get("one-1.1"))
+        (folder / "checks" / "one-1.1.json").write_text(
+            json.dumps({"result": "pass"}))
+        rebuilt = {i["id"]: i for i in devedit.build_queue(folder)}
+        check("a later complete rebuild restores the accept",
+              rebuilt["one-1.1"].get("verdict") == "accept"
+              and rebuilt["one-1.1"].get("applied"), rebuilt["one-1.1"])
+
+
 def test_front_matter_can_move_into_the_edit() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ms = _manuscript(Path(tmp))
@@ -276,6 +320,7 @@ def main() -> None:
              test_apply_refuses_changed_text,
              test_markdown_diff_bolds_additions_and_strikes_removals,
              test_gather_group_and_build_queue,
+             test_build_queue_keeps_accepted_verdict_when_check_missing,
              test_front_matter_can_move_into_the_edit]
     for fn in tests:
         print(fn.__name__)

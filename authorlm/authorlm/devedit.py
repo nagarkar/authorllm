@@ -501,15 +501,30 @@ def build_queue(folder: Path) -> list[dict]:
     """`queue.json` from the integrated items and their checks: a pass keeps
     the item, a fix takes the checker's proposed text, a drop removes it,
     and a reconsider keeps it with the checker's reason in front. An item
-    with no check yet is held back and named."""
+    with no check yet is held back and named — except a decided item, whose
+    verdict (and `applied`/`pushed`) must survive an incomplete rebuild so a
+    later complete one can restore it and the author is not stuck re-accepting
+    text already written to the manuscript."""
     integrated = _read_json(folder / "integrated.json", None)
     if integrated is None:
         raise RuntimeError("no integrated.json yet — the integrator writes it")
+    previous = {i["id"]: i for i in queue(folder)}
     out, unchecked = [], []
     for item in integrated:
         check = _read_json(folder / "checks" / f"{item['id']}.json", None)
         if check is None:
             unchecked.append(item["id"])
+            old = previous.get(item["id"])
+            if old and old.get("verdict"):
+                # Keep the decided row in queue.json so the next rebuild can
+                # copy its verdict back; dropping it here left accepts stuck
+                # (original already gone from the file, no `applied` flag).
+                kept = dict(item)
+                kept.update({k: old[k] for k in (
+                    "verdict", "final", "reason_given", "decided",
+                    "applied", "pushed", "proposed", "check", "reconsider")
+                    if k in old})
+                out.append(kept)
             continue
         result = check.get("result")
         if result == "drop":
@@ -521,7 +536,6 @@ def build_queue(folder: Path) -> list[dict]:
             item["reconsider"] = check.get("reason", "")
         item["check"] = {"result": result, "reason": check.get("reason", "")}
         out.append(item)
-    previous = {i["id"]: i for i in queue(folder)}
     for item in out:
         old = previous.get(item["id"])
         if old and old.get("verdict"):
