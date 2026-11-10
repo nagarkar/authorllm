@@ -282,3 +282,9 @@ sweep_interval_seconds = 300
 [gdocs]
 # OAuth installed-app client for the Google Docs bridge (doc push/pull).
 client_secret = "/Users/nagarkar/workspace/repos/authorllm/authorlm/client_secret_936657761738-gbalhjavi216muq9ruikmtvu1mtudrpn.apps.googleusercontent.com.json"
+
+[ask]
+# `authorlm ask`: one call to an outside model for a second opinion
+# ("ask OpenAI what's best"). Author ruling 2026-11-09.
+model = "openai/gpt-5.6-sol"
+effort = "medium"

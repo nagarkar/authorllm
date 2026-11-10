@@ -5,8 +5,8 @@ is conditioned on every prior summary, so an edit pass over essay E can
 hold "everything before E" and "everything after E" in a few thousand
 tokens. Since the summary hierarchy (docs/summary-hierarchy-design.md
 §3.4, ruling 6) the essay summary is COMPOSED from the essay's section
-summaries, never from its text: the model writes FLOW, MOVES, MOTIFS and
-DOES NOT, and code derives INTRODUCES, ASSUMES, PROMISES and DEBTS from
+summaries, never from its text: the model writes FLOW, MOVES, MOTIFS, ARCS
+and DOES NOT, and code derives INTRODUCES, ASSUMES, PROMISES and DEBTS from
 the paragraph records (§6.6). Summaries are DERIVED machinery (like
 renders): they live in the database, never in the manuscript or the Doc.
 
@@ -616,7 +616,7 @@ def summarize_unit(db: Database, manuscript: dict, file: str, text: str,
     """Write (or rewrite) one unit's summary from its SECTION SUMMARIES
     (`sections`: (section as `sections_of` yields it, its current row),
     in order), conditioned on `prior` [(file, summary), …] (§3.4). The
-    model writes FLOW, MOVES, MOTIFS, DOES NOT; INTRODUCES, ASSUMES,
+    model writes FLOW, MOVES, MOTIFS, ARCS, DOES NOT; INTRODUCES, ASSUMES,
     PROMISES, DEBTS are derived from the paragraph records and rendered
     under those labels (ruling 6, §6.6). `texts` is the caller's capture
     of the whole manuscript (the derived lists read every file's
@@ -1409,10 +1409,10 @@ HEADING_ONLY_SUMMARY = ("POINT: A heading with no body text.\nMOVES: none\n"
 # ESSAY_MODEL_LABELS from the section summaries, code derives
 # DERIVED_LABELS from the paragraph records (ruling 6, §6.6) and renders
 # them under the same names, so `manifest._field` keeps working.
-ESSAY_MODEL_LABELS = ("FLOW", "MOVES", "MOTIFS", "DOES NOT")
+ESSAY_MODEL_LABELS = ("FLOW", "MOVES", "MOTIFS", "ARCS", "DOES NOT")
 DERIVED_LABELS = ("INTRODUCES", "ASSUMES", "PROMISES", "DEBTS")
 ESSAY_LABELS = ("FLOW", "MOVES", "INTRODUCES", "ASSUMES", "PROMISES", "DEBTS",
-                "MOTIFS", "DOES NOT")
+                "MOTIFS", "ARCS", "DOES NOT")
 
 
 def paragraph_prompt() -> str:
@@ -1858,7 +1858,7 @@ def flow_of(summary: str) -> str:
 
 def render_essay_block(reply: str, derived: dict[str, list[str]]
                        ) -> tuple[str, list[str]]:
-    """The stored essay block (ruling 6): the model's four labels in
+    """The stored essay block (ruling 6): the model's five labels in
     `ESSAY_LABELS` order with the derived lists rendered under theirs as
     comma-separated terms ("none" when empty). Returns (block, the model
     labels that were absent — rendered as "none" and reported)."""

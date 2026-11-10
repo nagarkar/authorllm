@@ -106,7 +106,7 @@ class EchoSummarizer(http.server.BaseHTTPRequestHandler):
         EchoSummarizer.calls.append({"unit": unit, "n_prior": n_prior,
                                      "model": body.get("model"), "user": user})
         self._reply(f"MOVES: [1] summary of {unit} conditioned on {n_prior} "
-                    "prior.\nMOTIFS: none\nDOES NOT: none")
+                    "prior.\nMOTIFS: none\nARCS: none\nDOES NOT: none")
 
     def _reply(self, content: str) -> None:
         payload = json.dumps({

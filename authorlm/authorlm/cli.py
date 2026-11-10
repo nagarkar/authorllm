@@ -1912,6 +1912,8 @@ def cmd_devedit(args):
     manuscript = _manuscript(db, args)
     if args.action == "new":
         folder = devedit.new_run(manuscript)
+        for path in devedit.state(folder).get("archived") or []:
+            print(ui.dim(f"  archived an earlier run → {path}"))
         print(ui.green(f"Started run {folder.name} at {folder}"))
         args.action = "coverage"
     try:
@@ -1967,20 +1969,65 @@ def cmd_devedit(args):
             sys.exit(f"error: {err}")
         print(ui.green(f"{params[0]}: {entry['status']}"))
         return
+    if args.action == "stage":
+        try:
+            if params[:1] == ["close"]:
+                row = devedit.close_stage(folder, int(params[1]))
+                print(ui.green(f"Stage {row['n']} ({row['name']}) closed"))
+                return
+            rows = devedit.stage_status(folder)
+        except (IndexError, ValueError, RuntimeError, LookupError) as err:
+            sys.exit(f"error: {err or 'usage: devedit stage [close <n>]'}")
+        if args.json:
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+            return
+        for r in rows:
+            flag = (ui.green("closed") if r["closed"] else ui.yellow("open"))
+            print(f"  {r['n']}. {r['name']:<28} {flag}  "
+                  f"{len(r['finished'])}/{len(r['edit'])} essays finished · "
+                  f"letter {'yes' if r['letter'] else 'no'} · "
+                  f"decisions {r['answered']}/{r['decisions']}")
+        return
+    if args.action == "audit":
+        problems = devedit.audit(db, manuscript, folder)
+        for p_ in problems:
+            print(ui.yellow(f"  {p_}"))
+        print(ui.green("audit: nothing to fix") if not problems
+              else ui.bold(f"audit: {len(problems)} to fix before the run"))
+        return
     if args.action == "terms":
         try:
             rows = devedit.term_index(folder, manuscript)
         except RuntimeError as err:
             sys.exit(f"error: {err}")
-        print(ui.green(f"{len(rows)} terms → {folder / 'terms.json'}"))
+        for r in rows:
+            print(f"  {r['term']} ({r['count']}×): {', '.join(r['files'])}")
+        print(ui.green(f"{len(rows)} terms from the finished essays"))
         return
     if args.action == "pack":
         try:
-            text = (devedit.book_pack(db, manuscript, folder) if args.book
-                    else devedit.essay_pack(db, manuscript, folder, params[0]))
+            text = (devedit.book_pack(db, manuscript, folder, args.stage) if args.book
+                    else devedit.essay_pack(db, manuscript, folder, params[0],
+                                            trial=args.trial))
         except (IndexError, LookupError, RuntimeError) as err:
             sys.exit(f"error: {err or 'usage: devedit pack <file> | --book'}")
         print(text)
+        return
+    if args.action == "note":
+        text = args.text if args.text else sys.stdin.read()
+        try:
+            devedit.note(folder, params[0], text)
+        except (IndexError, LookupError, ValueError) as err:
+            sys.exit(f"error: {err or 'usage: devedit note <file> (entry on stdin or --text)'}")
+        print(ui.green(f"notebook: {params[0]} finished → {folder / devedit.NOTEBOOK}"))
+        return
+    if args.action == "read":
+        try:
+            print(devedit.read(folder, manuscript, params[0], args.section,
+                               via=args.via)
+                  if params else devedit.sources_listing(folder, manuscript))
+        except (IndexError, LookupError, RuntimeError) as err:
+            sys.exit(f"error: {err or 'usage: devedit read <file> [--section N] [--via FILE]'}")
         return
     if args.action == "models":
         try:
@@ -2006,7 +2053,7 @@ def cmd_devedit(args):
         print(ui.green(f"{len(rows)} → {folder / name}"))
         return
     if args.action == "decisions":
-        rows = devedit.decisions(folder)
+        rows = devedit.decisions(folder, args.stage)
         if args.json:
             print(json.dumps(rows, indent=2, ensure_ascii=False))
             return
@@ -2019,8 +2066,13 @@ def cmd_devedit(args):
         if len(params) != 2:
             sys.exit("usage: devedit decide <n> <answer> [--reason R] [--provisional]")
         try:
-            row = devedit.decide(folder, int(params[0]), params[1],
-                                 args.reason or "", binding=not args.provisional)
+            row = devedit.decide_and_apply(folder, manuscript, int(params[0]),
+                                           params[1], args.reason or "",
+                                           binding=not args.provisional,
+                                           stage=args.stage)
+            for a in row.get("applied") or []:
+                print((ui.yellow(f"  not applied: {a['error']}") if a.get("error")
+                       else ui.dim(f"  applied {a['id']} to {a['file']}")))
         except (LookupError, ValueError) as err:
             sys.exit(f"error: {err}")
         print(ui.green(f"Decision {row['n']}: {row['answer']}"))
@@ -2040,17 +2092,24 @@ def cmd_devedit(args):
             print(devedit.markdown_diff(item["original"], item["proposed"]))
         else:
             print(item.get("move") or item.get("proposed") or "")
+        print(ui.dim("Why: ") + devedit.why_of(item))
         return
     if args.action == "verdict":
         if len(params) != 2:
             sys.exit("usage: devedit verdict <id> accept|reject|defer "
                      "[--text T] [--reason R]")
         try:
-            item = devedit.verdict(folder, manuscript, params[0], params[1],
-                                   text=args.text, reason=args.reason or "")
+            # An item already decided is revised: an accept is undone in
+            # the file, or swapped for the new wording.
+            done = any(i["id"] == params[0] and i.get("verdict")
+                       for i in devedit.queue(folder))
+            fn = devedit.revise if done else devedit.verdict
+            item = fn(folder, manuscript, params[0], params[1],
+                      text=args.text, reason=args.reason or "")
         except (LookupError, RuntimeError, ValueError) as err:
             sys.exit(f"error: {err}")
-        print(ui.green(f"#{item['id']}: {item['verdict']}"))
+        print(ui.green(f"#{item['id']}: {item['verdict']}"
+                       + (" (revised)" if item.get("revised") else "")))
         return
     sys.exit(f"error: unknown devedit action '{args.action}'")
 
@@ -6007,7 +6066,7 @@ def cmd_audiostation(args):
 # parser builder, and the test that asserts the note is present listed
 # five of these by hand — so a new LLM verb was unchecked by
 # construction.
-LLM_VERBS = {"extract", "intent", "guide", "review",
+LLM_VERBS = {"ask", "extract", "intent", "guide", "review",
              "analyze", "lens", "sweep", "illus", "summarize", "doc",
              "belief", "critique", "triage-app", "workbench",
              # `filter run --native` is the filter pass's one call, and
@@ -7559,6 +7618,58 @@ def _print_toc_pairs(pairs: dict, limit: int = 10) -> None:
             print(f"  {label}: … +{len(rows) - limit} more")
 
 
+def _devedit_pushed(manuscript: dict, relpath: str) -> None:
+    """A push from the command line counts for the developmental edit too:
+    the run's accepted items in this file are marked pushed, exactly as the
+    review page's Push marks them, so the page stops listing the file as
+    not yet on the Doc."""
+    from . import devedit
+
+    try:
+        devedit.mark_pushed(devedit.run_dir(manuscript), relpath)
+    except LookupError:
+        pass
+
+
+ASK_DEFAULTS = {"model": "openai/gpt-5.6-sol", "effort": "medium"}
+
+
+def cmd_ask(args):
+    """`authorlm ask`: one call to an outside model for a second opinion
+    (author ruling 2026-11-09, "ask OpenAI what's best"). The caller
+    composes the request: a system text with the constraints (style law,
+    the voice, what must not change) and a user text with the passage and
+    the question. One call, no retries, no tools; the reply is printed for
+    the session to critique. Model and effort default to `[ask]` in
+    config.toml, else OpenAI's Sol at medium reasoning."""
+    from .llm import LLMClient
+
+    config = _load_config(args)
+    ask = config.get("ask", {}) or {}
+    llm = LLMClient(config)
+    llm.model = args.model or ask.get("model") or ASK_DEFAULTS["model"]
+    llm.reasoning_effort = (args.effort or ask.get("effort")
+                            or ASK_DEFAULTS["effort"])
+    llm.purpose = "ask"
+    system = (Path(args.system_file).read_text(encoding="utf-8")
+              if args.system_file else (args.system or ""))
+    user = (Path(args.file).read_text(encoding="utf-8") if args.file
+            else sys.stdin.read())
+    if not user.strip():
+        sys.exit("error: nothing to ask: give --file or the request on stdin")
+    reply = llm.complete(system, user)
+    if reply is None:
+        sys.exit(f"error: {llm.model} gave no reply (no key, or unreachable)")
+    print(ui.dim(f"{llm.model} · effort {llm.reasoning_effort}"), file=sys.stderr)
+    print(reply)
+    if args.save:
+        out = Path(args.save)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(f"# ask · {llm.model} · effort {llm.reasoning_effort}\n\n"
+                       f"## System\n\n{system}\n\n## Request\n\n{user}\n\n"
+                       f"## Reply\n\n{reply}\n", encoding="utf-8")
+
+
 def cmd_doc(args):
     from . import docs
 
@@ -7797,6 +7908,7 @@ def cmd_doc(args):
                                                      and target == args.name),
                                             guard=True)
                     normalized_any = normalized_any or result["locally_normalized"]
+                    _devedit_pushed(manuscript, result["relpath"])
                     print(f"Pushed {result['relpath']} → tab "
                           f"{ui.dim(ui.link(result['url']))}")
                     _print_held(result)
@@ -9488,9 +9600,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action",
                    choices=["new", "coverage", "status", "step", "terms",
                             "pack", "decisions", "decide", "gather", "group",
-                            "build-queue", "next", "verdict", "models"])
+                            "build-queue", "next", "verdict", "models",
+                            "read", "note", "stage", "audit"])
     p.add_argument("params", nargs="*",
-                   help="step: <step> <status>; pack: <file>; decide: <n> "
+                   help="step: <step> <status>; pack: <file>; read: <file>; "
+                        "decide: <n> "
                         "<answer>; verdict: <id> accept|reject|defer")
     p.add_argument("--run", help="the run id (default: the latest)")
     p.add_argument("--lock", action="store_true",
@@ -9504,6 +9618,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "repeatable")
     p.add_argument("--book", action="store_true",
                    help="pack: the cross-book pack instead of one essay's")
+    p.add_argument("--stage", type=int,
+                   help="pack --book, decisions, decide: this stage (default "
+                        "the current one)")
+    p.add_argument("--trial", action="store_true",
+                   help="pack: one essay out of order, for a trial pass")
+    p.add_argument("--section", type=int,
+                   help="read: only this section, by its ordinal")
+    p.add_argument("--via", action="append", metavar="FILE",
+                   help="read: the source that names the file (repeat for a "
+                        "chain: the first a core source, each naming the next)")
     p.add_argument("--executor", choices=["authorlm", "session"],
                    help="step: who ran it")
     p.add_argument("--model", help="step: the model the run reported")
@@ -9513,7 +9637,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reason", help="decide/verdict: the author's reason")
     p.add_argument("--provisional", action="store_true",
                    help="decide: record the answer as provisional")
-    p.add_argument("--text", help="verdict accept: the author's own wording")
+    p.add_argument("--text", help="verdict accept: the author's own wording; "
+                                  "note: the notebook entry")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_devedit)
 
@@ -10428,6 +10553,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--defer", action="store_true")
     p.add_argument("--explain", help="why — becomes the highest-quality evidence")
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser(
+        "ask", help="one call to an outside model (default OpenAI's Sol, "
+                    "medium reasoning) for a second opinion on a passage",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="example:\n"
+               "  authorlm ask --system-file rules.md --file request.md\n"
+               "  echo 'Improve this line: …' | authorlm ask --effort high")
+    p.add_argument("--model", help="model id (default: [ask] model in "
+                                   "config.toml, else openai/gpt-5.6-sol)")
+    p.add_argument("--effort", choices=["low", "medium", "high"],
+                   help="reasoning effort (default: [ask] effort, else medium)")
+    p.add_argument("--system", help="the system text: constraints, voice, rules")
+    p.add_argument("--system-file", help="read the system text from a file")
+    p.add_argument("--file", help="read the request from a file (default stdin)")
+    p.add_argument("--save", help="also save system, request and reply to this file")
+    p.set_defaults(func=cmd_ask)
 
     p = sub.add_parser(
         "belief", help="list / answer questions / curate (retire, merge, convert)",

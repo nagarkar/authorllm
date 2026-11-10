@@ -746,20 +746,104 @@ in their own words.
 A whole-book developmental edit runs as the `developmental-editing` skill's
 workflow over `authorlm devedit` (devedit.py owns the run folder,
 `<manuscript>/_devedit/<run-id>/`). What this project supplies to that skill:
-- **Status and resume:** `authorlm -m <ms> devedit status`; `devedit new`
-  starts a run and proposes coverage from `toc.toml`. Show both lists and
-  confirm with `devedit coverage --lock` only on the author's yes.
-- **Summaries:** `summarize rebuild` for the covered files, with `--model`
+- **Clean slate:** `devedit new` archives every earlier run to
+  `~/.authorlm/archive/<ms>/devedit-<run>` (moved, never deleted) and
+  starts a fresh run: no letter, decision, ledger or notebook carries
+  over. Then `devedit audit` (missing profiles, edited files with no style
+  guide, rules citing retired rules, profiles or rules naming files the TOC
+  puts outside the book), plus a subagent's read of the profiles and
+  style law for staleness against the author's rulings; fix it all with
+  the author before locking.
+- **Status and resume:** `authorlm -m <ms> devedit status` and `devedit
+  stage`. Coverage lists every TOC file, front and back matter included,
+  all edited by default; confirm with `devedit coverage --lock` only on
+  the author's yes.
+- **Stages** come from the TOC: the front matter, then one per part (a lone
+  back-matter file joins the last). Within a stage, essays one at a time;
+  then the stage's cross-book diagnosis and letter (`devedit pack --book`,
+  every stage so far), decisions (`devedit decide`, files under
+  `stages/<n>/`), reruns of the essays the letter touches, and `devedit
+  stage close <n>` on the author's word. The next stage waits for the
+  close.
+- **Ledger:** every finding is addressed, declined, dropped or open, from
+  the items, checks and verdicts. A rerun's pack (pass 2+, findings file
+  `<stem>--p<N>.json`) carries the essay's ledger; reruns and letters
+  never reverse, re-raise or raise the bar on a closed finding. The term
+  index is computed from the finished essays only.
+- **Summaries:** `summarize rebuild <file>` for the current essay at the start of its pass and again after its items are applied, never the whole book; `--model`
   and `--effort` when the author picks them.
-- **Read verbs** for every agent: `summarize show <file> [--section N |
-  --paragraph N]`, `summarize outline <file>`, the file itself.
+- **Read verbs** for every agent: `devedit read <file> [--section N]`
+  reads a core source: a covered file, a profile in the pack, or a file of
+  the run's folder (`devedit read` alone lists them). Any other file reads
+  only by following a reference: `devedit read <file> --via <covered file
+  or profile that names it>` (repeat `--via` for a chain, each link naming
+  the next). The command checks every link; a reference that is not there
+  is an error. Names inside `[Omit: all]` notes, the run's generated files,
+  other runs and anything outside the manuscript folder open nothing; `summarize show <file>
+  [--section N | --paragraph N]` and `summarize outline <file>` for a
+  covered file. **Agents read nothing outside the run** (author ruling
+  2026-11-09): not `_drafts`, `_exports`, `_critiques`, `_retired`, old
+  `_devedit` runs, the synopsis or pitch, the Google Doc, or any file the
+  TOC leaves out. Their sources are the pack (style law, audience, market,
+  example arcs, notebook, ledger, the finished essays' summaries and
+  terms), the run folder and the covered files.
 - **Packs:** `devedit pack <file>` (an essay agent's input), `devedit pack
-  --book` (the cross-book agent's and the letter's).
-- **Between agents:** `devedit terms`, `gather`, `group`, `build-queue`.
+  --book` (the cross-book agent's and the letter's). Both open with the
+  standing context: `_profiles/audience.md` (the letter judges the reader
+  against it, never against the synopsis or market note),
+  `_profiles/market.md` and `_profiles/examples.md` (the example arcs); the essay pack adds the
+  file's prose style law and the arcs earlier essay agents proposed in
+  this run. Structural style law binds the proposals; sentence-level law
+  waits for the line edit (author ruling 2026-11-09).
+- **Essays run one at a time, in reading order**, like an editor's pass:
+  findings, checks, the author's review, accepted items applied, `summarize
+  rebuild <file>`, then `devedit note <file>` (entry on stdin or `--text`)
+  writes the essay's entry in the run's `notebook.md`, the shared memory
+  of every later agent (condensed reasoning and the author's feedback).
+  `devedit pack` refuses an essay until every earlier one has its entry
+  and every earlier stage is closed;
+  `--trial` runs one out of order. Each findings file is `{findings,
+  arcs}`; the next pack carries the arcs and the notebook. The integrator
+  runs once at the end, over the notebook, for drift. The author ratifies
+  arcs worth keeping into `examples.md`; several passes are normal.
+- **Between agents:** `devedit terms` (finished essays only), `gather`, `group`, `build-queue`.
+- **Watch the page while the author works it** (author ruling 2026-11-09):
+  start a Monitor running `python3 -u authorlm/tools/devedit_watch.py <run folder>`
+  over the run folder (decisions.json under `stages/`,
+  `queue.json`) that emits each verdict and decision and a COMPLETE line
+  when an essay's items or a stage's decisions are all settled. On
+  COMPLETE, finish at once without waiting for chat: rebuild the summary,
+  write the notebook entry, push, start the next essay; or run the reruns
+  the decisions call for. A verdict on the page already applies the
+  change locally. Chat is for questions. Re-arm the Monitor on expiry.
+  Any count given to the author comes from the record (the queue, or
+  the page's `next` call), never from tallying watcher events.
 - **Review:** the audio page's Dev edit mode (`#<ms>/devedit`), or chat with
   `devedit next` / `devedit verdict`. Publish with the page's Push or `doc
   push <file>`; a file whose tab has pending suggested edits is settled
   first, never pushed over.
+
+## Ask OpenAI what's best (`authorlm ask`)
+When the author says "ask OpenAI what's best" (or "ask OpenAI", "what does
+OpenAI say", "second opinion from OpenAI") about a passage, a decision or
+an item (author ruling 2026-11-09):
+1. **Compose the request.** Send what the question needs, no more: the
+   passage itself, the surrounding context a reader would have (the
+   question it answers, the paragraph before), the constraints that bind
+   it (the file's style law that applies, the voice, terms of art and
+   their casing, rulings such as "never capitalize nothingness"), and what
+   must not change. State the question precisely and ask for the revised
+   text plus a one-line reason. Put the rules in `--system-file`, the
+   passage and question in `--file` (both in the scratchpad), and save
+   the exchange with `--save`.
+2. **One call:** `authorlm ask --system-file … --file … --save …`.
+   Default model OpenAI's Sol (`openai/gpt-5.6-sol`), medium effort
+   (`[ask]` in config.toml); the author may name another model or effort.
+3. **Critique and suggest.** Show the reply, then judge it against the
+   original and any earlier proposal: what it does better, what it loses
+   (meaning, cadence, a term, a promise the book must keep), and what
+   breaks a rule. End with the options the author can pick, ours, theirs,
+   or a combination, and recommend one.
 
 ## External critique intake (critic input is never law until triaged)
 Design reference: `docs/critique-pass-design.md`. When the author brings a
