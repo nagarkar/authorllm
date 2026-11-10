@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { deveditTransport, formsTransport, request, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
 import { DevEdit } from "./DevEdit";
-import { MergeForms } from "./MergeForms";
+import { MergeForms, type FormsTab } from "./MergeForms";
 
 // Mirrors audiobook.Session.status (authorlm/audiobook.py).
 interface ChapterSummary { stem: string; title: string; total: number; generated: number; previewed: number; remaining: number; remainingCharacters: number; stitched: string | null; stitchStale: boolean; }
@@ -70,6 +70,8 @@ export function App() {
   const [stem, setStem] = useState<string>(parseHash().stem);
   const [mode, setMode] = useState<PageMode>(parseHash().mode);
   const [term, setTerm] = useState<string>(parseHash().term);
+  const [formsTabs, setFormsTabs] = useState<FormsTab[]>([]);
+  const [formsTab, setFormsTab] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [confirm, setConfirm] = useState<null | {label: string; run: () => Promise<void>}>(null);
   const [now, setNow] = useState<{source: Source; id: string} | null>(null);
@@ -202,6 +204,12 @@ export function App() {
             {manuscripts.map(name => <option key={name} value={name}>{name}</option>)}
           </select>
         </div>}
+        {mode === "forms" && formsTabs.length > 0 && <div className="bar">
+          <select value={formsTabs.some(t => t.file === formsTab) ? formsTab : formsTabs[0].file}
+            onChange={e => setFormsTab(e.target.value)} aria-label="Tab">
+            {formsTabs.map(t => <option key={t.file} value={t.file}>{t.file.replace(/\.md$/, "")} — {t.count} open</option>)}
+          </select>
+        </div>}
         {mode === "chapters" && <div className="bar">
           <select value={stem} onChange={e => { setNow(null); setStem(e.target.value); }} aria-label="Chapter">
             {book.chapters.map(c => (
@@ -234,7 +242,7 @@ export function App() {
       {error && <div className="status bad">{error}</div>}
       {mode === "pron" && <Workbench key={ms} transport={workbenchTransport} manuscript={ms} initialTerm={term || undefined} />}
       {mode === "devedit" && <DevEdit key={ms} transport={deveditTransport} manuscript={ms} />}
-      {mode === "forms" && <MergeForms key={ms} transport={formsTransport} manuscript={ms} />}
+      {mode === "forms" && <MergeForms key={ms} transport={formsTransport} manuscript={ms} tab={formsTab} onTabs={setFormsTabs} />}
       {mode === "chapters" && <JobStrip jobs={jobs} />}
 
       {mode === "chapters" && chapter && cur && (

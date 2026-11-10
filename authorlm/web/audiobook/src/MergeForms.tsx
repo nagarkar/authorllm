@@ -28,7 +28,13 @@ const STATE_WORDS: Record<string, string> = {
   conflict: "changed on both sides", missing: "tab not found",
 };
 
-export function MergeForms({ transport, manuscript }: { transport: Transport; manuscript: string }) {
+export interface FormsTab { file: string; count: number; }
+
+// One Doc tab at a time: the header's Tab menu (App) picks it from the tabs
+// this listing reports, which are only the tabs with open forms.
+export function MergeForms({ transport, manuscript, tab, onTabs }: {
+  transport: Transport; manuscript: string; tab: string; onTabs: (tabs: FormsTab[]) => void;
+}) {
   const [data, setData] = useState<Listing | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -44,6 +50,7 @@ export function MergeForms({ transport, manuscript }: { transport: Transport; ma
     finally { setLoading(false); }
   }, [transport, manuscript]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (data) onTabs(data.files.map(g => ({file: g.file, count: g.count}))); }, [data, onTabs]);
   // Coming back to the page (from the Doc, where the author may have edited
   // a form) reloads it, as the Dev edit does.
   useEffect(() => {
@@ -92,7 +99,7 @@ export function MergeForms({ transport, manuscript }: { transport: Transport; ma
       </div>
       {landed.map(r => <ResultBox key={r.file} r={r} />)}
       {data && data.files.length === 0 && <div className="card muted">No outside revision is open on this manuscript.</div>}
-      {data?.files.map(g => (
+      {data?.files.filter(g => g.file === (data.files.some(x => x.file === tab) ? tab : data.files[0]?.file)).map(g => (
         <FileCard key={g.file} g={g} result={results[g.file]} merging={merging === g.file} busy={!!merging}
           onMerge={() => void merge(g.file)} onDecide={decide} />
       ))}
@@ -104,6 +111,11 @@ function FileCard({ g, result, merging, busy, onMerge, onDecide }: {
   g: FileGroup; result?: MergeResult; merging: boolean; busy: boolean; onMerge: () => void;
   onDecide: (f: Form, verdict: string, text?: string) => Promise<string | null>;
 }) {
+  // As on the Dev edit page: a ruled form moves to Decided, where its
+  // status shows and Undo or a new ruling sends it back.
+  const [view, setView] = useState<"open" | "decided">("open");
+  const decided = g.forms.filter(f => f.ruling);
+  const open = g.forms.filter(f => !f.ruling);
   const conflict = g.state === "conflict";
   const blockedBy = conflict ? "Changed on both sides: settle that first."
     : g.state === "missing" ? "The tab was not found in the Doc's export."
@@ -126,7 +138,13 @@ function FileCard({ g, result, merging, busy, onMerge, onDecide }: {
       </div>
       {result && <ResultBox r={result} />}
       {conflict && g.diff && <DiffBox diff={g.diff} />}
-      {g.forms.map(f => <FormCard key={f.id} f={f} onDecide={onDecide} />)}
+      <div className="devedit-actions">
+        <button className={`pill${view === "open" ? " on" : ""}`} onClick={() => setView("open")}>To rule · {open.length}</button>
+        <button className={`pill${view === "decided" ? " on" : ""}`} onClick={() => setView("decided")}>Decided · {decided.length}</button>
+      </div>
+      {(view === "open" ? open : decided).map(f => <FormCard key={f.id} f={f} onDecide={onDecide} />)}
+      {view === "open" && open.length === 0 && <div className="muted">Every form in this tab is ruled. Check them under Decided, then Merge.</div>}
+      {view === "decided" && decided.length === 0 && <div className="muted">Nothing ruled yet in this tab.</div>}
     </section>
   );
 }
