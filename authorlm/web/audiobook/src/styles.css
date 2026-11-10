@@ -222,3 +222,20 @@ footer audio{max-width:640px;display:block;margin:0 auto}
 .top-nav{margin:0 0 8px;flex-wrap:wrap}
 .listen{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 10px 0}
 .listen audio{flex:1 1 16rem;min-width:0}
+
+/* Merge forms (MergeForms.tsx) */
+.forms-file-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.forms-file-name{font-size:18px;margin:0;color:var(--ink)}
+.forms-file-head .state{margin-left:0}
+.state.forms-conflict{background:var(--bad-soft);color:var(--bad)}
+.forms-form{border-top:1px solid var(--line);margin-top:10px;padding-top:8px}
+.forms-form.ruled{opacity:.85}
+.forms-note{text-transform:none;letter-spacing:0;color:var(--ink)}
+.forms-anchor{font-size:15px;margin-bottom:0}
+.forms-merge{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.forms-result{margin:10px 0 0;padding:8px 12px;border-radius:10px;font-size:14px}
+.forms-result.ok{background:var(--good-soft);color:var(--ink)}
+.forms-result.bad{background:var(--bad-soft);color:var(--ink)}
+.forms-result ul{margin:6px 0 0;padding-left:18px}
+.forms-diff pre{white-space:pre-wrap;word-break:break-word;font-size:13px;background:var(--ground);border:1px solid var(--line);border-radius:8px;padding:8px;margin:4px 0 8px;max-height:40vh;overflow:auto}
+a.pill{text-decoration:none;display:inline-flex;align-items:center}
