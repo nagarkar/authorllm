@@ -770,6 +770,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 The developmental edit's run folder: coverage from the TOC, step staleness, letter decisions, and verdicts that apply only to unchanged text.
 
+## `tests.test_devedit_packs`
+
+`authorlm/tests/test_devedit_packs.py`
+
+`devedit.essay_pack` and `devedit.book_pack` — agent context assembly.
+
 ## `tests.test_doc_add_toc`
 
 `authorlm/tests/test_doc_add_toc.py`
@@ -1010,6 +1016,12 @@ Interlocutor tests (docs/interlocutor-design.md).
 
 `media.is_tag_line` decides which lines `strip_for_book` drops from PDF/EPUB exports.
 
+## `tests.test_italic_term_helpers`
+
+`authorlm/tests/test_italic_term_helpers.py`
+
+Italic-term lint helpers: `_term_pattern` plurals and `_is_term` gates.
+
 ## `tests.test_iter_manuscript_paths`
 
 `authorlm/tests/test_iter_manuscript_paths.py`
@@ -1195,6 +1207,12 @@ Pure Omni helpers: model gate, duration clamp, billed USD from token usage, and 
 `authorlm/tests/test_own_line_form.py`
 
 `threads.own_line_form` / `math_spans` / `in_math` / `pending_forms` decide which bare `{{…}}` count as staged insertions on Doc-road resolve.
+
+## `tests.test_page_cite`
+
+`authorlm/tests/test_page_cite.py`
+
+`audio.speech_text` strips in-text page citations (`_PAGE_CITE`).
 
 ## `tests.test_paragraph_records`
 
