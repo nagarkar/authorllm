@@ -1450,9 +1450,14 @@ def split_tabbed_export(text: str, known_files,
             sections[current].append(line)
     found = {name: "\n".join(lines).strip() + "\n"
              for name, lines in sections.items()}
-    # No tab-title heading at all for tabs the Docs API lists: the export
-    # carries none. Find each tab by its opening heading instead.
-    if order and anchors and not any(t in found for t in order):
+    # No tab-title headings for the tabs the Docs API lists: the export
+    # carries none. Find each tab by its opening heading instead. One
+    # match is not enough to trust: a title page whose H1 is the book's
+    # name equals the container tab's title by coincidence
+    # (it-448105775835), so an export with real tab titles must match at
+    # least two of them.
+    if order and anchors and (
+            sum(t in found for t in order) < min(2, len(order))):
         return _split_by_anchors(text, list(order), anchors)
     return found
 

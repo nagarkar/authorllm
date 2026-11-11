@@ -245,6 +245,27 @@ def list_shows_the_doc_as_it_stands(root: Path) -> None:
           got["files"] == [] and got["total"] == 0, got)
 
 
+def list_sorts_gone_forms_as_invalid(root: Path) -> None:
+    """it-c4895c2ea86e: a form the tab no longer holds is invalid, not to
+    rule; when the tab itself is not found, every form is."""
+    print("list (invalid):")
+    ws, db, manuscript, ms, fake = _staged(root, "list-gone-ws")
+    fake.edit("tab-2", "<<Beta is to be replaced.>>{{Beta, replaced.}}",
+              "Beta, replaced.")
+    group = _call(ws, fake, "list")["files"][0]
+    check("a form taken out of the tab is not found",
+          _by_note({"files": [group]})["r-beta"]["found"] is False, group)
+    check("it counts as invalid, not to rule",
+          group["invalid"] == 1 and group["undecided"] == 3, group)
+
+    ws, db, manuscript, ms, fake = _staged(root, "list-lost-ws")
+    fake.tabs = [t for t in fake.tabs if t["id"] != "tab-2"]
+    group = _call(ws, fake, "list")["files"][0]
+    check("a tab not found makes every form invalid, none to rule",
+          group["state"] == "missing" and group["invalid"] == 4
+          and group["undecided"] == 0, group)
+
+
 # ---------------------------------------------------------------- decide
 
 def decide_holds_rulings(root: Path) -> None:
@@ -505,7 +526,8 @@ def queue_runs_one_merge_at_a_time(_root: Path) -> None:
 
 def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="forms-page-"))
-    for fn in (rulings_on_marked_text, list_shows_the_doc_as_it_stands, decide_holds_rulings,
+    for fn in (rulings_on_marked_text, list_shows_the_doc_as_it_stands,
+               list_sorts_gone_forms_as_invalid, decide_holds_rulings,
                merge_lands_the_rulings, merge_declines_everything,
                merge_stops_on_a_doc_edit_after_ruling,
                merge_stops_on_conflict, merge_never_pulls_a_stale_tab,

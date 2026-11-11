@@ -190,6 +190,9 @@ def listing(db: Database, manuscript: dict, service, docs_service) -> dict:
             "origins": sorted({r["origin"] for r in rows}),
             "others": others,
             "undecided": sum(1 for r in rows if r["found"] and not r["ruling"]),
+            # Forms the tab no longer holds (all of them when the tab was
+            # not found): the page lists these under Invalid, not To rule.
+            "invalid": sum(1 for r in rows if not r["found"]),
             "blocking": (f"This tab takes no new forms until its {len(rows)} "
                          f"open form(s) are merged"
                          + (" and the other producers' forms ("

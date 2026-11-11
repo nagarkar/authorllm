@@ -207,7 +207,7 @@ export function App() {
         {mode === "forms" && formsTabs.length > 0 && <div className="bar">
           <select value={formsTabs.some(t => t.file === formsTab) ? formsTab : formsTabs[0].file}
             onChange={e => setFormsTab(e.target.value)} aria-label="Tab">
-            {formsTabs.map(t => <option key={t.file} value={t.file}>{t.file.replace(/\.md$/, "")} — {t.toRule ? `${t.toRule} to rule` : "all ruled, ready to merge"}{t.toRule && t.toRule < t.count ? `, ${t.count - t.toRule} decided` : ""}</option>)}
+            {formsTabs.map(t => <option key={t.file} value={t.file}>{t.file.replace(/\.md$/, "")} — {formsTabLabel(t)}</option>)}
           </select>
         </div>}
         {mode === "chapters" && <div className="bar">
@@ -416,4 +416,13 @@ function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate,
       </div>
     </article>
   );
+}
+
+// The Tab menu's count: forms to rule are only those the tab still holds;
+// a form gone from the tab (or from a tab not found) counts as invalid.
+function formsTabLabel(t: FormsTab): string {
+  const decided = t.count - t.toRule - t.invalid;
+  return [t.toRule ? `${t.toRule} to rule` : decided ? "all ruled, ready to merge" : null,
+    t.toRule && decided ? `${decided} decided` : null,
+    t.invalid ? `${t.invalid} invalid` : null].filter(Boolean).join(", ");
 }
