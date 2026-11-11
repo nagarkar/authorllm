@@ -795,6 +795,15 @@ workflow over `authorlm devedit` (devedit.py owns the run folder,
   file's prose style law and the arcs earlier essay agents proposed in
   this run. Structural style law binds the proposals; sentence-level law
   waits for the line edit (author ruling 2026-11-09).
+- **The arc step comes first** on each essay (not the Sermons or Papers;
+  author ruling 2026-11-10): `devedit arc pack <file>` for the arc agent
+  (skill prompt `arc.md`), `devedit arc propose <file>` (round JSON on
+  stdin), interview the author in chat and record their words with
+  `devedit arc answer <file>`, then `devedit arc settle <file> arc
+  <n>|keep|none`. The page's arc cards write the same record,
+  `stages/<n>/arcs/<stem>.json`. A settled arc is approved for now into
+  `_profiles/examples.md`; `devedit pack` refuses the essay until it is
+  settled. Sources of stories, quotes and metaphors: `_profiles/arc-sources.md`.
 - **Essays run one at a time, in reading order**, like an editor's pass:
   findings, checks, the author's review, accepted items applied, `summarize
   rebuild <file>`, then `devedit note <file>` (entry on stdin or `--text`)
@@ -2052,6 +2061,7 @@ run the CLI via Bash:
   A push that stops with "tab structure and export disagree" names the first divergent paragraph; when Google's export joined two paragraphs with a hard line break (an illustration tag directly above a `[^XX]:` definition), it says where to add the blank line in the Doc.
 - diff: `authorlm doc diff <file>` prints base→Doc and base→local unified diffs and the three-way state (unchanged / local_ahead / doc_ahead / conflict). Read-only; run it before any merge or pull on a contested file.
 - outside revisions: `authorlm revise stage <file> --origin NAME < revisions.json` (a JSON list of {old, new, note, anchor_paragraph?}) puts them in the tab as pending forms and prints what was staged and what failed, with reasons; after the author rules in the tab, `authorlm revise resolve <file> --origin NAME` lands them (accepted / modified / declined, plus warnings).
+- **Forms or direct edits: ask once a tab has a draft (author ruling 2026-11-11).** The first draft of a file may be written and pushed directly. After that, when the author asks for a revision of a drafted file, ask one line before changing anything: forms in the tab, or direct edits? Forms are the author's usual preference: "Once a draft is done on a tab, I'd rather see the forms in isolation so I know what is changing precisely." Forms road: draft each change as {old, new, note}, keep `old` to the smallest span that changes, stage with `revise stage <file> --origin <name>` (they show in the tab and on the Merge forms page), and land them with `revise resolve` once ruled; one producer's forms per tab at a time, and the file stays untouched until the resolve. Direct road (only on the author's word): edit the file, `collect`, `doc push`, then list every change in the reply. Either way, `doc diff` first: a tab the author edited is pulled and read before anything is staged or pushed. Mechanical slips found in the author's own edits (a typo, a stray curly quote) are staged as forms too, never fixed silently.
 - pull: `authorlm doc pull <file> -m <manuscript>` → normalizes the export,
   writes the file, collects; "clean round trip" means nothing changed.
   A pull also harvests every open Doc comment (no addressing prefix
@@ -2523,7 +2533,21 @@ feature ideas go through the normal design workflow. Never file without
 the author's confirmation. **If the defect is about to be fixed
 immediately, file FIRST, fix SECOND** — filing stamps the git commit and
 manuscript version, and an urgent fix applied before filing destroys the
-before-state the task exists to preserve. **Then open its GitHub issue
+before-state the task exists to preserve. **Fix small defects by default, in a
+subagent (author ruling 2026-11-10: "Fix it in a subagent. We should do
+that as a default if it's easily possible ... We can also file an issue
+but it's important to fix it if it's small.").** After filing and
+opening the issue, when the fix is small and clear (a known cause in a
+few lines, a test file to extend), hand it to a subagent in the same
+turn instead of leaving it in the queue. The brief names the record id,
+the cause with file and function, the expected behavior, the test to
+add, and where to work: the checkout or worktree that owns the code,
+never another session's uncommitted work. The subagent fixes and tests
+and does not commit; this session reads its diff and test results,
+runs `resolve_improvement` `propose` with the fix summary and test
+name, and tells the author what changed. A defect whose fix is not
+small (a design question, many files, an unclear cause) stays filed
+and is offered to the author as its own task. **Then open its GitHub issue
 on `nagarkar/authorllm` (ruled 2026-10-31): the record is local and has
 no link, so the issue is the visible, shared handle.** `gh issue create
 --label bug`, titled like the record. The body names the record

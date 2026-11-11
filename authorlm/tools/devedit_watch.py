@@ -25,7 +25,13 @@ while True:
     for i in q:
         by.setdefault(i["file"], []).append(i)
         if i.get("verdict") and seen_ver.get(i["id"]) != i["verdict"]:
-            if not first: print(f"VERDICT {i['id']}: {i['verdict']}", flush=True)
+            if not first:
+                extra = ""
+                if i.get("reason_given"):
+                    extra += f" — reason: {i['reason_given']}"
+                if i.get("author_text"):
+                    extra += " — with the author's edited text (author_text in queue.json)"
+                print(f"VERDICT {i['id']}: {i['verdict']}{extra}", flush=True)
             seen_ver[i["id"]] = i["verdict"]
     for f, items in by.items():
         if all(i.get("verdict") and i["verdict"] != "defer" for i in items):

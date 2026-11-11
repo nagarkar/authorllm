@@ -3,6 +3,42 @@ import type { ReactNode } from "react";
 import type { Transport } from "./transport";
 import { MarkdownBox } from "./MarkdownBox";
 
+// Undo for an edit box: a snapshot every few seconds while the text changes,
+// kept per item in this browser's localStorage (lost if storage is cleared;
+// that is fine). Guards against a fat-fingered select-all-and-delete.
+function useUndo(key: string, text: string, setText: (t: string) => void) {
+  const storeKey = `devedit-undo:${key}`;
+  const [stack, setStack] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem(storeKey) || "[]"); } catch { return []; }
+  });
+  useEffect(() => {
+    try { setStack(JSON.parse(localStorage.getItem(storeKey) || "[]")); } catch { setStack([]); }
+  }, [storeKey]);
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setStack(prev => {
+        if (prev[prev.length - 1] === text) return prev;
+        const next = [...prev, text].slice(-50);
+        try { localStorage.setItem(storeKey, JSON.stringify(next)); } catch { /* storage off */ }
+        return next;
+      });
+    }, 2500);
+    return () => clearTimeout(id);
+  }, [text, storeKey]);
+  const undo = () => {
+    // Step back to the last snapshot that differs from what is in the box.
+    const prev = [...stack];
+    while (prev.length && prev[prev.length - 1] === text) prev.pop();
+    const back = prev[prev.length - 1];
+    if (back === undefined) return;
+    setStack(prev);
+    try { localStorage.setItem(storeKey, JSON.stringify(prev)); } catch { /* storage off */ }
+    setText(back);
+  };
+  const canUndo = stack.some(t => t !== text);
+  return { undo, canUndo };
+}
+
 // Mirrors devedit.dispatch (authorlm/devedit.py): the letter and its
 // decisions, then the review queue one item at a time. Accept applies the
 // item to the manuscript file; Push sends a file to its Doc tab, guarded as
@@ -30,7 +66,13 @@ interface Next { item: Item | null; left: number; counts: Record<string, number>
 interface Step { step: string; status: string; executor?: string; model?: string; effort?: string; changed?: string[]; }
 interface Status { run: string; steps: Step[]; counts: Record<string, number>; unpushed: string[]; decisions: Decision[]; }
 
-type Tab = "letter" | "review" | "decided";
+// Arc rounds (devedit `arcs`): an essay whose case or story is in question.
+interface ArcCandidate { case?: string; kind?: string; stage?: string; story?: string; moral?: string; fit?: string; weakness?: string; source?: string; text?: string; }
+interface ArcAnswer { at?: string; round?: number; text: string; via?: string; }
+interface ArcOpen { file: string; pass: string; rounds?: number; round?: {at?: string; judgment?: string; candidates?: ArcCandidate[]; questions?: string[]}; answers?: ArcAnswer[]; }
+interface Arcs { open: ArcOpen[]; status: {file: string; state: string; pass?: string; outcome?: string}[]; }
+
+type Tab = "letter" | "review" | "decided" | "arcs";
 
 export function DevEdit({ transport, manuscript }: { transport: Transport; manuscript: string }) {
   const [tab, setTab] = useState<Tab>("letter");
@@ -38,12 +80,16 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
   const [letter, setLetter] = useState<{letter: string; map: string; decisions: Decision[]} | null>(null);
   const [next, setNext] = useState<Next | null>(null);
   const [text, setText] = useState("");
+  const lastId = useRef<string | undefined>(undefined);
+  // Cards the author skipped this visit: shown again after the rest.
+  const skipped = useRef<string[]>([]);
   const [reason, setReason] = useState("");
   const [why, setWhy] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [done, setDone] = useState<Item[]>([]);
   const [doneStage, setDoneStage] = useState<{n: number; name: string} | null>(null);
+  const [arcs, setArcs] = useState<Arcs | null>(null);
 
   const call = useCallback(async <T,>(method: string, params: Record<string, unknown> = {}): Promise<T | null> => {
     setError("");
@@ -55,16 +101,25 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
   }, [transport, manuscript]);
 
   const load = useCallback(async () => {
-    const [s, l, n, d] = await Promise.all([
+    const [s, l, n, d, a] = await Promise.all([
       call<Status>("status"),
       call<{letter: string; map: string; decisions: Decision[]}>("letter"),
-      call<Next>("next"),
+      call<Next>("next", {skip: skipped.current}),
       call<{items: Item[]; stage: {n: number; name: string} | null}>("decided"),
+      call<Arcs>("arcs"),
     ]);
+    if (a) setArcs(a);
     if (d) { setDone(d.items); setDoneStage(d.stage); }
     if (s) setStatus(s);
     if (l) setLetter(l);
-    if (n) { setNext(n); setText(n.item?.proposed ?? ""); setReason(""); setWhy(false); }
+    if (n) {
+      // A reload of the same card (the page comes back into view, Refresh)
+      // keeps what the author has typed; only a new card resets the box.
+      const fresh = n.item?.id !== lastId.current;
+      lastId.current = n.item?.id;
+      setNext(n);
+      if (fresh) { setText(n.item?.paragraph_proposed ?? n.item?.proposed ?? ""); setReason(""); setWhy(false); }
+    }
   }, [call]);
   useEffect(() => { void load(); }, [load]);
   // Coming back to the page (from the chat, or after the phone slept)
@@ -85,12 +140,18 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
   };
 
   const item = next?.item ?? null;
+  const reviewUndo = useUndo(`review:${item?.id ?? "-"}`, text, setText);
   const decideItem = useCallback(async (verdict: "accept" | "reject" | "defer") => {
     if (!item) return;
     if (verdict === "reject" && !reason.trim()) { setError("Say why in a few words, then reject."); return; }
     setBusy(verdict);
-    const edited = item.proposed != null && text !== item.proposed;
-    const r = await call("verdict", {id: item.id, verdict, reason, ...(verdict === "accept" && edited ? {text} : {})});
+    // The box holds the whole paragraph when the card has one; an edit is
+    // sent as the paragraph, and the server finds the passage inside it.
+    const whole = item.paragraph_proposed != null;
+    const start = whole ? item.paragraph_proposed : item.proposed;
+    const edited = item.proposed != null && text !== start;
+    const r = await call("verdict", {id: item.id, verdict, reason,
+      ...(edited ? (whole ? {paragraph: text} : {text}) : {})});
     setBusy("");
     if (r) await load();
   }, [item, text, reason, call, load]);
@@ -103,6 +164,7 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
       if (e.key === "a") void decideItem("accept");
       else if (e.key === "x") (document.getElementById("devedit-reason") as HTMLInputElement | null)?.focus();
       else if (e.key === "d") void decideItem("defer");
+      else if (e.key === "s" && item) { skipped.current = [...skipped.current.filter(x => x !== item.id), item.id]; void load(); }
       else if (e.key === "?") setWhy(w => !w);
     };
     window.addEventListener("keydown", onKey);
@@ -142,6 +204,15 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
     if (l) setLetter(l);
     return null;
   };
+  // An arc card's action reports on its own card, then the list reloads.
+  const arcCall = async (method: "arc_answer" | "arc_settle", params: Record<string, unknown>): Promise<string | null> => {
+    try {
+      const r = await transport.request<{error?: string}>(method, {manuscript, ...params});
+      if (r?.error) return r.error;
+    } catch (err) { return (err as Error).message; }
+    await load();
+    return null;
+  };
   const saveDoc = async (doc: "letter" | "map", text: string): Promise<boolean> => {
     const r = await call("save", {doc, text});
     return r !== null;
@@ -156,6 +227,7 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
           <button className={`pill${tab === "letter" ? " on" : ""}`} onClick={() => setTab("letter")}>Letter &amp; decisions</button>
           <button className={`pill${tab === "review" ? " on" : ""}`} onClick={() => setTab("review")}>Review</button>
           <button className={`pill${tab === "decided" ? " on" : ""}`} onClick={() => setTab("decided")}>Decided{doneStage ? ` · ${doneStage.name}` : ""} · {done.length}</button>
+          {(arcs?.open.length ?? 0) > 0 && <button className={`pill${tab === "arcs" ? " on" : ""}`} onClick={() => setTab("arcs")}>Arcs · {arcs!.open.length}</button>}
           <span className="muted">run {status.run} · must {status.counts.must ?? 0} · should {status.counts.should ?? 0} · could {status.counts.could ?? 0} · accepted {status.counts.accept ?? 0}</span>
         </div>
         {status.unpushed.length > 0 && <div className="devedit-push">
@@ -181,10 +253,19 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
       {tab === "review" && (item ? (
         <div className="card devedit-item">
           <div className="card-head"><span className="ord">#{item.id}</span><span>{item.tier}</span><span>{item.file}</span><span>{next?.left} left</span></div>
-          {item.diff ? <InContext it={item} middle={text !== item.proposed
-              ? <><s className="del">{item.original}</s> <b className="add">{text}</b></> : diffOf(item)} />
+          {item.diff ? ((item.paragraph_proposed ?? item.proposed) === text
+              ? <InContext it={item} middle={diffOf(item)} />
+              : item.paragraph_proposed != null
+                // The author is editing the whole paragraph: show it as it will read.
+                ? <p className="devedit-diff" style={{whiteSpace: "pre-wrap"}}><b className="add">{text}</b></p>
+                : <InContext it={item} middle={<><s className="del">{item.original}</s> <b className="add">{text}</b></>} />)
             : <p className="devedit-diff">{item.move ?? item.proposed}</p>}
           {item.proposed != null && <textarea className="devedit-edit" value={text} onChange={e => setText(e.target.value)} rows={Math.min(12, Math.max(3, Math.ceil(text.length / 70)))} aria-label="Proposed text (edit before accepting)" />}
+          {item.proposed != null && <Listen markdown={text} label="▶ Listen" wait="Preparing audio…" />}
+          {item.proposed != null && <div className="devedit-undo">
+            <button className="pill" disabled={!reviewUndo.canUndo} onClick={reviewUndo.undo}>↶ Undo</button>
+            <button className="pill" disabled={text === (item.paragraph_proposed ?? item.proposed)} onClick={() => setText(item.paragraph_proposed ?? item.proposed ?? "")}>Reset to proposed</button>
+          </div>}
           {why && <div className="devedit-why">{item.reason}{item.finding ? <><br /><span className="muted">Letter finding: {item.finding}</span></> : null}</div>}
           <input id="devedit-reason" className="devedit-reason" placeholder="Reason (needed to reject)" value={reason} onChange={e => setReason(e.target.value)}
             onKeyDown={e => { if (e.key === "Enter") void decideItem("reject"); }} />
@@ -192,6 +273,7 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
             <button className="pill on" disabled={!!busy} onClick={() => void decideItem("accept")}>{busy === "accept" ? "…" : "a Accept"}</button>
             <button className="pill" disabled={!!busy} onClick={() => void decideItem("reject")}>x Reject</button>
             <button className="pill" disabled={!!busy} onClick={() => void decideItem("defer")}>d Defer</button>
+            <button className="pill" disabled={!!busy} onClick={() => { if (item) { skipped.current = [...skipped.current.filter(x => x !== item.id), item.id]; void load(); } }}>s Skip</button>
             <button className="pill" onClick={() => setWhy(w => !w)}>? Why</button>
           </div>
         </div>
@@ -200,6 +282,10 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
       {tab === "decided" && (done.length
         ? done.map(it => <DecidedCard key={it.id} it={it} onRevise={revise} />)
         : <div className="card muted">No item has a verdict yet.</div>)}
+
+      {tab === "arcs" && (arcs?.open.length
+        ? arcs.open.map(a => <ArcCard key={a.file} a={a} onAct={arcCall} />)
+        : <div className="card muted">No essay is waiting on its arc.</div>)}
     </div>
   );
 }
@@ -209,6 +295,7 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
 // file; accepting other wording swaps it (devedit.revise).
 function DecidedCard({ it, onRevise }: { it: Item; onRevise: (it: Item, verdict: string, reason: string, text?: string) => Promise<string | null> }) {
   const [text, setText] = useState(it.final ?? it.proposed ?? "");
+  const decidedUndo = useUndo(`decided:${it.id}`, text, setText);
   const [reason, setReason] = useState(it.reason_given ?? "");
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState("");
@@ -234,6 +321,7 @@ function DecidedCard({ it, onRevise }: { it: Item; onRevise: (it: Item, verdict:
       {msg && <div className="status bad">{msg}</div>}
       {open && <>
         {it.proposed != null && <textarea className="devedit-edit" value={text} onChange={e => setText(e.target.value)} rows={Math.min(12, Math.max(3, Math.ceil(text.length / 70)))} aria-label="Text to accept (edit before accepting)" />}
+        {it.proposed != null && <div className="devedit-undo"><button className="pill" disabled={!decidedUndo.canUndo} onClick={decidedUndo.undo}>↶ Undo</button></div>}
         <input className="devedit-reason" placeholder="Reason (needed to reject)" value={reason} onChange={e => setReason(e.target.value)} />
         <div className="devedit-actions">
           <button className="pill on" disabled={!!busy} onClick={() => void go("accept")}>{busy === "accept" ? "…" : "Accept"}</button>
@@ -242,6 +330,57 @@ function DecidedCard({ it, onRevise }: { it: Item; onRevise: (it: Item, verdict:
           <button className="pill" onClick={() => setOpen(false)}>Cancel</button>
         </div>
       </>}
+    </div>
+  );
+}
+
+// One essay's open arc round: the agent's judgment, its candidate cases,
+// its questions and the author's answers so far; the author answers or
+// settles (devedit arc_answer / arc_settle).
+function ArcCard({ a, onAct }: { a: ArcOpen; onAct: (method: "arc_answer" | "arc_settle", params: Record<string, unknown>) => Promise<string | null> }) {
+  const [text, setText] = useState("");
+  const arcUndo = useUndo(`arc:${a.file}`, text, setText);
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState("");
+  const go = async (key: string, method: "arc_answer" | "arc_settle", params: Record<string, unknown>) => {
+    setBusy(key); setMsg("");
+    const err = await onAct(method, {file: a.file, ...params});
+    setBusy("");
+    if (err) setMsg(err); else if (method === "arc_answer") setText("");
+  };
+  const answer = () => text.trim() ? void go("answer", "arc_answer", {text}) : setMsg("Write an answer first.");
+  const none = () => text.trim() ? void go("none", "arc_settle", {outcome: "none", reason: text}) : setMsg("Say in the box why the essay needs no case, then press No case.");
+  const r = a.round ?? {};
+  return (
+    <div className="card devedit-item">
+      <div className="card-head"><span>{a.file}</span><span className="pill">{a.pass}</span>{a.rounds ? <span className="muted">round {a.rounds}</span> : null}</div>
+      {r.judgment && <p>{r.judgment}</p>}
+      {(r.candidates ?? []).map((c, i) => (
+        <div key={i} className="card">
+          <div className="card-head"><span className="ord">{i + 1}</span><b>{c.case}</b>
+            {c.kind && <span className="pill">{c.kind}</span>}{c.stage && <span className="pill">{c.stage}</span>}</div>
+          {c.story && <p>{c.story}</p>}
+          {c.moral && <p><span className="muted">Moral:</span> {c.moral}</p>}
+          {c.fit && <p><span className="muted">How it fits:</span> {c.fit}</p>}
+          {c.weakness && <p><span className="muted">Weakness:</span> {c.weakness}</p>}
+          {c.source && <p className="muted">Source: {c.source}</p>}
+          {c.text && <p className="devedit-diff" style={{whiteSpace: "pre-wrap"}}>{c.text}</p>}
+          <div className="devedit-actions">
+            <button className="pill on" disabled={!!busy} onClick={() => void go(`c${i}`, "arc_settle", {outcome: "arc", candidate: i + 1, ...(text.trim() ? {reason: text} : {})})}>{busy === `c${i}` ? "…" : "Settle this one"}</button>
+          </div>
+        </div>
+      ))}
+      {(r.questions ?? []).length > 0 && <><div className="muted">Questions</div><ul>{r.questions!.map((q, i) => <li key={i}>{q}</li>)}</ul></>}
+      {(a.answers ?? []).length > 0 && <><div className="muted">Your answers</div>
+        {a.answers!.map((x, i) => <p key={i}><span className="muted">{x.round != null ? `round ${x.round} · ` : ""}{x.at ?? ""}</span><br />{x.text}</p>)}</>}
+      {msg && <div className="status bad">{msg}</div>}
+      <textarea className="devedit-edit" value={text} onChange={e => setText(e.target.value)} rows={4} placeholder="Answer, or the reason for No case" aria-label="Answer to the arc questions" />
+      <div className="devedit-undo"><button className="pill" disabled={!arcUndo.canUndo} onClick={arcUndo.undo}>↶ Undo</button></div>
+      <div className="devedit-actions">
+        <button className="pill on" disabled={!!busy} onClick={answer}>{busy === "answer" ? "sending…" : "Send answer"}</button>
+        <button className="pill" disabled={!!busy} onClick={() => void go("keep", "arc_settle", {outcome: "keep", ...(text.trim() ? {reason: text} : {})})}>{busy === "keep" ? "…" : "Keep current case"}</button>
+        <button className="pill" disabled={!!busy} onClick={none}>{busy === "none" ? "…" : "No case"}</button>
+      </div>
     </div>
   );
 }
@@ -278,7 +417,7 @@ function DecisionCard({ d, onDecide }: { d: Decision & {why?: string}; onDecide:
 
 // Reads the letter aloud with the Mac preview voice, through the same road as
 // the Try text page (/api/try-text); nothing is saved.
-function Listen({ markdown }: { markdown: string }) {
+function Listen({ markdown, label = "▶ Listen to the letter", wait = "Preparing audio… (a minute or two for the whole letter)" }: { markdown: string; label?: string; wait?: string }) {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -305,8 +444,8 @@ function Listen({ markdown }: { markdown: string }) {
   return (
     <div className="listen">
       {!url && <button className="pill on" disabled={busy || !markdown.trim()} onClick={() => void listen()}>
-        {busy ? "Preparing audio… (a minute or two for the whole letter)" : "▶ Listen to the letter"}</button>}
-      {url && <audio ref={player} src={url} controls aria-label="The letter read aloud" />}
+        {busy ? wait : label}</button>}
+      {url && <audio ref={player} src={url} controls aria-label="Read aloud" />}
       {error && <span className="bad">{error}</span>}
     </div>
   );

@@ -1903,6 +1903,53 @@ def _summarize_show(args, db, manuscript: dict) -> None:
     print(row["summary"])
 
 
+def _devedit_arc(db, manuscript, folder, params, args):
+    """`devedit arc …`: the arc step (devedit.py, "arcs")."""
+    from . import devedit
+
+    verb = params[0] if params else "status"
+    try:
+        if verb == "status":
+            rows = devedit.arc_status(db, manuscript, folder)
+            if args.json:
+                print(json.dumps(rows, indent=1))
+                return
+            for r in rows:
+                extra = f" ({r['outcome']})" if r.get("outcome") else ""
+                print(f"  {r['state']:<12} {r['file']}{extra}")
+            return
+        file = params[1]
+        if verb == "pack":
+            print(devedit.arc_pack(db, manuscript, folder, file))
+        elif verb == "show":
+            print(json.dumps(devedit.arc_record(folder, file), ensure_ascii=False,
+                             indent=1))
+        elif verb == "propose":
+            rec = devedit.arc_propose(folder, file, json.loads(sys.stdin.read()))
+            print(ui.green(f"arc round {len(rec['rounds'])} recorded for {file} → "
+                           f"{devedit.arc_path(folder, file)}"))
+        elif verb == "answer":
+            text = args.text if args.text else sys.stdin.read()
+            devedit.arc_answer(folder, file, text, via="chat")
+            print(ui.green(f"answer recorded for {file}"))
+        elif verb == "settle":
+            outcome = params[2]
+            cand = int(params[3]) if len(params) > 3 else None
+            arc = (json.loads(sys.stdin.read())
+                   if outcome == "arc" and cand is None else None)
+            rec = devedit.arc_settle(folder, manuscript, file, outcome,
+                                     candidate=cand, arc=arc,
+                                     reason=args.reason or "", via="chat")
+            print(ui.green(f"{file}: arc settled ({outcome})"
+                           + (" and approved in _profiles/examples.md"
+                              if rec["settled"].get("arc") else "")))
+        else:
+            sys.exit(f"error: unknown arc verb '{verb}'")
+    except (IndexError, LookupError, RuntimeError, ValueError,
+            json.JSONDecodeError) as err:
+        sys.exit(f"error: {err or 'usage: devedit arc status|pack|show|propose|answer|settle <file> …'}")
+
+
 def cmd_devedit(args):
     """`authorlm devedit …`: the chat surface of a developmental edit run
     (devedit.py). The `developmental-editing` skill drives these verbs."""
@@ -2012,6 +2059,9 @@ def cmd_devedit(args):
         except (IndexError, LookupError, RuntimeError) as err:
             sys.exit(f"error: {err or 'usage: devedit pack <file> | --book'}")
         print(text)
+        return
+    if args.action == "arc":
+        _devedit_arc(db, manuscript, folder, params, args)
         return
     if args.action == "note":
         text = args.text if args.text else sys.stdin.read()
@@ -4010,12 +4060,10 @@ def cmd_illus(args):
         if args.name:
             targets = [resolve_slot()]
         else:
-            targets = [
-                {"file": s["file"], "line": s["line"], "prompt": s["prompt"],
-                 "caption": None, "ref": s.get("ref"),
-                 "key": s.get("key"),
-                 "desc_hash": illus.desc_hash(s["prompt"])}
-                for s in illus.slot_report(root)["unrendered"]]
+            # The full slots, cast and prior included: a trimmed copy
+            # rendered scenes text-only (it-d088feca40aa). Lines go stale
+            # as each render writes, so each slot is re-found below.
+            targets = list(illus.slot_report(root)["unrendered"])
             if not targets:
                 print("Every declared slot is rendered — name a fragment to "
                       "re-render one.")
@@ -4024,6 +4072,16 @@ def cmd_illus(args):
                 raise SystemExit("--from needs a single slot — name a fragment")
         rendered = failed = 0
         for slot in targets:
+            try:
+                # Re-read the file and find this slot where it is NOW:
+                # the previous render externalized a tag and inserted an
+                # embed line, so lines taken up front are stale
+                # (it-6bd797b7bd4a).
+                slot = illus.relocate_slot(root, slot)
+            except LookupError as err:
+                print(ui.yellow(f"  render failed (LookupError): {err}"))
+                failed += 1
+                continue
             print(f"Rendering {slot['file']}:{slot['line']} "
                   f"[Illustration: {slot['prompt'][:60]}…]"
                   if len(slot["prompt"]) > 60 else
@@ -4100,7 +4158,7 @@ def cmd_illus(args):
         slot = resolve_slot()
         try:
             result = illus.externalize(root, slot)
-        except ValueError as err:
+        except (ValueError, LookupError) as err:
             raise SystemExit(f"error: {err}")
         print(f"Externalized → _illustrations/prompts/{result['ref']} "
               f"(desc_hash {result['desc_hash']} unchanged — renders "
@@ -9601,11 +9659,15 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["new", "coverage", "status", "step", "terms",
                             "pack", "decisions", "decide", "gather", "group",
                             "build-queue", "next", "verdict", "models",
-                            "read", "note", "stage", "audit"])
+                            "read", "note", "stage", "audit", "arc"])
     p.add_argument("params", nargs="*",
                    help="step: <step> <status>; pack: <file>; read: <file>; "
                         "decide: <n> "
-                        "<answer>; verdict: <id> accept|reject|defer")
+                        "<answer>; verdict: <id> accept|reject|defer; arc: "
+                        "status | pack <file> | show <file> | propose <file> "
+                        "(round JSON on stdin) | answer <file> (--text or stdin) "
+                        "| settle <file> arc <n>|keep|none (arc JSON on stdin "
+                        "when no <n>; none needs --reason)")
     p.add_argument("--run", help="the run id (default: the latest)")
     p.add_argument("--lock", action="store_true",
                    help="coverage: lock the proposed coverage, so the steps "

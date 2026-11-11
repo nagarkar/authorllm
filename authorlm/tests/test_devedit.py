@@ -19,6 +19,11 @@ from authorlm import devedit  # noqa: E402
 # never the author's real archive.
 devedit.ARCHIVE_ROOT = Path(tempfile.mkdtemp(prefix="devedit-archive-"))
 
+# The arc step gates every essay pack; the tests of the edit itself treat
+# every file as exempt, and test_the_arc_step_comes_first restores the rule.
+_ARC_EXEMPT = devedit.arc_exempt
+devedit.arc_exempt = lambda db, manuscript, file: True
+
 TOC = '''outside = ["metaphysic.md"]
 
 [[chapter]]
@@ -852,6 +857,125 @@ def test_the_card_shows_the_whole_paragraph() -> None:
         check("a move item is unchanged", "paragraph" not in move and "context_missing" not in move)
 
 
+def _raises(label: str, fn, needle: str) -> None:
+    try:
+        fn()
+    except (LookupError, RuntimeError, ValueError) as err:
+        check(label, needle in str(err), err)
+    else:
+        check(label, False, "no error")
+
+
+def test_the_arc_step_comes_first() -> None:
+    from authorlm.db import Database
+    _declined = _raises
+
+    devedit.arc_exempt = _ARC_EXEMPT
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            ms = _staged(Path(tmp))
+            prof = Path(ms["path"]) / "_profiles"
+            prof.mkdir(exist_ok=True)
+            (prof / "examples.md").write_text(
+                "# Example arcs\n\n## Ratified arcs\n\n### The sandcastle (lived)\n"
+                "- Starts: title.md: the castle.\n\n## Candidates to review (not binding)\n\n- x\n")
+            (prof / "arc-sources.md").write_text("# Arc sources\n\n### The Carver\n- kind: parable\n")
+            db = Database(Path(tmp) / "authorlm.db")
+            folder = devedit.new_run(ms)
+            devedit.confirm_coverage(folder)
+            _declined("an essay's edit waits for its arc",
+                      lambda: devedit.essay_pack(db, ms, folder, "title.md"),
+                      "arc is not settled")
+            devedit.arc_propose(folder, "title.md", {
+                "judgment": "The case decorates.",
+                "candidates": [{"case": "The level floor", "kind": "hypothetical",
+                                "stage": "starts", "story": "Water waits for a tilt.",
+                                "moral": "Movement waits on difference",
+                                "fit": "difference before things"},
+                               {"case": "The sandcastle", "stage": "develops",
+                                "story": "She returns.", "moral": "m",
+                                "fit": "the house again"}],
+                "questions": ["Do you know a time when…?"]})
+            devedit.arc_answer(folder, "title.md", "The second, but shorter.")
+            rec = devedit.arc_record(folder, "title.md")
+            check("a round and the author's words land in the run's record",
+                  devedit.arc_path(folder, "title.md").exists()
+                  and rec["answers"][0]["text"] == "The second, but shorter."
+                  and rec["pass"] == "arc")
+            _declined("a candidate missing its moral is turned back",
+                      lambda: devedit.arc_propose(folder, "preface.md",
+                                                  {"candidates": [{"case": "x", "story": "y",
+                                                                   "fit": "z"}]}), "moral")
+            devedit.arc_settle(folder, ms, "title.md", "arc", candidate=1)
+            ex = (prof / "examples.md").read_text()
+            check("settling approves the arc into the examples list, above the candidates",
+                  "### The level floor (hypothetical)" in ex
+                  and ex.index("The level floor") < ex.index("## Candidates"), ex)
+            pack = devedit.essay_pack(db, ms, folder, "title.md")
+            check("the edit pack carries the settled arc as given",
+                  "settled arc" in pack and "The level floor" in pack, pack[:400])
+            devedit.arc_propose(folder, "preface.md", {"candidates": [
+                {"case": "The sandcastle", "stage": "develops", "story": "s",
+                 "moral": "m", "fit": "the house again"}]})
+            devedit.arc_settle(folder, ms, "preface.md", "arc", candidate=1)
+            ex = (prof / "examples.md").read_text()
+            check("developing an approved arc adds a stage line, not a second entry",
+                  ex.count("### The sandcastle") == 1
+                  and "- Develops: preface.md: the house again" in ex, ex)
+            apack = devedit.arc_pack(db, ms, folder, "a.md")
+            check("the arc pack holds earlier essays' arcs, the sources and this essay, "
+                  "never later essays",
+                  "title.md** [settled (arc)]" in apack and "The Carver" in apack
+                  and "## This essay" in apack and "**c.md**" not in apack, apack[:800])
+            _declined("'none' needs a reason",
+                      lambda: devedit.arc_settle(folder, ms, "a.md", "none"), "reason")
+            devedit.arc_settle(folder, ms, "a.md", "none", reason="concrete already")
+            rows = {r["file"]: r["state"] for r in devedit.arc_status(db, ms, folder)}
+            check("status names settled and not-started essays",
+                  rows["a.md"] == "settled" and rows["b.md"] == "not started", rows)
+            st = devedit.state(folder)
+            st["stages"] = {"0": {"closed": "x"}}
+            devedit._save_state(folder, st)
+            devedit.arc_path(folder, "preface.md").unlink()
+            check("on a closed stage the step is an arc revision",
+                  devedit.arc_record(folder, "preface.md")["pass"] == "arc-revision"
+                  and devedit.arc_findings_name("preface.md") == "preface--arc")
+    finally:
+        devedit.arc_exempt = lambda db, manuscript, file: True
+
+
+def test_a_whole_paragraph_edit_on_the_card() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ms = _manuscript(Path(tmp))
+        path = Path(ms["path"]) / "one.md"
+        path.write_text("# One\n\nFirst part. Old middle. Last part.\n")
+        folder = devedit.new_run(ms)
+        _with_queue(folder, [
+            {"id": "a", "file": "one.md", "tier": "must", "original": "Old middle.",
+             "proposed": "New middle.", "order": 1},
+            {"id": "b", "file": "one.md", "tier": "must", "original": "Last part.",
+             "proposed": "End.", "order": 2}])
+        devedit.verdict(folder, ms, "a", "accept",
+                        paragraph="First part. Newer middle. Last part.")
+        check("an edit inside the passage keeps the rest of the paragraph",
+              "First part. Newer middle. Last part." in path.read_text(), path.read_text())
+        devedit.verdict(folder, ms, "b", "accept",
+                        paragraph="Opening changed. Newer middle. The end.")
+        before = path.read_text()
+        _with_queue(folder, devedit.queue(folder) + [
+            {"id": "c", "file": "one.md", "tier": "must", "original": "The end.",
+             "proposed": "Fin.", "order": 3}])
+        devedit.verdict(folder, ms, "c", "reject", reason="other problems",
+                        paragraph="Opening changed. Newer middle. Closing.")
+        c = next(i for i in devedit.queue(folder) if i["id"] == "c")
+        check("a rejection keeps the author's edited text and applies nothing",
+              c["author_text"].endswith("Closing.") and c["reason_given"] == "other problems"
+              and path.read_text() == before, c)
+        check("an edit outside the passage replaces the whole paragraph",
+              "Opening changed. Newer middle. The end." in path.read_text()
+              and "First part." not in path.read_text(), path.read_text())
+
+
 def main() -> None:
     tests = [test_coverage_follows_toc,
              test_steps_wait_for_confirmed_coverage,
@@ -872,6 +996,8 @@ def main() -> None:
              test_audit_finds_what_must_be_fixed_first,
              test_a_decision_with_edits_applies_when_answered,
              test_a_verdict_can_be_revised,
+             test_the_arc_step_comes_first,
+             test_a_whole_paragraph_edit_on_the_card,
              test_decided_shows_only_the_current_stage,
              test_the_card_shows_the_whole_paragraph]
     for fn in tests:

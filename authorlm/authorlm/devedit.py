@@ -781,6 +781,226 @@ def _gate(folder: Path, file: str) -> None:
                            "note') first, or pass --trial for a one-off trial")
 
 
+# ------------------------------------------------------------------ arcs
+#
+# The arc step runs on an essay before its developmental edit (author
+# ruling 2026-11-10). A dedicated arc agent judges the essay's current case
+# (does it make the claim; does it assume what the essay says comes later;
+# does it carry the point or decorate it), proposes two or three candidates
+# (new, or the next stage of an existing arc) and asks the author questions.
+# The author answers in chat or on the page; both write one record,
+# `stages/<n>/arcs/<stem>.json`. Settling an arc approves it for now: it is
+# written into the example-arcs list at once, and stays revisable. "No arc"
+# is a valid outcome with a reason. The essay's edit pass takes the settled
+# arc as given. Sermons and Papers skip the step. On an essay whose stage is
+# closed the step is an arc revision: a settled change becomes ordinary
+# items in `findings/<stem>--arc.json`, and nothing else is reopened.
+
+ARC_EXEMPT_GUIDES = ("Sermons", "Papers")
+ARC_OUTCOMES = ("arc", "none", "keep")
+
+
+def arc_exempt(db, manuscript: dict, file: str) -> bool:
+    """Sermons and Papers have no arc step: the arcs rule does not apply."""
+    row = db.one("SELECT g.name FROM style_attachments a JOIN style_guides g "
+                 "ON g.id = a.guide_id WHERE a.manuscript_id = ? AND a.file = ?",
+                 (manuscript["id"], file))
+    return bool(row) and str(row["name"]).startswith(ARC_EXEMPT_GUIDES)
+
+
+def arc_path(folder: Path, file: str, stage: dict | None = None) -> Path:
+    stage = stage or stage_of(folder, file)
+    if stage is None:
+        raise LookupError(f"'{file}' is in no stage of this run")
+    return stage_dir(folder, stage["n"]) / "arcs" / f"{Path(file).stem}.json"
+
+
+def arc_record(folder: Path, file: str, stage: dict | None = None) -> dict:
+    stage = stage or stage_of(folder, file)
+    if stage is None:
+        raise LookupError(f"'{file}' is in no stage of this run")
+    default = {"file": file,
+               "pass": "arc-revision" if stage["closed"] else "arc",
+               "rounds": [], "answers": [], "settled": None}
+    return _read_json(arc_path(folder, file, stage), default)
+
+
+def _save_arc(folder: Path, record: dict) -> dict:
+    _write_json(arc_path(folder, record["file"]), record)
+    return record
+
+
+def arc_propose(folder: Path, file: str, data: dict) -> dict:
+    """Record one round of the arc agent: `{judgment, candidates,
+    questions}`. Each candidate: `{case, kind, stage, story, moral, fit,
+    weakness, source, text}`; `stage` is "starts" or "develops"."""
+    if not isinstance(data, dict):
+        raise ValueError("an arc round is a JSON object")
+    cands = data.get("candidates") or []
+    for c in cands:
+        missing = [k for k in ("case", "story", "moral", "fit") if not c.get(k)]
+        if missing:
+            raise ValueError(f"candidate '{c.get('case', '?')}' lacks "
+                             + ", ".join(missing))
+    rec = arc_record(folder, file)
+    if rec.get("settled"):
+        rec["settled"] = None  # a new round reopens a settled arc
+    rec["rounds"].append({"at": _now(), "judgment": data.get("judgment", ""),
+                          "candidates": cands,
+                          "questions": data.get("questions") or []})
+    return _save_arc(folder, rec)
+
+
+def arc_answer(folder: Path, file: str, text: str, via: str = "chat") -> dict:
+    """The author's answer, in their own words, to the latest round."""
+    if not text.strip():
+        raise ValueError("an answer needs text")
+    rec = arc_record(folder, file)
+    rec["answers"].append({"at": _now(), "round": len(rec["rounds"]),
+                           "text": text.strip(), "via": via})
+    return _save_arc(folder, rec)
+
+
+def arc_settle(folder: Path, manuscript: dict, file: str, outcome: str, *,
+               candidate: int | None = None, arc: dict | None = None,
+               reason: str = "", via: str = "chat") -> dict:
+    """Settle the essay's arc. `outcome` is "arc" (a candidate by its
+    1-based number in the latest round, or an `arc` dict), "keep" (the
+    current case stands) or "none" (no case; `reason` says why). An "arc"
+    is approved for now and written into the example-arcs list."""
+    if outcome not in ARC_OUTCOMES:
+        raise ValueError(f"outcome must be one of {', '.join(ARC_OUTCOMES)}")
+    rec = arc_record(folder, file)
+    chosen = None
+    if outcome == "arc":
+        if arc is not None:
+            chosen = dict(arc)
+        else:
+            if not rec["rounds"] or candidate is None:
+                raise ValueError("settle an arc with a candidate number or an arc")
+            cands = rec["rounds"][-1]["candidates"]
+            if not 1 <= candidate <= len(cands):
+                raise ValueError(f"candidate {candidate} is not in the latest "
+                                 f"round (1–{len(cands)})")
+            chosen = dict(cands[candidate - 1])
+        for k in ("case", "story", "moral", "fit"):
+            if not chosen.get(k):
+                raise ValueError(f"the settled arc lacks {k}")
+    elif outcome == "none" and not reason.strip():
+        raise ValueError("'none' needs a reason")
+    rec["settled"] = {"at": _now(), "outcome": outcome, "arc": chosen,
+                      "reason": reason.strip(), "via": via}
+    _save_arc(folder, rec)
+    if chosen:
+        approve_arc(manuscript, file, chosen)
+    return rec
+
+
+def approve_arc(manuscript: dict, file: str, arc: dict) -> None:
+    """Write a settled arc into `_profiles/examples.md` under "Ratified
+    arcs": a new entry, or a stage line on an existing one. Approved for
+    now; any entry stays revisable."""
+    path = Path(manuscript["path"]) / "_profiles" / "examples.md"
+    text = path.read_text(encoding="utf-8") if path.exists() else (
+        "# Example arcs\n\n## Ratified arcs\n\n## Candidates to review (not binding)\n")
+    stage = "Develops" if arc.get("stage") == "develops" else "Starts"
+    line = f"- {stage}: {file}: {arc['fit']}"
+    head = f"### {arc['case']}"
+    cand = text.find("\n## Candidates to review")
+    ratified_end = cand if cand >= 0 else len(text)
+    at = text.find(head, 0, ratified_end)
+    if at >= 0:
+        nxt = text.find("\n### ", at + len(head))
+        end = min(e for e in (nxt if nxt >= 0 else len(text), ratified_end) if e >= 0)
+        block = text[at:end].rstrip("\n")
+        if line not in block:
+            text = text[:at] + block + "\n" + line + "\n" + text[end:]
+    else:
+        kind = arc.get("kind") or "case"
+        entry = (f"{head} ({kind})\n- Approved by the author {_now()[:10]} "
+                 f"(arc step).\n- Summary: {arc['story']} Moral: {arc['moral']}\n"
+                 + (f"- Source: {arc['source']}\n" if arc.get("source") else "")
+                 + line + "\n\n")
+        text = text[:ratified_end].rstrip("\n") + "\n\n" + entry + text[ratified_end:].lstrip("\n")
+    path.write_text(text, encoding="utf-8")
+
+
+def arc_status(db, manuscript: dict, folder: Path) -> list[dict]:
+    """Every covered edited essay in reading order with its arc state:
+    exempt, settled (and how), open (a round waits for the author) or
+    not started."""
+    out = []
+    # Stages are computed once: each call reads the TOC and every file.
+    by_file = {f: s for s in stages(folder) for f in s["files"]}
+    guides = {r["file"]: r["name"] for r in db.all(
+        "SELECT a.file, g.name FROM style_attachments a JOIN style_guides g "
+        "ON g.id = a.guide_id WHERE a.manuscript_id = ?", (manuscript["id"],))}
+    for f in state(folder)["coverage"]["edit"]:
+        if str(guides.get(f, "")).startswith(ARC_EXEMPT_GUIDES):
+            out.append({"file": f, "state": "exempt"})
+            continue
+        if f not in by_file:
+            continue
+        rec = arc_record(folder, f, by_file[f])
+        st = ("settled" if rec.get("settled") else
+              "open" if rec["rounds"] else "not started")
+        out.append({"file": f, "state": st, "pass": rec["pass"],
+                    "outcome": (rec.get("settled") or {}).get("outcome")})
+    return out
+
+
+def arc_findings_name(file: str) -> str:
+    """The findings file a settled arc's items go to: `<stem>--arc`."""
+    return f"{Path(file).stem}--arc"
+
+
+def _arcs_line(summary: str | None) -> str:
+    m = re.search(r"^ARCS:\s*(.*)$", summary or "", re.M)
+    return m.group(1).strip() if m else "(no ARCS line)"
+
+
+def arc_pack(db, manuscript: dict, folder: Path, file: str) -> str:
+    """What the arc agent is given: the standing context (style law,
+    audience, market, the example-arcs list), the arc sources, the arcs of
+    every essay before this one in reading order (never later ones: what
+    each tells, its moral and how it serves its essay, settled or not),
+    this essay's full text, and this essay's arc record so far."""
+    names = covered(folder)
+    if file not in names:
+        raise LookupError(f"'{file}' is not covered by this run")
+    rec = arc_record(folder, file)
+    out = [f"# Arc context for {file}", "",
+           f"Arc step ({rec['pass']}). Record your round with "
+           f"'authorlm devedit arc propose {file} --json <file>'.", ""]
+    out += _standing_context(db, manuscript, file)
+    out += ["## Arc sources (candidates, not binding)", "",
+            _profile(manuscript, "arc-sources") or "(no _profiles/arc-sources.md: "
+            "ask the author what the source of stories, quotes and metaphors is)", ""]
+    out += ["## Arcs told so far, in reading order", ""]
+    for other in names[:names.index(file)]:
+        try:
+            orec = arc_record(folder, other)
+        except LookupError:
+            orec = {"settled": None}
+        settled = orec.get("settled")
+        tag = (f"settled ({settled['outcome']})" if settled else "not settled yet")
+        out.append(f"- **{other}** [{tag}]: {_arcs_line(_essay_summary(db, manuscript, other))}")
+        if settled and settled.get("arc"):
+            a = settled["arc"]
+            out.append(f"  - settled arc: {a['case']}: {a['story']} Moral: "
+                       f"{a['moral']}. Serves: {a['fit']}")
+        if settled and settled["outcome"] == "none":
+            out.append(f"  - no arc: {settled['reason']}")
+    out += ["", "## This essay's summary (ARCS line)", "",
+            _arcs_line(_essay_summary(db, manuscript, file)), "",
+            "## This essay", "", _disk_files(manuscript)[file].strip(), ""]
+    if rec["rounds"] or rec["answers"]:
+        out += ["## This essay's arc record so far", "",
+                "```json", json.dumps({k: rec[k] for k in ("rounds", "answers", "settled")},
+                                      ensure_ascii=False, indent=1), "```", ""]
+    return "\n".join(out) + "\n"
+
+
 # ------------------------------------------------------------------ audit
 
 def audit(db, manuscript: dict, folder: Path) -> list[str]:
@@ -904,6 +1124,10 @@ def essay_pack(db, manuscript: dict, folder: Path, file: str,
     if not trial:
         _gate(folder, file)
     n = pass_of(folder, file)
+    if not trial and n == 1 and not arc_exempt(db, manuscript, file) \
+            and not arc_record(folder, file).get("settled"):
+        raise RuntimeError(f"{file}: its arc is not settled yet — run the arc "
+                           f"step first ('devedit arc pack {file}')")
     stage = stage_of(folder, file)
     out = [f"# Context for {file}", "",
            f"Pass {n} on this essay"
@@ -918,6 +1142,17 @@ def essay_pack(db, manuscript: dict, folder: Path, file: str,
             re.sub(r"^(#+)", r"#\1", book, flags=re.M) if book
             else "(empty: this is the first essay's pass)", ""]
     out += _earlier_arcs(folder, names, file)
+    settled = arc_record(folder, file).get("settled") if stage else None
+    if settled:
+        a = settled.get("arc")
+        out += ["## This essay's settled arc (the author's; take it as given)", "",
+                (f"**{a['case']}** ({a.get('stage', 'starts')}): {a['story']} "
+                 f"Moral: {a['moral']}. Serves: {a['fit']}"
+                 + (f"\n\nText: {a['text']}" if a.get("text") else "")) if a else
+                ("Keep the essay's current case." if settled["outcome"] == "keep"
+                 else f"No case in this essay: {settled['reason']}"),
+                "", "Do not add, replace or extend a case; revise only the "
+                "wording of the settled one.", ""]
     mine = ledger(folder, file)
     if mine or n > 1:
         out += [f"## The ledger for this essay (pass {n})", "",
@@ -1260,10 +1495,10 @@ def queue(folder: Path) -> list[dict]:
 
 
 def ordered(items: list[dict]) -> list[dict]:
-    """Review order: tier, then reading order of file, then position; linked
-    items stay together behind the first of their group."""
-    return sorted(items, key=lambda i: (_TIER_RANK.get(i.get("tier"), 9),
-                                        i.get("order", 0), i["id"]))
+    """Review order: reading order of file, then position in it, so the
+    author walks each essay front to back; tier only breaks ties."""
+    return sorted(items, key=lambda i: (i.get("order", 0),
+                                        _TIER_RANK.get(i.get("tier"), 9), i["id"]))
 
 
 def pending(folder: Path) -> list[dict]:
@@ -1296,7 +1531,8 @@ def apply_item(manuscript: dict, item: dict, text: str | None = None) -> str:
 
 
 def verdict(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
-            text: str | None = None, reason: str = "") -> dict:
+            text: str | None = None, reason: str = "",
+            paragraph: str | None = None) -> dict:
     """Record the author's verdict on one item. Accept applies it (with
     `text` when the author rewrote the proposal); reject asks for a reason;
     defer leaves it for later."""
@@ -1308,7 +1544,37 @@ def verdict(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
         raise LookupError(f"no item {item_id}")
     if verdict_ == "reject" and not reason.strip():
         raise ValueError("a rejection needs the author's reason")
-    if verdict_ == "accept" and item.get("original"):
+    if verdict_ != "accept":
+        # Rejected or deferred with an edit: nothing is applied; the author's
+        # text is kept beside the reason for the next round to work from.
+        authored = paragraph if paragraph is not None else text
+        if authored is not None:
+            item["author_text"] = authored
+        text = paragraph = None
+    if verdict_ == "accept" and paragraph is not None and item.get("original"):
+        # The author edited the whole paragraph on the card. When the text
+        # around the passage is untouched, keep the edit to the passage;
+        # otherwise the edited paragraph replaces the paragraph.
+        ctx = _paragraph_context(item, manuscript)
+        if ctx.get("context_missing"):
+            raise RuntimeError(f"item {item_id}: its paragraph is no longer "
+                               "in the file; the item needs checking again")
+        pre, suf = ctx["prefix"], ctx["suffix"]
+        # A line break typed on the card starts a new paragraph: Markdown and
+        # the Doc both need a blank line, or the tab and the file disagree.
+        paragraph = re.sub(r"[ \t]*\n[ \t]*(?=\S)", "\n\n",
+                           re.sub(r"\n{2,}", "\n", paragraph.strip("\n")))
+        if paragraph.startswith(pre) and paragraph.endswith(suf) \
+                and len(paragraph) >= len(pre) + len(suf):
+            text = paragraph[len(pre):len(paragraph) - len(suf)]
+        else:
+            whole = dict(item, original=pre + item["original"] + suf)
+            apply_item(manuscript, whole, paragraph)
+            item["applied"] = _now()
+            item["pushed"] = None
+            text = paragraph
+            item["final_is_paragraph"] = True
+    if verdict_ == "accept" and item.get("original") and not item.get("applied"):
         apply_item(manuscript, item, text)
         item["applied"] = _now()
         item["pushed"] = None
@@ -1319,7 +1585,7 @@ def verdict(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
     with (folder / "verdicts.jsonl").open("a", encoding="utf-8") as log:
         log.write(json.dumps({k: item.get(k) for k in
                               ("id", "file", "verdict", "final",
-                               "reason_given", "decided")},
+                               "reason_given", "author_text", "decided")},
                              ensure_ascii=False) + "\n")
     return item
 
@@ -1382,6 +1648,12 @@ def revise(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
         raise ValueError(f"item {item_id} has no verdict yet; give it one first")
     if verdict_ == "reject" and not reason.strip():
         raise ValueError("a rejection needs the author's reason")
+    if verdict_ != "accept":
+        # Rejected or deferred with an edit: nothing is applied; the author's
+        # text is kept beside the reason for the next round to work from.
+        if text is not None:
+            item["author_text"] = text
+        text = None
     was_applied = bool(item.get("applied") and item.get("original"))
     applied_text = item.get("final") if item.get("final") is not None else item.get("proposed")
     final = item.get("proposed") if text is None else text
@@ -1520,13 +1792,19 @@ def dispatch(method: str, params: dict[str, Any], workspace: str | None = None
         return {"decision": row}
     if method == "next":
         rest = pending(folder)
-        return {"item": _for_page(rest[0] if rest else None, manuscript), "left": len(rest),
+        # Skipped cards (the page's own list) wait at the back; when only
+        # skipped cards are left, they come round again in order.
+        skip = list(params.get("skip") or [])
+        shown = [i for i in rest if i["id"] not in skip] or sorted(
+            rest, key=lambda i: skip.index(i["id"]) if i["id"] in skip else -1)
+        return {"item": _for_page(shown[0] if shown else None, manuscript), "left": len(rest),
                 "counts": _counts(folder), "unpushed": unpushed(folder)}
     if method == "verdict":
         try:
             item = verdict(folder, manuscript, str(params["id"]),
                            str(params["verdict"]), text=params.get("text"),
-                           reason=str(params.get("reason") or ""))
+                           reason=str(params.get("reason") or ""),
+                           paragraph=params.get("paragraph"))
         except (LookupError, RuntimeError, ValueError) as err:
             return {"error": str(err)}
         return {"item": _for_page(item, manuscript), "unpushed": unpushed(folder)}
@@ -1564,6 +1842,33 @@ def dispatch(method: str, params: dict[str, Any], workspace: str | None = None
             return {"error": str(err)}
         mark_pushed(folder, file)
         return {"pushed": file, "unpushed": unpushed(folder)}
+    if method == "arcs":
+        db = session._thread_db()
+        open_ = []
+        by_file = {f: s for s in stages(folder) for f in s["files"]}
+        for row in arc_status(db, manuscript, folder):
+            if row["state"] == "open":
+                rec = arc_record(folder, row["file"], by_file[row["file"]])
+                open_.append({"file": row["file"], "pass": rec["pass"],
+                              "round": rec["rounds"][-1], "rounds": len(rec["rounds"]),
+                              "answers": rec["answers"]})
+        return {"open": open_, "status": arc_status(db, manuscript, folder)}
+    if method == "arc_answer":
+        try:
+            rec = arc_answer(folder, str(params["file"]), str(params.get("text") or ""),
+                             via="page")
+        except (LookupError, ValueError) as err:
+            return {"error": str(err)}
+        return {"answers": rec["answers"]}
+    if method == "arc_settle":
+        try:
+            rec = arc_settle(folder, manuscript, str(params["file"]),
+                             str(params["outcome"]),
+                             candidate=int(params["candidate"]) if params.get("candidate") else None,
+                             reason=str(params.get("reason") or ""), via="page")
+        except (LookupError, ValueError) as err:
+            return {"error": str(err)}
+        return {"settled": rec["settled"]}
     return {"error": f"unknown method '{method}'"}
 
 

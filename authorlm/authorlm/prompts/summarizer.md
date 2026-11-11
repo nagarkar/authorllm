@@ -53,10 +53,11 @@ the section summaries record them.
 ARCS: Each case this unit tells that the book may tell again: a story, a
 lived scene, a parable or a historical episode that carries an idea (e.g.
 the burning house, a child sharing a cookie). One per case, separated by
-semicolons: a short name for the case, then "starts" or "develops", then
-what this telling carries in a few words. "develops" when a PRIOR SUMMARY's
-ARCS already names the case, saying what stage is new here. A passing
-mention with no telling is not an arc. "none" if the unit tells no case.
+semicolons, each in this shape: a short name; "starts" or "develops"; the
+story in one line (who, what happens); its moral in a few words; and how it
+serves this unit's message. "develops" when a PRIOR SUMMARY's ARCS already
+names the case, saying what stage is new here. A passing mention with no
+telling is not an arc. "none" if the unit tells no case.
 
 DOES NOT: What this unit deliberately does not explain or re-explain, leaving
 it to other units (the LEAVES OPEN lines and the PRIOR SUMMARIES tell you
