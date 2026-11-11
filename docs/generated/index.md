@@ -1004,12 +1004,6 @@ Retake must not destroy a good paragraph take when the write fails mid-flight.
 
 `gdocs._holds_doc_edits` is the push-guard door for a hand-settled conflict.
 
-## `tests.test_illus_batch_render`
-
-`authorlm/tests/test_illus_batch_render.py`
-
-`illus render` with no fragment renders every unrendered slot, one after another, exactly as single-slot renders would.
-
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`
