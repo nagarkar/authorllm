@@ -140,6 +140,15 @@ def _form_row(thread: dict, form: dict | None, marked: str | None,
             local, at, at + len(old))
     row["edited_in_doc"] = (row["current"] is not None
                             and row["current"] != row["proposed"])
+    # A ruling made on a green half the tab no longer reads (the Doc was
+    # edited after it) does not count: the form goes back to To rule,
+    # flagged, and merging waits for a new ruling. The held ruling stays
+    # in the database until then, so the page can say what it was.
+    row["ruling_stale"] = None
+    if (row["ruling"] and row["current"] is not None
+            and row["current"] != row["ruling"]["seen"]):
+        row["ruling_stale"] = row["ruling"]
+        row["ruling"] = None
     return row
 
 

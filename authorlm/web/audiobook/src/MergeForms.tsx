@@ -11,6 +11,9 @@ interface Form {
   id: string; origin: string; note: string; kind: "replace" | "insert";
   old: string; proposed: string; current: string | null; found: boolean; edited_in_doc: boolean;
   prefix: string; suffix: string; anchor: string; ruling: Ruling | null;
+  // A ruling the Doc overtook (the green half changed after it): the form
+  // is back under To rule, and this says what the ruling was.
+  ruling_stale: Ruling | null;
 }
 interface Diff { base_found: boolean; doc: string; local: string; note?: string; }
 interface FileGroup {
@@ -84,12 +87,27 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
     };
   }, [load]);
 
+  // A ruling is saved at once (milliseconds) and shown in place: the form
+  // moves to Decided without reading the whole Doc again, which takes
+  // seconds. A quiet re-read follows a little after the last ruling; if
+  // the Doc has overtaken a ruling meanwhile, that re-read sends the form
+  // back to To rule, flagged.
+  const recheck = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(recheck.current), []);
   const decide = async (f: Form, verdict: string, text?: string): Promise<string | null> => {
+    let ruling: Ruling | null;
     try {
-      const r = await transport.request<{error?: string}>("decide", {manuscript, id: f.id, verdict, seen: f.current, ...(text != null ? {text} : {})});
+      const r = await transport.request<{error?: string; ruling?: Ruling | null}>("decide", {manuscript, id: f.id, verdict, seen: f.current, ...(text != null ? {text} : {})});
       if (r?.error) return r.error;
+      ruling = r.ruling ?? null;
     } catch (err) { return (err as Error).message; }
-    await load();
+    setData(d => d && {...d, files: d.files.map(g => {
+      if (!g.forms.some(x => x.id === f.id)) return g;
+      const forms = g.forms.map(x => x.id === f.id ? {...x, ruling, ruling_stale: null} : x);
+      return {...g, forms, undecided: forms.filter(x => x.found && !x.ruling).length};
+    })});
+    window.clearTimeout(recheck.current);
+    recheck.current = window.setTimeout(() => void load(), 20000);
     return null;
   };
 
@@ -233,6 +251,7 @@ function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: strin
           <p className="devedit-diff">{ruled === "decline" ? <s className="del">{shown}</s> : <>New paragraph: {newPart}</>}</p>
         </>}
       {f.edited_in_doc && <div className="muted">Edited in the Doc. Staged as: “{f.proposed}”</div>}
+      {f.ruling_stale && <div className="moved">The Doc changed this form after you ruled ({f.ruling_stale.verdict === "accept" ? "accepted" : f.ruling_stale.verdict === "edit" ? "edited" : "declined"}). Rule again on the text as it reads now.</div>}
       {!f.found && <div className="moved">This form is no longer in the tab (taken out by hand?). Merge reads what the tab holds for it; it takes no ruling here.</div>}
       {msg && <div className="status bad">{msg}</div>}
       {f.found && editing && <>
