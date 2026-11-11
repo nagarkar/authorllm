@@ -113,6 +113,44 @@ def test_second_run_same_day_gets_its_own_folder() -> None:
         check("two runs, two folders", a.name == "2026-11-06"
               and b.name == "2026-11-06-2", (a.name, b.name))
         check("the latest run is the default", devedit.run_dir(ms) == b)
+        # Eleven same-day folders: lexicographic sort would pick -9 over -11.
+        latest = b
+        for _ in range(9):
+            latest = devedit.new_run(ms, today="2026-11-06")
+        check("the eleventh same-day run is still the default",
+              latest.name == "2026-11-06-11"
+              and devedit.run_dir(ms) == latest,
+              (latest.name, devedit.run_dir(ms).name))
+
+
+def test_accept_refuses_path_escape() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        ms = _manuscript(root)
+        victim = root / "SECRET.md"
+        victim.write_text("KEEP\n")
+        abs_victim = root / "ABS.md"
+        abs_victim.write_text("KEEP2\n")
+        folder = devedit.new_run(ms)
+        _with_queue(folder, [
+            {"id": "e1", "file": "../SECRET.md", "tier": "must",
+             "original": "KEEP", "proposed": "PWNED"},
+            {"id": "e2", "file": str(abs_victim), "tier": "must",
+             "original": "KEEP2", "proposed": "PWNED2"}])
+        try:
+            devedit.verdict(folder, ms, "e1", "accept")
+            check("a ../ file is not applied", False)
+        except ValueError as err:
+            check("a ../ file is refused", "manuscript-relative" in str(err), err)
+        check("the outside file is untouched", victim.read_text() == "KEEP\n")
+        try:
+            devedit.verdict(folder, ms, "e2", "accept")
+            check("an absolute file is not applied", False)
+        except ValueError as err:
+            check("an absolute file is refused", "manuscript-relative" in str(err), err)
+        check("the absolute victim is untouched", abs_victim.read_text() == "KEEP2\n")
+        check("neither escape left a verdict",
+              not any(i.get("verdict") for i in devedit.queue(folder)))
 
 
 def test_term_index_covers_only_covered_files() -> None:
@@ -270,6 +308,7 @@ def main() -> None:
              test_steps_wait_for_confirmed_coverage,
              test_done_step_goes_stale_when_a_covered_file_changes,
              test_second_run_same_day_gets_its_own_folder,
+             test_accept_refuses_path_escape,
              test_term_index_covers_only_covered_files,
              test_decisions_are_binding_or_provisional,
              test_accept_applies_and_reject_needs_reason,
