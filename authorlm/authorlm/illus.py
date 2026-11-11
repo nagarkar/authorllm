@@ -373,6 +373,20 @@ def externalize(root: Path, slot: dict) -> dict:
     if slot.get("ref"):
         raise ValueError("this slot is already externalized "
                          f"(⇢ {slot['ref']})")
+    path = root / slot["file"]
+    lines = path.read_text(encoding="utf-8").split("\n")
+    # The tag line is rewritten in place, so the line must still BE this
+    # tag. A line number taken before an earlier write in the same file
+    # can point at prose; writing there overwrote six paragraphs on
+    # 2026-11-10 (it-6bd797b7bd4a). Stop rather than touch prose.
+    at = slot.get("line") or 0
+    tag = parse_tag(lines[at - 1]) if 0 < at <= len(lines) else None
+    if (tag is None or tag.get("ref")
+            or desc_hash(tag["prompt"]) != slot["desc_hash"]):
+        raise LookupError(
+            f"{slot['file']}:{at} is no longer the tag "
+            f"[Illustration: {_excerpt_of(slot['prompt'])}]; re-find the "
+            "slot before writing (nothing was changed)")
     directory = root / ILLUS_DIR / PROMPTS_SUBDIR
     directory.mkdir(parents=True, exist_ok=True)
     base = slug(slot["prompt"])
@@ -380,8 +394,6 @@ def externalize(root: Path, slot: dict) -> dict:
     while (directory / name).exists():
         name, n = f"{base}-{n}.md", n + 1
     (directory / name).write_text(slot["prompt"] + "\n", encoding="utf-8")
-    path = root / slot["file"]
-    lines = path.read_text(encoding="utf-8").split("\n")
     lines[slot["line"] - 1] = _tag_line(
         _excerpt_of(slot["prompt"]), name, slot.get("caption"),
         slot.get("cast_id"), slot.get("cast"), slot.get("prior"))
@@ -804,6 +816,34 @@ def set_embed(path: Path, key: str, candidate_name: str) -> bool:
     return True
 
 
+def relocate_slot(root: Path, slot: dict) -> dict:
+    """The slot as its file declares it NOW: re-read the file and find
+    the same slot (by key, or for an inline slot by its description
+    hash, nearest its old line), returning the full scan dict at its
+    current line, with cast and prior. A slot dict goes stale the moment
+    any write lands in its file (an externalize, an embed line), so
+    every render re-finds its slot first; a multi-slot run then renders
+    exactly what one-at-a-time renders would (it-6bd797b7bd4a,
+    it-d088feca40aa). LookupError when the slot is gone."""
+    root = Path(root)
+    rel = slot["file"]
+    text = _read_manuscript_text(root / rel, rel)
+    found = scan_text(text, load_prompts(root))
+    key = slot.get("key")
+    if key:
+        hits = [s for s in found if s["key"] == key]
+    else:
+        hits = [s for s in found
+                if not s["key"] and s["desc_hash"] == slot["desc_hash"]]
+    if not hits:
+        raise LookupError(
+            f"{rel}: the slot [Illustration: {_excerpt_of(slot['prompt'])}]"
+            " is no longer in the file")
+    old = slot.get("line") or 0
+    best = min(hits, key=lambda s: abs(s["line"] - old))
+    return {**slot, **best, "file": rel}
+
+
 def find_slot(root: Path, fragment: str) -> list[dict]:
     """Slots whose prompt contains the fragment (case-insensitive),
     each as {file, line, prompt, caption, desc_hash}."""
@@ -1069,12 +1109,27 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
         lambda prompt, input_png, references=None:
         generate_image(config, prompt, input_png, references=references,
                        model=pin["model"], size=pin["size"]))
-    slot = ensure_key(root, slot)
-    deschash = slot["desc_hash"]
+    # The file is the truth: re-find the slot so a stale or partial
+    # dict (an old line number, a dropped cast) can neither write at the
+    # wrong line nor render without its references.
+    slot = relocate_slot(root, slot)
     assembled = effective_prompt(db, manuscript, slot)
     if assembled["reference_errors"]:
         raise LookupError("cast unresolved — " +
                           "; ".join(assembled["reference_errors"]))
+    declared = list(slot.get("cast") or []) + (
+        [slot["prior"]] if slot.get("prior") else [])
+    attached = {r["slug"] for r in assembled["references"]}
+    missing = [cid for cid in declared if cid not in attached]
+    if missing:
+        raise LookupError(
+            f"{slot['file']}:{slot['line']} [Illustration: "
+            f"{_excerpt_of(slot['prompt'])}] declares "
+            f"{', '.join(missing)} but no reference resolved for "
+            f"{'it' if len(missing) == 1 else 'them'}; not rendering "
+            "text-only")
+    slot = ensure_key(root, slot)
+    deschash = slot["desc_hash"]
     references = [r["path"].read_bytes() for r in assembled["references"]]
     shash = assembled["style_hash"]
     prompt = assembled["composed"]
