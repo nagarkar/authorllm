@@ -31,12 +31,28 @@ const STATE_WORDS: Record<string, string> = {
 
 // A form the tab no longer holds (or every form, when the tab itself was
 // not found in the export) is invalid: it is neither to rule nor decided.
-export interface FormsTab { file: string; count: number; toRule: number; invalid: number; }
+export interface FormsTab {
+  file: string; count: number; toRule: number; invalid: number;
+  // Merge state: ready (nothing blocks a merge), its place in the queue
+  // (-1 when not queued), and whether it is merging now.
+  ready: boolean; queued: number; merging: boolean;
+}
+// The header (App) holds the Tab menu and the merge buttons; the page hands
+// it the tabs and these two actions.
+export interface FormsActions { mergeTab: (file: string) => void; mergeAll: () => void; }
+
+// Why a tab cannot be merged yet, or "" when it can.
+function blockerOf(g: FileGroup): string {
+  return g.state === "conflict" ? "Changed on both sides: settle that first."
+    : g.state === "missing" ? "The tab was not found in the Doc's export."
+      : g.undecided ? `${g.undecided} form${g.undecided === 1 ? "" : "s"} still to rule on.` : "";
+}
 
 // One Doc tab at a time: the header's Tab menu (App) picks it from the tabs
 // this listing reports, which are only the tabs with open forms.
 export function MergeForms({ transport, manuscript, tab, onTabs }: {
-  transport: Transport; manuscript: string; tab: string; onTabs: (tabs: FormsTab[]) => void;
+  transport: Transport; manuscript: string; tab: string;
+  onTabs: (tabs: FormsTab[], actions: FormsActions) => void;
 }) {
   const [data, setData] = useState<Listing | null>(null);
   const [error, setError] = useState("");
@@ -56,7 +72,6 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
     finally { setLoading(false); }
   }, [transport, manuscript]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { if (data) onTabs(data.files.map(g => ({file: g.file, count: g.count, toRule: g.forms.filter(f => f.found && !f.ruling).length, invalid: g.forms.filter(f => !f.found).length}))); }, [data, onTabs]);
   // Coming back to the page (from the Doc, where the author may have edited
   // a form) reloads it, as the Dev edit does.
   useEffect(() => {
@@ -98,12 +113,29 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
     done.current = n;
   }, [queue.results, load]);
 
-  const merge = async (file: string) => {
+  const merge = useCallback(async (file: string) => {
     try {
       const q = await transport.request<Queue & {error?: string}>("enqueue", {manuscript, file});
       if (q.error) setError(q.error); else setQueue(q);
     } catch (err) { setError((err as Error).message); }
-  };
+  }, [transport, manuscript]);
+  // Merge all: every tab nothing blocks and not already in the queue, in
+  // the Tab menu's order; the server still runs them one after another.
+  const mergeAll = useCallback(async () => {
+    if (!data) return;
+    for (const g of data.files) {
+      if (!blockerOf(g) && queue.running !== g.file && !queue.pending.includes(g.file)) await merge(g.file);
+    }
+  }, [data, queue, merge]);
+  useEffect(() => {
+    if (!data) return;
+    onTabs(data.files.map(g => ({
+      file: g.file, count: g.count,
+      toRule: g.forms.filter(f => f.found && !f.ruling).length,
+      invalid: g.forms.filter(f => !f.found).length,
+      ready: !blockerOf(g), queued: queue.pending.indexOf(g.file), merging: queue.running === g.file,
+    })), {mergeTab: f => void merge(f), mergeAll: () => void mergeAll()});
+  }, [data, queue, merge, mergeAll, onTabs]);
 
   if (!data && !error) return <div className="boot">Reading the open forms from the Doc…</div>;
   const landed = Object.values(results).filter(r => !data?.files.some(g => g.file === r.file));
@@ -116,22 +148,22 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
           <button className="pill" disabled={loading} onClick={() => void load()}>{loading ? "reading…" : "⟳ Refresh"}</button>
           {data?.doc_url && <a className="pill" href={data.doc_url} target="_blank" rel="noreferrer">Open the Doc ↗</a>}
         </div>
-        {active && <div className="status">{queue.running ? <><span className="spin" /> Merging {queue.running}</> : "Starting the queue"}{queue.pending.length ? `; queued: ${queue.pending.join(", ")}` : ""}. You can keep ruling meanwhile.</div>}
-        <div className="muted">Rule on each form, then Merge its file: the file lands the rulings and its tab is brought up to it. Nothing reaches the Doc or the file before Merge.</div>
+        {active && <div className="muted forms-queue">{queue.running ? <><span className="spin" /> Merging {queue.running}</> : "Starting the queue"}{queue.pending.length ? `; queued: ${queue.pending.join(", ")}` : ""}. You can keep ruling meanwhile.</div>}
+        <div className="muted">Rule on each form, then Merge this tab (or Merge all): the file lands the rulings and its tab is brought up to it. Nothing reaches the Doc or the file before Merge.</div>
       </div>
       {landed.map(r => <ResultBox key={r.file} r={r} />)}
       {data && data.files.length === 0 && <div className="card muted">No outside revision is open on this manuscript.</div>}
       {data?.files.filter(g => g.file === (data.files.some(x => x.file === tab) ? tab : data.files[0]?.file)).map(g => (
         <FileCard key={g.file} g={g} result={results[g.file]} merging={queue.running === g.file}
           queued={queue.pending.indexOf(g.file)}
-          onMerge={() => void merge(g.file)} onDecide={decide} />
+          onDecide={decide} />
       ))}
     </div>
   );
 }
 
-function FileCard({ g, result, merging, queued, onMerge, onDecide }: {
-  g: FileGroup; result?: MergeResult; merging: boolean; queued: number; onMerge: () => void;
+function FileCard({ g, result, merging, queued, onDecide }: {
+  g: FileGroup; result?: MergeResult; merging: boolean; queued: number;
   onDecide: (f: Form, verdict: string, text?: string) => Promise<string | null>;
 }) {
   // As on the Dev edit page: a ruled form moves to Decided, where its
@@ -142,9 +174,7 @@ function FileCard({ g, result, merging, queued, onMerge, onDecide }: {
   const open = g.forms.filter(f => f.found && !f.ruling);
   const invalid = g.forms.filter(f => !f.found);
   const conflict = g.state === "conflict";
-  const blockedBy = conflict ? "Changed on both sides: settle that first."
-    : g.state === "missing" ? "The tab was not found in the Doc's export."
-      : g.undecided ? `${g.undecided} form${g.undecided === 1 ? "" : "s"} still to rule on.` : "";
+  const blockedBy = blockerOf(g);
   return (
     <section className="card forms-file">
       <div className="forms-file-head">
@@ -155,13 +185,9 @@ function FileCard({ g, result, merging, queued, onMerge, onDecide }: {
       </div>
       <div className="muted">{g.origins.length ? `From ${g.origins.join(", ")}. ` : ""}{g.blocking}</div>
       {Object.keys(g.others).length > 0 && <div className="moved">Other forms in this tab are not ruled here: {Object.entries(g.others).map(([o, n]) => `${n} ${o}`).join(", ")}.</div>}
-      <div className="forms-merge">
-        <button className="btn take" disabled={merging || queued >= 0 || !!blockedBy} onClick={onMerge}>
-          {merging ? <><span className="spin dark" /> merging…</>
-            : queued >= 0 ? `Queued${queued ? ` · ${queued} ahead` : " · next"}` : `Merge ${g.file}`}
-        </button>
-        {blockedBy && <span className="muted">{blockedBy}</span>}
-      </div>
+      {(merging || queued >= 0 || blockedBy) && <div className="muted">
+        {merging ? <><span className="spin" /> Merging now.</> : queued >= 0 ? `In the merge queue${queued ? `, ${queued} ahead` : ", next"}.` : blockedBy}
+      </div>}
       {result && <ResultBox r={result} />}
       {conflict && g.diff && <DiffBox diff={g.diff} />}
       <div className="devedit-actions">
