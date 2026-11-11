@@ -992,6 +992,18 @@ Retake must not destroy a good paragraph take when the write fails mid-flight.
 
 `gdocs._holds_doc_edits` is the push-guard door for a hand-settled conflict.
 
+## `tests.test_image_ref`
+
+`authorlm/tests/test_image_ref.py`
+
+`media_gen._image_ref` resolves a Veo start/end/cast frame value to an image path: a relative path under the manuscript root, a known cast id's plate under `_illustrations/`, or None.
+
+## `tests.test_intent_dispositions`
+
+`authorlm/tests/test_intent_dispositions.py`
+
+`api._intent_dispositions` assigns served / deferred / unserved to every member of a writeup's intent block at completion.
+
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`
@@ -1291,6 +1303,12 @@ Paragraph-record reply unwrap (`_reply_records`) and JSON schema shape.
 `authorlm/tests/test_resolve_pointers.py`
 
 `lenses.resolve_pointers` decides which other chapters a lens INPUTS payload may pull in as pointed-to essays.
+
+## `tests.test_rule_judgments`
+
+`authorlm/tests/test_rule_judgments.py`
+
+`api._rule_judgments` decides accept vs reject for door INSERTION judgment tags by presence alone, then folds an accepted tag onto the paragraph it follows.
 
 ## `tests.test_run_all`
 
