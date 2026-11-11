@@ -107,10 +107,22 @@ def root(manuscript: dict) -> Path:
     return Path(manuscript["path"]) / "_devedit"
 
 
+def _run_sort_key(name: str) -> tuple[str, int]:
+    """Order same-day runs by their numeric suffix: `YYYY-MM-DD` is the
+    first of that day, then `-2`, `-3`, … so `-10` sorts after `-9`. Plain
+    lexicographic order would put `-10` between `-1` and `-2` and make
+    `run_dir()` default to a stale run once a tenth same-day folder exists."""
+    if len(name) > 10 and name[10] == "-" and name[11:].isdigit():
+        return (name[:10], int(name[11:]))
+    return (name, 1)
+
+
 def runs(manuscript: dict) -> list[str]:
     base = root(manuscript)
-    return sorted(p.name for p in base.iterdir()
-                  if (p / "state.json").exists()) if base.exists() else []
+    if not base.exists():
+        return []
+    return sorted((p.name for p in base.iterdir()
+                   if (p / "state.json").exists()), key=_run_sort_key)
 
 
 def run_dir(manuscript: dict, run_id: str | None = None) -> Path:
@@ -556,12 +568,31 @@ def pending(folder: Path) -> list[dict]:
     return [i for i in ordered(queue(folder)) if not i.get("verdict")]
 
 
+def _manuscript_file(manuscript: dict, file: str, item_id: str) -> Path:
+    """Resolve an item's `file` under the manuscript root. Absolute paths,
+    `..` segments, and anything that resolves outside the root are refused:
+    gather trusts the agent-supplied `file`, and accept must not write
+    outside the manuscript (or replace the root via an absolute join)."""
+    if not isinstance(file, str) or not file.strip():
+        raise ValueError(f"item {item_id}: file is missing")
+    candidate = Path(file)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError(
+            f"item {item_id}: file '{file}' is not a manuscript-relative path")
+    root = Path(manuscript["path"]).resolve()
+    path = (root / candidate).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError(
+            f"item {item_id}: file '{file}' is outside the manuscript")
+    return path
+
+
 def apply_item(manuscript: dict, item: dict, text: str | None = None) -> str:
     """Replace the item's original passage with `text` (the proposed text
     when None) in its file. The original must occur exactly once; anything
     else means the file changed since the item was made, and nothing is
     written. Returns the file name."""
-    path = Path(manuscript["path"]) / item["file"]
+    path = _manuscript_file(manuscript, item["file"], item["id"])
     body = path.read_text(encoding="utf-8")
     original = item["original"]
     count = body.count(original)
@@ -570,9 +601,12 @@ def apply_item(manuscript: dict, item: dict, text: str | None = None) -> str:
             f"item {item['id']}: its original text occurs {count} times in "
             f"{item['file']} now (expected once) — the file changed; the "
             "item needs checking again")
-    path.write_text(body.replace(original,
-                                 item["proposed"] if text is None else text, 1),
-                    encoding="utf-8")
+    replacement = item["proposed"] if text is None else text
+    if not isinstance(replacement, str):
+        raise ValueError(
+            f"item {item['id']}: accept needs proposed text "
+            "(or --text); proposed is missing")
+    path.write_text(body.replace(original, replacement, 1), encoding="utf-8")
     return item["file"]
 
 
