@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { deveditTransport, request, setManuscript, workbenchTransport } from "./transport";
+import { deveditTransport, formsTransport, request, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
 import { DevEdit } from "./DevEdit";
+import { MergeForms, type FormsTab } from "./MergeForms";
 
 // Mirrors audiobook.Session.status (authorlm/audiobook.py).
 interface ChapterSummary { stem: string; title: string; total: number; generated: number; previewed: number; remaining: number; remainingCharacters: number; stitched: string | null; stitchStale: boolean; }
@@ -35,8 +36,8 @@ const when = (iso: string | null | undefined) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
 const mmss = (s: number | null | undefined) => s == null ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-type PageMode = "chapters" | "pron" | "devedit";
-// #<manuscript>/<stem>, #<manuscript>/pron:<term> or #<manuscript>/devedit; a bare #<stem> opens
+type PageMode = "chapters" | "pron" | "devedit" | "forms";
+// #<manuscript>/<stem>, #<manuscript>/pron:<term>, #<manuscript>/devedit or #<manuscript>/forms; a bare #<stem> opens
 // on the server's -m manuscript.
 const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string} => {
   let h = decodeURIComponent(location.hash.replace(/^#/, ""));
@@ -45,6 +46,7 @@ const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string} =
   if (slash >= 0) { ms = h.slice(0, slash); h = h.slice(slash + 1); }
   if (h.startsWith("pron")) return {ms, mode: "pron", stem: "", term: h.slice(5)};
   if (h === "devedit") return {ms, mode: "devedit", stem: "", term: ""};
+  if (h === "forms") return {ms, mode: "forms", stem: "", term: ""};
   return {ms, mode: "chapters", stem: h, term: ""};
 };
 
@@ -68,6 +70,8 @@ export function App() {
   const [stem, setStem] = useState<string>(parseHash().stem);
   const [mode, setMode] = useState<PageMode>(parseHash().mode);
   const [term, setTerm] = useState<string>(parseHash().term);
+  const [formsTabs, setFormsTabs] = useState<FormsTab[]>([]);
+  const [formsTab, setFormsTab] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [confirm, setConfirm] = useState<null | {label: string; run: () => Promise<void>}>(null);
   const [now, setNow] = useState<{source: Source; id: string} | null>(null);
@@ -100,7 +104,7 @@ export function App() {
   useEffect(() => { latestStem.current = stem; latestMs.current = ms; load(stem); }, [ms, stem, load]);
   useEffect(() => {
     if (!ms) return;
-    const rest = mode === "pron" ? (term ? `pron:${term}` : "pron") : mode === "devedit" ? "devedit" : stem;
+    const rest = mode === "pron" ? (term ? `pron:${term}` : "pron") : mode === "devedit" || mode === "forms" ? mode : stem;
     location.hash = `${encodeURIComponent(ms)}/${rest}`;
   }, [ms, stem, mode, term]);
   const switchManuscript = useCallback((name: string) => {
@@ -188,6 +192,7 @@ export function App() {
           <button className={`chip${mode === "chapters" ? " on" : ""}`} aria-pressed={mode === "chapters"} onClick={() => setMode("chapters")}>Audiobook</button>
           <button className={`chip${mode === "pron" ? " on" : ""}`} aria-pressed={mode === "pron"} onClick={() => setMode("pron")}>Pronunciations</button>
           <button className={`chip${mode === "devedit" ? " on" : ""}`} aria-pressed={mode === "devedit"} onClick={() => setMode("devedit")}>Dev edit</button>
+          <button className={`chip${mode === "forms" ? " on" : ""}`} aria-pressed={mode === "forms"} onClick={() => setMode("forms")}>Merge forms</button>
           <a className="chip" href={`/try-text${location.hash}`}>Try text</a>
         </nav>
         <div className="title-row">
@@ -197,6 +202,12 @@ export function App() {
         {manuscripts.length > 1 && <div className="bar">
           <select value={ms} onChange={e => switchManuscript(e.target.value)} aria-label="Manuscript">
             {manuscripts.map(name => <option key={name} value={name}>{name}</option>)}
+          </select>
+        </div>}
+        {mode === "forms" && formsTabs.length > 0 && <div className="bar">
+          <select value={formsTabs.some(t => t.file === formsTab) ? formsTab : formsTabs[0].file}
+            onChange={e => setFormsTab(e.target.value)} aria-label="Tab">
+            {formsTabs.map(t => <option key={t.file} value={t.file}>{t.file.replace(/\.md$/, "")} — {formsTabLabel(t)}</option>)}
           </select>
         </div>}
         {mode === "chapters" && <div className="bar">
@@ -231,6 +242,7 @@ export function App() {
       {error && <div className="status bad">{error}</div>}
       {mode === "pron" && <Workbench key={ms} transport={workbenchTransport} manuscript={ms} initialTerm={term || undefined} />}
       {mode === "devedit" && <DevEdit key={ms} transport={deveditTransport} manuscript={ms} />}
+      {mode === "forms" && <MergeForms key={ms} transport={formsTransport} manuscript={ms} tab={formsTab} onTabs={setFormsTabs} />}
       {mode === "chapters" && <JobStrip jobs={jobs} />}
 
       {mode === "chapters" && chapter && cur && (
@@ -404,4 +416,13 @@ function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate,
       </div>
     </article>
   );
+}
+
+// The Tab menu's count: forms to rule are only those the tab still holds;
+// a form gone from the tab (or from a tab not found) counts as invalid.
+function formsTabLabel(t: FormsTab): string {
+  const decided = t.count - t.toRule - t.invalid;
+  return [t.toRule ? `${t.toRule} to rule` : decided ? "all ruled, ready to merge" : null,
+    t.toRule && decided ? `${decided} decided` : null,
+    t.invalid ? `${t.invalid} invalid` : null].filter(Boolean).join(", ");
 }

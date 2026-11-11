@@ -302,6 +302,12 @@ Generic finding storage — the door shared by any producer that emits arbitrary
 
 The pending-change forms a Doc tab or a marked file carries: how to read them, collapse them and write them.
 
+## `authorlm.forms_page`
+
+`authorlm/authorlm/forms_page.py`
+
+The Merge forms page: every open outside revision of a manuscript in one place, ruled on there and merged one file at a time.
+
 ## `authorlm.gdocs`
 
 `authorlm/authorlm/gdocs.py`
@@ -938,6 +944,12 @@ footnote_prefixes must stay injective when nested paths share a stem.
 
 `form_grammar.form_remnants` / `strip_form_remnants` clean hand-resolved Doc forms after pull.
 
+## `tests.test_forms_page`
+
+`authorlm/tests/test_forms_page.py`
+
+The Merge forms page (`forms_page.dispatch`, `/api/forms`): every open outside revision listed as the Doc holds it, ruled on the page, and merged one file at a time.
+
 ## `tests.test_gallery`
 
 `authorlm/tests/test_gallery.py`
@@ -991,6 +1003,12 @@ Retake must not destroy a good paragraph take when the write fails mid-flight.
 `authorlm/tests/test_holds_doc_edits.py`
 
 `gdocs._holds_doc_edits` is the push-guard door for a hand-settled conflict.
+
+## `tests.test_illus_batch_render`
+
+`authorlm/tests/test_illus_batch_render.py`
+
+`illus render` with no fragment renders every unrendered slot, one after another, exactly as single-slot renders would.
 
 ## `tests.test_interlocutor`
 
