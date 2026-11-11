@@ -6555,8 +6555,105 @@ def _held_warnings(rel: str, pushed: dict) -> list[str]:
             f"«{h['paragraph'][:70]}»" for h in (pushed.get("held") or [])]
 
 
+def _pair_insert_forms(forms: list[dict], inserts: list[dict]
+                       ) -> dict[str, dict]:
+    """thread id → its own-line insertion form among `forms`: the same new
+    text first, then the closest rewording (ratio 0.5 or better). An
+    emptied form pairs with nothing."""
+    from . import lint
+
+    def flat(s: str) -> str:
+        return " ".join(s.split())
+
+    free = [f for f in forms if f["kind"] == "insert" and f["new"].strip()]
+    pairs: dict[str, dict] = {}
+    for t in inserts:                       # the same text, first
+        hit = next((f for f in free if f["new"] == t["proposed_new"]), None)
+        if hit is not None:
+            free.remove(hit)
+            pairs[t["id"]] = hit
+    for t in inserts:                       # then the closest rewording
+        if t["id"] in pairs or not free:
+            continue
+        k, _ = lint.closest_by_ratio(t["proposed_new"],
+                                     [f["new"] for f in free], flat,
+                                     floor=0.5)
+        if k is not None:
+            pairs[t["id"]] = free.pop(k)
+    return pairs
+
+
+def pair_external_forms(marked: str, threads: list[dict]) -> dict[str, dict]:
+    """thread id → the form in `marked` (a tab's text with its forms
+    intact) that the thread staged, as `form_grammar.pending_forms` gives
+    it ({kind, old, new, start, end}). A replacement is its first
+    unclaimed `<<old>>{{…}}` with the thread's old half; an addition is
+    paired as `revise resolve` pairs it. A thread whose form is not in
+    the tab (taken out by hand, or an addition emptied) is absent.
+    Threads are taken in the order given (staging order)."""
+    from .gdocs import rendered_text
+
+    forms = form_grammar.pending_forms(marked)
+    pairs: dict[str, dict] = {}
+    taken: set[int] = set()
+    # The exact old half first; then the same text as the Doc renders it,
+    # since the export can wrap a struck old half in its own emphasis
+    # (`<<*He mistaketh …*>>` for a staged `He mistaketh …`, SMSTTD
+    # nietzsche.md, 2026-11-10).
+    for same in (lambda a, b: a == b,
+                 lambda a, b: rendered_text(a) == rendered_text(b)):
+        for t in threads:
+            if not t.get("proposed_old") or t["id"] in pairs:
+                continue
+            hit = next((f for f in forms if f["kind"] == "replace"
+                        and f["start"] not in taken
+                        and same(f["old"], t["proposed_old"])), None)
+            if hit is not None:
+                taken.add(hit["start"])
+                pairs[t["id"]] = hit
+    pairs.update(_pair_insert_forms(
+        forms, [t for t in threads if not t.get("proposed_old")]))
+    return pairs
+
+
+def rule_forms_in_marked(marked: str, threads: list[dict],
+                         rulings: dict[str, str]
+                         ) -> tuple[str, dict[str, int]]:
+    """`marked` with each ruled form's green half set to its ruling, as
+    the author would type it in the tab: the text to land (an edit, or
+    the form's own text for an acceptance), or '' to decline it. A ruling
+    for a thread whose form is not in `marked` raises ValueError, so
+    nothing lands on a ruling that could not be applied.
+
+    Also returns, for each ruled addition that is not declined, its place
+    among the tab's own-line additions (0-based, document order): its
+    pairing is known, so a heavy rewording is not mistaken for a new
+    paragraph and declined (`_rule_external_marked`)."""
+    pairs = pair_external_forms(marked, threads)
+    inserts = [f["start"] for f in form_grammar.pending_forms(marked)
+               if f["kind"] == "insert"]
+    order = {tid: inserts.index(pairs[tid]["start"]) for tid, text
+             in rulings.items() if tid in pairs and text.strip()
+             and pairs[tid]["kind"] == "insert"}
+    edits = []
+    for tid, text in rulings.items():
+        form = pairs.get(tid)
+        if form is None:
+            raise ValueError(
+                f"form {tid} is no longer in the tab, so its ruling cannot "
+                f"be applied; nothing was landed")
+        form_grammar.assert_no_pending_markers("", text)
+        end = form["end"] - 2
+        edits.append((end - len(form["new"]), end, text))
+    for start, end, text in sorted(edits, reverse=True):
+        marked = marked[:start] + text + marked[end:]
+    return marked, order
+
+
 def _rule_external_marked(marked: str, replaces: list[dict],
-                          inserts: list[dict]) -> tuple[str, dict]:
+                          inserts: list[dict],
+                          known: dict[str, int] | None = None
+                          ) -> tuple[str, dict]:
     """The part of an outside caller's resolve that the shared settle
     steps do not cover, done on the marked text BEFORE they run.
 
@@ -6575,7 +6672,6 @@ def _rule_external_marked(marked: str, replaces: list[dict],
     Returns (marked, {thread id: (verdict, final)}) for the additions
     alone; the replacements are still forms, or plain old text, in the
     returned marked text."""
-    from . import lint
     def flat(s: str) -> str:
         return " ".join(s.split())
 
@@ -6586,21 +6682,14 @@ def _rule_external_marked(marked: str, replaces: list[dict],
             lambda m, t=t: t["proposed_old"], marked, count=1)
 
     forms = [f for f in form_grammar.pending_forms(marked) if f["kind"] == "insert"]
-    free = [f for f in forms if f["new"].strip()]
-    pairs: dict[str, dict] = {}
-    for t in inserts:                       # the same text, first
-        hit = next((f for f in free if f["new"] == t["proposed_new"]), None)
-        if hit is not None:
-            free.remove(hit)
-            pairs[t["id"]] = hit
-    for t in inserts:                       # then the closest rewording
-        if t["id"] in pairs or not free:
-            continue
-        k, _ = lint.closest_by_ratio(t["proposed_new"],
-                                     [f["new"] for f in free], flat,
-                                     floor=0.5)
-        if k is not None:
-            pairs[t["id"]] = free.pop(k)
+    # `known`: additions already paired by their place (a ruling made off
+    # the tab, `rule_forms_in_marked`); the rest are paired by text.
+    pairs = {tid: forms[i] for tid, i in (known or {}).items()
+             if i < len(forms) and forms[i]["new"].strip()}
+    taken = [f["start"] for f in pairs.values()]
+    pairs.update(_pair_insert_forms(
+        [f for f in forms if f["start"] not in taken],
+        [t for t in inserts if t["id"] not in pairs]))
     # Unwrap the paired forms and drop the emptied ones, last to first.
     edits = [(f["start"], f["end"], f["new"]) for f in pairs.values()]
     edits += [(f["start"], f["end"], "") for f in forms
@@ -6623,7 +6712,8 @@ def _rule_external_marked(marked: str, replaces: list[dict],
 
 def resolve_revisions(db: Database, manuscript: dict, file: str,
                       origin: str, service, docs_service,
-                      config: dict | None = None) -> dict:
+                      config: dict | None = None,
+                      rulings: dict[str, str] | None = None) -> dict:
     """Read `file`'s tab back and land every form `origin` still has out
     there, with the standing semantics: a form left alone is accepted;
     an edited `{{new}}` half wins (modified); a form emptied, deleted,
@@ -6661,7 +6751,13 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
     "tab_still_marked", "warnings"}. `new` is what was proposed;
     `final` is the author's wording for a `modified` revision (None when
     they folded it into other prose and it cannot be located), else
-    None."""
+    None.
+
+    `rulings` (thread id → text) are rulings made somewhere other than the
+    tab (the Merge forms page): before anything is read for landing, each
+    named form's green half is taken as that text, exactly as if the
+    author had typed it there ('' declines). See `rule_forms_in_marked`.
+    A ruling whose form is gone from the tab lands nothing."""
     from . import gdocs
     origin = (origin or "").strip()
     mid = manuscript["id"]
@@ -6725,8 +6821,14 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
 
     replaces = [t for t in written if t["proposed_old"]]
     inserts = [t for t in written if not t["proposed_old"]]
-    marked, ruled = _rule_external_marked(fetched["marked"], replaces,
-                                          inserts)
+    marked, known = fetched["marked"], None
+    if rulings:
+        try:
+            marked, known = rule_forms_in_marked(marked, written, rulings)
+        except ValueError as err:
+            result["warnings"].append(str(err))
+            return result
+    marked, ruled = _rule_external_marked(marked, replaces, inserts, known)
     final, forms = passes.final_text_from_marked(
         marked, written=replaces, kinds=("replace",))
     # Whatever is still a form now is somebody else's. A replacement has

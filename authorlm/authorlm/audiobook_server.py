@@ -5,7 +5,8 @@ on a loopback port and opens it in the browser; the page posts to
 `/api/audiobook`, which is `audiobook.dispatch` (and `/api/workbench`,
 which is `workbench.dispatch` — the pronunciation workbench is a mode of
 the same page — and `/api/devedit`, `devedit.dispatch`, the developmental
-edit's review mode), and streams audio from
+edit's review mode, and `/api/forms`, `forms_page.dispatch`, the Merge
+forms mode), and streams audio from
 `/preview/<stem>/<id>.mp3` (rendered on the request when missing — the
 lazy listen), `/take/<stem>/<id>.mp3` and `/stitched/<stem>.mp3`
 with HTTP ranges honoured so a phone can seek, and the brand icons
@@ -182,7 +183,8 @@ def make_handler(workspace: str | None, manuscript: str | None):
             # The pronunciation workbench lives on this page too (author's
             # ruling 2026-09-26: "all in one place"); its transport is
             # unchanged, so the standalone `authorlm workbench` still works.
-            if self.path not in ("/api/audiobook", "/api/workbench", "/api/devedit"):
+            if self.path not in ("/api/audiobook", "/api/workbench", "/api/devedit",
+                                 "/api/forms"):
                 self.send_error(404)
                 return
             try:
@@ -201,6 +203,12 @@ def make_handler(workspace: str | None, manuscript: str | None):
                     from . import devedit
                     result = devedit.dispatch(body.get("method", ""), params,
                                               workspace=workspace)
+                elif self.path == "/api/forms":
+                    # Merge forms: every open outside revision, ruled on
+                    # and merged one file at a time (forms_page.py).
+                    from . import forms_page
+                    result = forms_page.dispatch(body.get("method", ""), params,
+                                                 workspace=workspace)
                 else:
                     result = audiobook.dispatch(body.get("method", ""), params,
                                                 workspace=workspace)
