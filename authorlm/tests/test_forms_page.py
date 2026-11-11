@@ -452,13 +452,65 @@ def unknown_method(root: Path) -> None:
     check("an unknown form is an error", "error" in r, r)
 
 
+def queue_runs_one_merge_at_a_time(_root: Path) -> None:
+    print("queue:")
+    import threading
+    import time
+    key = ("test-ws", "queue-book")
+    gate = threading.Event()
+    seen: list[str] = []
+    live = {"now": 0, "most": 0}
+
+    def run_one(file: str) -> dict:
+        live["now"] += 1
+        live["most"] = max(live["most"], live["now"])
+        gate.wait(5)
+        seen.append(file)
+        live["now"] -= 1
+        if file == "bad.md":
+            raise RuntimeError("the Doc could not be read")
+        return {"file": file, "stopped": None, "message": "landed",
+                "accepted": 1, "modified": 0, "declined": 0,
+                "warnings": [], "pushed": True, "url": None}
+
+    forms_page.enqueue(key, "a.md", run_one)
+    forms_page.enqueue(key, "b.md", run_one)
+    forms_page.enqueue(key, "b.md", run_one)
+    q = forms_page.enqueue(key, "bad.md", run_one)
+    check("a tab pressed twice is queued once; the first is running",
+          q["running"] == "a.md" and q["pending"] == ["b.md", "bad.md"]
+          or q["pending"] == ["a.md", "b.md", "bad.md"], q)
+    gate.set()
+    for _ in range(100):
+        q = forms_page.queue_status(key)
+        if not q["running"] and not q["pending"] and len(q["results"]) == 3:
+            break
+        time.sleep(0.05)
+    check("the merges ran in the order pressed, never two at once",
+          seen == ["a.md", "b.md", "bad.md"] and live["most"] == 1,
+          (seen, live))
+    check("each tab's result is kept for the page",
+          q["results"]["a.md"]["pushed"] and q["results"]["b.md"]["pushed"], q)
+    check("a merge that raises is reported, and the queue goes on",
+          q["results"]["bad.md"]["stopped"] == "error"
+          and "could not be read" in q["results"]["bad.md"]["message"], q)
+    forms_page.enqueue(key, "a.md", run_one)
+    for _ in range(100):
+        if forms_page.queue_status(key)["results"].get("a.md"):
+            break
+        time.sleep(0.05)
+    check("an idle queue starts again when a tab is pressed",
+          seen[-1] == "a.md" and len(seen) == 4, seen)
+
+
 def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="forms-page-"))
     for fn in (rulings_on_marked_text, list_shows_the_doc_as_it_stands, decide_holds_rulings,
                merge_lands_the_rulings, merge_declines_everything,
                merge_stops_on_a_doc_edit_after_ruling,
                merge_stops_on_conflict, merge_never_pulls_a_stale_tab,
-               merge_keeps_illustration_lines, unknown_method):
+               merge_keeps_illustration_lines, unknown_method,
+               queue_runs_one_merge_at_a_time):
         fn(root)
     print(f"OK — {PASSED} Merge forms checks")
 

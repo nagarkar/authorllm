@@ -40,6 +40,7 @@ import contextlib
 import io
 import json
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -455,9 +456,78 @@ def merge(db: Database, manuscript: dict, file: str, service, docs_service,
 
 # ----------------------------------------------------------------- transport
 
+# ------------------------------------------------------------------ queue
+# The page may press Merge on several tabs; the merges run one after
+# another on a thread of this same web server, never side by side: each
+# merge snapshots the whole manuscript and checks the whole Doc's
+# revision, so two at once could interleave. The queue lives in the
+# server's memory: a restart forgets what was waiting (nothing half-done
+# is lost; a merge either lands and pushes or stops and says why).
+
+_QUEUES: dict[tuple, dict] = {}
+_QLOCK = threading.Lock()
+
+
+def _queue(key: tuple) -> dict:
+    return _QUEUES.setdefault(key, {"pending": [], "running": None,
+                                    "results": {}, "thread": None})
+
+
+def queue_status(key: tuple) -> dict:
+    with _QLOCK:
+        q = _queue(key)
+        return {"pending": list(q["pending"]), "running": q["running"],
+                "results": dict(q["results"])}
+
+
+def _run_queue(key: tuple, run_one) -> None:
+    while True:
+        with _QLOCK:
+            q = _queue(key)
+            if not q["pending"]:
+                q["running"] = None
+                q["thread"] = None
+                return
+            file = q["pending"].pop(0)
+            q["running"] = file
+        try:
+            result = run_one(file)
+        except Exception as err:  # noqa: BLE001 — reported on the page
+            result = {"file": file, "stopped": "error",
+                      "message": f"{type(err).__name__}: {err}",
+                      "accepted": 0, "modified": 0, "declined": 0,
+                      "warnings": [], "pushed": False, "url": None}
+        if result.get("error"):
+            result = {"file": file, "stopped": "error",
+                      "message": result["error"], "accepted": 0,
+                      "modified": 0, "declined": 0, "warnings": [],
+                      "pushed": False, "url": None}
+        with _QLOCK:
+            q = _queue(key)
+            q["results"][file] = result
+            q["running"] = None
+
+
+def enqueue(key: tuple, file: str, run_one, start: bool = True) -> dict:
+    """Add `file` to the queue (once) and start the worker if it is idle.
+    `run_one(file)` does one merge on the worker's thread."""
+    with _QLOCK:
+        q = _queue(key)
+        if file != q["running"] and file not in q["pending"]:
+            q["pending"].append(file)
+            q["results"].pop(file, None)
+        if start and q["thread"] is None:
+            q["thread"] = threading.Thread(
+                target=_run_queue, args=(key, run_one), daemon=True,
+                name=f"merge-forms-{key[1]}")
+            q["thread"].start()
+    return queue_status(key)
+
+
 def dispatch(method: str, params: dict[str, Any],
              workspace: str | None = None) -> dict:
-    """The page's API (`/api/forms`): list, decide, merge. Every method
+    """The page's API (`/api/forms`): list, decide, merge (at once),
+    enqueue (merge on the queue's thread) and queue (its state). Every method
     names the manuscript. The database and the Google services are the
     audio page's session's, as for the Dev edit."""
     from . import audiobook
@@ -480,6 +550,17 @@ def dispatch(method: str, params: dict[str, Any],
             config, service, docs_service = session._doc_services()
             return merge(db, manuscript, str(params["file"]), service,
                          docs_service, config)
+        key = (workspace, manuscript["name"])
+        if method == "enqueue":
+            def run_one(file: str) -> dict:
+                # The worker's own thread: its own database connection.
+                tdb = session._thread_db()
+                config, service, docs_service = session._doc_services()
+                return merge(tdb, manuscript, file, service, docs_service,
+                             config)
+            return enqueue(key, str(params["file"]), run_one)
+        if method == "queue":
+            return queue_status(key)
     except (LookupError, ValueError, KeyError) as err:
         return {"error": str(err)}
     return {"error": f"unknown method '{method}'"}

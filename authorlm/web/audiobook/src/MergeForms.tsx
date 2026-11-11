@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Transport } from "./transport";
 
 // Mirrors forms_page.dispatch (authorlm/forms_page.py): every open outside
@@ -18,6 +18,7 @@ interface FileGroup {
   origins: string[]; others: Record<string, number>; undecided: number; blocking: string; diff?: Diff;
 }
 interface Listing { doc_url: string | null; files: FileGroup[]; total: number; }
+interface Queue { pending: string[]; running: string | null; results: Record<string, MergeResult>; }
 interface MergeResult {
   file: string; stopped: string | null; message: string; accepted: number; modified: number;
   declined: number; warnings: string[]; pushed: boolean; url: string | null; diff?: Diff;
@@ -38,8 +39,11 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
   const [data, setData] = useState<Listing | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState<Record<string, MergeResult>>({});
-  const [merging, setMerging] = useState("");
+  // The merge queue runs on the web server, one tab after another; the page
+  // only adds tabs to it and reads its state.
+  const [queue, setQueue] = useState<Queue>({pending: [], running: null, results: {}});
+  const results = queue.results;
+  const done = useRef(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -72,16 +76,31 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
     return null;
   };
 
-  const merge = async (file: string) => {
-    setMerging(file);
+  const readQueue = useCallback(async () => {
     try {
-      const r = await transport.request<MergeResult & {error?: string}>("merge", {manuscript, file});
-      if (r.error) setResults(rs => ({...rs, [file]: {file, stopped: "error", message: r.error!, accepted: 0, modified: 0, declined: 0, warnings: [], pushed: false, url: null}}));
-      else setResults(rs => ({...rs, [file]: r}));
-    } catch (err) {
-      setResults(rs => ({...rs, [file]: {file, stopped: "error", message: (err as Error).message, accepted: 0, modified: 0, declined: 0, warnings: [], pushed: false, url: null}}));
-    } finally { setMerging(""); }
-    await load();
+      const q = await transport.request<Queue & {error?: string}>("queue", {manuscript});
+      if (!q.error) setQueue(q);
+    } catch { /* the next poll tries again */ }
+  }, [transport, manuscript]);
+  useEffect(() => { void readQueue(); }, [readQueue]);
+  const active = !!queue.running || queue.pending.length > 0;
+  useEffect(() => {
+    if (!active) return;
+    const t = window.setInterval(() => void readQueue(), 2000);
+    return () => window.clearInterval(t);
+  }, [active, readQueue]);
+  // A merge that finished changes the listing: read it again.
+  useEffect(() => {
+    const n = Object.keys(queue.results).length;
+    if (n > done.current) void load();
+    done.current = n;
+  }, [queue.results, load]);
+
+  const merge = async (file: string) => {
+    try {
+      const q = await transport.request<Queue & {error?: string}>("enqueue", {manuscript, file});
+      if (q.error) setError(q.error); else setQueue(q);
+    } catch (err) { setError((err as Error).message); }
   };
 
   if (!data && !error) return <div className="boot">Reading the open forms from the Doc…</div>;
@@ -95,20 +114,22 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
           <button className="pill" disabled={loading} onClick={() => void load()}>{loading ? "reading…" : "⟳ Refresh"}</button>
           {data?.doc_url && <a className="pill" href={data.doc_url} target="_blank" rel="noreferrer">Open the Doc ↗</a>}
         </div>
+        {active && <div className="status">{queue.running ? <><span className="spin" /> Merging {queue.running}</> : "Starting the queue"}{queue.pending.length ? `; queued: ${queue.pending.join(", ")}` : ""}. You can keep ruling meanwhile.</div>}
         <div className="muted">Rule on each form, then Merge its file: the file lands the rulings and its tab is brought up to it. Nothing reaches the Doc or the file before Merge.</div>
       </div>
       {landed.map(r => <ResultBox key={r.file} r={r} />)}
       {data && data.files.length === 0 && <div className="card muted">No outside revision is open on this manuscript.</div>}
       {data?.files.filter(g => g.file === (data.files.some(x => x.file === tab) ? tab : data.files[0]?.file)).map(g => (
-        <FileCard key={g.file} g={g} result={results[g.file]} merging={merging === g.file} busy={!!merging}
+        <FileCard key={g.file} g={g} result={results[g.file]} merging={queue.running === g.file}
+          queued={queue.pending.indexOf(g.file)}
           onMerge={() => void merge(g.file)} onDecide={decide} />
       ))}
     </div>
   );
 }
 
-function FileCard({ g, result, merging, busy, onMerge, onDecide }: {
-  g: FileGroup; result?: MergeResult; merging: boolean; busy: boolean; onMerge: () => void;
+function FileCard({ g, result, merging, queued, onMerge, onDecide }: {
+  g: FileGroup; result?: MergeResult; merging: boolean; queued: number; onMerge: () => void;
   onDecide: (f: Form, verdict: string, text?: string) => Promise<string | null>;
 }) {
   // As on the Dev edit page: a ruled form moves to Decided, where its
@@ -131,8 +152,9 @@ function FileCard({ g, result, merging, busy, onMerge, onDecide }: {
       <div className="muted">{g.origins.length ? `From ${g.origins.join(", ")}. ` : ""}{g.blocking}</div>
       {Object.keys(g.others).length > 0 && <div className="moved">Other forms in this tab are not ruled here: {Object.entries(g.others).map(([o, n]) => `${n} ${o}`).join(", ")}.</div>}
       <div className="forms-merge">
-        <button className="btn take" disabled={busy || !!blockedBy} onClick={onMerge}>
-          {merging ? <><span className="spin dark" /> merging…</> : `Merge ${g.file}`}
+        <button className="btn take" disabled={merging || queued >= 0 || !!blockedBy} onClick={onMerge}>
+          {merging ? <><span className="spin dark" /> merging…</>
+            : queued >= 0 ? `Queued${queued ? ` · ${queued} ahead` : " · next"}` : `Merge ${g.file}`}
         </button>
         {blockedBy && <span className="muted">{blockedBy}</span>}
       </div>
