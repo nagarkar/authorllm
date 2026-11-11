@@ -165,10 +165,19 @@ def effective_style(db: Database, manuscript_id: str, file: str) -> list[dict]:
     return [e for layer in layers for e in layer if e["id"] not in displaced]
 
 
+# The aspects that govern prose. Every other aspect (image, placement,
+# clip, pronunciation, concept-*) has its own consumer and must never reach
+# a drafting or editing prompt.
+PROSE_ASPECTS = ("register", "lexicon", "syntax", "structure", "formatting",
+                 "citation", "rhetoric", "figure", "tone")
+
+
 def render(db: Database, manuscript_id: str, file: str) -> str:
     """The effective guide as prose — injected into drafting prompts so
-    generated text arrives in the file's ratified register."""
-    elements = effective_style(db, manuscript_id, file)
+    generated text arrives in the file's ratified register. Prose aspects
+    only (PROSE_ASPECTS)."""
+    elements = [e for e in effective_style(db, manuscript_id, file)
+                if e["aspect"] in PROSE_ASPECTS]
     if not elements:
         return ""
     lines = [f"STYLE GUIDE for {file} (ratified by the author — follow strictly):"]

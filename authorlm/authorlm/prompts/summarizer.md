@@ -50,6 +50,15 @@ MOTIFS: Recurring images or phrases the book relies on that appear here
 (e.g. the sacred tremor, the two Fields, the temple walls, the ladder), as
 the section summaries record them.
 
+ARCS: Each case this unit tells that the book may tell again: a story, a
+lived scene, a parable or a historical episode that carries an idea (e.g.
+the burning house, a child sharing a cookie). One per case, separated by
+semicolons, each in this shape: a short name; "starts" or "develops"; the
+story in one line (who, what happens); its moral in a few words; and how it
+serves this unit's message. "develops" when a PRIOR SUMMARY's ARCS already
+names the case, saying what stage is new here. A passing mention with no
+telling is not an arc. "none" if the unit tells no case.
+
 DOES NOT: What this unit deliberately does not explain or re-explain, leaving
 it to other units (the LEAVES OPEN lines and the PRIOR SUMMARIES tell you
 which). This is how the book avoids saying everything four times; record it
@@ -62,7 +71,7 @@ under those labels.
 Rules:
 - Use the author's vocabulary verbatim for every term of art.
 - Never soften, correct, or evaluate the argument. Record it.
-- Never invent a move, motif or omission the section summaries do not
+- Never invent a move, motif, arc or omission the section summaries do not
   support; if a label has nothing, write "none".
-- Plain text only. No markdown headers, no bullets — the four labels above,
+- Plain text only. No markdown headers, no bullets — the five labels above,
   each on its own line, followed by prose.
