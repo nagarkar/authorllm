@@ -817,10 +817,17 @@ workflow over `authorlm devedit` (devedit.py owns the run folder,
   arcs worth keeping into `examples.md`; several passes are normal.
 - **Between agents:** `devedit terms` (finished essays only), `gather`, `group`, `build-queue`.
 - **Watch the page while the author works it** (author ruling 2026-11-09):
-  start a Monitor running `python3 -u authorlm/tools/devedit_watch.py <run folder>`
+  start a Monitor running `python3 -u authorlm/tools/author_watch.py --run <run folder>`
   over the run folder (decisions.json under `stages/`,
   `queue.json`) that emits each verdict and decision and a COMPLETE line
-  when an essay's items or a stage's decisions are all settled. On
+  when an essay's items or a stage's decisions are all settled. The same
+  watcher covers the Merge forms page: add `--manuscript <name>` (one
+  Monitor for both) and it also emits each ruling (`RULING`), newly
+  staged forms, `COMPLETE rulings <file>` when a tab's forms are all
+  ruled, and each merge as it starts, lands or stops (`MERGING`,
+  `MERGED`, `MERGE STOPPED`), read from the database and the live page
+  server's queue (`--port`, default 8792). On MERGED, do the tab's hand
+  step at once. `devedit_watch.py` still works for Dev edit alone. On
   COMPLETE, finish at once without waiting for chat: rebuild the summary,
   write the notebook entry, push, start the next essay; or run the reruns
   the decisions call for. A verdict on the page already applies the

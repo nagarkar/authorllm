@@ -698,6 +698,12 @@ Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_author_watch`
+
+`authorlm/tests/test_author_watch.py`
+
+Offline checks for tools/author_watch.py: the one watcher for the Dev edit and Merge forms pages. No server, no Google: a fake database and queue.
+
 ## `tests.test_beat_repetition`
 
 `authorlm/tests/test_beat_repetition.py`
@@ -1489,6 +1495,12 @@ write_accept must not duplicate a beat after a crash mid-accept.
 `authorlm/tests/test_writing_parse_reply.py`
 
 `writing.parse_reply` is the beat-draft door. It accepts exactly two shapes: ordered WHY / SELF-CHECK / DRAFT, or a leading BLOCKED (optional QUESTION). Mis-ordered labels and a reply in neither shape must refuse; a bare BLOCKED line AFTER DRAFT must stay manuscript prose.
+
+## `tools.author_watch`
+
+`authorlm/tools/author_watch.py`
+
+One watcher for the author's two review pages: Dev edit and Merge forms.
 
 ## `tools.bootstrap_beliefs`
 
