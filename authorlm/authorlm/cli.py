@@ -7635,10 +7635,17 @@ def _doc_road_verb(db, manuscript: dict, args) -> None:
         where = (": " + ", ".join(f"line {ln}" for ln in result["conflicts"])
                  if n else "")
         print(f"{n} conflict region(s){where}.")
+        rel = result["relpath"]
+        # The forced pull comes BEFORE the copy: it takes the Doc's text
+        # as the new base, so the push that follows is not held back as
+        # a conflict again (the old hint skipped it; 2026-11-12).
         print(ui.dim("next: settle each <<<<<<< local / ======= / >>>>>>> doc "
-                     "regions, copy the result over the file, then "
-                     f"'doc push {result['relpath']}'. Nothing was pushed "
-                     "and the manuscript file is untouched."))
+                     f"region in the draft, then 'doc pull {rel} --force' "
+                     "(the Doc's text becomes the new base; your edits stay "
+                     "in version history), copy the settled draft over the "
+                     f"file, 'collect', and 'doc push {rel}'. Or settle it "
+                     "on the Merge forms page, under Conflicts. Nothing was "
+                     "pushed and the manuscript file is untouched."))
         return
     rel = view["relpath"]
     print(f"{rel}: state: {view['state']}")

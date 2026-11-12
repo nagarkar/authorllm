@@ -2688,10 +2688,12 @@ def unified(a: str, b: str, from_name: str, to_name: str) -> str:
 
 
 def merge3(local: str, base: str, doc: str,
-           relpath: str = "") -> tuple[str, list[int]]:
+           relpath: str = "", diff3: bool = False) -> tuple[str, list[int]]:
     """`git merge-file -p` of local and doc against base (labels
     local/base/doc): the merged text and the line of each conflict
-    region's '<<<<<<< local' marker."""
+    region's '<<<<<<< local' marker. `diff3` adds each region's base
+    lines after a '||||||| base' marker (the Merge forms page's
+    Conflicts cards show all three)."""
     import subprocess
     import tempfile
 
@@ -2702,7 +2704,8 @@ def merge3(local: str, base: str, doc: str,
             names[side].write_text(text, encoding="utf-8")
         try:
             run = subprocess.run(
-                ["git", "merge-file", "-p", "-L", "local", "-L", "base",
+                ["git", "merge-file", "-p", *(["--diff3"] if diff3 else []),
+                 "-L", "local", "-L", "base",
                  "-L", "doc", str(names["local"]), str(names["base"]),
                  str(names["doc"])],
                 capture_output=True, text=True)
