@@ -11,7 +11,7 @@ nothing here knows about.
 
 **One worker.** Every act that writes — refresh (export + previews),
 preview, generate, retake, stitch — is a job on one queue drained by one
-thread, in order. The Doc is never consulted here: reconciliation stays
+thread, in order. The refresh never consults the Doc: reconciliation stays
 in chat (author's ruling 2026-09-26) and lands on disk, where the stale
 banner sees it like any local edit.
 Two taps on the same paragraph become two jobs, and the second finds
@@ -19,7 +19,11 @@ the take present and does nothing (generation.py's guard 2). The page
 polls `status` and paints progress. A card's text can be edited on the
 page (`source` / `edit`, 2026-10-26): the markdown block is rewritten in
 the manuscript file and a refresh follows, so the paragraph returns
-under a new id with nothing rendered — stale by construction. Nothing here spends until a
+under a new id with nothing rendered — stale by construction. A saved
+edit to a file with a tab also queues a push of that file behind the
+refresh (2026-11-12), which goes up only while the Doc side has not
+moved; otherwise it is held back and named, with the Merge forms page
+to settle it. Nothing here spends until a
 generate or retake job runs, and each one is the author's tap.
 """
 
@@ -28,6 +32,7 @@ from __future__ import annotations
 import queue
 import tempfile
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable
@@ -92,6 +97,12 @@ class Session:
         # files go to their tabs of the master Doc, and the line under the
         # dropdown reads "pushed <when>" from the stamp push_doc leaves.
         self.account: dict | None = None
+        # What the page knows about a file whose tab it did not push
+        # (2026-11-12): file -> {state, message}. Set when an automatic
+        # push, a Push or a Pull finds the Doc side moved or forms
+        # waiting; cleared when the file goes up or comes down. Read with
+        # no call to Google, so the edit box can warn before an edit.
+        self.held: dict[str, dict] = {}
         if not inline:
             threading.Thread(target=self._drain, daemon=True,
                              name="audiobook-worker").start()
@@ -164,6 +175,15 @@ class Session:
             full["inRetailSample"] = [sid for sid in book.get("retailSample", [])
                                       if sid in texts]
             out["chapter"] = full
+            try:
+                _c, names = self._chapter_files(stem)
+            except (audio.AudioError, OSError, KeyError, LookupError):
+                names = []
+            with self._lock:
+                out["held"] = [{"file": n, **self.held[n]} for n in names
+                               if n in self.held]
+            if out["held"]:
+                out["formsLink"] = self.forms_link()
         return out
 
     # ------------------------------------------------- editing a card
@@ -210,7 +230,15 @@ class Session:
             raise LookupError(f"¶ {gen.ordinal_of(chapter, section_id)} of {stem} is "
                               "not one block of the file (a tag the audio strips, "
                               "or a list read item by item) — edit it in the file")
-        return {k: found[k] for k in ("file", "line", "markdown")}
+        out = {k: found[k] for k in ("file", "line", "markdown")}
+        # The warning before an edit: only what this page already knows
+        # (no call to Google on opening the box).
+        with self._lock:
+            known = self.held.get(found["file"])
+        if known:
+            out["warning"] = known["message"]
+            out["link"] = self.forms_link()
+        return out
 
     def edit(self, stem: str, section_id: str, markdown: str) -> dict:
         """Write the edited markdown over the paragraph in its file, then
@@ -228,8 +256,36 @@ class Session:
             return {"file": found["file"], "line": found["line"], "changed": False,
                     "job": None}
         audio.replace_block(root, found, markdown)
+        job = self.enqueue("refresh", stem=stem)
         return {"file": found["file"], "line": found["line"], "changed": True,
-                "job": self.enqueue("refresh", stem=stem)}
+                "job": job, "push": self._queue_autopush(stem, found["file"])}
+
+    def forms_link(self) -> str:
+        return f"#{quote(self.manuscript['name'])}/forms"
+
+    def _queue_autopush(self, stem: str, name: str) -> dict | None:
+        """After a saved edit (2026-11-12): queue a push of the edited
+        file behind the refresh, so the Doc follows the page and the two
+        do not drift into a conflict. Local reads only, so the save stays
+        as fast as it was; the job asks Google. Not queued for a file
+        with no tab or never pushed (its first push stays the Push
+        button), nor when one for the same file already waits."""
+        from . import gdocs
+
+        try:
+            links = gdocs._mapping(self._thread_db(), self.manuscript).get(
+                "gdocs", {})
+        except (OSError, KeyError, LookupError):
+            return None
+        entry = links.get(name)
+        if not (links.get("_master_id") and isinstance(entry, dict)
+                and entry.get("tab_id") and entry.get("pushed_hash")):
+            return None
+        with self._lock:
+            if any(j["kind"] == "autopush" and j["state"] == "queued"
+                   and j.get("file") == name for j in self._jobs):
+                return None
+        return self.enqueue("autopush", stem=stem, file=name)
 
     def _thread_db(self):
         """A connection for the calling thread: `self.db` belongs to the
@@ -262,6 +318,20 @@ class Session:
                 "queued": [j for j in recent if j["state"] == "queued"],
                 "recent": [j for j in recent if j["state"] in ("done", "failed")][-8:]}
 
+    def _hold(self, name: str, state: str, message: str,
+              job: dict | None = None) -> str:
+        """Remember a file whose tab was not pushed, and point its job at
+        the Merge forms page."""
+        with self._lock:
+            self.held[name] = {"state": state, "message": message}
+        if job is not None:
+            self._set(job, held=True, link=self.forms_link())
+        return message
+
+    def _clear_hold(self, name: str) -> None:
+        with self._lock:
+            self.held.pop(name, None)
+
     # ---------------------------------------------------------- jobs
 
     def enqueue(self, kind: str, **params: Any) -> dict:
@@ -284,8 +354,10 @@ class Session:
             job.update(characters=plan["characters"], ids=plan["ids"],
                        of=len(plan["ids"]),
                        ordinals=[gen.ordinal_of(chapter, i) for i in plan["ids"]])
-        elif kind in ("stitch", "push", "pull"):
+        elif kind in ("stitch", "push", "pull", "autopush"):
             gen.load_chapter(root, book, params["stem"])
+            if kind == "autopush":
+                job["file"] = params["file"]
         elif kind in ("refresh", "preview"):
             if params.get("stem"):
                 gen.load_chapter(root, book, params["stem"])
@@ -447,9 +519,14 @@ class Session:
             # Guarded: a tab edited since the last push is never
             # overwritten from the page; the job fails with "did not
             # push; doc has changed. pull first" and Pull is beside it.
-            result = gdocs.push_doc(db, self.manuscript, name,
-                                    service=service, docs_service=docs_service,
-                                    guard=True)
+            try:
+                result = gdocs.push_doc(db, self.manuscript, name,
+                                        service=service,
+                                        docs_service=docs_service, guard=True)
+            except gdocs.DocChanged:
+                self._hold(name, "conflict", _moved_message(name), job)
+                raise
+            self._clear_hold(name)
             urls.append(result["url"])
             held += len(result.get("held") or [])
             self._set(job, done=i + 1)
@@ -487,6 +564,7 @@ class Session:
         self._set(job, of=len(names) + 1, done=0)
         db = self._thread_db()
         pulled: list[str] = []
+        matched: list[str] = []
         conflicts: list[str] = []
         ahead: list[str] = []
         missing: list[str] = []
@@ -495,6 +573,7 @@ class Session:
             report = gdocs.pull_doc(db, self.manuscript, name, service=service,
                                     docs_service=docs_service)
             pulled += [r for r in report.get("changed", []) if r not in pulled]
+            matched += [r for r in report.get("unchanged", []) if r not in matched]
             conflicts += report.get("conflicts", [])
             ahead += report.get("local_ahead", [])
             missing += report.get("missing", [])
@@ -511,15 +590,90 @@ class Session:
         audio.export(db, self.manuscript)
         self._set(job, done=len(names) + 1)
         self.doc = {**self.doc, "state": "pulled from the page", "detail": ""}
-        parts = [f"pulled {', '.join(pulled)}" if pulled
-                 else "the Doc matches the files" if not ahead
-                 else "nothing new in the Doc"]
-        if ahead:
-            parts.append(f"the file is ahead of the Doc, kept: {', '.join(ahead)} "
-                         "(Push sends it)")
-        if conflicts:
-            parts.append(f"changed on both sides, left alone: {', '.join(conflicts)}")
-        return " · ".join(parts)
+        for name in pulled + matched:
+            self._clear_hold(name)
+        for name in conflicts:
+            self._hold(name, "conflict", _moved_message(name), job)
+        return pull_summary(pulled, matched, ahead, conflicts)
+
+    def _job_autopush(self, job: dict) -> str:
+        """The push after a saved edit (2026-11-12). The file goes up only
+        when the Doc side has not moved since its last push or pull
+        (unchanged or local_ahead); a tab edited in the Doc, or holding
+        forms not yet merged, is left alone and named, with the Merge
+        forms page to settle it. Asked per tab the cheap way first
+        (gdocs.doc_side_state). `checkSecs` and `secs` on the job are how
+        long the check and the whole job took."""
+        from . import gdocs
+
+        started = time.monotonic()
+        name = job["file"]
+        db = self._thread_db()
+        try:
+            origin = gdocs.forms_pending(db, self.manuscript["id"], name)
+            if origin:
+                return self._hold(name, "forms", _forms_message(name), job)
+            _config, service, docs_service = self._doc_services()
+            self._set(job, message=f"checking {name}'s tab")
+            side = gdocs.doc_side_state(db, self.manuscript, name, service,
+                                        docs_service)
+            self._set(job, checkSecs=round(time.monotonic() - started, 3),
+                      fast=side["fast"], docState=side["state"])
+            if side["state"] == "unlinked":
+                return f"{name} has no tab in the Doc yet: Push sends it"
+            if side["state"] == "unchanged":
+                self._clear_hold(name)
+                return f"nothing to push: the Doc already has {name} as it is"
+            if side["state"] in ("doc_ahead", "conflict"):
+                return self._hold(name, side["state"], _moved_message(name), job)
+            self._set(job, message=f"pushing {name}")
+            try:
+                result = gdocs.push_doc(db, self.manuscript, name,
+                                        service=service,
+                                        docs_service=docs_service, guard=True)
+            except gdocs.DocChanged:
+                # The Doc moved between the check and the push.
+                return self._hold(name, "conflict", _moved_message(name), job)
+            self._clear_hold(name)
+            self.doc = {**self.doc, "state": "pushed from the page",
+                        "detail": result.get("url", "")}
+            held = len(result.get("held") or [])
+            return (f"pushed {name}"
+                    + (f" · {held} paragraph(s) held under open comments"
+                       if held else ""))
+        finally:
+            self._set(job, secs=round(time.monotonic() - started, 3))
+
+
+def _moved_message(name: str) -> str:
+    return (f"did not push {name}: its tab in the Doc was edited since the "
+            "last push. Your edit is saved in the file. Settle the two "
+            "versions on the Merge forms page.")
+
+
+def _forms_message(name: str) -> str:
+    return (f"did not push {name}: its tab has forms waiting. Merge the "
+            "forms first on the Merge forms page, then push.")
+
+
+def pull_summary(pulled: list[str], matched: list[str], ahead: list[str],
+                 conflicts: list[str]) -> str:
+    """The Pull job's line. Each file is named under what happened to
+    it, so a file left alone is never covered by "the Doc matches"
+    (2026-11-12: "the Doc matches the files · changed on both sides,
+    left alone: king-who-owned-the-rain.md" read as covering it)."""
+    parts: list[str] = []
+    if pulled:
+        parts.append(f"pulled {', '.join(pulled)}")
+    if matched:
+        parts.append(f"the Doc matches {', '.join(matched)}")
+    if ahead:
+        parts.append(f"the file is ahead of the Doc, kept: {', '.join(ahead)} "
+                     "(Push sends it)")
+    if conflicts:
+        parts.append(f"changed on both sides, left alone: {', '.join(conflicts)} "
+                     "(settle it on the Merge forms page)")
+    return " · ".join(parts) or "nothing new in the Doc"
 
 
 def session(workspace: str | None, manuscript: str | None, db=None,
