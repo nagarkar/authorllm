@@ -2222,8 +2222,11 @@ The author declares an image as a single-line paragraph anywhere in the
 manuscript — `[Illustration: prompt | caption: optional reader-facing
 caption]` — and that tag is never consumed or replaced. Collect/pull
 output reports new unrendered slots ("new illustrations found"); relay
-that and ASK before rendering — rendering is always an explicit,
-consented act (`authorlm illus render [fragment] [-n N] [--from N]`).
+that and ASK before rendering anything new. Once the author has asked
+for a picture or a change to one, render it without asking again when
+the job is fewer than 10 image-model calls; ask first when it is 10 or
+more, saying the count (author ruling 2026-11-12) (`authorlm illus
+render [fragment] [-n N] [--from N]`).
 **When the author asks to see an image or to change one, show the
 current pinned render first and edit its description file; render
 something new only once the change is agreed.** On 2026-10-17 three
