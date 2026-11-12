@@ -698,6 +698,12 @@ Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_audiobook_autopush`
+
+`authorlm/tests/test_audiobook_autopush.py`
+
+The audiobook page's push after an edit (2026-11-12), hermetic.
+
 ## `tests.test_beat_repetition`
 
 `authorlm/tests/test_beat_repetition.py`
