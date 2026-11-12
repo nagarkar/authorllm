@@ -420,9 +420,11 @@ function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate,
 
 // The Tab menu's count: forms to rule are only those the tab still holds;
 // a form gone from the tab (or from a tab not found) counts as invalid.
+// A tab changed on both sides also counts its conflict cards.
 function formsTabLabel(t: FormsTab): string {
   const decided = t.count - t.toRule - t.invalid;
-  return [t.toRule ? `${t.toRule} to rule` : decided ? "all ruled, ready to merge" : null,
+  return [t.conflicts ? `${t.conflicts} conflict${t.conflicts === 1 ? "" : "s"}` : null,
+    t.toRule ? `${t.toRule} to rule` : decided ? "all ruled, ready to merge" : null,
     t.toRule && decided ? `${decided} decided` : null,
     t.invalid ? `${t.invalid} invalid` : null].filter(Boolean).join(", ");
 }

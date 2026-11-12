@@ -944,6 +944,12 @@ footnote_prefixes must stay injective when nested paths share a stem.
 
 `form_grammar.form_remnants` / `strip_form_remnants` clean hand-resolved Doc forms after pull.
 
+## `tests.test_forms_conflicts`
+
+`authorlm/tests/test_forms_conflicts.py`
+
+The Merge forms page's Conflicts (`forms_page.settle`, `forms_page.land_conflict`, `/api/forms` list / settle / land / enqueue): a file changed both in the file and in its Doc tab since the last push, settled in the browser instead of by hand.
+
 ## `tests.test_forms_page`
 
 `authorlm/tests/test_forms_page.py`

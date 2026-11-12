@@ -232,6 +232,7 @@ footer audio{max-width:640px;display:block;margin:0 auto}
 .forms-form.ruled{opacity:.85}
 .forms-note{text-transform:none;letter-spacing:0;color:var(--ink)}
 .forms-anchor{font-size:15px;margin-bottom:0}
+.forms-base{opacity:.6;font-size:14px;white-space:pre-wrap;margin-bottom:6px}
 .forms-merge{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .forms-result{margin:10px 0 0;padding:8px 12px;border-radius:10px;font-size:14px}
 .forms-result.ok{background:var(--good-soft);color:var(--ink)}
