@@ -1560,20 +1560,29 @@ def verdict(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
             raise RuntimeError(f"item {item_id}: its paragraph is no longer "
                                "in the file; the item needs checking again")
         pre, suf = ctx["prefix"], ctx["suffix"]
-        # A line break typed on the card starts a new paragraph: Markdown and
-        # the Doc both need a blank line, or the tab and the file disagree.
-        paragraph = re.sub(r"[ \t]*\n[ \t]*(?=\S)", "\n\n",
-                           re.sub(r"\n{2,}", "\n", paragraph.strip("\n")))
+        # Compare against the file's prefix/suffix before normalizing newlines:
+        # a soft wrap inside the paragraph must not force a whole-paragraph
+        # replace (that would rewrite surrounding prose and break undo).
+        paragraph = paragraph.strip("\n")
         if paragraph.startswith(pre) and paragraph.endswith(suf) \
                 and len(paragraph) >= len(pre) + len(suf):
             text = paragraph[len(pre):len(paragraph) - len(suf)]
         else:
-            whole = dict(item, original=pre + item["original"] + suf)
+            # A line break typed on the card starts a new paragraph: Markdown
+            # and the Doc both need a blank line, or the tab and the file
+            # disagree.
+            paragraph = re.sub(r"[ \t]*\n[ \t]*(?=\S)", "\n\n",
+                               re.sub(r"\n{2,}", "\n", paragraph))
+            original_paragraph = pre + item["original"] + suf
+            whole = dict(item, original=original_paragraph)
             apply_item(manuscript, whole, paragraph)
             item["applied"] = _now()
             item["pushed"] = None
             text = paragraph
             item["final_is_paragraph"] = True
+            # revise undoes with this full paragraph; item["original"] stays
+            # the passage so a later passage-level re-accept still applies.
+            item["original_paragraph"] = original_paragraph
     if verdict_ == "accept" and item.get("original") and not item.get("applied"):
         apply_item(manuscript, item, text)
         item["applied"] = _now()
@@ -1656,7 +1665,13 @@ def revise(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
         text = None
     was_applied = bool(item.get("applied") and item.get("original"))
     applied_text = item.get("final") if item.get("final") is not None else item.get("proposed")
-    final = item.get("proposed") if text is None else text
+    # A whole-paragraph accept stored the full paragraph as final; without a
+    # new `text`, keep that applied text — falling back to the passage-only
+    # proposed would delete the surrounding prose on swap.
+    if text is None and item.get("final_is_paragraph") and was_applied:
+        final = applied_text
+    else:
+        final = item.get("proposed") if text is None else text
     changed = False
     if verdict_ == "accept" and item.get("original"):
         if was_applied:
@@ -1666,13 +1681,19 @@ def revise(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
         else:
             apply_item(manuscript, item, final)
             changed = True
+            item.pop("final_is_paragraph", None)
+            item.pop("original_paragraph", None)
         item["applied"] = _now() if changed or not was_applied else item["applied"]
         item.pop("reverted", None)
     elif was_applied:
-        _swap(manuscript, item, applied_text, item["original"])
+        restore = (item.get("original_paragraph")
+                   if item.get("final_is_paragraph") and item.get("original_paragraph")
+                   else item["original"])
+        _swap(manuscript, item, applied_text, restore)
         changed = True
         item["applied"] = None
         item["reverted"] = _now()
+        item.pop("final_is_paragraph", None)
     if changed:
         item["pushed"] = None
     item.update(verdict=verdict_, reason_given=reason.strip(),

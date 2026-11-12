@@ -974,6 +974,36 @@ def test_a_whole_paragraph_edit_on_the_card() -> None:
         check("an edit outside the passage replaces the whole paragraph",
               "Opening changed. Newer middle. The end." in path.read_text()
               and "First part." not in path.read_text(), path.read_text())
+        devedit.revise(folder, ms, "b", "reject", reason="restore the opening")
+        check("undoing a whole-paragraph accept restores the full paragraph",
+              path.read_text() == "# One\n\nFirst part. Newer middle. Last part.\n",
+              path.read_text())
+
+
+def test_a_soft_wrapped_paragraph_edit_stays_a_passage() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ms = _manuscript(Path(tmp))
+        path = Path(ms["path"]) / "one.md"
+        path.write_text(
+            "# One\n\nThe Dharma is the ground. It moves all.\nStill the same para.\n")
+        folder = devedit.new_run(ms)
+        _with_queue(folder, [
+            {"id": "a", "file": "one.md", "tier": "must", "original": "is the ground",
+             "proposed": "is the soil", "order": 1}])
+        devedit.verdict(folder, ms, "a", "accept",
+                        paragraph="The Dharma is the soil. It moves all.\nStill the same para.")
+        body = path.read_text()
+        item = next(i for i in devedit.queue(folder) if i["id"] == "a")
+        check("a soft wrap does not force a whole-paragraph replace",
+              body == "# One\n\nThe Dharma is the soil. It moves all.\nStill the same para.\n"
+              and not item.get("final_is_paragraph")
+              and item.get("final") == "is the soil",
+              (body, item.get("final"), item.get("final_is_paragraph")))
+        devedit.revise(folder, ms, "a", "reject", reason="keep ground")
+        check("undoing the passage accept restores only the passage",
+              path.read_text() ==
+              "# One\n\nThe Dharma is the ground. It moves all.\nStill the same para.\n",
+              path.read_text())
 
 
 def main() -> None:
@@ -998,6 +1028,7 @@ def main() -> None:
              test_a_verdict_can_be_revised,
              test_the_arc_step_comes_first,
              test_a_whole_paragraph_edit_on_the_card,
+             test_a_soft_wrapped_paragraph_edit_stays_a_passage,
              test_decided_shows_only_the_current_stage,
              test_the_card_shows_the_whole_paragraph]
     for fn in tests:
