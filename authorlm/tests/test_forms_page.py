@@ -233,6 +233,13 @@ def list_shows_the_doc_as_it_stands(root: Path) -> None:
           "takes no new forms" in group["blocking"]
           and "4 open form" in group["blocking"], group["blocking"])
     check("every form waits for a ruling", group["undecided"] == 4)
+    check("a card diffs the old text against the green half word by word",
+          gamma["segments"] == [
+              {"op": "equal", "text": "Gamma"},
+              {"op": "delete", "text": " is to be reworded"},
+              {"op": "insert", "text": ", my words"},
+              {"op": "equal", "text": "."}], gamma["segments"])
+    check("an addition carries no word diff", forms["r-add"]["segments"] == [])
 
     ws2 = root / "empty-ws"
     (ws2 / "book").mkdir(parents=True)
@@ -699,9 +706,43 @@ def lens_resolve_reads_an_emptied_half_as_decline(root: Path) -> None:
           and _GAMMA_OLD in text, (done, text))
 
 
+def word_diff_segments(_root: Path) -> None:
+    print("word diff:")
+    from authorlm.forms_page import word_diff
+    old = "The mind returns to what it loves, again and again."
+    check("a prepended sentence is the only insert; the rest stays plain",
+          word_diff(old, "First comes the claim. " + old) == [
+              {"op": "insert", "text": "First comes the claim. "},
+              {"op": "equal", "text": old}],
+          word_diff(old, "First comes the claim. " + old))
+    got = word_diff("one two three four five", "one TWO three FOUR five")
+    check("separate word changes stay apart, kept words between them plain",
+          got == [{"op": "equal", "text": "one "},
+                  {"op": "delete", "text": "two"}, {"op": "insert", "text": "TWO"},
+                  {"op": "equal", "text": " three "},
+                  {"op": "delete", "text": "four"}, {"op": "insert", "text": "FOUR"},
+                  {"op": "equal", "text": " five"}], got)
+    got = word_diff("red cat and big dog", "blue cat or small dog")
+    check("a space or one short word between two changes folds into them",
+          got == [{"op": "delete", "text": "red cat and big"},
+                  {"op": "insert", "text": "blue cat or small"},
+                  {"op": "equal", "text": " dog"}], got)
+    got2 = word_diff("red kitten and dog", "blue kitten or dog")
+    check("a longer kept word between two changes stays plain",
+          {"op": "equal", "text": " kitten "} in got2, got2)
+    check("segments rebuild both sides",
+          "".join(g["text"] for g in got if g["op"] != "insert")
+          == "red cat and big dog"
+          and "".join(g["text"] for g in got if g["op"] != "delete")
+          == "blue cat or small dog")
+    check("*emphasis* marks stay in the text",
+          word_diff("a *bold* claim here", "a *bolder* claim here")[1]
+          == {"op": "delete", "text": "bold"})
+
+
 def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="forms-page-"))
-    for fn in (rulings_on_marked_text, list_shows_the_doc_as_it_stands,
+    for fn in (word_diff_segments, rulings_on_marked_text, list_shows_the_doc_as_it_stands,
                list_sorts_gone_forms_as_invalid, decide_holds_rulings,
                merge_lands_the_rulings, merge_declines_everything,
                merge_stops_on_a_doc_edit_after_ruling,
