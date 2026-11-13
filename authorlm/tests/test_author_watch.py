@@ -130,9 +130,60 @@ def devedit_watch() -> None:
                   "COMPLETE items x.md"], out)
 
 
+def helper_edges() -> None:
+    """Direct pins for the pure diff helpers FormsWatch composes.
+    The FormsWatch road above covers the happy path; these catch the
+    edges a poll-loop change can break without a live server."""
+    print("helpers:")
+    snap = aw.forms_snapshot([
+        {"id": "f1", "file": "a.md", "metadata": '{"page_ruling":{"verdict":"accept"}}'},
+        {"id": "f2", "file": "a.md", "metadata": "{not-json"},
+        {"id": "f3", "file": "b.md", "metadata": None},
+    ])
+    check("snapshot groups by file and reads a ruling",
+          snap == {"a.md": {"f1": "accept", "f2": None},
+                   "b.md": {"f3": None}}, snap)
+
+    prev = {"a.md": {"f1": None, "f2": "accept"}}
+    cur = {"a.md": {"f1": "decline", "f2": "accept", "f3": None},
+           "b.md": {"g1": None}}
+    lines = aw.forms_lines(prev, cur)
+    check("new forms, a ruling change, and no COMPLETE while one is open",
+          lines == ["FORMS STAGED a.md: 1 new open form(s)",
+                    "RULING a.md f1: decline",
+                    "FORMS STAGED b.md: 1 new open form(s)"], lines)
+    done = aw.forms_lines(
+        {"a.md": {"f1": "accept", "f2": None}},
+        {"a.md": {"f1": "accept", "f2": "edit"}})
+    check("COMPLETE only when the file first becomes fully ruled",
+          done == ["RULING a.md f2: edit", "COMPLETE rulings a.md"], done)
+    again = aw.forms_lines(
+        {"a.md": {"f1": "accept", "f2": "edit"}},
+        {"a.md": {"f1": "accept", "f2": "edit"}})
+    check("already-complete stays quiet", again == [], again)
+    cleared = aw.forms_lines(
+        {"a.md": {"f1": "accept"}},
+        {"a.md": {"f1": None}})
+    check("Undo reports as cleared",
+          cleared == ["RULING a.md f1: cleared"], cleared)
+
+    q_prev = {"running": None, "results": {}}
+    q_cur = {"running": "a.md", "results": {
+        "a.md": {"stopped": None, "message": "ok"},
+        "b.md": {"stopped": "conflict", "message": "both sides"}}}
+    q = aw.queue_lines(q_prev, q_cur)
+    check("a start and both result shapes are reported once",
+          q == ["MERGING a.md",
+                "MERGED a.md: ok",
+                "MERGE STOPPED b.md: conflict — both sides"], q)
+    check("unchanged results stay quiet",
+          aw.queue_lines(q_cur, q_cur) == [])
+
+
 def main() -> None:
     forms_watch()
     devedit_watch()
+    helper_edges()
     print(f"OK — {PASSED} watcher checks")
 
 
