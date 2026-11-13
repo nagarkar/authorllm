@@ -22,6 +22,7 @@ os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
 # every fixture row — tests passing for the wrong reason. Same failure
 # mode as a leaked config, so it gets the same treatment: pin it.
 os.environ["AUTHORLM_CLIENT"] = "none"
+os.environ["AUTHORLM_STYLE_DEFAULTS"] = "/nonexistent/authorlm-test/style-defaults.toml"  # composition tests see the book alone; test_style_defaults.py covers the default layer
 
 def _assert_offline() -> None:
     """Fail loudly if the real project config or .env leaks into a test.

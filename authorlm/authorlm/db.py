@@ -443,6 +443,21 @@ CREATE TABLE IF NOT EXISTS filter_runs (
                                          -- active | settled | abandoned
 );
 
+-- One shared whole-essay reading per (filter family, file), issue #412
+-- (readings.py). A run COPIES it into filter_runs.registry at prelude time
+-- and never reads it again, so a later reading cannot touch a live run.
+-- Rows are superseded, never edited: at most one 'current' per key.
+CREATE TABLE IF NOT EXISTS filter_readings (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id   TEXT NOT NULL,
+    reading         TEXT NOT NULL,   -- the group, from front matter `reading`
+    file            TEXT NOT NULL,   -- relpath
+    registry        TEXT NOT NULL,   -- the reading
+    run_id          TEXT,            -- the filter run whose prelude made it
+    status          TEXT NOT NULL DEFAULT 'current',  -- current | superseded
+    superseded_at   TEXT
+);
+
 CREATE TABLE IF NOT EXISTS triage_runs (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,

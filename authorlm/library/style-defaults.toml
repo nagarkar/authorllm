@@ -1,0 +1,74 @@
+# Default style law: the conventions every manuscript starts with.
+#
+# Where English allows more than one valid form, the choice is made here,
+# once, as STYLE LAW, instead of essay by essay or filter by filter. The
+# author ratified every row on 2026-11-12. Read in place by
+# `styles.effective_style`, never copied: each default is the LOWEST layer
+# of every file's effective guide, below the manuscript's root guide.
+#
+# A manuscript departs from a default with its own law whose `overrides`
+# names the default: `authorlm style add formatting "..." --guide "<root>"
+# --overrides default:dash` (several: `default:dash,default:semicolons`).
+# Changing a default is an edit here, and it reaches every book at once.
+# `key` is the convention's name in the strunk-and-white registry
+# (library/filters/strunk-and-white-*.md, "The registry").
+
+[[default]]
+key = "serial-comma"
+aspect = "formatting"
+statement = "Serial comma: in a list of three or more, put a comma before the final and/or: \"truth, beauty, and goodness\"."
+
+[[default]]
+key = "clause-comma"
+aspect = "formatting"
+statement = "Comma before and, but, or, nor, so, yet joining two independent clauses: \"He stayed, and she left.\" It may be dropped when both clauses are short and tightly linked: \"He knocked and she came.\""
+
+[[default]]
+key = "possessive-s"
+aspect = "formatting"
+statement = "Possessive of a name ending in s takes a bare apostrophe: Charles', Socrates', Jesus'. Singular common nouns ending in s take 's: the boss's, the class's. Plurals take a bare apostrophe: the gods'."
+
+[[default]]
+key = "quotation-marks"
+aspect = "formatting"
+statement = "Curly quotation marks, American style: “double” outside, ‘single’ inside; periods and commas always go inside the closing mark; colons and semicolons outside; question and exclamation marks inside only when they belong to the quoted words."
+
+[[default]]
+key = "dash"
+aspect = "formatting"
+statement = "Dashes: a closed em dash (—), no spaces, for an interruption or aside: \"the answer—if there is one—waits\". The en dash (–) only for ranges: 1914–1918. Never a hyphen or a double hyphen for a dash."
+
+[[default]]
+key = "semicolons"
+aspect = "formatting"
+statement = "Semicolons are allowed in standard use: between two closely related independent clauses, and between list items that themselves contain commas. Never between a clause and a fragment."
+
+[[default]]
+key = "ellipsis"
+aspect = "formatting"
+statement = "Ellipsis: the single character …, closed to the word before, a space after: \"and then… nothing\". Never three periods."
+
+[[default]]
+key = "colon-capital"
+aspect = "formatting"
+statement = "After a colon, lowercase the next word even when a complete sentence follows: \"The rule is simple: choose the good.\" Capitalize only a proper noun, a quotation, or the first of two or more sentences the colon introduces."
+
+[[default]]
+key = "numbers"
+aspect = "formatting"
+statement = "Numbers: spell out zero to one hundred and round numbers (\"three thousand years\"); use figures otherwise (\"2,500\"). Figures always for years, dates, percentages with %, and units of measure. Never open a sentence with a figure."
+
+[[default]]
+key = "compound-modifiers"
+aspect = "formatting"
+statement = "Hyphenate a compound modifier before its noun (\"a well-known idea\", \"a twentieth-century thinker\"); leave it open after the noun (\"the idea is well known\"); never hyphenate after an -ly adverb (\"a deeply held belief\")."
+
+[[default]]
+key = "italics"
+aspect = "formatting"
+statement = "Italics for titles of books and other long works; for foreign words not in an English dictionary (karma and yoga stay roman), on every use; for words referred to as words; and, rarely, for emphasis. Titles of short works (essays, poems, chapters, articles) go in quotation marks."
+
+[[default]]
+key = "spelling"
+aspect = "lexicon"
+statement = "American spelling, the first form listed in Merriam-Webster: color, judgment, toward (not towards), gray, -ize."

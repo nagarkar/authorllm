@@ -6,11 +6,70 @@ files fall back to the root. An element is one rule: an aspect, a
 statement, optional free-text notes, and an optional `overrides` link that
 displaces an inherited element. Composition is deterministic set
 arithmetic — no model in the loop; the author ratifies every row.
+
+Below every manuscript's root guide sits one more layer, the DEFAULTS:
+author-ratified law for the conventions where English allows more than
+one valid form (serial comma, possessive of names in s, dash style…),
+kept in the repo at `library/style-defaults.toml` and read in place, so a
+change there reaches every book. A default is an element with id
+`default:<key>`; a manuscript law departs from it by naming that id in
+`overrides` (a comma-separated list when one law displaces several).
 """
 
 from __future__ import annotations
 
+import os
+import tomllib
+from pathlib import Path
+
 from .db import Database, ko_fields
+
+DEFAULTS_ENV = "AUTHORLM_STYLE_DEFAULTS"
+DEFAULT_PREFIX = "default:"
+
+
+def defaults_path() -> Path:
+    """`authorlm/library/style-defaults.toml` in the checkout, or the file
+    named by AUTHORLM_STYLE_DEFAULTS (tests point it at a temp file, or at
+    a missing one to see a manuscript alone)."""
+    override = os.environ.get(DEFAULTS_ENV, "")
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parent.parent / "library" / "style-defaults.toml"
+
+
+def default_laws(manuscript_id: str = "") -> list[dict]:
+    """The default layer as element dicts (id `default:<key>`), in file
+    order. A missing file is no defaults; a malformed row fails loudly."""
+    path = defaults_path()
+    if not path.is_file():
+        return []
+    rows = tomllib.loads(path.read_text(encoding="utf-8")).get("default", [])
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        key, aspect, statement = row.get("key"), row.get("aspect"), row.get("statement")
+        if not (key and aspect and statement):
+            raise ValueError(f"{path}: a default needs key, aspect and statement: {row}")
+        if aspect not in ASPECTS:
+            raise ValueError(f"{path}: default '{key}' has unknown aspect '{aspect}'")
+        if key in seen:
+            raise ValueError(f"{path}: default '{key}' appears twice")
+        seen.add(key)
+        out.append({
+            "id": DEFAULT_PREFIX + key, "default": key,
+            "manuscript_id": manuscript_id, "guide_id": None, "file": None,
+            "aspect": aspect, "statement": statement, "notes": row.get("notes"),
+            "status": "active", "overrides": None, "source_id": None,
+        })
+    return out
+
+
+def overridden_ids(value: str | None) -> list[str]:
+    """The ids an element's `overrides` names, in order: one id, or a
+    comma list."""
+    return list(dict.fromkeys(
+        part.strip() for part in (value or "").split(",") if part.strip()))
 
 ASPECTS = {
     "register", "lexicon", "syntax", "structure", "formatting",
@@ -148,8 +207,8 @@ def guide_chain(db: Database, manuscript_id: str, file: str) -> list[dict]:
 
 def effective_style(db: Database, manuscript_id: str, file: str) -> list[dict]:
     """Active elements governing `file`, nearest scope first: file-local
-    rows, then each guide up the chain — minus every element displaced by
-    a nearer element's `overrides` link."""
+    rows, then each guide up the chain, then the defaults — minus every
+    element displaced by a nearer element's `overrides` link."""
     layers: list[list[dict]] = [[dict(e) for e in db.all(
         "SELECT * FROM style_laws WHERE manuscript_id = ? AND file = ? "
         "AND status = 'active' ORDER BY created_at",
@@ -161,7 +220,9 @@ def effective_style(db: Database, manuscript_id: str, file: str) -> list[dict]:
             "AND status = 'active' ORDER BY created_at",
             (manuscript_id, guide["id"]),
         )])
-    displaced = {e["overrides"] for layer in layers for e in layer if e["overrides"]}
+    layers.append(default_laws(manuscript_id))
+    displaced = {i for layer in layers for e in layer
+                 for i in overridden_ids(e["overrides"])}
     return [e for layer in layers for e in layer if e["id"] not in displaced]
 
 

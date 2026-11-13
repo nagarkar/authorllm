@@ -20,6 +20,7 @@ from pathlib import Path
 os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
 os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
 os.environ["AUTHORLM_CLIENT"] = "none"
+os.environ["AUTHORLM_STYLE_DEFAULTS"] = "/nonexistent/authorlm-test/style-defaults.toml"  # composition tests see the book alone; test_style_defaults.py covers the default layer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

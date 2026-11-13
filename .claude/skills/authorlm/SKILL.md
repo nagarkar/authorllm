@@ -1146,6 +1146,64 @@ code. `filter add <name>` with the artifact on stdin; `filter list`,
 the same read-then-ratify rule; the loop itself (`run`/`prelude`/
 `record`/`settle`/…) stays a CLI-only surface.
 
+**The shared library.** `authorlm/library/filters/` in the repo holds
+filters written for any manuscript (the three `strunk-and-white-*` passes,
+ratified 2026-11-12). Every manuscript sees them in `filter list`, marked
+`(library)`, and runs them by name with no install step; they are read in
+place, so an edit in the repo reaches every book. A manuscript's own
+`_filters/<name>.md` of the same name overrides the library's for that book
+only (`filter add` of a library name writes that override). Never copy a
+library filter into a manuscript unless the author wants that book to differ.
+
+**Shared readings.** A global filter whose front matter says `reading =
+"<group>"` shares one whole-essay reading per essay with the rest of its group
+(the strunk-and-white passes are group `strunk-and-white`). The first `filter
+prelude` in the group on an essay reads it and records the reading; every later
+pass on that essay reuses it with no call (the CLI says "reused"), even after
+edits, so the order is simply concision, grammar, mechanics, each prelude then
+run. The reading describes the essay's form, so edits do not refresh it; only
+`filter prelude <name> <essay> --replace` reads the essay again. Each run keeps
+its own copy, so a replaced reading never changes a live run. Conventions where
+English allows several forms are settled up front by the default style laws,
+not by the reading.
+
+**Default style law (ratified 2026-11-12).** Where English allows more than
+one valid form, every manuscript starts with a decided one: the defaults in
+`authorlm/library/style-defaults.toml`, read in place as the LOWEST layer of
+every file's effective guide (`authorlm style show <file>` marks them
+`workspace default`; `authorlm style guides` and `get_style` without a file
+list them with any law that displaces each). The filters follow them like any
+law, so a book never gets a style-sheet question on a point a default
+decides. The defaults, by key:
+
+- `serial-comma`: always ("truth, beauty, and goodness").
+- `clause-comma`: comma before and/but/or joining two independent clauses;
+  may drop when both are short and tight.
+- `possessive-s`: names take a bare apostrophe (Charles', Socrates');
+  common nouns take 's (the boss's); plurals bare (the gods').
+- `quotation-marks`: curly, American (periods and commas inside).
+- `dash`: closed em dash (a—b); en dash only for ranges.
+- `semicolons`: allowed in standard use.
+- `ellipsis`: the single character …
+- `colon-capital`: lowercase after a colon, even before a full sentence.
+- `numbers`: words for zero to one hundred and round numbers, figures
+  otherwise; figures for years, dates, % and units.
+- `compound-modifiers`: hyphenated before the noun, open after; none after -ly.
+- `italics`: Chicago (long-work titles, unfamiliar foreign words, words as
+  words, rare emphasis; short-work titles in quotation marks).
+- `spelling`: American, Merriam-Webster's first form (toward, judgment).
+
+**Changing a default.** For every book: edit the row in
+`style-defaults.toml` (only on the author's word; it reaches every manuscript
+at once). For one book: add that book's own law naming the default it
+displaces, `authorlm style add <aspect> "<statement>" --guide "<root guide>"
+--overrides default:<key>` (MCP `add_style_law(overrides="default:<key>")`;
+a comma list displaces several). A book's law that contradicts a default
+without naming it leaves both in the guide, so always link it. Linked on
+2026-11-12: Parables' "no dashes, no semicolons" law displaces `default:dash`
+and `default:semicolons`; SMSTTD's "own chapters plain roman" law and DON's
+"Sanskrit roman in verse" law displace `default:italics`.
+
 **Three filters are written and waiting to be ratified**, in full, in
 `docs/filter-pass-design.md`'s appendix:
 
@@ -2429,6 +2487,14 @@ without it}}`, or `<<tag>>{{}}` for a standalone), local pristine, then
 — a deleted form keeps the paragraph and its tag open — and pushes
 clean. A second apply while forms are out, and `doc push`, are refused
 naming `suggestion resolve`. Exports strip an unresolved tag and warn.
+
+**A suggestion whose gist begins `Query:` is a question for the author**,
+planted by a filter's (ask) rule (the strunk-and-white filters in
+`authorlm/library/filters/` plant them). Put it to the author verbatim,
+with both readings, and draft nothing until the author answers: the
+filter declined to guess, so the collaborator must not guess either. A
+`Query: style sheet:` question is answered by a STYLE LAW row (`style
+add`), then the tag is declined with the ruling as its reason.
 
 ## Media for podcasts (`[Clip: …]`, `[Collage: …]`, `[Montage: …]` — design: authorlm/docs/video-clips-design.md)
 
