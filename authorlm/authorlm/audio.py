@@ -39,6 +39,7 @@ Decisions:
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -969,20 +970,34 @@ def replace_block(root: Path, found: dict, markdown: str) -> Path:
     """Write `markdown` over the block `locate_block` found, and nothing
     else of the file: the lines before and after are kept byte for byte.
     Refuses when the block has moved since it was located (a save from
-    another editor in between), or when the new text is blank."""
+    another editor in between), or when the new text is blank.
+
+    The audiobook page's ThreadingHTTPServer answers Mac and phone edits
+    on separate threads. Without a lock, two saves that each read the
+    whole file, patch one block, and write back can land on the same
+    pre-write snapshot — both report success, and the earlier edit is
+    gone. Lock around the read-check-write so the second save re-reads
+    the first's bytes (or refuses when its own block moved)."""
     new = markdown.replace("\r\n", "\n").strip("\n")
     if not new.strip():
         raise AudioError("the paragraph would be empty — delete it in the "
                          "file instead")
     path = root / found["file"]
-    text = path.read_text(encoding="utf-8")
-    lines = text.split("\n")
-    start, count = found["line"] - 1, found["lines"]
-    if "\n".join(lines[start:start + count]) != found["markdown"]:
-        raise AudioError(f"{found['file']}:{found['line']} changed since it "
-                         "was opened — reload and edit again")
-    lines[start:start + count] = new.split("\n")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    lock_path = path.with_name(path.name + ".authorlm-edit.lock")
+    with open(lock_path, "a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            text = path.read_text(encoding="utf-8")
+            lines = text.split("\n")
+            start, count = found["line"] - 1, found["lines"]
+            if "\n".join(lines[start:start + count]) != found["markdown"]:
+                raise AudioError(
+                    f"{found['file']}:{found['line']} changed since it "
+                    "was opened — reload and edit again")
+            lines[start:start + count] = new.split("\n")
+            path.write_text("\n".join(lines), encoding="utf-8")
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     return path
 
 
