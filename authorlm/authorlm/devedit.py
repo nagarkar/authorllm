@@ -1,7 +1,17 @@
 """Developmental edit: one whole-book developmental edit as a run folder, and the verbs over it.
 
-A run lives at `<manuscript>/_devedit/<run-id>/` and is the only place its
-state lives. This module is the only writer of that folder; the
+A run's documents live at `<manuscript>/_devedit/<run-id>/` (state.json,
+the letters and stage decisions, notebook.md, findings/, checks/, arcs);
+its items and the author's verdicts live in the workspace database:
+`devedit_items`, one row per item (the current view: decided, applied,
+reverted, pushed), and `edit_events`, one row per verdict, apply, undo or
+push with its time and actor (the history). Each verdict is one
+transaction over its item's row and its events, so several agents may
+decide at once (the technique Merge forms uses on `doc_threads`). A push of
+a file to the Doc (`gdocs.push_doc`) marks that file's waiting items pushed
+(`pushed_to_doc`). A run folder from before the move is loaded once with
+`authorlm devedit import-record` (`import_record`). This module is the
+only writer of the run folder and of those rows; the
 `developmental-editing` skill drives the steps, `authorlm devedit` is the
 chat surface, and the audio page's Dev edit mode (`dispatch`) is the review
 surface. A run moves through these steps, each recorded in `state.json` with
@@ -25,6 +35,9 @@ the run reported, and the hashes of the files it read:
 Decisions:
 - Run state lives in the manuscript folder, `_devedit/<run-id>/`, beside
   `_critiques`, and travels with the manuscript. (owner)
+- The queue and the verdicts live in the workspace database beside
+  `doc_threads`, written per row in transactions, safe for several agents
+  at once; the documents stay files. (owner, 2026-11-13)
 - Coverage comes from `toc.toml` and is confirmed by the author before any
   step runs; only files the TOC lists are covered, and `outside` files never
   are. (owner)
@@ -122,6 +135,164 @@ def _write_json(path: Path, value: Any) -> None:
     tmp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n",
                    encoding="utf-8")
     tmp.replace(path)
+
+
+# ------------------------------------------------------------------ the record
+#
+# Items and verdicts live in the workspace database, not the run folder:
+# `devedit_items` holds one row per item (the current view), `edit_events`
+# one row per verdict, apply, undo or push (the history). Every change to an
+# item is one transaction (BEGIN IMMEDIATE) that re-reads the row, writes it
+# and inserts its events, so several agents deciding at once never overwrite
+# each other — the technique Merge forms uses on `doc_threads`.
+
+# The columns a verdict changes; everything else about an item is its body.
+_STATE = ("verdict", "final", "reason_given", "author_text", "revised",
+          "decided", "applied", "reverted", "pushed")
+_KEYS = ("id", "file", "order")
+
+
+def _key(db, folder: Path) -> tuple[str, str]:
+    """(manuscript id, run) of a run folder: the manuscript whose folder
+    holds `_devedit/<run>`."""
+    want = folder.resolve().parent.parent
+    for r in db.all("SELECT id, path FROM manuscripts"):
+        try:
+            if Path(r["path"]).resolve() == want:
+                return r["id"], folder.name
+        except OSError:
+            continue
+    raise LookupError(f"no manuscript in the database holds the run {folder}")
+
+
+def _item_of(row) -> dict:
+    item = json.loads(row["body"] or "{}")
+    item.update(id=row["item_id"], file=row["file"], order=row["ord"])
+    for k in _STATE:
+        v = row[k]
+        if k == "revised":
+            if v:
+                item[k] = True
+        elif v is not None:
+            item[k] = v
+    return item
+
+
+def _body(item: dict) -> str:
+    return json.dumps({k: v for k, v in item.items()
+                       if k not in _STATE and k not in _KEYS},
+                      ensure_ascii=False)
+
+
+def _put(db, mid: str, run: str, item: dict, *, gathered: bool = False,
+         queued: bool = False) -> str:
+    """Insert or update an item's body (never its state); returns its row id."""
+    row = db.one("SELECT id FROM devedit_items WHERE manuscript_id = ? AND "
+                 "run = ? AND item_id = ?", (mid, run, item["id"]))
+    fields = {"file": item["file"], "ord": int(item.get("order") or 0),
+              "body": _body(item)}
+    if gathered:
+        fields["gathered"] = 1
+    if queued:
+        fields["queued"] = 1
+    if row:
+        db.update("devedit_items", row["id"], fields)
+        return row["id"]
+    from .db import ko_fields
+    return db.insert("devedit_items", {**ko_fields("dei"), "manuscript_id": mid,
+                                       "run": run, "item_id": item["id"],
+                                       **fields})
+
+
+def _store(db, row_id: str, item: dict) -> None:
+    """Write an item's body and state back to its row."""
+    changes = {k: item.get(k) for k in _STATE}
+    changes["revised"] = 1 if item.get("revised") else 0
+    changes["body"] = _body(item)
+    db.update("devedit_items", row_id, changes)
+
+
+def _locked(db, mid: str, run: str, item_id: str) -> tuple[str, dict]:
+    """Inside a transaction: the queued item's row id and its current view."""
+    row = db.one("SELECT * FROM devedit_items WHERE manuscript_id = ? AND "
+                 "run = ? AND item_id = ? AND queued = 1", (mid, run, item_id))
+    if row is None:
+        raise LookupError(f"no item {item_id}")
+    return row["id"], _item_of(row)
+
+
+def _event(db, mid: str, run: str, item: dict, event: str, actor: str,
+           at: str | None = None) -> None:
+    from .db import ko_fields
+    detail = {k: item.get(k) for k in ("final", "reason_given", "author_text")
+              if item.get(k) is not None}
+    db.insert("edit_events", {**ko_fields("eev"), "manuscript_id": mid,
+                              "source": "devedit", "run": run,
+                              "item_id": item["id"], "file": item.get("file", ""),
+                              "event": event, "verdict": item.get("verdict"),
+                              "detail": json.dumps(detail, ensure_ascii=False),
+                              "at": at or _now(), "actor": actor})
+
+
+def events(db, folder: Path, item_id: str | None = None) -> list[dict]:
+    """The run's history, oldest first (one item's with `item_id`)."""
+    mid, run = _key(db, folder)
+    sql = ("SELECT * FROM edit_events WHERE manuscript_id = ? AND "
+           "source = 'devedit' AND run = ?")
+    args: tuple = (mid, run)
+    if item_id:
+        sql += " AND item_id = ?"
+        args += (item_id,)
+    return [{**dict(r), "detail": json.loads(r["detail"] or "{}")}
+            for r in db.all(sql + " ORDER BY at, rowid", args)]
+
+
+def import_record(db, folder: Path) -> dict:
+    """Load a run folder written before the record moved to the database:
+    `items.json` (gathered), `queue.json` (the queue with its state) and
+    `verdicts.jsonl` (the history, as events). Idempotent: an item already
+    in the database keeps its row (its state is never overwritten), and an
+    event already imported is not added twice. The files are left as they
+    are."""
+    mid, run = _key(db, folder)
+    out = {"items": 0, "queued": 0, "kept": 0, "events": 0}
+    with db.transaction():
+        for item in _read_json(folder / "queue.json", []):
+            have = db.one("SELECT id, queued FROM devedit_items WHERE "
+                          "manuscript_id = ? AND run = ? AND item_id = ?",
+                          (mid, run, item["id"]))
+            if have and have["queued"]:
+                out["kept"] += 1
+                continue
+            row_id = _put(db, mid, run, item, queued=True)
+            _store(db, row_id, item)
+            out["queued"] += 1
+        for item in _read_json(folder / "items.json", []):
+            have = db.one("SELECT id, gathered FROM devedit_items WHERE "
+                          "manuscript_id = ? AND run = ? AND item_id = ?",
+                          (mid, run, item["id"]))
+            if have:
+                if not have["gathered"]:
+                    db.update("devedit_items", have["id"], {"gathered": 1})
+                    out["items"] += 1
+                continue
+            _put(db, mid, run, item, gathered=True)
+            out["items"] += 1
+        path = folder / "verdicts.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        for line in lines:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            event = "revise" if rec.get("revision") else "verdict"
+            at = rec.get("decided") or ""
+            if db.one("SELECT id FROM edit_events WHERE manuscript_id = ? AND "
+                      "source = 'devedit' AND run = ? AND item_id = ? AND "
+                      "event = ? AND at = ?", (mid, run, rec["id"], event, at)):
+                continue
+            _event(db, mid, run, rec, event, "import", at=at)
+            out["events"] += 1
+    return out
 
 
 # ------------------------------------------------------------------ runs
@@ -1056,15 +1227,15 @@ def audit(db, manuscript: dict, folder: Path) -> list[str]:
 
 # ------------------------------------------------------------------ ledger
 
-def ledger(folder: Path, file: str | None = None) -> list[dict]:
+def ledger(db, folder: Path, file: str | None = None) -> list[dict]:
     """Every finding of this run with what became of it, from the gathered
     items, the checks and the author's verdicts: "addressed" (an item was
     accepted), "declined" (the author rejected every item, with reasons),
     "dropped" (the checker dropped every item), or "open". The standard a
     run holds itself to: a rerun or a letter reads it, closes what was
     addressed, and never reverses or raises the bar on a closed finding."""
-    items = _read_json(folder / "items.json", [])
-    q = {i["id"]: i for i in queue(folder)}
+    items = gathered(db, folder)
+    q = {i["id"]: i for i in queue(db, folder)}
     groups: dict[str, list[dict]] = {}
     for item in items:
         key = item["id"].rsplit(".", 1)[0]
@@ -1153,7 +1324,7 @@ def essay_pack(db, manuscript: dict, folder: Path, file: str,
                  else f"No case in this essay: {settled['reason']}"),
                 "", "Do not add, replace or extend a case; revise only the "
                 "wording of the settled one.", ""]
-    mine = ledger(folder, file)
+    mine = ledger(db, folder, file)
     if mine or n > 1:
         out += [f"## The ledger for this essay (pass {n})", "",
                 "Earlier findings on this essay and what became of them. "
@@ -1227,7 +1398,7 @@ def book_pack(db, manuscript: dict, folder: Path, stage: int | None = None) -> s
     out += ["## The ledger", "",
             "Every finding so far and what became of it. A letter never "
             "reopens one that is addressed, declined or dropped.", ""]
-    out += _ledger_lines([r for r in ledger(folder) if r["file"] in scope]) \
+    out += _ledger_lines([r for r in ledger(db, folder) if r["file"] in scope]) \
         or ["(no findings yet)"]
     out.append("")
     for name in scope:
@@ -1253,7 +1424,11 @@ def decisions(folder: Path, stage: int | None = None) -> list[dict]:
 
 
 def decide(folder: Path, n: int, answer: str, reason: str = "",
-           binding: bool = True, stage: int | None = None) -> dict:
+           binding: bool = True, stage: int | None = None, *,
+           db=None, manuscript: dict | None = None) -> dict:
+    """Answer one letter decision. With `db` and `manuscript`, the edits
+    the letter attached to the chosen option are applied too
+    (`decide_and_apply`)."""
     rows = decisions(folder, stage)
     row = next((r for r in rows if r["n"] == n), None)
     if row is None:
@@ -1264,18 +1439,13 @@ def decide(folder: Path, n: int, answer: str, reason: str = "",
     row.update(answer=answer, reason=reason.strip(), binding=binding,
                answered=_now())
     _write_json(stage_dir(folder, stage) / "decisions.json", rows)
-    if "_manuscript" in _APPLY_CTX:
-        row["applied"] = _apply_decision(folder, _APPLY_CTX["_manuscript"],
-                                         row, stage)
+    if db is not None and manuscript is not None:
+        row["applied"] = _apply_decision(db, folder, manuscript, row, stage)
         _write_json(stage_dir(folder, stage) / "decisions.json", rows)
     return row
 
 
-# The manuscript a decision's edits apply to; set by `decide_and_apply`.
-_APPLY_CTX: dict = {}
-
-
-def decide_and_apply(folder: Path, manuscript: dict, n: int, answer: str,
+def decide_and_apply(db, folder: Path, manuscript: dict, n: int, answer: str,
                      reason: str = "", binding: bool = True,
                      stage: int | None = None) -> dict:
     """Answer a decision and apply the exact edits the letter attached to
@@ -1285,20 +1455,17 @@ def decide_and_apply(folder: Path, manuscript: dict, n: int, answer: str,
     applied item so the ledger, the push list and the page see it. An
     option with no edits needs drafting: its essays are rerun (author ruling
     2026-11-09)."""
-    _APPLY_CTX["_manuscript"] = manuscript
-    try:
-        return decide(folder, n, answer, reason, binding, stage)
-    finally:
-        _APPLY_CTX.clear()
+    return decide(folder, n, answer, reason, binding, stage,
+                  db=db, manuscript=manuscript)
 
 
-def _apply_decision(folder: Path, manuscript: dict, row: dict,
+def _apply_decision(db, folder: Path, manuscript: dict, row: dict,
                     stage: int | None) -> list[dict]:
     edits = (row.get("edits") or {}).get(row["answer"]) or []
     if not edits:
         return []
     s = stage if stage is not None else int(stage_dir(folder).name)
-    items = queue(folder)
+    mid, run = _key(db, folder)
     out = []
     for k, e in enumerate(edits, 1):
         item = {"id": f"stage{s}-d{row['n']}.{k}", "file": e["file"],
@@ -1307,17 +1474,21 @@ def _apply_decision(folder: Path, manuscript: dict, row: dict,
                 "why": e.get("why") or f"Your decision {row['n']}: {row['answer']}",
                 "reason": f"Decision {row['n']}: {row['question']} Answer: {row['answer']}",
                 "finding": row["question"], "order": 0}
-        try:
-            apply_item(manuscript, item)
-        except RuntimeError as err:
-            out.append({"id": item["id"], "file": e["file"], "error": str(err)})
-            continue
-        now = _now()
-        item.update(verdict="accept", final=e["proposed"], decided=now,
-                    applied=now, pushed=None, reason_given=row.get("reason", ""))
-        items = [i for i in items if i["id"] != item["id"]] + [item]
+        with db.transaction():
+            try:
+                apply_item(manuscript, item)
+            except RuntimeError as err:
+                out.append({"id": item["id"], "file": e["file"], "error": str(err)})
+                continue
+            now = _now()
+            item.update(verdict="accept", final=e["proposed"], decided=now,
+                        applied=now, pushed=None, reverted=None,
+                        reason_given=row.get("reason", ""))
+            row_id = _put(db, mid, run, item, queued=True)
+            _store(db, row_id, item)
+            _event(db, mid, run, item, "verdict", "decision")
+            _event(db, mid, run, item, "apply", "decision")
         out.append({"id": item["id"], "file": e["file"]})
-    _write_json(folder / "queue.json", items)
     return out
 
 
@@ -1331,11 +1502,11 @@ def _apply_decision(folder: Path, manuscript: dict, row: dict,
 # "starts" or "develops"). A bare list of findings is read as {findings}.
 # Essay agents run one at a time in reading order, so each pack carries the
 # arcs every earlier agent proposed (`_earlier_arcs`).
-# `gather` numbers every item into `items.json`; `group` writes the
+# `gather` records every item in the database (`devedit_items`); `group` writes the
 # integrator's `groups.json`; the integrator writes `integrated.json` (items
 # kept, edited, merged or dropped, with `links`); each checker writes
 # `checks/<id>.json` {result: pass|fix|drop|reconsider, proposed?, reason};
-# `build_queue` turns what passed into `queue.json`.
+# `build_queue` puts what passed into the review queue (queued rows).
 
 def _first_sentence(text: str) -> str:
     m = re.match(r"(.+?[.!?])(\s|$)", (text or "").strip(), re.S)
@@ -1356,7 +1527,7 @@ def _findings_of(data: Any) -> list[dict]:
     return data if isinstance(data, list) else (data or {}).get("findings", [])
 
 
-def gather(folder: Path) -> list[dict]:
+def gather(db, folder: Path) -> list[dict]:
     order = {name: i for i, name in enumerate(covered(folder))}
     items: list[dict] = []
     for path in sorted((folder / "findings").glob("*.json"),
@@ -1383,7 +1554,12 @@ def gather(folder: Path) -> list[dict]:
                     "order": order.get(item.get("file", file), 999) * 10000
                              + _position(folder, item.get("file", file),
                                          item.get("original"))})
-    _write_json(folder / "items.json", items)
+    mid, run = _key(db, folder)
+    with db.transaction():
+        db.conn.execute("UPDATE devedit_items SET gathered = 0 WHERE "
+                        "manuscript_id = ? AND run = ?", (mid, run))
+        for item in items:
+            _put(db, mid, run, item, gathered=True)
     return items
 
 
@@ -1400,12 +1576,12 @@ def _position(folder: Path, file: str, original: str | None) -> int:
     return max(at, 0) // 100
 
 
-def group(folder: Path) -> list[dict]:
+def group(db, folder: Path) -> list[dict]:
     """The integrator's input: items grouped wherever two of them could
     conflict — they use the same term, touch the same concept of the
     argument map, sit where one concept is relied on and another is
     justified, or touch the same paragraph. Groups of one are left out."""
-    items = _read_json(folder / "items.json", [])
+    items = gathered(db, folder)
     files = _disk_files_for(folder)
     done = set(finished(folder))
     texts = {n: files[n] for n in covered(folder) if n in done and n in files}
@@ -1442,16 +1618,17 @@ def group(folder: Path) -> list[dict]:
     return out
 
 
-def build_queue(folder: Path) -> list[dict]:
-    """`queue.json` from the items and their checks: a pass keeps the item,
-    a fix takes the checker's proposed text, a drop removes it, and a
+def build_queue(db, folder: Path) -> list[dict]:
+    """The review queue from the items and their checks: a pass keeps the
+    item, a fix takes the checker's proposed text, a drop removes it, and a
     reconsider keeps it with the checker's reason in front. An item with no
     check yet is held back and named. The items are the integrator's
     (`integrated.json`) once it has run at the end of the run; until then,
-    during the one-essay-at-a-time passes, the gathered `items.json`."""
+    during the one-essay-at-a-time passes, the gathered items. An item
+    the author already decided keeps its verdict and stays in the queue."""
     integrated = _read_json(folder / "integrated.json", None)
     if integrated is None:
-        integrated = _read_json(folder / "items.json", None)
+        integrated = gathered(db, folder) or None
     if integrated is None:
         raise RuntimeError("no items yet — 'devedit gather' writes them")
     out, unchecked = [], []
@@ -1463,26 +1640,29 @@ def build_queue(folder: Path) -> list[dict]:
         result = check.get("result")
         if result == "drop":
             continue
-        item = dict(item)
+        item = {k: v for k, v in item.items() if k not in _STATE}
         if result == "fix" and check.get("proposed") is not None:
             item["proposed"] = check["proposed"]
         if result == "reconsider":
             item["reconsider"] = check.get("reason", "")
         item["check"] = {"result": result, "reason": check.get("reason", "")}
         out.append(item)
-    previous = {i["id"]: i for i in queue(folder)}
-    for item in out:
-        old = previous.get(item["id"])
-        if old and old.get("verdict"):
-            item.update({k: old[k] for k in ("verdict", "final", "reason_given",
-                                             "decided", "applied", "pushed")
-                         if k in old})
-    _write_json(folder / "queue.json", ordered(out))
+    mid, run = _key(db, folder)
+    with db.transaction():
+        keep = {i["id"] for i in out}
+        for r in db.all("SELECT id, item_id FROM devedit_items WHERE "
+                        "manuscript_id = ? AND run = ? AND queued = 1 AND "
+                        "verdict IS NULL", (mid, run)):
+            if r["item_id"] not in keep:
+                db.update("devedit_items", r["id"], {"queued": 0})
+        for item in out:
+            _put(db, mid, run, item, queued=True)
     if unchecked:
         raise RuntimeError(f"{len(unchecked)} item(s) have no check yet and were "
                            f"held back: {', '.join(unchecked[:10])}"
                            + (" …" if len(unchecked) > 10 else ""))
-    return out
+    q = {i["id"]: i for i in queue(db, folder)}
+    return [q[i["id"]] for i in out]
 
 
 # ------------------------------------------------------------------ queue
@@ -1490,8 +1670,20 @@ def build_queue(folder: Path) -> list[dict]:
 _TIER_RANK = {t: i for i, t in enumerate(TIERS)}
 
 
-def queue(folder: Path) -> list[dict]:
-    return _read_json(folder / "queue.json", [])
+def queue(db, folder: Path) -> list[dict]:
+    """The review queue of the run, each item with its state."""
+    mid, run = _key(db, folder)
+    return [_item_of(r) for r in db.all(
+        "SELECT * FROM devedit_items WHERE manuscript_id = ? AND run = ? "
+        "AND queued = 1 ORDER BY rowid", (mid, run))]
+
+
+def gathered(db, folder: Path) -> list[dict]:
+    """Every item gathered from the findings, in gathering order."""
+    mid, run = _key(db, folder)
+    return [_item_of(r) for r in db.all(
+        "SELECT * FROM devedit_items WHERE manuscript_id = ? AND run = ? "
+        "AND gathered = 1 ORDER BY rowid", (mid, run))]
 
 
 def ordered(items: list[dict]) -> list[dict]:
@@ -1501,8 +1693,8 @@ def ordered(items: list[dict]) -> list[dict]:
                                         _TIER_RANK.get(i.get("tier"), 9), i["id"]))
 
 
-def pending(folder: Path) -> list[dict]:
-    return [i for i in ordered(queue(folder)) if not i.get("verdict")]
+def pending(db, folder: Path) -> list[dict]:
+    return [i for i in ordered(queue(db, folder)) if not i.get("verdict")]
 
 
 def apply_item(manuscript: dict, item: dict, text: str | None = None) -> str:
@@ -1530,18 +1722,28 @@ def apply_item(manuscript: dict, item: dict, text: str | None = None) -> str:
     return item["file"]
 
 
-def verdict(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
+def verdict(db, folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
             text: str | None = None, reason: str = "",
-            paragraph: str | None = None) -> dict:
+            paragraph: str | None = None, actor: str = "chat") -> dict:
     """Record the author's verdict on one item. Accept applies it (with
     `text` when the author rewrote the proposal); reject asks for a reason;
-    defer leaves it for later."""
+    defer leaves it for later. One transaction: the item's row and its
+    events, so verdicts from several agents at once all land."""
     if verdict_ not in VERDICTS:
         raise ValueError(f"verdict is one of {', '.join(VERDICTS)}")
-    items = queue(folder)
-    item = next((i for i in items if i["id"] == item_id), None)
-    if item is None:
-        raise LookupError(f"no item {item_id}")
+    mid, run = _key(db, folder)
+    with db.transaction():
+        row_id, item = _locked(db, mid, run, item_id)
+        return _verdict(db, mid, run, row_id, item, manuscript, verdict_,
+                        text=text, reason=reason, paragraph=paragraph,
+                        actor=actor)
+
+
+def _verdict(db, mid: str, run: str, row_id: str, item: dict,
+             manuscript: dict, verdict_: str, *, text, reason, paragraph,
+             actor) -> dict:
+    item_id = item["id"]
+    was_applied = item.get("applied")
     if verdict_ == "reject" and not reason.strip():
         raise ValueError("a rejection needs the author's reason")
     if verdict_ != "accept":
@@ -1581,12 +1783,10 @@ def verdict(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
     item.update(verdict=verdict_, reason_given=reason.strip(),
                 final=text if text is not None else item.get("proposed"),
                 decided=_now())
-    _write_json(folder / "queue.json", items)
-    with (folder / "verdicts.jsonl").open("a", encoding="utf-8") as log:
-        log.write(json.dumps({k: item.get(k) for k in
-                              ("id", "file", "verdict", "final",
-                               "reason_given", "author_text", "decided")},
-                             ensure_ascii=False) + "\n")
+    _store(db, row_id, item)
+    _event(db, mid, run, item, "verdict", actor)
+    if item.get("applied") and item.get("applied") != was_applied:
+        _event(db, mid, run, item, "apply", actor)
     return item
 
 
@@ -1614,13 +1814,13 @@ def decided_stage(folder: Path) -> dict | None:
     return rows[-1] if rows else None
 
 
-def decided(folder: Path, stage: dict | None = None, *,
+def decided(db, folder: Path, stage: dict | None = None, *,
             every: bool = False) -> list[dict]:
     """Items with a verdict, newest decision first, scoped to one stage
     (default `decided_stage`): items on that stage's files, plus the items
     its letter decisions applied (ids `stage<n>-d<k>.<m>`). `every` lists the
     whole run."""
-    rows = [i for i in queue(folder) if i.get("verdict")]
+    rows = [i for i in queue(db, folder) if i.get("verdict")]
     if not every:
         stage = stage or decided_stage(folder)
         if stage is not None:
@@ -1631,8 +1831,8 @@ def decided(folder: Path, stage: dict | None = None, *,
     return sorted(rows, key=lambda i: i.get("decided") or "", reverse=True)
 
 
-def revise(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
-           text: str | None = None, reason: str = "") -> dict:
+def revise(db, folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
+           text: str | None = None, reason: str = "", actor: str = "chat") -> dict:
     """Change the verdict on an item already decided. Leaving an accept
     undoes it in the file (the applied text back to the original); a new
     accept applies, or swaps the applied text for the author's new `text`.
@@ -1640,10 +1840,16 @@ def revise(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
     and leaves the file waiting for a push. Logged as a revision."""
     if verdict_ not in VERDICTS:
         raise ValueError(f"verdict is one of {', '.join(VERDICTS)}")
-    items = queue(folder)
-    item = next((i for i in items if i["id"] == item_id), None)
-    if item is None:
-        raise LookupError(f"no item {item_id}")
+    mid, run = _key(db, folder)
+    with db.transaction():
+        row_id, item = _locked(db, mid, run, item_id)
+        return _revise(db, mid, run, row_id, item, manuscript, verdict_,
+                       text=text, reason=reason, actor=actor)
+
+
+def _revise(db, mid: str, run: str, row_id: str, item: dict,
+            manuscript: dict, verdict_: str, *, text, reason, actor) -> dict:
+    item_id = item["id"]
     if not item.get("verdict"):
         raise ValueError(f"item {item_id} has no verdict yet; give it one first")
     if verdict_ == "reject" and not reason.strip():
@@ -1678,29 +1884,39 @@ def revise(folder: Path, manuscript: dict, item_id: str, verdict_: str, *,
     item.update(verdict=verdict_, reason_given=reason.strip(),
                 final=final if verdict_ == "accept" else item.get("proposed"),
                 decided=_now(), revised=True)
-    _write_json(folder / "queue.json", items)
-    with (folder / "verdicts.jsonl").open("a", encoding="utf-8") as log:
-        log.write(json.dumps({**{k: item.get(k) for k in
-                                 ("id", "file", "verdict", "final",
-                                  "reason_given", "decided")},
-                              "revision": True}, ensure_ascii=False) + "\n")
+    _store(db, row_id, item)
+    _event(db, mid, run, item, "revise", actor)
+    if changed:
+        _event(db, mid, run, item,
+               "apply" if verdict_ == "accept" else "undo", actor)
     return item
 
 
-def unpushed(folder: Path) -> list[str]:
+def unpushed(db, folder: Path) -> list[str]:
     """Files with applied (or undone) items not yet pushed to the Doc."""
-    return sorted({i["file"] for i in queue(folder)
-                   if (i.get("applied") or i.get("reverted"))
-                   and not i.get("pushed")})
+    mid, run = _key(db, folder)
+    return [r["file"] for r in db.all(
+        "SELECT DISTINCT file FROM devedit_items WHERE manuscript_id = ? AND "
+        "run = ? AND queued = 1 AND (applied IS NOT NULL OR reverted IS NOT "
+        "NULL) AND pushed IS NULL ORDER BY file", (mid, run))]
 
 
-def mark_pushed(folder: Path, file: str) -> None:
-    items = queue(folder)
-    for i in items:
-        if (i.get("file") == file and (i.get("applied") or i.get("reverted"))
-                and not i.get("pushed")):
-            i["pushed"] = _now()
-    _write_json(folder / "queue.json", items)
+def pushed_to_doc(db, manuscript_id: str, file: str,
+                  actor: str = "authorlm") -> int:
+    """The file reached the Doc: every applied (or undone) item of every
+    run on it that was waiting is pushed now, each with a push event.
+    Called from `gdocs.push_doc` on every successful push. Returns how many
+    items it marked."""
+    now = _now()
+    with db.transaction():
+        rows = db.all(
+            "SELECT * FROM devedit_items WHERE manuscript_id = ? AND file = ? "
+            "AND (applied IS NOT NULL OR reverted IS NOT NULL) AND pushed IS NULL",
+            (manuscript_id, file))
+        for r in rows:
+            db.update("devedit_items", r["id"], {"pushed": now})
+            _event(db, manuscript_id, r["run"], _item_of(r), "push", actor)
+    return len(rows)
 
 
 # ------------------------------------------------------------------ word diff
@@ -1759,12 +1975,14 @@ def dispatch(method: str, params: dict[str, Any], workspace: str | None = None
         folder = run_dir(manuscript, params.get("run"))
     except LookupError as err:
         return {"error": str(err)}
+    # Each request runs on its own server thread, with its own connection.
+    db = session._thread_db()
     if method == "status":
         return {"run": folder.name, "steps": status(folder, manuscript),
                 "stages": stage_status(folder),
                 "coverage": state(folder).get("coverage"),
                 "decisions": decisions(folder),
-                "counts": _counts(folder), "unpushed": unpushed(folder)}
+                "counts": _counts(db, folder), "unpushed": unpushed(db, folder)}
     if method == "letter":
         letter = stage_dir(folder) / "letter.md"
         amap = stage_dir(folder) / "argument-map.md"
@@ -1783,7 +2001,7 @@ def dispatch(method: str, params: dict[str, Any], workspace: str | None = None
         return {"saved": name}
     if method == "decide":
         try:
-            row = decide_and_apply(folder, manuscript, int(params["n"]),
+            row = decide_and_apply(db, folder, manuscript, int(params["n"]),
                                    str(params["answer"]),
                          str(params.get("reason") or ""),
                          bool(params.get("binding", True)))
@@ -1791,43 +2009,42 @@ def dispatch(method: str, params: dict[str, Any], workspace: str | None = None
             return {"error": str(err)}
         return {"decision": row}
     if method == "next":
-        rest = pending(folder)
+        rest = pending(db, folder)
         # Skipped cards (the page's own list) wait at the back; when only
         # skipped cards are left, they come round again in order.
         skip = list(params.get("skip") or [])
         shown = [i for i in rest if i["id"] not in skip] or sorted(
             rest, key=lambda i: skip.index(i["id"]) if i["id"] in skip else -1)
         return {"item": _for_page(shown[0] if shown else None, manuscript), "left": len(rest),
-                "counts": _counts(folder), "unpushed": unpushed(folder)}
+                "counts": _counts(db, folder), "unpushed": unpushed(db, folder)}
     if method == "verdict":
         try:
-            item = verdict(folder, manuscript, str(params["id"]),
+            item = verdict(db, folder, manuscript, str(params["id"]),
                            str(params["verdict"]), text=params.get("text"),
                            reason=str(params.get("reason") or ""),
-                           paragraph=params.get("paragraph"))
+                           paragraph=params.get("paragraph"), actor="page")
         except (LookupError, RuntimeError, ValueError) as err:
             return {"error": str(err)}
-        return {"item": _for_page(item, manuscript), "unpushed": unpushed(folder)}
+        return {"item": _for_page(item, manuscript), "unpushed": unpushed(db, folder)}
     if method == "decided":
         every = bool(params.get("all"))
         stage = None if every else decided_stage(folder)
-        return {"items": [_for_page(i, manuscript) for i in decided(folder, stage, every=every)],
+        return {"items": [_for_page(i, manuscript) for i in decided(db, folder, stage, every=every)],
                 "stage": {"n": stage["n"], "name": stage["name"]} if stage else None,
-                "unpushed": unpushed(folder)}
+                "unpushed": unpushed(db, folder)}
     if method == "revise":
         try:
-            item = revise(folder, manuscript, str(params["id"]),
+            item = revise(db, folder, manuscript, str(params["id"]),
                           str(params["verdict"]), text=params.get("text"),
-                          reason=str(params.get("reason") or ""))
+                          reason=str(params.get("reason") or ""), actor="page")
         except (LookupError, RuntimeError, ValueError) as err:
             return {"error": str(err)}
-        return {"item": _for_page(item, manuscript), "unpushed": unpushed(folder)}
+        return {"item": _for_page(item, manuscript), "unpushed": unpushed(db, folder)}
     if method in ("push", "pull"):
         from . import gdocs
 
         file = str(params["file"])
         _config, service, docs_service = session._doc_services()
-        db = session._thread_db()
         if method == "pull":
             report = gdocs.pull_doc(db, manuscript, file, service=service,
                                     docs_service=docs_service)
@@ -1840,10 +2057,9 @@ def dispatch(method: str, params: dict[str, Any], workspace: str | None = None
                            docs_service=docs_service, guard=True)
         except Exception as err:  # the guard and Google's errors both land here
             return {"error": str(err)}
-        mark_pushed(folder, file)
-        return {"pushed": file, "unpushed": unpushed(folder)}
+        # push_doc marked this file's dev edit items pushed (pushed_to_doc).
+        return {"pushed": file, "unpushed": unpushed(db, folder)}
     if method == "arcs":
-        db = session._thread_db()
         open_ = []
         by_file = {f: s for s in stages(folder) for f in s["files"]}
         for row in arc_status(db, manuscript, folder):
@@ -1872,8 +2088,8 @@ def dispatch(method: str, params: dict[str, Any], workspace: str | None = None
     return {"error": f"unknown method '{method}'"}
 
 
-def _counts(folder: Path) -> dict:
-    items = queue(folder)
+def _counts(db, folder: Path) -> dict:
+    items = queue(db, folder)
     out: dict[str, int] = {"total": len(items)}
     for tier in TIERS:
         out[tier] = sum(1 for i in items if i.get("tier") == tier and not i.get("verdict"))

@@ -1566,7 +1566,7 @@ One-off: convert authorlm's record/replay recordings to llmlm's cache format.
 
 `authorlm/tools/devedit_watch.py`
 
-Emit one line per author action on the dev edit page, and a COMPLETE line when a batch is done: every decision of a stage answered, or every queued item of a file decided.
+Emit one line per author action on the dev edit page, and a COMPLETE line when a batch is done: every decision of a stage answered, or every queued item of a file decided. The Dev edit half of author_watch.py, alone:
 
 ## `tools.pdf2md`
 

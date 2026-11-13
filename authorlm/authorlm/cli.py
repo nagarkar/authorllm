@@ -2095,12 +2095,23 @@ def cmd_devedit(args):
         fn = {"gather": devedit.gather, "group": devedit.group,
               "build-queue": devedit.build_queue}[args.action]
         try:
-            rows = fn(folder)
+            rows = fn(db, folder)
         except (RuntimeError, ValueError) as err:
             sys.exit(f"error: {err}")
-        name = {"gather": "items.json", "group": "groups.json",
-                "build-queue": "queue.json"}[args.action]
-        print(ui.green(f"{len(rows)} → {folder / name}"))
+        where = {"gather": "items (database, devedit_items)",
+                 "group": str(folder / "groups.json"),
+                 "build-queue": "queue (database, devedit_items)"}[args.action]
+        print(ui.green(f"{len(rows)} → {where}"))
+        return
+    if args.action == "import-record":
+        try:
+            out = devedit.import_record(db, folder)
+        except (LookupError, ValueError) as err:
+            sys.exit(f"error: {err}")
+        print(ui.green(f"Imported run {folder.name}: {out['queued']} queued, "
+                       f"{out['items']} gathered, {out['events']} event(s); "
+                       f"{out['kept']} already in the database kept as they are"))
+        print(ui.dim("  the files in the run folder are untouched"))
         return
     if args.action == "decisions":
         rows = devedit.decisions(folder, args.stage)
@@ -2116,7 +2127,7 @@ def cmd_devedit(args):
         if len(params) != 2:
             sys.exit("usage: devedit decide <n> <answer> [--reason R] [--provisional]")
         try:
-            row = devedit.decide_and_apply(folder, manuscript, int(params[0]),
+            row = devedit.decide_and_apply(db, folder, manuscript, int(params[0]),
                                            params[1], args.reason or "",
                                            binding=not args.provisional,
                                            stage=args.stage)
@@ -2128,7 +2139,7 @@ def cmd_devedit(args):
         print(ui.green(f"Decision {row['n']}: {row['answer']}"))
         return
     if args.action == "next":
-        rest = devedit.pending(folder)
+        rest = devedit.pending(db, folder)
         if not rest:
             print(ui.green("No items left."))
             return
@@ -2152,9 +2163,9 @@ def cmd_devedit(args):
             # An item already decided is revised: an accept is undone in
             # the file, or swapped for the new wording.
             done = any(i["id"] == params[0] and i.get("verdict")
-                       for i in devedit.queue(folder))
+                       for i in devedit.queue(db, folder))
             fn = devedit.revise if done else devedit.verdict
-            item = fn(folder, manuscript, params[0], params[1],
+            item = fn(db, folder, manuscript, params[0], params[1],
                       text=args.text, reason=args.reason or "")
         except (LookupError, RuntimeError, ValueError) as err:
             sys.exit(f"error: {err}")
@@ -7691,19 +7702,6 @@ def _print_toc_pairs(pairs: dict, limit: int = 10) -> None:
             print(f"  {label}: … +{len(rows) - limit} more")
 
 
-def _devedit_pushed(manuscript: dict, relpath: str) -> None:
-    """A push from the command line counts for the developmental edit too:
-    the run's accepted items in this file are marked pushed, exactly as the
-    review page's Push marks them, so the page stops listing the file as
-    not yet on the Doc."""
-    from . import devedit
-
-    try:
-        devedit.mark_pushed(devedit.run_dir(manuscript), relpath)
-    except LookupError:
-        pass
-
-
 ASK_DEFAULTS = {"model": "openai/gpt-5.6-sol", "effort": "medium"}
 
 
@@ -7981,7 +7979,6 @@ def cmd_doc(args):
                                                      and target == args.name),
                                             guard=True)
                     normalized_any = normalized_any or result["locally_normalized"]
-                    _devedit_pushed(manuscript, result["relpath"])
                     print(f"Pushed {result['relpath']} → tab "
                           f"{ui.dim(ui.link(result['url']))}")
                     _print_held(result)
@@ -9683,7 +9680,8 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["new", "coverage", "status", "step", "terms",
                             "pack", "decisions", "decide", "gather", "group",
                             "build-queue", "next", "verdict", "models",
-                            "read", "note", "stage", "audit", "arc"])
+                            "read", "note", "stage", "audit", "arc",
+                            "import-record"])
     p.add_argument("params", nargs="*",
                    help="step: <step> <status>; pack: <file>; read: <file>; "
                         "decide: <n> "

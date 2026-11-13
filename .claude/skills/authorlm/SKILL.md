@@ -818,8 +818,8 @@ workflow over `authorlm devedit` (devedit.py owns the run folder,
 - **Between agents:** `devedit terms` (finished essays only), `gather`, `group`, `build-queue`.
 - **Watch the page while the author works it** (author ruling 2026-11-09):
   start a Monitor running `python3 -u authorlm/tools/author_watch.py --run <run folder>`
-  over the run folder (decisions.json under `stages/`,
-  `queue.json`) that emits each verdict and decision and a COMPLETE line
+  over the run folder (decisions.json under `stages/`) and the database
+  (the items and verdicts, `devedit_items`) that emits each verdict and decision and a COMPLETE line
   when an essay's items or a stage's decisions are all settled. The same
   watcher covers the Merge forms page: add `--manuscript <name>` (one
   Monitor for both) and it also emits each ruling (`RULING`), newly

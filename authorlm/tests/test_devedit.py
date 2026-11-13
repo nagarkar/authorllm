@@ -65,11 +65,37 @@ def _manuscript(tmp: Path) -> dict:
     (root / "toc.toml").write_text(TOC)
     for name, text in FILES.items():
         (root / name).write_text(text)
-    return {"name": "MS", "id": "ms", "path": str(root)}
+    return _register(tmp, {"name": "MS", "id": "ms", "path": str(root)})
+
+
+# The workspace database of the current test: the items and verdicts live
+# there (devedit_items, edit_events). `_register` opens it beside the
+# manuscript and records the manuscript, as `authorlm init` would.
+DB = None
+
+
+def _register(tmp: Path, ms: dict) -> dict:
+    global DB
+    from authorlm.db import Database, ko_fields
+    DB = Database(tmp / "authorlm.db")
+    DB.insert("manuscripts", {**ko_fields("ms"), "id": ms["id"],
+                              "name": ms["name"], "path": ms["path"]})
+    return ms
 
 
 def _with_queue(folder: Path, items: list[dict]) -> None:
-    (folder / "queue.json").write_text(json.dumps(items))
+    """Queue rows as a test states them, state included, written straight
+    into the record."""
+    mid, run = devedit._key(DB, folder)
+    for item in items:
+        devedit._store(DB, devedit._put(DB, mid, run, item, queued=True), item)
+
+
+def _with_items(folder: Path, items: list[dict]) -> None:
+    """Gathered items as a test states them."""
+    mid, run = devedit._key(DB, folder)
+    for item in items:
+        devedit._put(DB, mid, run, item, gathered=True)
 
 
 def test_coverage_follows_toc() -> None:
@@ -187,22 +213,25 @@ def test_accept_applies_and_reject_needs_reason() -> None:
             {"id": "a2", "file": "two.md", "tier": "could",
              "original": "returns here", "proposed": "comes back here"}])
         check("must comes before could",
-              [i["id"] for i in devedit.pending(folder)] == ["a1", "a2"])
-        devedit.verdict(folder, ms, "a1", "accept", text="It moves the whole.")
+              [i["id"] for i in devedit.pending(DB, folder)] == ["a1", "a2"])
+        devedit.verdict(DB, folder, ms, "a1", "accept", text="It moves the whole.")
         body = (Path(ms["path"]) / "one.md").read_text()
         check("the author's rewrite is what lands", "It moves the whole." in body, body)
         check("the file is waiting to be pushed",
-              devedit.unpushed(folder) == ["one.md"])
+              devedit.unpushed(DB, folder) == ["one.md"])
         try:
-            devedit.verdict(folder, ms, "a2", "reject")
+            devedit.verdict(DB, folder, ms, "a2", "reject")
             check("a rejection without a reason is declined", False)
         except ValueError:
             check("a rejection without a reason is declined", True)
-        devedit.verdict(folder, ms, "a2", "reject", reason="the old word is right")
+        devedit.verdict(DB, folder, ms, "a2", "reject", reason="the old word is right")
         check("two.md is untouched by a rejection",
               (Path(ms["path"]) / "two.md").read_text() == FILES["two.md"])
         check("the verdicts are logged",
-              len((folder / "verdicts.jsonl").read_text().splitlines()) == 2)
+              [e["event"] for e in devedit.events(DB, folder)]
+              == ["verdict", "apply", "verdict"], devedit.events(DB, folder))
+        check("no record files are written in the run folder",
+              not (folder / "verdicts.jsonl").exists())
 
 
 def test_apply_refuses_changed_text() -> None:
@@ -214,14 +243,14 @@ def test_apply_refuses_changed_text() -> None:
                               "proposed": "It moves everything."}])
         (Path(ms["path"]) / "one.md").write_text("# One\n\nRewritten by hand.\n")
         try:
-            devedit.verdict(folder, ms, "b1", "accept")
+            devedit.verdict(DB, folder, ms, "b1", "accept")
             check("an item whose original text is gone is not applied", False)
         except RuntimeError:
             check("an item whose original text is gone is not applied", True)
         check("the file keeps the author's text",
               "Rewritten by hand." in (Path(ms["path"]) / "one.md").read_text())
         check("the item stays undecided",
-              not devedit.queue(folder)[0].get("verdict"))
+              not devedit.queue(DB, folder)[0].get("verdict"))
 
 
 def test_markdown_diff_bolds_additions_and_strikes_removals() -> None:
@@ -249,10 +278,10 @@ def test_gather_group_and_build_queue() -> None:
             {"finding": "Return unexplained", "items": [
                 {"tier": "should", "original": "The Dharma returns here.",
                  "proposed": "The Dharma returns here, as promised.", "reason": "r"}]}]))
-        items = devedit.gather(folder)
+        items = devedit.gather(DB, folder)
         check("items are numbered per file and finding",
               [i["id"] for i in items] == ["one-1.1", "two-1.1"], [i["id"] for i in items])
-        groups = devedit.group(folder)
+        groups = devedit.group(DB, folder)
         check("both items share the term Dharma",
               any(g["kind"] == "term" and g["key"] == "Dharma"
                   and g["items"] == ["one-1.1", "two-1.1"] for g in groups), groups)
@@ -262,18 +291,18 @@ def test_gather_group_and_build_queue() -> None:
             {"result": "fix", "proposed": "The Dharma is the ground of all things.",
              "reason": "tighter"}))
         try:
-            devedit.build_queue(folder)
+            devedit.build_queue(DB, folder)
             check("an unchecked item is held back and named", False)
         except RuntimeError as err:
             check("an unchecked item is held back and named", "two-1.1" in str(err))
         check("the checked item is queued with the checker's fix",
-              devedit.queue(folder)[0]["proposed"]
+              devedit.queue(DB, folder)[0]["proposed"]
               == "The Dharma is the ground of all things.")
         (folder / "checks" / "two-1.1.json").write_text(json.dumps(
             {"result": "drop", "reason": "answered elsewhere"}))
-        devedit.build_queue(folder)
+        devedit.build_queue(DB, folder)
         check("a dropped item leaves the queue",
-              [i["id"] for i in devedit.queue(folder)] == ["one-1.1"])
+              [i["id"] for i in devedit.queue(DB, folder)] == ["one-1.1"])
 
 
 def test_front_matter_can_move_into_the_edit() -> None:
@@ -488,15 +517,15 @@ def test_essays_go_one_at_a_time_through_the_notebook() -> None:
         check("each pass gets its own entry, numbered",
               "— pass 2" in devedit.notebook(folder)
               and devedit.finished(folder) == ["beta.md", "one.md"])
-        (folder / "items.json").write_text(json.dumps([{
+        _with_items(folder, [{
             "id": "one-1.1", "file": "one.md", "tier": "should",
             "original": "It moves all.", "proposed": "It moves everything.",
-            "order": 1}]))
+            "order": 1}])
         (folder / "checks").mkdir()
         (folder / "checks" / "one-1.1.json").write_text(json.dumps(
             {"result": "pass", "reason": "ok"}))
         check("the queue builds from gathered items before any integration",
-              [i["id"] for i in devedit.build_queue(folder)] == ["one-1.1"])
+              [i["id"] for i in devedit.build_queue(DB, folder)] == ["one-1.1"])
 
 
 STAGED_TOC = '''outside = ["metaphysic.md"]
@@ -543,7 +572,7 @@ def _staged(tmp: Path) -> dict:
                        "c.md": "# C\n\nGamma.\n", "about.md": "# About\n",
                        "metaphysic.md": "# The Metaphysic\n"}.items():
         (root / name).write_text(text)
-    return {"name": "MS", "id": "ms", "path": str(root)}
+    return _register(tmp, {"name": "MS", "id": "ms", "path": str(root)})
 
 
 def test_stages_come_from_the_toc_and_close_in_order() -> None:
@@ -633,18 +662,18 @@ def test_the_ledger_holds_the_standard_across_passes() -> None:
             {"finding": "Footnote too long", "items": [
                 {"tier": "could", "original": "The Dharma is the ground.",
                  "proposed": "x", "reason": "r"}]}], "arcs": []}))
-        devedit.gather(folder)
+        devedit.gather(DB, folder)
         (folder / "checks").mkdir()
         for i, result in (("one-1.1", "pass"), ("one-2.1", "pass"),
                           ("one-3.1", "pass"), ("one-4.1", "drop")):
             (folder / "checks" / f"{i}.json").write_text(json.dumps(
                 {"result": result, "reason": "ok"}))
-        devedit.build_queue(folder)
-        q = {i["id"]: i for i in devedit.queue(folder)}
+        devedit.build_queue(DB, folder)
+        q = {i["id"]: i for i in devedit.queue(DB, folder)}
         q["one-1.1"].update(verdict="accept")
         q["one-2.1"].update(verdict="reject", reason_given="the abstraction is the point")
         _with_queue(folder, list(q.values()))
-        rows = {r["finding"]: r for r in devedit.ledger(folder, "one.md")}
+        rows = {r["finding"]: r for r in devedit.ledger(DB, folder, "one.md")}
         check("accepted is addressed", rows["Dharma defined late"]["status"] == "addressed")
         check("rejected with a reason is declined, the reason kept",
               rows["Opening too abstract"]["status"] == "declined"
@@ -665,7 +694,7 @@ def test_the_ledger_holds_the_standard_across_passes() -> None:
             {"finding": "Needs a case", "items": [
                 {"tier": "could", "original": "It moves all.",
                  "proposed": "It moves all, as a river moves a stone.", "reason": "r"}]}]}))
-        items = devedit.gather(folder)
+        items = devedit.gather(DB, folder)
         check("a rerun's items keep their essay and their own ids",
               any(i["id"] == "one--p2-1.1" and i["file"] == "one.md" for i in items),
               [i["id"] for i in items])
@@ -720,19 +749,19 @@ def test_a_decision_with_edits_applies_when_answered() -> None:
             {"n": 3, "question": "Gone text?", "options": ["fix"],
              "edits": {"fix": [{"file": "two.md", "original": "Not there.",
                                 "proposed": "x"}]}}]))
-        row = devedit.decide_and_apply(folder, ms, 1, "yes")
+        row = devedit.decide_and_apply(DB, folder, ms, 1, "yes")
         body = (Path(ms["path"]) / "one.md").read_text()
         check("answering applies the option's edit to the local file",
               "Ground of Creation" in body and row["applied"][0]["id"] == "stage0-d1.1", row)
-        q = {i["id"]: i for i in devedit.queue(folder)}
+        q = {i["id"]: i for i in devedit.queue(DB, folder)}
         check("and records it as an accepted, applied item, so it is pushed and "
               "in the ledger",
               q["stage0-d1.1"]["verdict"] == "accept" and q["stage0-d1.1"]["applied"]
-              and "one.md" in devedit.unpushed(folder), q)
-        row = devedit.decide_and_apply(folder, ms, 2, "draft")
+              and "one.md" in devedit.unpushed(DB, folder), q)
+        row = devedit.decide_and_apply(DB, folder, ms, 2, "draft")
         check("an option without edits applies nothing (its essay is rerun)",
               row["applied"] == [] and row["answer"] == "draft", row)
-        row = devedit.decide_and_apply(folder, ms, 3, "fix")
+        row = devedit.decide_and_apply(DB, folder, ms, 3, "fix")
         check("an edit whose original is gone is reported, not forced",
               "error" in row["applied"][0] and "x" not in (Path(ms["path"]) / "two.md").read_text(),
               row)
@@ -748,59 +777,62 @@ def test_a_verdict_can_be_revised() -> None:
                  {"id": "r2.1", "file": "two.md", "tier": "should",
                   "original": "returns here", "proposed": "comes back here",
                   "finding": "f2"}]
-        (folder / "items.json").write_text(json.dumps(items))
+        _with_items(folder, items)
         _with_queue(folder, items)
         one, two = Path(ms["path"]) / "one.md", Path(ms["path"]) / "two.md"
-        status = lambda key: next(r["status"] for r in devedit.ledger(folder)
+        status = lambda key: next(r["status"] for r in devedit.ledger(DB, folder)
                                   if r["key"] == key)
         try:
-            devedit.revise(folder, ms, "r1.1", "reject", reason="x")
+            devedit.revise(DB, folder, ms, "r1.1", "reject", reason="x")
             check("an undecided item is not revised", False)
         except ValueError:
             check("an undecided item is not revised", True)
 
-        devedit.verdict(folder, ms, "r2.1", "reject", reason="old word")
+        devedit.verdict(DB, folder, ms, "r2.1", "reject", reason="old word")
         check("ledger: rejected is declined", status("r2") == "declined")
-        devedit.revise(folder, ms, "r2.1", "accept")
+        devedit.revise(DB, folder, ms, "r2.1", "accept")
         check("reject→accept applies", "comes back here" in two.read_text())
         check("ledger follows: addressed", status("r2") == "addressed")
-        check("the revised file waits for a push", "two.md" in devedit.unpushed(folder))
+        check("the revised file waits for a push", "two.md" in devedit.unpushed(DB, folder))
 
-        devedit.verdict(folder, ms, "r1.1", "accept")
-        devedit.mark_pushed(folder, "one.md")
+        devedit.verdict(DB, folder, ms, "r1.1", "accept")
+        devedit.pushed_to_doc(DB, ms["id"], "one.md")
         try:
-            devedit.revise(folder, ms, "r1.1", "reject")
+            devedit.revise(DB, folder, ms, "r1.1", "reject")
             check("undoing to reject needs a reason", False)
         except ValueError:
             check("undoing to reject needs a reason", True)
-        devedit.revise(folder, ms, "r1.1", "accept", text="It moves the whole.")
+        devedit.revise(DB, folder, ms, "r1.1", "accept", text="It moves the whole.")
         check("accept with new text swaps", "It moves the whole." in one.read_text()
               and "everything" not in one.read_text(), one.read_text())
-        check("the swap waits for a push", "one.md" in devedit.unpushed(folder))
-        devedit.mark_pushed(folder, "one.md")
-        devedit.revise(folder, ms, "r1.1", "reject", reason="keep it plain")
+        check("the swap waits for a push", "one.md" in devedit.unpushed(DB, folder))
+        devedit.pushed_to_doc(DB, ms["id"], "one.md")
+        devedit.revise(DB, folder, ms, "r1.1", "reject", reason="keep it plain")
         check("accept→reject undoes the change", one.read_text() == FILES["one.md"],
               one.read_text())
-        check("the undo waits for a push", "one.md" in devedit.unpushed(folder))
+        check("the undo waits for a push", "one.md" in devedit.unpushed(DB, folder))
         check("ledger follows: declined", status("r1") == "declined")
-        devedit.revise(folder, ms, "r1.1", "defer")
+        devedit.revise(DB, folder, ms, "r1.1", "defer")
         check("ledger: deferred is open", status("r1") == "open")
 
-        devedit.revise(folder, ms, "r1.1", "accept")
+        devedit.revise(DB, folder, ms, "r1.1", "accept")
         one.write_text("# One\n\nRewritten by hand.\n")
         try:
-            devedit.revise(folder, ms, "r1.1", "defer")
+            devedit.revise(DB, folder, ms, "r1.1", "defer")
             check("an undo whose applied text is gone is refused", False)
         except RuntimeError:
             check("an undo whose applied text is gone is refused", True)
         check("the hand edit is kept", "Rewritten by hand." in one.read_text())
         check("the verdict stays accept",
-              next(i for i in devedit.queue(folder) if i["id"] == "r1.1")["verdict"] == "accept")
-        log = [json.loads(l) for l in (folder / "verdicts.jsonl").read_text().splitlines()]
+              next(i for i in devedit.queue(DB, folder) if i["id"] == "r1.1")["verdict"] == "accept")
+        log = devedit.events(DB, folder)
         check("revisions are logged as revisions",
-              sum(1 for l in log if l.get("revision")) == 5, log)
+              sum(1 for l in log if l["event"] == "revise") == 5, log)
+        check("each apply and undo is its own event",
+              {l["event"] for l in log} >= {"verdict", "revise", "apply",
+                                            "undo", "push"}, log)
         check("decided lists newest first",
-              devedit.decided(folder)[0]["id"] == "r1.1")
+              devedit.decided(DB, folder)[0]["id"] == "r1.1")
 
 
 def test_decided_shows_only_the_current_stage() -> None:
@@ -815,7 +847,7 @@ def test_decided_shows_only_the_current_stage() -> None:
                              mk("r2.1", "a.md"), mk("stage1-d2.1", "c.md"),
                              {"id": "r3.1", "file": "b.md", "tier": "must",
                               "original": "x", "proposed": "y"}])
-        ids = lambda **kw: sorted(i["id"] for i in devedit.decided(folder, **kw))
+        ids = lambda **kw: sorted(i["id"] for i in devedit.decided(DB, folder, **kw))
         check("before any stage closes, the front matter's items show",
               ids() == ["r1.1", "stage0-d1.1"], ids())
         st = devedit.state(folder)
@@ -955,25 +987,107 @@ def test_a_whole_paragraph_edit_on_the_card() -> None:
              "proposed": "New middle.", "order": 1},
             {"id": "b", "file": "one.md", "tier": "must", "original": "Last part.",
              "proposed": "End.", "order": 2}])
-        devedit.verdict(folder, ms, "a", "accept",
+        devedit.verdict(DB, folder, ms, "a", "accept",
                         paragraph="First part. Newer middle. Last part.")
         check("an edit inside the passage keeps the rest of the paragraph",
               "First part. Newer middle. Last part." in path.read_text(), path.read_text())
-        devedit.verdict(folder, ms, "b", "accept",
+        devedit.verdict(DB, folder, ms, "b", "accept",
                         paragraph="Opening changed. Newer middle. The end.")
         before = path.read_text()
-        _with_queue(folder, devedit.queue(folder) + [
+        _with_queue(folder, devedit.queue(DB, folder) + [
             {"id": "c", "file": "one.md", "tier": "must", "original": "The end.",
              "proposed": "Fin.", "order": 3}])
-        devedit.verdict(folder, ms, "c", "reject", reason="other problems",
+        devedit.verdict(DB, folder, ms, "c", "reject", reason="other problems",
                         paragraph="Opening changed. Newer middle. Closing.")
-        c = next(i for i in devedit.queue(folder) if i["id"] == "c")
+        c = next(i for i in devedit.queue(DB, folder) if i["id"] == "c")
         check("a rejection keeps the author's edited text and applies nothing",
               c["author_text"].endswith("Closing.") and c["reason_given"] == "other problems"
               and path.read_text() == before, c)
         check("an edit outside the passage replaces the whole paragraph",
               "Opening changed. Newer middle. The end." in path.read_text()
               and "First part." not in path.read_text(), path.read_text())
+
+
+def test_verdicts_from_two_agents_at_once_all_land() -> None:
+    import threading
+    from authorlm.db import Database
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ms = _manuscript(Path(tmp))
+        folder = devedit.new_run(ms)
+        ids = [f"c{n}" for n in range(20)]
+        _with_queue(folder, [{"id": i, "file": "one.md", "tier": "could",
+                              "original": None, "proposed": None,
+                              "move": f"move {i}"} for i in ids])
+        # One item each that changes the file, so the file writes race too.
+        _with_queue(folder, [
+            {"id": "w1", "file": "one.md", "tier": "must",
+             "original": "The Dharma is the ground.", "proposed": "The Dharma grounds."},
+            {"id": "w2", "file": "one.md", "tier": "must",
+             "original": "It moves all.", "proposed": "It moves everything."}])
+        barrier, errors = threading.Barrier(2), []
+
+        def agent(mine: list[str], write: str) -> None:
+            db = Database(Path(tmp) / "authorlm.db")   # its own connection
+            try:
+                barrier.wait()
+                for i in mine:
+                    devedit.verdict(db, folder, ms, i, "reject", reason=f"no {i}")
+                devedit.verdict(db, folder, ms, write, "accept", actor="page")
+            except Exception as err:  # noqa: BLE001 — reported below
+                errors.append(err)
+
+        a = threading.Thread(target=agent, args=(ids[0::2], "w1"))
+        b = threading.Thread(target=agent, args=(ids[1::2], "w2"))
+        a.start(); b.start(); a.join(); b.join()
+        check("neither agent failed", not errors, errors)
+        q = {i["id"]: i for i in devedit.queue(DB, folder)}
+        check("every verdict from both agents survived",
+              all(q[i].get("verdict") == "reject" and q[i]["reason_given"] == f"no {i}"
+                  for i in ids)
+              and q["w1"]["verdict"] == q["w2"]["verdict"] == "accept", q)
+        body = (Path(ms["path"]) / "one.md").read_text()
+        check("both accepted edits are in the file",
+              "The Dharma grounds." in body and "It moves everything." in body, body)
+        check("one event per verdict, plus each apply",
+              len(devedit.events(DB, folder)) == 22 + 2)
+
+
+def test_import_record_is_idempotent() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ms = _manuscript(Path(tmp))
+        folder = devedit.new_run(ms)
+        items = [{"id": "i1.1", "file": "one.md", "tier": "must",
+                  "original": "It moves all.", "proposed": "It moves everything.",
+                  "finding": "f1"},
+                 {"id": "i1.2", "file": "one.md", "tier": "could",
+                  "original": "The Dharma", "proposed": "Dharma", "finding": "f1"}]
+        queue = [dict(items[0], verdict="accept", final="It moves everything.",
+                      decided="2026-11-09T10:00:00Z", applied="2026-11-09T10:00:00Z",
+                      pushed=None, check={"result": "pass", "reason": "ok"})]
+        (folder / "items.json").write_text(json.dumps(items))
+        (folder / "queue.json").write_text(json.dumps(queue))
+        (folder / "verdicts.jsonl").write_text(json.dumps(
+            {"id": "i1.1", "file": "one.md", "verdict": "accept",
+             "final": "It moves everything.", "decided": "2026-11-09T10:00:00Z"}) + "\n")
+        before = {p.name: p.read_text() for p in folder.iterdir() if p.is_file()}
+        first = devedit.import_record(DB, folder)
+        check("the first import loads the queue, the items and the history",
+              first == {"items": 2, "queued": 1, "kept": 0, "events": 1}, first)
+        check("the imported item keeps its state",
+              devedit.queue(DB, folder)[0]["verdict"] == "accept"
+              and devedit.unpushed(DB, folder) == ["one.md"])
+        check("the gathered items are both there",
+              [i["id"] for i in devedit.gathered(DB, folder)] == ["i1.1", "i1.2"])
+        second = devedit.import_record(DB, folder)
+        check("a second import adds nothing",
+              second == {"items": 0, "queued": 0, "kept": 1, "events": 0}, second)
+        check("nothing is doubled",
+              len(devedit.queue(DB, folder)) == 1
+              and len(devedit.gathered(DB, folder)) == 2
+              and len(devedit.events(DB, folder)) == 1)
+        check("the run folder's files are untouched",
+              {p.name: p.read_text() for p in folder.iterdir() if p.is_file()} == before)
 
 
 def main() -> None:
@@ -999,7 +1113,9 @@ def main() -> None:
              test_the_arc_step_comes_first,
              test_a_whole_paragraph_edit_on_the_card,
              test_decided_shows_only_the_current_stage,
-             test_the_card_shows_the_whole_paragraph]
+             test_the_card_shows_the_whole_paragraph,
+             test_verdicts_from_two_agents_at_once_all_land,
+             test_import_record_is_idempotent]
     for fn in tests:
         print(fn.__name__)
         fn()

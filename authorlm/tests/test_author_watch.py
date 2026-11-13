@@ -112,17 +112,30 @@ def forms_watch() -> None:
 
 def devedit_watch() -> None:
     print("dev edit:")
-    run = Path(tempfile.mkdtemp(prefix="watch-run-"))
+    sys.path.insert(0, str(HERE.parent))
+    from authorlm import devedit
+    from authorlm.db import Database, ko_fields
+
+    tmp = Path(tempfile.mkdtemp(prefix="watch-"))
+    run = tmp / "MS" / "_devedit" / "2026-11-13"
     (run / "stages" / "1").mkdir(parents=True)
+    db = Database(tmp / "authorlm.db")
+    db.insert("manuscripts", {**ko_fields("ms"), "name": "MS",
+                              "path": str(tmp / "MS")})
+    mid, name = devedit._key(db, run)
+
+    def item(**state) -> None:
+        row = {"id": "i1", "file": "x.md", **state}
+        devedit._store(db, devedit._put(db, mid, name, row, queued=True), row)
+
     dec = run / "stages" / "1" / "decisions.json"
     dec.write_text(json.dumps([{"n": 1}, {"n": 2}]))
-    (run / "queue.json").write_text(json.dumps([{"id": "i1", "file": "x.md"}]))
-    w = aw.DevEditWatch(run)
+    item()
+    w = aw.DevEditWatch(run, db=db)
     check("the first pass reports nothing", w.poll(True) == [])
     dec.write_text(json.dumps([{"n": 1, "answered": "t1", "answer": "A"},
                                {"n": 2, "answered": "t2", "answer": "B"}]))
-    (run / "queue.json").write_text(json.dumps(
-        [{"id": "i1", "file": "x.md", "verdict": "accept", "reason_given": "fine"}]))
+    item(verdict="accept", reason_given="fine")
     out = w.poll(False)
     check("decisions, verdicts and both COMPLETE lines, as devedit_watch said them",
           out == ["DECISION stage 1 #1: A", "DECISION stage 1 #2: B",
