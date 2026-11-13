@@ -17,6 +17,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import os
+os.environ["AUTHORLM_STYLE_DEFAULTS"] = "/nonexistent/authorlm-test/style-defaults.toml"  # the book alone; test_style_defaults.py covers the default layer
 
 from authorlm import api, illus, placement, styles
 from authorlm.cli import main as cli_main

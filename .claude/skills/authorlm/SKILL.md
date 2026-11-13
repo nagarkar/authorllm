@@ -2583,6 +2583,44 @@ When the author says "analyze my edits", "analyze my accepts", "what did I chang
 4. **Weigh each candidate against the ratified law** (`get_style`) and the validated beliefs: a candidate that contradicts a law is a ruling the author has to make, never a silent override; one that refines a law is put as the refined wording.
 5. **Report**: the counts, then each candidate rule in one plain sentence, with the instances quoted (proposal and the author's version), then the conflicts. Each candidate is offered for ratification as style law (`style add` only on the author's word, their reasons verbatim in `--notes`); nothing becomes law by being detected. Slips in the author's own text are listed separately: word slips (typos) are staged as forms, and punctuation slips are fixed directly under the punctuation exception and listed.
 
+## Default style law (ratified 2026-11-12)
+
+Where English allows more than
+one valid form, every manuscript starts with a decided one: the defaults in
+`authorlm/library/style-defaults.toml`, read in place as the LOWEST layer of
+every file's effective guide (`authorlm style show <file>` marks them
+`workspace default`; `authorlm style guides` and `get_style` without a file
+list them with any law that displaces each). Filters and drafting follow them like any
+law. The defaults, by key:
+
+- `serial-comma`: always ("truth, beauty, and goodness").
+- `clause-comma`: comma before and/but/or joining two independent clauses;
+  may drop when both are short and tight.
+- `possessive-s`: names take a bare apostrophe (Charles', Socrates');
+  common nouns take 's (the boss's); plurals bare (the gods').
+- `quotation-marks`: curly, American (periods and commas inside).
+- `dash`: closed em dash (a—b); en dash only for ranges.
+- `semicolons`: allowed in standard use.
+- `ellipsis`: the single character …
+- `colon-capital`: lowercase after a colon, even before a full sentence.
+- `numbers`: words for zero to one hundred and round numbers, figures
+  otherwise; figures for years, dates, % and units.
+- `compound-modifiers`: hyphenated before the noun, open after; none after -ly.
+- `italics`: Chicago (long-work titles, unfamiliar foreign words, words as
+  words, rare emphasis; short-work titles in quotation marks).
+- `spelling`: American, Merriam-Webster's first form (toward, judgment).
+
+**Changing a default.** For every book: edit the row in
+`style-defaults.toml` (only on the author's word; it reaches every manuscript
+at once). For one book: add that book's own law naming the default it
+displaces, `authorlm style add <aspect> "<statement>" --guide "<root guide>"
+--overrides default:<key>` (MCP `add_style_law(overrides="default:<key>")`;
+a comma list displaces several). A book's law that contradicts a default
+without naming it leaves both in the guide, so always link it. Linked on
+2026-11-12: Parables' "no dashes, no semicolons" law displaces `default:dash`
+and `default:semicolons`; SMSTTD's "own chapters plain roman" law and DON's
+"Sanskrit roman in verse" law displace `default:italics`.
+
 ## Mid-writing standing instructions (ratify, don't just obey)
 When the author, during drafting or verdicts, states an instruction in the
 form of a general rule rather than a one-off correction ("don't shorten

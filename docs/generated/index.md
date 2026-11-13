@@ -1406,6 +1406,12 @@ The [Signature: uri] tag: plain text in the files, a signature block (image, aut
 
 Figure / illustration / illustration-placement must never cross prompts.
 
+## `tests.test_style_defaults`
+
+`authorlm/tests/test_style_defaults.py`
+
+Workspace style defaults: `library/style-defaults.toml` is the lowest layer of every file's effective guide, and a manuscript law displaces a default by naming `default:<key>` in `overrides` (a comma list displaces several), so a book's own law always wins over a default.
+
 ## `tests.test_summaries`
 
 `authorlm/tests/test_summaries.py`

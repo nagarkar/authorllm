@@ -3139,6 +3139,16 @@ def style_overview(db: Database, manuscript: dict) -> dict:
                     "elements": counts[g["id"]]} for g in guides],
         "attachments": [{"file": a["file"], "guide": names.get(a["guide_id"])}
                         for a in attachments],
+        # The default layer under every guide, with the manuscript's laws
+        # that displace each (any active law naming it in `overrides`).
+        "defaults": [{"id": d["id"], "aspect": d["aspect"],
+                      "statement": d["statement"],
+                      "displaced_by": [r["id"] for r in db.all(
+                          "SELECT id, overrides FROM style_laws WHERE manuscript_id = ? "
+                          "AND status = 'active' AND overrides LIKE ?",
+                          (mid, f"%{d['id']}%"))
+                          if d["id"] in st.overridden_ids(r["overrides"])]}
+                     for d in st.default_laws(mid)],
     }
 
 
@@ -3213,10 +3223,23 @@ def add_style_law(db: Database, manuscript: dict, aspect: str, statement: str,
             raise LookupError(f"no style guide named '{guide_name}'")
     if file is not None:
         _validate_file(db, manuscript, file)
+    # `overrides` names one id (prefix) or a comma list; `default:<key>`
+    # names a workspace default (styles.default_laws), checked by key.
     resolved = None
     if overrides:
-        resolved = _find_style_law(
-            db, manuscript, overrides, "status = 'active'", "active")["id"]
+        default_ids = {d["id"] for d in st.default_laws()}
+        ids = []
+        for part in st.overridden_ids(overrides):
+            if part.startswith(st.DEFAULT_PREFIX):
+                if part not in default_ids:
+                    raise LookupError(
+                        f"no style default '{part}' (known: "
+                        f"{', '.join(sorted(default_ids)) or 'none'})")
+                ids.append(part)
+            else:
+                ids.append(_find_style_law(
+                    db, manuscript, part, "status = 'active'", "active")["id"])
+        resolved = ",".join(ids)
     return dict(st.add_element(
         db, manuscript["id"], aspect, statement,
         guide=dict(guide) if guide else None, file=file, notes=notes,
