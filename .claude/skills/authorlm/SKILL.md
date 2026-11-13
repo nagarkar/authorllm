@@ -862,7 +862,16 @@ need `document_ids` on (`authorlm manuscript set --document-ids on`).
    that belongs to an earlier step goes in the result as filed back, not
    fixed.
 4. `authorlm book done <run-id> --result-json <file>`: the result is one
-   JSON object (`summary`, `artifacts`, `register_entries`, `filed_back`).
+   JSON object (`summary`, `artifacts`, `register_entries`, `filed_back`,
+   `register_uses`). **For an agent step that is given the register,
+   `register_uses` is required** and `book done` is declined without it:
+   a list of `{"entry": "<kind/key or id>", "mode": "applies"|"infers",
+   "note": "<what rests on it>", "document": "<file, optional>"}`, one
+   per entry the work rested on, or `"register_uses": "none"` with a
+   `register_uses_reason`. `book done` records each use under the run;
+   do not also run `register use` for them. An inference is fine and
+   often needed; it must be labelled `infers`, never `applies`. When you
+   hand a step to a subagent, tell it to return this list.
 5. Go to 1 without stopping while the next step is an agent's. When the
    step is a person's (`human:author`), `book start` marks it waiting and
    notifies them: ask them in chat, record what they say, then `book done`.
@@ -891,7 +900,10 @@ step to an agent or a person; `book show <run-id>` shows one run; `book
 history [--step <id>] [--scope <s>]` lists every status change in time
 order (an append-only log); `book diagram [--scope <s>]` prints the
 workflow as Mermaid flowchart text (`--json` gives nodes, edges and each
-node's status, for a page to draw).
+node's status, for a page to draw). A node's status is the same state
+`book status` gives (blocked, ready, running, waiting, done, failed); a
+step that was restarted shows its attempt number and a second mark
+(`reran`), never "superseded".
 
 **The register** holds every choice the author has settled (brief answers,
 shape, theses, voice, arcs, terms, claims, rulings). A new choice is the
@@ -913,7 +925,11 @@ author's; keeping to settled ones is your work.
   on the old one. `register reopen <kind/key>` does the same listing
   without changing it. Go through that list with the author.
 - `register list`, `register show <kind/key>` (words and reading side by
-  side, every use labelled), `register uses <kind/key>`.
+  side, every use labelled, with the step and run it came from),
+  `register uses <kind/key>`.
+- Inside a workflow step the uses go in the result (`register_uses`,
+  above) and `book done` writes them; `register use` by hand is for work
+  done outside a step run.
 
 ## Ask OpenAI what's best (`authorlm ask`)
 When the author says "ask OpenAI what's best" (or "ask OpenAI", "what does

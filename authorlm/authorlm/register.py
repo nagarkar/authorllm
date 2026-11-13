@@ -84,9 +84,15 @@ def _entry(row) -> dict:
             "note": row["note"], "created_at": row["created_at"]}
 
 
+_USES = ("SELECT u.*, r.step AS step FROM register_uses u "
+         "LEFT JOIN step_runs r ON r.id = u.step_run_id ")
+
+
 def _use(row) -> dict:
+    """A use, with the workflow step and run it came from (both None for
+    a use recorded outside a step run)."""
     return {"id": row["id"], "entry_id": row["entry_id"],
-            "step_run_id": row["step_run_id"],
+            "step": row["step"], "step_run_id": row["step_run_id"],
             "document_id": row["document_id"], "actor": row["actor"],
             "mode": row["mode"], "note": row["note"],
             "created_at": row["created_at"]}
@@ -207,8 +213,8 @@ def uses(db: Database, manuscript: dict, reference: str) -> list[dict]:
     """Every use of one entry, oldest first: the work that rests on it."""
     entry = find(db, manuscript, reference)
     return [_use(r) for r in db.all(
-        "SELECT * FROM register_uses WHERE entry_id = ? "
-        "ORDER BY created_at, id", (entry["id"],))]
+        _USES + "WHERE u.entry_id = ? ORDER BY u.created_at, u.rowid",
+        (entry["id"],))]
 
 
 def reopen(db: Database, manuscript: dict, reference: str,
@@ -301,8 +307,7 @@ def use(db: Database, manuscript: dict, reference: str, *, mode: str,
            "document_id": _document(db, manuscript, document),
            "actor": actor.strip(), "mode": mode, "note": note}
     db.insert("register_uses", row)
-    return _use(db.one("SELECT * FROM register_uses WHERE id = ?",
-                       (row["id"],)))
+    return _use(db.one(_USES + "WHERE u.id = ?", (row["id"],)))
 
 
 def list_entries(db: Database, manuscript: dict, *, kind: str | None = None,

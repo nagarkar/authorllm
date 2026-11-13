@@ -80,10 +80,23 @@ Decisions:
   conditions.
 - The diagram (`diagram`) is drawn from the definition file and the runs
   each time it is asked for, as Mermaid flowchart text and as its nodes
-  and edges; nothing here renders it. Enforced by:
+  and edges; nothing here renders it. A step's state has one source
+  (`_cell`) for the status board and the diagram, so the two cannot
+  disagree; superseded is a run's status and never a step's state.
+  Enforced by:
   tests/test_book_workflow.py::DiagramTests::test_adding_a_step_changes_the_diagram
   and
-  tests/test_book_workflow.py::DiagramTests::test_a_node_carries_its_status_in_the_scope_asked_for.
+  tests/test_book_workflow.py::DiagramTests::test_every_node_carries_the_state_the_status_board_gives.
+- Recording what rested on the register is not left to the role's
+  memory: an agent's run of a step that is given the register is marked
+  done only when its result declares its uses (`register_uses`), each
+  labelled applies or infers, or says it rested on none and why. `done`
+  writes those uses under the run, through `register.use`. A person's
+  step is exempt. Why: the author must be able to tell a choice they made
+  from one made for them. Enforced by:
+  tests/test_book_workflow.py::RegisterUsesOnDoneTests::test_done_is_declined_without_the_key_and_names_it
+  and
+  tests/test_book_workflow.py::RegisterUsesOnDoneTests::test_the_uses_are_written_under_the_run.
 - The trade's order is large to small, and each role's contract
   (`leaves_alone`) says what it does not change: a later role that finds
   an earlier-level problem files it back and does not fix it.
@@ -620,6 +633,29 @@ def _rests_on_restarted(definition: Definition, book_layout: Layout,
     return False
 
 
+def _cell(definition: Definition, book_layout: Layout, runs: dict,
+          step: Step, key: str) -> dict:
+    """A step's state for one scope, as every board and the diagram show
+    it: `state` is the status of the run in force (running, waiting, done,
+    failed), or, with no run in force, blocked (a step it follows is not
+    done) or ready. A superseded run is never in force, so superseded is
+    never a state; `earlier_attempts` counts the attempts before this
+    one."""
+    run = _current(runs, step.id, key)
+    attempts = runs.get((step.id, key)) or []
+    unmet = [] if run else _unmet(definition, book_layout, runs, step, key)
+    return {
+        "state": run["status"] if run else ("blocked" if unmet else "ready"),
+        "run": run["id"] if run else None,
+        "attempt": run["attempt"] if run else None,
+        "earlier_attempts": len(attempts) - (1 if run else 0),
+        "actor": run["actor"] if run else step.actor, "blocked_by": unmet,
+        "rests_on_restarted": bool(run) and _rests_on_restarted(
+            definition, book_layout, runs, step, run),
+        "contract_changed": bool(run) and (
+            run["contract_hash"] != contract_hash(step))}
+
+
 def waited_on(actor: str) -> str | None:
     """The person an actor names, as the board says it: `the author` for
     `human:author`, the name for anyone else, None for an agent."""
@@ -650,28 +686,16 @@ def status(db: Database, manuscript: dict) -> dict:
     for step in definition.steps:
         cells: list[dict] = []
         for scope in book_layout.scopes(step.grain):
-            run = _current(runs, step.id, scope.key)
-            unmet = [] if run else _unmet(definition, book_layout, runs,
-                                          step, scope.key)
-            state = run["status"] if run else ("blocked" if unmet
-                                               else "ready")
-            actor = run["actor"] if run else step.actor
+            cell = _cell(definition, book_layout, runs, step, scope.key)
+            state, actor = cell["state"], cell["actor"]
             counts[state] = counts.get(state, 0) + 1
-            cells.append({
-                "scope": scope.key, "label": scope.label, "state": state,
-                "run": run["id"] if run else None,
-                "attempt": run["attempt"] if run else None,
-                "actor": actor, "blocked_by": unmet,
-                "rests_on_restarted": bool(run) and _rests_on_restarted(
-                    definition, book_layout, runs, step, run),
-                "contract_changed": bool(run) and (
-                    run["contract_hash"] != contract_hash(step))})
+            cells.append({"scope": scope.key, "label": scope.label, **cell})
             who = waited_on(actor)
             if who and state in ("waiting", "ready"):
                 waiting_on.append({"who": who, "step": step.id,
                                    "scope": scope.key, "label": scope.label,
                                    "asked": state == "waiting",
-                                   "run": run["id"] if run else None})
+                                   "run": cell["run"]})
             if state in ("ready", "failed") and first_ready is None:
                 first_ready = _start_command(manuscript, step, scope)
         steps.append({"id": step.id, "role": step.role, "actor": step.actor,
@@ -756,7 +780,8 @@ def _entry_lines(entry: dict, db: Database) -> list[str]:
 
 
 def _register_section(db: Database, manuscript: dict, book_layout: Layout,
-                      scope: Scope, run_id: str) -> list[str]:
+                      scope: Scope, run_id: str,
+                      must_declare_uses: bool) -> list[str]:
     if scope.grain == "book":
         document_ids = None
     elif scope.grain == "chapter":
@@ -770,11 +795,34 @@ def _register_section(db: Database, manuscript: dict, book_layout: Layout,
         "Each entry is the author's words, verbatim, and the machine's "
         "reading of them. Keeping to a settled entry is your work; a new "
         "choice is the author's. For every entry your work rests on, "
-        "record a use and say which it is: `applies` when you do what the "
-        "entry says, `infers` when you go beyond what it says.", "",
-        f"    authorlm register use <kind/key> --mode applies|infers "
-        f"--actor <who> --step-run {run_id} --note '<what rests on it>' "
-        f"-m {manuscript['name']}", ""]
+        "a use is recorded that says which it is: `applies` when you do "
+        "what the entry says, `infers` when you go beyond what it says.", ""]
+    if must_declare_uses:
+        lines += [
+            "**Required.** This run cannot be marked done unless its result "
+            f"says what rested on the register. Put `{USES_KEY}` in the "
+            "result you hand back: a list with one item for each entry your "
+            "work rested on,", "",
+            '    {"entry": "<kind/key or id>", "mode": "applies" or '
+            '"infers", "note": "<what rests on it>", "document": "<the '
+            'chapter file, optional>"}', "",
+            f'or, if your work rested on no entry, `"{USES_KEY}": "none"` '
+            f'with a `{USES_REASON_KEY}` saying why. `book done` records '
+            "each use under this run, so do not also record them yourself.",
+            "",
+            "An inference is fine, and often needed: the author cannot "
+            "settle everything in advance. It must be labelled `infers`, so "
+            "that the author can tell what they chose from what you chose "
+            "for them. Never label an inference `applies`.", ""]
+    else:
+        lines += [
+            "Record each use as you go, or list them in your result under "
+            f"`{USES_KEY}` (items of entry, mode, note) and `book done` "
+            "records them. An inference is fine; it must be labelled "
+            "`infers`.", "",
+            f"    authorlm register use <kind/key> --mode applies|infers "
+            f"--actor <who> --step-run {run_id} --note '<what rests on it>' "
+            f"-m {manuscript['name']}", ""]
     groups = (("settled", "Settled"),
               ("proposed", "Proposed, not settled: the author has not "
                            "agreed to these; no work rests on them"),
@@ -890,7 +938,9 @@ def _pack(db: Database, manuscript: dict, definition: Definition,
         "record: this pack lists what you are handed, not what you may "
         "read. A problem that belongs to an earlier step is filed back in "
         "your result, not fixed here.", ""]
-    lines += _register_section(db, manuscript, book_layout, scope, run["id"])
+    lines += _register_section(
+        db, manuscript, book_layout, scope, run["id"],
+        run["actor"] == "agent" and "register" in step.gives)
     lines += _handed_over(definition, book_layout, runs, step, scope)
     lines += _reference(step, earlier)
     lines += [
@@ -898,7 +948,8 @@ def _pack(db: Database, manuscript: dict, definition: Definition,
         "Write what you hand back as one JSON object (suggested keys: "
         "`summary`, `artifacts` for the files you wrote, `register_entries` "
         "for the entry ids you added, `filed_back` for problems that "
-        "belong to an earlier step), then:", "",
+        f"belong to an earlier step; and `{USES_KEY}` as the register "
+        "section above says), then:", "",
         f"    authorlm book done {run['id']} --result-json <file> -m "
         f"{manuscript['name']}", ""]
     return "\n".join(lines)
@@ -1048,11 +1099,78 @@ def finish(db: Database, manuscript: dict, run_id: str,
             raise LookupError(f"result.register_entries names '{entry_id}', "
                               "which is not a register entry of this "
                               "manuscript. List them: authorlm register list")
-    _transition(db, manuscript, "done", actor=row["actor"],
-                run=_run(db, row),
-                changes={"finished_at": now_iso(),
-                         "result": json.dumps(result, ensure_ascii=False)})
+    step = next((s for s in load_definition(manuscript).steps
+                 if s.id == row["step"]), None)
+    uses = _register_uses(result, row, step)
+    who = (f"agent:{step.role}" if step and row["actor"] == "agent"
+           else row["actor"])
+    with db.transaction():
+        for item in uses:
+            register.use(db, manuscript, item["entry"], mode=item["mode"],
+                         actor=who, note=item["note"],
+                         step_run_id=row["id"],
+                         document=item.get("document"))
+        _transition(db, manuscript, "done", actor=row["actor"],
+                    run=_run(db, row),
+                    changes={"finished_at": now_iso(),
+                             "result": json.dumps(result,
+                                                  ensure_ascii=False)})
     return show_run(db, manuscript, row["id"])["run"]
+
+
+USES_KEY = "register_uses"
+USES_REASON_KEY = "register_uses_reason"
+
+
+def _register_uses(result: dict, row, step: Step | None) -> list[dict]:
+    """The register uses a result declares, checked for shape; the caller
+    writes them. An agent's run of a step that is given the register must
+    declare them: a list of `{entry, mode, note, document?}`, or the word
+    `none` with a reason. A person's step, and a step not given the
+    register, may leave the key out."""
+    name = row["step"]
+    required = (row["actor"] == "agent" and step is not None
+                and "register" in step.gives)
+    how = (f'add "{USES_KEY}" to the result: a list of {{"entry": '
+           '"<kind/key or id>", "mode": "applies" or "infers", "note": '
+           '"<what rests on it>"}, with an optional "document"; or '
+           f'"{USES_KEY}": "none" with a "{USES_REASON_KEY}". An inference '
+           'is fine; label it infers')
+    if USES_KEY not in result:
+        if required:
+            raise ValueError(
+                f"{name} was given the register, so its result must say "
+                f"which entries the work rested on, and it has no "
+                f"{USES_KEY}. To fix: {how}")
+        return []
+    declared = result[USES_KEY]
+    if declared == "none":
+        reason = result.get(USES_REASON_KEY)
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(
+                f'{USES_KEY} is "none" but there is no {USES_REASON_KEY}: '
+                "say in a sentence why the work rested on no entry")
+        return []
+    if not isinstance(declared, list) or not declared:
+        raise ValueError(
+            f"{USES_KEY} must be a list with at least one use, or the "
+            f"word none. To fix: {how}")
+    for item in declared:
+        if not isinstance(item, dict):
+            raise ValueError(f"each item of {USES_KEY} is an object. "
+                             f"To fix: {how}")
+        for key in ("entry", "note"):
+            if not isinstance(item.get(key), str) or not item[key].strip():
+                raise ValueError(f"an item of {USES_KEY} has no {key}. "
+                                 f"To fix: {how}")
+        if item.get("mode") not in register.MODES:
+            raise ValueError(
+                f"the use of {item['entry']} has mode "
+                f"'{item.get('mode')}'; it must be applies or infers")
+        if not isinstance(item.get("document", ""), str):
+            raise ValueError(f"the use of {item['entry']}: document is a "
+                             "file name or a dc- id")
+    return declared
 
 
 def _require_open(row) -> None:
@@ -1199,8 +1317,10 @@ DIAGRAM_CLASSES = {
     "running": "fill:#e3f2fd,stroke:#1565c0",
     "waiting": "fill:#fce4ec,stroke:#ad1457",
     "done": "fill:#e8f5e9,stroke:#2e7d32",
-    "superseded": "fill:#f3e5f5,stroke:#6a1b9a",
     "failed": "fill:#ffebee,stroke:#c62828",
+    # A second mark, beside the state: the step was run before and
+    # restarted, or failed and was started again.
+    "reran": "stroke:#6a1b9a,stroke-width:3px",
 }
 _GRAIN_TITLES = {"book": "book: once for the whole book",
                  "part": "part: once for each part",
@@ -1236,8 +1356,10 @@ def diagram(db: Database, manuscript: dict,
     file: `{mermaid, nodes, edges, scope}`. One node per step, grouped by
     grain, an edge for each `after`, a mark for a person's step and for an
     independent step. With a `scope` (a chapter, a part, or `book`) each
-    node also carries its status there: blocked, ready, running, waiting,
-    done, failed, or superseded (restarted and not yet started again)."""
+    node also carries its state there, the same one `status` gives
+    (`_cell`): blocked, ready, running, waiting, done or failed. A step
+    that was run before and restarted says so with a second mark and its
+    attempt number, never as its state."""
     _require_document_ids(db, manuscript)
     definition = load_definition(manuscript)
     book_layout = layout(db, manuscript)
@@ -1246,22 +1368,16 @@ def diagram(db: Database, manuscript: dict,
     nodes: list[dict] = []
     for step in definition.steps:
         key = keys[step.grain]
-        status_name = run_id = None
-        if key is not None:
-            run = _current(runs, step.id, key)
-            attempts = runs.get((step.id, key)) or []
-            if run:
-                status_name, run_id = run["status"], run["id"]
-            elif attempts:
-                status_name = "superseded"
-            else:
-                status_name = ("blocked" if _unmet(
-                    definition, book_layout, runs, step, key) else "ready")
+        cell = (_cell(definition, book_layout, runs, step, key)
+                if key is not None else None)
         nodes.append({
             "node": "step_" + step.id.replace("-", "_"), "step": step.id,
             "role": step.role, "actor": step.actor,
             "human": step.actor != "agent", "independent": step.independent,
-            "grain": step.grain, "status": status_name, "run": run_id})
+            "grain": step.grain,
+            "status": cell["state"] if cell else None,
+            "run": cell["run"] if cell else None,
+            "earlier_attempts": cell["earlier_attempts"] if cell else 0})
     edges = [{"from": earlier, "to": step.id}
              for step in definition.steps for earlier in step.after]
     by_step = {node["step"]: node for node in nodes}
@@ -1274,7 +1390,9 @@ def diagram(db: Database, manuscript: dict,
         for node in members:
             text = "<br/>".join(
                 [node["step"], node["role"], node["actor"]]
-                + (["independent"] if node["independent"] else []))
+                + (["independent"] if node["independent"] else [])
+                + ([f"attempt {node['earlier_attempts'] + 1}"]
+                   if node["earlier_attempts"] else []))
             text = text.replace('"', "#quot;")
             opening, closing = (('{{"', '"}}') if node["independent"] else
                                 ('(["', '"])') if node["human"] else
@@ -1288,7 +1406,8 @@ def diagram(db: Database, manuscript: dict,
     for node in nodes:
         for name in ((["human"] if node["human"] else [])
                      + (["independent"] if node["independent"] else [])
-                     + ([node["status"]] if node["status"] else [])):
+                     + ([node["status"]] if node["status"] else [])
+                     + (["reran"] if node["earlier_attempts"] else [])):
             lines.append(f"  class {node['node']} {name}")
     return {"manuscript": manuscript["name"],
             "scope": _scope_key(db, manuscript, scope) if scope else None,

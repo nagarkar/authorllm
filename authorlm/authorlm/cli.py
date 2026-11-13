@@ -2371,9 +2371,9 @@ def _register_use_lines(uses: list[dict], heading: str) -> list[str]:
         return [f"{heading}: none"]
     lines = [f"{heading}: {len(uses)}"]
     for use in uses:
-        where = "".join(f"  {label} {use[key]}" for label, key in
-                        (("in", "document_id"), ("run", "step_run_id"))
-                        if use[key])
+        where = f"  in {use['document_id']}" if use["document_id"] else ""
+        if use["step_run_id"]:
+            where += f"  step {use['step']}, run {use['step_run_id']}"
         lines.append(f"  {use['mode']:<8} {use['actor']}{where}  "
                      f"{use['note']}")
     return lines

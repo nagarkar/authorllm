@@ -124,6 +124,12 @@ leaves_alone = "the manuscript"
 '''
 
 
+# What an agent step that is given the register hands back when its work
+# rested on no entry: the explicit answer `book done` asks for.
+NO_USES = {"register_uses": "none",
+           "register_uses_reason": "this test's step rested on no entry"}
+
+
 def quiet(function, *args, **kwargs):
     with contextlib.redirect_stdout(io.StringIO()):
         return function(*args, **kwargs)
@@ -184,7 +190,7 @@ class Workspace(unittest.TestCase):
                  result: dict | None = None) -> dict:
         started = self.start(step, scope)
         return book.finish(self.db, self.manuscript, started["run"]["id"],
-                           result or {})
+                           {**NO_USES, **(result or {})})
 
     def ready(self) -> list[tuple[str, str]]:
         return [(r["step"], r["scope"])
@@ -380,10 +386,12 @@ class OrderingTests(Workspace):
         self.assertEqual(started["run"]["status"], "running")
         self.assertEqual(started["run"]["attempt"], 1)
         done = book.finish(self.db, self.manuscript, started["run"]["id"],
-                           {"summary": "drafted", "artifacts": ["one.md"]})
+                           {"summary": "drafted", "artifacts": ["one.md"],
+                            **NO_USES})
         self.assertEqual(done["status"], "done")
         self.assertEqual(self.run_row(done["id"])["result"],
-                         {"summary": "drafted", "artifacts": ["one.md"]})
+                         {"summary": "drafted", "artifacts": ["one.md"],
+                          **NO_USES})
         with self.assertRaisesRegex(ValueError, "already done"):
             book.finish(self.db, self.manuscript, done["id"], {})
 
@@ -524,7 +532,7 @@ class RestartTests(Workspace):
         self.assertEqual(self.run_row(self.brief["id"])["status"], "done")
         # What was produced before is kept.
         self.assertEqual(self.run_row(self.draft_one["id"])["result"],
-                         {"summary": "FIRST DRAFT OF ONE"})
+                         {"summary": "FIRST DRAFT OF ONE", **NO_USES})
         self.assertEqual(self.state("draft", self.one), "ready")
         self.assertEqual(self.state("critic", self.one), "blocked")
 
@@ -652,6 +660,144 @@ class PackTests(Workspace):
         pack = self.pack("critic", "one.md")
         self.assertNotIn("THE FIRST VERDICT", pack)
         self.assertIn("withheld", pack)
+
+
+class RegisterUsesOnDoneTests(Workspace):
+    """What rested on the register is not left to the agent's memory: an
+    agent step that is given the register cannot be marked done without
+    saying which entries its work rested on, or that it rested on none."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        entry = register.add(
+            self.db, self.manuscript, "reader", "newcomer",
+            author_words="Someone who has never meditated.",
+            reading="The reader is new to the practice.")
+        self.entry = register.settle(self.db, self.manuscript, entry["id"])
+        self.run_step("interview")
+        self.run_id = self.start("draft", "one.md")["run"]["id"]
+
+    def finish(self, result: dict) -> dict:
+        return book.finish(self.db, self.manuscript, self.run_id, result)
+
+    def status_of_run(self) -> str:
+        return self.run_row(self.run_id)["status"]
+
+    def test_done_is_declined_without_the_key_and_names_it(self):
+        with self.assertRaisesRegex(ValueError, "register_uses"):
+            self.finish({"summary": "drafted"})
+        self.assertEqual(self.status_of_run(), "running")
+
+    def test_the_uses_are_written_under_the_run(self):
+        self.finish({"summary": "drafted", "register_uses": [
+            {"entry": "reader/newcomer", "mode": "applies",
+             "note": "the opening assumes no practice"},
+            {"entry": self.entry["id"], "mode": "infers",
+             "note": "left the Pali terms out", "document": "one.md"}]})
+        self.assertEqual(self.status_of_run(), "done")
+        uses = register.uses(self.db, self.manuscript, "reader/newcomer")
+        self.assertEqual(
+            [(u["mode"], u["note"], u["step_run_id"], u["step"], u["actor"])
+             for u in uses],
+            [("applies", "the opening assumes no practice", self.run_id,
+              "draft", "agent:drafter"),
+             ("infers", "left the Pali terms out", self.run_id, "draft",
+              "agent:drafter")])
+        self.assertIsNone(uses[0]["document_id"])
+        self.assertEqual(uses[1]["document_id"], self.one)
+        shown = book.show_run(self.db, self.manuscript, self.run_id)
+        self.assertEqual([u["mode"] for u in shown["uses"]],
+                         ["applies", "infers"])
+
+    def test_none_needs_a_reason(self):
+        with self.assertRaisesRegex(ValueError, "register_uses_reason"):
+            self.finish({"register_uses": "none"})
+        with self.assertRaisesRegex(ValueError, "register_uses_reason"):
+            self.finish({"register_uses": "none",
+                         "register_uses_reason": "  "})
+        self.assertEqual(self.status_of_run(), "running")
+        self.finish({"register_uses": "none",
+                     "register_uses_reason": "a mechanical pass only"})
+        self.assertEqual(self.status_of_run(), "done")
+        self.assertEqual(
+            register.uses(self.db, self.manuscript, "reader/newcomer"), [])
+
+    def test_an_empty_list_is_not_an_answer(self):
+        with self.assertRaisesRegex(ValueError, "none"):
+            self.finish({"register_uses": []})
+        self.assertEqual(self.status_of_run(), "running")
+
+    def test_an_entry_that_is_not_settled_is_declined_and_nothing_written(
+            self):
+        register.add(self.db, self.manuscript, "voice", "plain",
+                     author_words="Plain.", reading="Plain words.")
+        with self.assertRaisesRegex(ValueError, "not settled"):
+            self.finish({"register_uses": [
+                {"entry": "reader/newcomer", "mode": "applies",
+                 "note": "the opening"},
+                {"entry": "voice/plain", "mode": "applies",
+                 "note": "short sentences"}]})
+        self.assertEqual(self.status_of_run(), "running")
+        self.assertEqual(
+            register.uses(self.db, self.manuscript, "reader/newcomer"), [])
+
+    def test_each_use_says_applies_or_infers_and_what_rests_on_it(self):
+        for item, word in (
+                ({"entry": "reader/newcomer", "mode": "follows",
+                  "note": "x"}, "applies"),
+                ({"entry": "reader/newcomer", "mode": "infers"}, "note"),
+                ({"mode": "infers", "note": "x"}, "entry"),
+                ("reader/newcomer", "object")):
+            with self.assertRaisesRegex(ValueError, word):
+                self.finish({"register_uses": [item]})
+        self.assertEqual(self.status_of_run(), "running")
+
+    def test_a_persons_step_is_exempt(self):
+        book.finish(self.db, self.manuscript, self.run_id, NO_USES)
+        self.run_step("critic", "one.md")
+        self.run_step("draft", "two.md")
+        self.run_step("critic", "two.md")
+        started = self.start("part-read", "part.md")
+        done = book.finish(self.db, self.manuscript, started["run"]["id"],
+                           {"summary": "the author's verdict"})
+        self.assertEqual(done["status"], "done")
+
+    def test_a_step_not_given_the_register_is_exempt(self):
+        text = self.definition.read_text(encoding="utf-8")
+        self.definition.write_text(
+            text.replace('gives = ["brief", "register", "chapter"]',
+                         'gives = ["chapter"]'), encoding="utf-8")
+        self.assertEqual(self.finish({"summary": "drafted"})["status"],
+                         "done")
+
+    def test_the_pack_states_the_requirement_beside_the_register(self):
+        pack = Path(book.pack_path(self.manuscript, self.run_id)).read_text(
+            encoding="utf-8")
+        self.assertIn("register_uses", pack)
+        self.assertIn("register_uses_reason", pack)
+        self.assertIn("An inference is fine", pack)
+        self.assertLess(pack.index("## The register"),
+                        pack.index("register_uses"))
+        self.assertLess(pack.index("register_uses"),
+                        pack.index("## From the steps before"))
+
+    def test_register_show_names_the_step_and_run_of_each_use(self):
+        self.finish({"register_uses": [
+            {"entry": "reader/newcomer", "mode": "infers",
+             "note": "left the Pali terms out"}]})
+        for verb in ("show", "uses"):
+            text = self.cli("register", verb, "reader/newcomer")
+            self.assertRegex(
+                text, rf"infers\b.*draft.*{self.run_id}.*left the Pali")
+
+    def test_the_verb_declines_naming_what_is_missing(self):
+        result = self.root / "_book" / "result.json"
+        result.write_text(json.dumps({"summary": "drafted"}),
+                          encoding="utf-8")
+        message = self.cli_error("book", "done", self.run_id,
+                                 "--result-json", str(result))
+        self.assertIn("error:", message)
+        self.assertIn("register_uses", message)
 
 
 class HistoryTests(Workspace):
@@ -883,9 +1029,11 @@ class DiagramTests(Workspace):
             self.assertIn(left, declared)
             self.assertIn(right, declared)
         self.assertLessEqual(used_classes, defined_classes)
-        self.assertLessEqual({"ready", "running", "waiting", "done",
-                              "superseded", "failed", "human",
+        self.assertLessEqual({"blocked", "ready", "running", "waiting",
+                              "done", "failed", "reran", "human",
                               "independent"}, defined_classes)
+        # Superseded is a run's status, never a step's state on the board.
+        self.assertNotIn("superseded", defined_classes)
 
     def test_nodes_and_edges_come_from_the_definition(self):
         board = self.diagram()
@@ -964,12 +1112,56 @@ class DiagramTests(Workspace):
         self.assertEqual(self.node("draft", "two.md")["status"], "ready")
         book.restart(self.db, self.manuscript, "draft", "one.md",
                      reason="again")
-        self.assertEqual(self.node("draft", "one.md")["status"],
-                         "superseded")
+        # A restarted step is ready again; that it ran before is a second
+        # mark, not its state.
+        restarted = self.node("draft", "one.md")
+        self.assertEqual(restarted["status"], "ready")
+        self.assertEqual(restarted["earlier_attempts"], 1)
+        text = self.diagram("one.md")["mermaid"]
+        self.assertIn(f'class {restarted["node"]} ready', text)
+        self.assertIn(f'class {restarted["node"]} reran', text)
         failing = self.start("draft", "one.md")
         book.fail(self.db, self.manuscript, failing["run"]["id"],
                   reason="stopped")
         self.assertEqual(self.node("draft", "one.md")["status"], "failed")
+
+    def test_after_a_restart_the_diagram_says_what_status_says(self):
+        """Reported defect: after `book restart` of a step whose follower
+        was running, the diagram called both nodes superseded while
+        `book status` said ready and blocked."""
+        self.run_step("interview")
+        self.start("draft", "one.md")
+        book.restart(self.db, self.manuscript, "interview", reason="x")
+        self.assertEqual(self.state("interview"), "ready")
+        self.assertEqual(self.state("draft", self.one), "blocked")
+        board = self.diagram("one.md")
+        status = {n["step"]: n["status"] for n in board["nodes"]}
+        self.assertEqual(status["interview"], "ready")
+        self.assertEqual(status["draft"], "blocked")
+        self.assertNotIn("superseded", board["mermaid"])
+        self.assertIn("attempt 2", board["mermaid"])
+
+    def test_every_node_carries_the_state_the_status_board_gives(self):
+        self.run_step("interview")
+        self.run_step("draft", "one.md")
+        failing = self.start("critic", "one.md")
+        book.fail(self.db, self.manuscript, failing["run"]["id"],
+                  reason="stopped")
+        self.start("draft", "two.md")
+        book.restart(self.db, self.manuscript, "draft", "one.md",
+                     reason="again")
+        status = json.loads(self.cli("book", "status", "--json"))
+        on_board = {(s["id"], c["scope"]): (c["state"], c["run"])
+                    for s in status["steps"] for c in s["scopes"]}
+        for scope, part in ((self.one, self.part), (self.two, self.part)):
+            keys = {"book": "book", "part": part, "chapter": scope}
+            drawn = json.loads(self.cli("book", "diagram", "--scope", scope,
+                                        "--json"))
+            for node in drawn["nodes"]:
+                self.assertEqual(
+                    (node["status"], node["run"]),
+                    on_board[(node["step"], keys[node["grain"]])],
+                    (node["step"], scope))
 
     def test_the_verb_prints_mermaid_or_the_parts_as_json(self):
         self.assertTrue(self.cli("book", "diagram").startswith(
