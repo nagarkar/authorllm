@@ -5916,6 +5916,31 @@ def _rule_judgments(marked: str, written: list[dict]
     return marked, rulings
 
 
+def _rule_lens_marked(marked: str, written: list[dict],
+                      rulings: dict[str, str]) -> str:
+    """The Merge forms page's rulings on lens forms typed into the tab's
+    text: a replacement's green half set to its ruling (`rule_forms_in_
+    marked`); a judgment tag (an insertion, ruled by presence) kept on an
+    acceptance and taken out, braces and all, on a decline."""
+    by_id = {t["id"]: t for t in written}
+    pairs = pair_external_forms(marked, written)
+    tags = {tid: text for tid, text in rulings.items()
+            if tid in by_id and not (by_id[tid].get("proposed_old") or "")}
+    for tid, text in tags.items():
+        form = pairs.get(tid)
+        if form is None:
+            raise ValueError(
+                f"form {tid} is no longer in the tab, so its ruling cannot "
+                f"be applied; nothing was landed")
+        if not text.strip():
+            marked = marked[:form["start"]] + marked[form["end"]:]
+            pairs = pair_external_forms(marked, written)
+    rest = {tid: text for tid, text in rulings.items() if tid not in tags}
+    if rest:
+        marked, _order = rule_forms_in_marked(marked, written, rest)
+    return marked
+
+
 def _apply_judgment_rulings(db: Database, mid: str, rulings,
                             evidence_type: str) -> None:
     for t, accepted in rulings:
@@ -6022,14 +6047,21 @@ def _clear_door_forms(db: Database, manuscript: dict, rel: str,
 
 
 def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
-                services=None) -> dict:
+                services=None,
+                rulings: dict[str, str] | None = None) -> dict:
     """Read the tab back and finalize the lens forms — `filter resolve`'s
     doc road for the lens door: the author's post-edits win, a
     hand-resolved form's verdict is inferred from the prose
     (it-4c5a8038c304), evidence lands as `lens_edit` under NO episode,
     a local edit made since the push is kept, and the settled forms are
     taken out of the tab in place (`_clear_door_forms`,
-    it-459f2c04ef77)."""
+    it-459f2c04ef77).
+
+    An emptied green half (`<<old>>{{}}`) is a decline, as on the filter
+    road. `rulings` (thread id → text, '' to decline) are rulings made on
+    the Merge forms page, applied to the tab's text as if typed there
+    before it is read back; a judgment tag's ruling keeps the tag
+    (accept) or takes it out of the tab (decline)."""
     from . import gdocs
     from . import summaries as sums
     mid = manuscript["id"]
@@ -6063,14 +6095,33 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
     # Judgment tags first (`_rule_judgments`), so record_resolution's
     # unmatched loop never sees them. Nothing is written until the local
     # file is known to merge.
-    marked, rulings = _rule_judgments(fetched["marked"], written)
     replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
-    final, forms = passes.final_text_from_marked(
-        marked, written=replaces, kinds=("replace",))
-    final, _ = form_grammar.strip_form_remnants(
-        final, [t["proposed_new"] for t in written])
+
+    def settle(marked: str):
+        marked = restore_emptied_forms(marked, replaces)
+        marked, judged = _rule_judgments(marked, written)
+        final, forms = passes.final_text_from_marked(
+            marked, written=replaces, kinds=("replace",))
+        final, _ = form_grammar.strip_form_remnants(
+            final, [t["proposed_new"] for t in written])
+        return final, forms, judged
+
+    tab_final = None
+    if rulings:
+        # The page's words land in the file; the in-place clear below
+        # keeps the tab's own green halves, so the tab is then recorded
+        # as reading THOSE (each kept ruling read as the tab holds it),
+        # and the caller's push brings it up to the file.
+        held = pair_external_forms(fetched["marked"], written)
+        as_tab = {tid: (held[tid]["new"] if text.strip() and tid in held
+                        else text) for tid, text in rulings.items()}
+        tab_final = settle(_rule_lens_marked(fetched["marked"], written,
+                                             as_tab))[0]
+    final, forms, judged = settle(
+        _rule_lens_marked(fetched["marked"], written, rulings)
+        if rulings else fetched["marked"])
     landed = _door_final_text(rel, fetched, final, path, "lens resolve")
-    _apply_judgment_rulings(db, mid, rulings, LENS_EVIDENCE)
+    _apply_judgment_rulings(db, mid, judged, LENS_EVIDENCE)
     diffs = passes.record_resolution(db, mid, rel, forms,
                                      origin_type=LENS_ORIGIN,
                                      evidence_type=LENS_EVIDENCE,
@@ -6081,7 +6132,8 @@ def lens_resolve(db: Database, manuscript: dict, config: dict, file: str,
                 episode=NO_EPISODE)
     still_marked = _clear_door_forms(db, manuscript, rel, written,
                                      fetched["marked"], docs_service,
-                                     final, warnings)
+                                     tab_final if tab_final is not None
+                                     else final, warnings)
     after = {t["id"]: dict(db.one(
         "SELECT * FROM doc_threads WHERE id = ?", (t["id"],)))
         for t in written}
