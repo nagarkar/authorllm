@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Transport } from "./transport";
 
 // Mirrors forms_page.dispatch (authorlm/forms_page.py): every open outside
-// revision ("form") of the manuscript, by file, as the Doc tab holds it now.
+// revision or Doc-road filter edit ("form") of the manuscript, by file, as
+// the Doc tab holds it now.
 // A ruling (Accept / Edit / Decline) is held on the server until the file is
 // merged; Merge lands that file's forms and brings the tab up to the file,
 // or stops and says why (both sides changed, a ruling missing, a stale tab).
@@ -11,7 +12,7 @@ import type { Transport } from "./transport";
 // on the server like a ruling; Merge lands them all and pushes.
 interface Ruling { verdict: "accept" | "edit" | "decline"; text: string | null; seen: string; at: string; }
 interface Form {
-  id: string; origin: string; note: string; kind: "replace" | "insert";
+  id: string; origin: string; producer: "external" | "filter"; note: string; kind: "replace" | "insert";
   old: string; proposed: string; current: string | null; found: boolean; edited_in_doc: boolean;
   prefix: string; suffix: string; anchor: string; ruling: Ruling | null;
   // A ruling the Doc overtook (the green half changed after it): the form
@@ -202,7 +203,7 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
         <div className="muted">Rule on each form, then Merge this tab (or Merge all): the file lands the rulings and its tab is brought up to it. A file changed both here and in its tab is settled under Conflicts. Nothing reaches the Doc or the file before Merge.</div>
       </div>
       {landed.map(r => <ResultBox key={r.file} r={r} />)}
-      {data && data.files.length === 0 && <div className="card muted">No outside revision is open on this manuscript, and no file is changed on both sides.</div>}
+      {data && data.files.length === 0 && <div className="card muted">No outside revision or filter form is open on this manuscript, and no file is changed on both sides.</div>}
       {data?.files.filter(g => g.file === (data.files.some(x => x.file === tab) ? tab : data.files[0]?.file)).map(g => (
         <FileCard key={g.file} g={g} result={results[g.file]} merging={queue.running === g.file}
           queued={queue.pending.indexOf(g.file)}
@@ -277,7 +278,7 @@ function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: strin
   return (
     <div className={`forms-form${ruled ? " ruled" : ""}`}>
       <div className="card-head">
-        <span>{f.origin}</span>
+        <span>{f.producer === "filter" ? `filter ${f.origin}` : f.origin}</span>
         {f.note && <span className="forms-note">{f.note}</span>}
         {ruled && <span className={`state ${ruled === "decline" ? "" : "done"}`}>{ruled === "accept" ? "accepted" : ruled === "edit" ? "edited" : "declined"}</span>}
       </div>

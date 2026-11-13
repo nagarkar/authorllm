@@ -1547,6 +1547,9 @@ The loop, per essay:
    file on disk holding the OLD essay. **The standing expectation is
    that the author then goes to the Doc and settles there** — `filter
    settle <essay>` reads the tab back when they say they are done.
+   The forms are also cards on the Merge forms page (Accept / Edit /
+   Decline); its Merge runs the same `filter resolve`, with the page's
+   rulings typed into the tab first, then the `doc push`.
 
    **Step 4 is OPTIONAL on this road, and usually skipped.** The tab IS
    the review: an untouched form is an acceptance, an emptied green half

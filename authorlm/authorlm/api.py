@@ -5224,7 +5224,8 @@ def _resolve_services(services, rel: str):
 
 def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
                   pause: bool = False, name: str | None = None,
-                  services=None) -> dict:
+                  services=None,
+                  rulings: dict[str, str] | None = None) -> dict:
     """One verb, three halves: the threads' state chooses whether this is
     an apply or a finalize, and the RUN'S TRANSPORT chooses where the
     marked text is read from (D-2).
@@ -5248,6 +5249,10 @@ def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
     both filter roads carry `origin_type='filter'`, so `origin_type` is
     the wrong key, and a sibling verb would be larger than a branch in
     the verb that already dispatches on thread state.
+
+    `rulings` (thread id → text, '' to decline) are rulings made on the
+    Merge forms page, applied to the tab's text as if typed there before
+    it is read back (doc road only).
     """
     from . import gdocs
     from . import summaries as sums
@@ -5265,6 +5270,10 @@ def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
     written = [t for t in _run_threads(db, mid, run)
                if t["state"] == "written"]
     warnings: list[str] = []
+    if rulings and mode != "doc":
+        raise ValueError(
+            f"rulings come from the Doc's forms, and this run on {rel} "
+            f"did not put its forms in the Doc.")
     if mode == "doc" and pause:
         raise ValueError(
             f"this run put its forms in the Doc — 'filter push {rel}' "
@@ -5307,8 +5316,15 @@ def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
                     f"wins. Compare the local file against the Doc tab by "
                     f"hand, then re-run 'filter resolve {rel}'.")
             warnings.extend(fetched["marker_warnings"])
+            marked = fetched["marked"]
+            if rulings:
+                marked, _order = rule_forms_in_marked(marked, written,
+                                                      rulings)
+            # An emptied green half is a decline (the filter road's
+            # standing semantics), not a rewording to nothing.
+            marked = restore_emptied_forms(marked, written)
             return _filter_finalize(db, manuscript, config, run, rel, path,
-                                    warnings, marked_doc=fetched["marked"])
+                                    warnings, marked_doc=marked)
         if mode is None:
             # A run paused before the transport existed: its forms are in
             # the bytes on disk, so the road it took was the local one.
@@ -6706,6 +6722,19 @@ def rule_forms_in_marked(marked: str, threads: list[dict],
     return marked, order
 
 
+def restore_emptied_forms(marked: str, replaces: list[dict]) -> str:
+    """`marked` with each replacement the author turned down by deleting
+    its green half (`<<old>>{{}}`, or a bare `<<old>>`) put back to its
+    old text, so the settle reads a decline and not a rewording to
+    nothing."""
+    for t in replaces:
+        old = re.escape(t["proposed_old"])
+        marked = re.sub(
+            r"(?:~~)*<<" + old + r">>(?:~~)*(?:\{\{\s*\}\}|(?!~~|\{\{))",
+            lambda m, t=t: t["proposed_old"], marked, count=1)
+    return marked
+
+
 def _rule_external_marked(marked: str, replaces: list[dict],
                           inserts: list[dict],
                           known: dict[str, int] | None = None
@@ -6731,11 +6760,7 @@ def _rule_external_marked(marked: str, replaces: list[dict],
     def flat(s: str) -> str:
         return " ".join(s.split())
 
-    for t in replaces:
-        old = re.escape(t["proposed_old"])
-        marked = re.sub(
-            r"(?:~~)*<<" + old + r">>(?:~~)*(?:\{\{\s*\}\}|(?!~~|\{\{))",
-            lambda m, t=t: t["proposed_old"], marked, count=1)
+    marked = restore_emptied_forms(marked, replaces)
 
     forms = [f for f in form_grammar.pending_forms(marked) if f["kind"] == "insert"]
     # `known`: additions already paired by their place (a ruling made off
