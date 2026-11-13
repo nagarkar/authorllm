@@ -225,6 +225,16 @@ def _checked_out(db, manuscript: dict, file: str) -> bool:
     return isinstance(entry, dict) and bool(entry.get("checked_out"))
 
 
+def _keep_checked_out(db, manuscript: dict, file: str) -> None:
+    from . import gdocs
+
+    meta = gdocs._mapping(db, manuscript)
+    entry = meta.get("gdocs", {}).get(file)
+    if isinstance(entry, dict) and not entry.get("checked_out"):
+        entry["checked_out"] = True
+        gdocs._save_mapping(db, manuscript, meta)
+
+
 def _services(services, file: str, step: str):
     """The Drive/Docs pair, built only when the Doc road is actually
     taken (api._resolve_services' ruling: every state refusal must be
@@ -301,8 +311,10 @@ def _choose(text: str, kind: str, file: str, pairs: list) -> list[dict]:
         if kind == "suggestion":
             if tag["target"] is None:
                 raise ValueError(f"tag #{tag['n']}: a standalone [Suggestion:] "
-                                 "acts on the paragraph before it, and "
-                                 "nothing precedes this one")
+                                 "acts on the prose paragraph before it, and "
+                                 "nothing precedes this one in its section — "
+                                 "move the note under the paragraph it "
+                                 "comments on")
             other = targets.get(tag["target_start"])
             if other is not None:
                 raise ValueError(f"tag #{tag['n']} and tag #{other} act on "
@@ -419,8 +431,16 @@ def apply(db, manuscript: dict, config: dict, kind: str, file: str,
         service, docs_service = _services(services, file, "apply")
         gdocs.level_from_doc(db, manuscript, file, service, docs_service)
     text = _read(path)
-    chosen = _choose(text, kind, file, pairs)
-    labels = _mint_labels(text, file, chosen, kind)
+    try:
+        chosen = _choose(text, kind, file, pairs)
+        labels = _mint_labels(text, file, chosen, kind)
+    except Exception:
+        if doc_road:
+            # The levelling pull cleared the checkout; a bad item must
+            # not leave it cleared, or the retry takes the direct road
+            # while the Doc is still the author's working copy (#420).
+            _keep_checked_out(db, manuscript, file)
+        raise
 
     if doc_road:
         return _stage_doc(db, manuscript, kind, file, text, chosen, labels,
