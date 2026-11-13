@@ -44,6 +44,7 @@ The page is `/api/forms` on the audiobook server (`audiobook_server.py`);
 from __future__ import annotations
 
 import contextlib
+import difflib
 import io
 import json
 import re
@@ -145,6 +146,57 @@ def _paragraph_before(text: str, start: int) -> str:
     return form_grammar.strip_pending(head[at:])[0]
 
 
+# A word diff for a card: kept words plain, removed words struck, inserted
+# words green, in reading order, so a form that keeps most of its old text
+# (a lens that prepends one sentence) does not read as all changed.
+_TOKEN = re.compile(r"\w+(?:['\u2019]\w+)*|\s+|[^\w\s]")
+
+
+def _tokens(text: str) -> list[str]:
+    return _TOKEN.findall(text or "")
+
+
+def _tiny(text: str) -> bool:
+    """An equal run too small to stand between two changes: whitespace or
+    punctuation alone, or one short word with its spaces."""
+    words = re.findall(r"\w+", text)
+    return not words or (len(words) == 1 and len(words[0]) <= 3
+                         and len(text) <= 6)
+
+
+def word_diff(old: str, new: str) -> list[dict]:
+    """Segments [{op: equal|delete|insert, text}] taking `old` to `new`,
+    over word, space and punctuation tokens. A tiny equal run between two
+    changes is folded into them, and each change reads delete then insert."""
+    a, b = _tokens(old), _tokens(new)
+    chunks: list[list[str]] = []  # [kind, old text, new text]
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, a, b, autojunk=False).get_opcodes():
+        chunks.append(["equal" if tag == "equal" else "change",
+                       "".join(a[i1:i2]), "".join(b[j1:j2])])
+    for i in range(1, len(chunks) - 1):
+        if (chunks[i][0] == "equal" and chunks[i - 1][0] == "change"
+                and chunks[i + 1][0] == "change" and _tiny(chunks[i][1])):
+            chunks[i][0] = "change"
+    merged: list[list[str]] = []
+    for c in chunks:
+        if merged and merged[-1][0] == c[0] == "change":
+            merged[-1][1] += c[1]
+            merged[-1][2] += c[2]
+        else:
+            merged.append(list(c))
+    out: list[dict] = []
+    for kind, o, n in merged:
+        if kind == "equal":
+            out.append({"op": "equal", "text": o})
+            continue
+        if o:
+            out.append({"op": "delete", "text": o})
+        if n:
+            out.append({"op": "insert", "text": n})
+    return out
+
+
 def _form_row(thread: dict, form: dict | None, marked: str | None,
               local: str) -> dict:
     meta = _meta(thread)
@@ -179,6 +231,11 @@ def _form_row(thread: dict, form: dict | None, marked: str | None,
             and row["current"] != row["ruling"]["seen"]):
         row["ruling_stale"] = row["ruling"]
         row["ruling"] = None
+    # The card's diff: the old text against what lands if merged now.
+    ruling = row["ruling"] or {}
+    shown = (ruling.get("text") if ruling.get("verdict") == "edit"
+             else None) or row["current"] or row["proposed"]
+    row["segments"] = word_diff(old, shown) if old else []
     return row
 
 

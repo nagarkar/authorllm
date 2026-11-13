@@ -13,7 +13,8 @@ import type { Transport } from "./transport";
 interface Ruling { verdict: "accept" | "edit" | "decline"; text: string | null; seen: string; at: string; }
 interface Form {
   id: string; origin: string; producer: "external" | "filter" | "lens"; note: string; kind: "replace" | "insert";
-  old: string; proposed: string; current: string | null; found: boolean; edited_in_doc: boolean;
+  old: string; proposed: string; current: string | null;
+  segments?: { op: "equal" | "delete" | "insert"; text: string }[]; found: boolean; edited_in_doc: boolean;
   prefix: string; suffix: string; anchor: string; ruling: Ruling | null;
   // A ruling the Doc overtook (the green half changed after it): the form
   // is back under To rule, and this says what the ruling was.
@@ -283,7 +284,13 @@ function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: strin
         {ruled && <span className={`state ${ruled === "decline" ? "" : "done"}`}>{ruled === "accept" ? "accepted" : ruled === "edit" ? "edited" : "declined"}</span>}
       </div>
       {f.kind === "replace"
-        ? <p className="devedit-diff">{f.prefix}<s className="del">{f.old}</s>{newPart && <> {newPart}</>}{f.suffix}</p>
+        ? <p className={`devedit-diff${ruled !== "decline" && f.segments?.length ? " forms-diff" : ""}`}>{f.prefix}{ruled !== "decline" && f.segments?.length
+            // One merged block: kept words green, removed red struck,
+            // inserted or changed words blue. Edit opens the new text alone.
+            ? f.segments.map((g, i) => g.op === "equal" ? <span key={i} className="keep">{g.text}</span>
+              : g.op === "delete" ? <s key={i} className="del">{g.text}</s>
+              : <span key={i} className="ins">{g.text}</span>)
+            : <><s className="del">{f.old}</s>{newPart && <> {newPart}</>}</>}{f.suffix}</p>
         : <>
           {f.anchor && <p className="devedit-diff muted forms-anchor">{f.anchor}</p>}
           <p className="devedit-diff">{ruled === "decline" ? <s className="del">{shown}</s> : <>New paragraph: {newPart}</>}</p>
