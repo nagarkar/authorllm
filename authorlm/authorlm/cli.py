@@ -2339,6 +2339,463 @@ def cmd_summarize(args):
                 "time, so there is no pre-rewrite text to summarize"))
 
 
+def _print_board(args, board: dict, lines: list[str]) -> None:
+    """A verb's board: the same facts as one JSON object under `--json`,
+    else as the given lines followed by the `next` hint."""
+    if getattr(args, "json", False):
+        print(json.dumps(board, ensure_ascii=False, indent=2))
+        return
+    for line in lines:
+        print(line)
+    if board.get("next"):
+        print(ui.dim(f"next: {board['next']}"))
+
+
+def _register_entry_lines(entry: dict) -> list[str]:
+    scope = "the whole book" if entry["scope"] is None else entry["scope"]
+    lines = [f"{entry['kind']}/{entry['key']}  {entry['id']}  "
+             f"{entry['status']}  ({scope})",
+             f"  Author's words: {entry['author_words'] or '(none yet)'}",
+             f"  Reading:        {entry['reading'] or '(none yet)'}"]
+    if entry["test"]:
+        lines.append(f"  Test:           {entry['test']}")
+    if entry["supersedes"]:
+        lines.append(f"  Supersedes:     {entry['supersedes']}")
+    if entry["note"]:
+        lines.append(f"  Note:           {entry['note']}")
+    return lines
+
+
+def _register_use_lines(uses: list[dict], heading: str) -> list[str]:
+    if not uses:
+        return [f"{heading}: none"]
+    lines = [f"{heading}: {len(uses)}"]
+    for use in uses:
+        where = f"  in {use['document_id']}" if use["document_id"] else ""
+        if use["step_run_id"]:
+            where += f"  step {use['step']}, run {use['step_run_id']}"
+        lines.append(f"  {use['mode']:<8} {use['actor']}{where}  "
+                     f"{use['note']}")
+    return lines
+
+
+def cmd_register(args):
+    """`authorlm register …`: the register of settled choices
+    (register.py)."""
+    from . import register
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    name = manuscript["name"]
+    try:
+        if args.action == "add":
+            entry = register.add(
+                db, manuscript, args.kind, args.key,
+                author_words=args.author_words or "",
+                reading=args.reading or "", test=args.test, scope=args.scope)
+            board = {"entry": entry,
+                     "next": f"authorlm register settle {entry['kind']}/"
+                             f"{entry['key']} -m {name}"}
+            lines = ["Proposed (not settled):"] + _register_entry_lines(entry)
+        elif args.action == "settle":
+            entry = register.settle(
+                db, manuscript, args.entry, author_words=args.author_words,
+                reading=args.reading, test=args.test)
+            board = {"entry": entry,
+                     "next": "show the author this reading; if it is not "
+                             "what they meant: authorlm register revise "
+                             f"{entry['kind']}/{entry['key']} --reading '…' "
+                             f"-m {name}"}
+            lines = ["Settled:"] + _register_entry_lines(entry)
+        elif args.action == "reopen":
+            board = register.reopen(db, manuscript, args.entry, args.reason)
+            board["next"] = (
+                "settle it again as it stands (authorlm register settle), "
+                "or change it (authorlm register revise)")
+            lines = (["Reopened:"] + _register_entry_lines(board["entry"])
+                     + _register_use_lines(
+                         board["uses"], "Work that rested on it"))
+        elif args.action == "revise":
+            board = register.revise(
+                db, manuscript, args.entry, author_words=args.author_words,
+                reading=args.reading, test=args.test, reason=args.reason)
+            entry = board["entry"]
+            board["next"] = (
+                f"authorlm register settle {entry['kind']}/{entry['key']} "
+                f"-m {name}" if entry["status"] == "proposed" else
+                "look again at the work listed, which rested on the old "
+                "entry" if board["uses"] else
+                f"authorlm register show {entry['id']} -m {name}")
+            lines = ["Now:"] + _register_entry_lines(entry)
+            if board["superseded"]:
+                lines += ([f"Superseded (kept): {board['superseded']['id']}"]
+                          + _register_use_lines(
+                              board["uses"], "Work that rested on the old "
+                                             "entry and needs a look"))
+        elif args.action == "list":
+            entries = register.list_entries(
+                db, manuscript, kind=args.kind, status=args.status,
+                include_superseded=args.superseded)
+            counts: dict[str, int] = {}
+            for entry in entries:
+                counts[entry["status"]] = counts.get(entry["status"], 0) + 1
+            board = {"entries": entries, "counts": counts,
+                     "next": f"authorlm register show <kind/key> -m {name}"}
+            lines = [f"{e['kind']}/{e['key']:<24} {e['status']:<10} "
+                     f"{e['id']}" for e in entries] or [
+                         "The register is empty."]
+            lines.append(", ".join(f"{n} {s}" for s, n in counts.items()))
+        elif args.action == "show":
+            board = register.show(db, manuscript, args.entry)
+            board["next"] = (
+                "to change it: authorlm register revise "
+                f"{board['entry']['id']} -m {name}")
+            lines = _register_entry_lines(board["entry"])
+            if board["superseded_by"]:
+                lines.append(f"  Superseded by:  {board['superseded_by']}")
+            lines += _register_use_lines(board["uses"], "Work resting on it")
+        elif args.action == "use":
+            use = register.use(
+                db, manuscript, args.entry, mode=args.mode, actor=args.actor,
+                note=args.note or "", step_run_id=args.step_run,
+                document=args.document)
+            board = {"use": use,
+                     "next": f"authorlm register uses {use['entry_id']} "
+                             f"-m {name}"}
+            lines = _register_use_lines([use], "Recorded")
+        else:
+            uses = register.uses(db, manuscript, args.entry)
+            board = {"uses": uses,
+                     "next": f"authorlm register show {args.entry} "
+                             f"-m {name}"}
+            lines = _register_use_lines(uses, "Work resting on it")
+    except (LookupError, ValueError) as err:
+        sys.exit(f"error: {err}")
+    _print_board(args, board, lines)
+
+
+def _book_status_lines(board: dict) -> list[str]:
+    lines = []
+    for wait in board["waiting_on"]:
+        where = "" if wait["scope"] == "book" else f" ({wait['label']})"
+        asked = "" if wait["asked"] else "  (not asked yet: start the step)"
+        lines.append(f"waiting on {wait['who']}: {wait['step']}{where}"
+                     f"{asked}")
+    for step in board["steps"]:
+        counts: dict[str, int] = {}
+        for cell in step["scopes"]:
+            counts[cell["state"]] = counts.get(cell["state"], 0) + 1
+        summary = (", ".join(f"{n} {s}" for s, n in counts.items())
+                   if step["grain"] != "book"
+                   else step["scopes"][0]["state"]) or f"no {step['grain']} yet"
+        lines.append(f"{step['id']:<24} {step['role']:<20} "
+                     f"{step['actor']:<16} {step['grain']:<8} {summary}")
+        for cell in step["scopes"]:
+            moving = cell["state"] in ("ready", "running", "waiting")
+            if (moving and step["grain"] != "book") \
+                    or cell["rests_on_restarted"] or cell["contract_changed"]:
+                flag = ("  rests on a step restarted since"
+                        if cell["rests_on_restarted"] else "")
+                if cell["contract_changed"]:
+                    flag += ("  made under an earlier version of this "
+                             "step's contract")
+                run = f"  {cell['run']}" if cell["run"] else ""
+                lines.append(f"    {cell['label']}: {cell['state']}{run}"
+                             f"{flag}")
+    lines += [ui.yellow(f"warning: {w}") for w in board["warnings"]]
+    return lines
+
+
+def cmd_book(args):
+    """`authorlm book …`: a book's workflow of roles (book.py). AuthorLM
+    says what is next, hands out the pack and records the result; the
+    conversation driving these verbs, or a person, does the step."""
+    from . import book
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    name = manuscript["name"]
+    try:
+        if args.action == "init":
+            board = book.init_definition(db, manuscript,
+                                         overwrite=args.overwrite)
+            board["next"] = f"authorlm book next -m {name}"
+            lines = [("Replaced the workflow definition with the default: "
+                      if board["overwrote"] else
+                      "Wrote the default workflow definition: ")
+                     + board["path"]]
+        elif args.action == "status":
+            board = book.status(db, manuscript)
+            lines = _book_status_lines(board)
+        elif args.action == "next":
+            board = book.next_runs(db, manuscript)
+            lines = []
+            for row in board["ready"]:
+                who = (f"waiting on {row['waiting_on']}"
+                       if row["waiting_on"] else "ready for an agent")
+                lines.append(f"{row['step']} ({row['label']}): {who}  "
+                             f"{row['command']}")
+            for row in board["in_progress"]:
+                who = (f"waiting on {row['waiting_on']}"
+                       if row["waiting_on"] else "running")
+                lines.append(f"{row['step']} ({row['label']}): {who}, "
+                             f"run {row['run']}")
+            lines = lines or ["Nothing is ready to start."]
+        elif args.action == "start":
+            board = book.start(db, manuscript, args.step, args.scope,
+                               note=args.note or "")
+            run = board["run"]
+            state = (f"waiting on {board['waiting_on']}"
+                     + (" (notified)" if board["notified"] else "")
+                     if board["waiting_on"] else "running")
+            lines = [f"Started {run['step']} ({run['scope_label']}), "
+                     f"attempt {run['attempt']}: run {run['id']}, {state}"]
+        elif args.action == "done":
+            result = None
+            if args.result_json:
+                text = (sys.stdin.read() if args.result_json == "-"
+                        else Path(args.result_json).read_text(
+                            encoding="utf-8"))
+                try:
+                    result = json.loads(text)
+                except json.JSONDecodeError as err:
+                    raise ValueError(f"the result is not valid JSON: {err}")
+            run = book.finish(db, manuscript, args.run_id, result)
+            board = {"run": run, "next": f"authorlm book next -m {name}"}
+            lines = [f"Done: {run['step']} ({run['scope_label']}), "
+                     f"run {run['id']}"]
+        elif args.action == "fail":
+            run = book.fail(db, manuscript, args.run_id,
+                            reason=args.reason or "")
+            board = {"run": run, "next": f"authorlm book next -m {name}"}
+            lines = [f"Failed: {run['step']} ({run['scope_label']}), "
+                     f"run {run['id']}: {run['failed_reason']}"]
+        elif args.action == "history":
+            board = book.history(db, manuscript, scope=args.scope,
+                                 step=args.step)
+            lines = [f"{e['at'][:19]}  {e['step']} ({e['scope_label']})  "
+                     f"{e['from_status'] or 'started'} → {e['to_status']}  "
+                     f"{e['run']}  {e['actor']}"
+                     + (f"  {e['reason']}" if e["reason"] else "")
+                     for e in board["events"]] or ["No step has run yet."]
+        elif args.action == "diagram":
+            board = book.diagram(db, manuscript, args.scope)
+            if not args.json:
+                print(board["mermaid"], end="")
+                return
+            lines = []
+        elif args.action == "restart":
+            board = book.restart(db, manuscript, args.step, args.scope,
+                                 reason=args.reason or "",
+                                 dry_run=args.dry_run)
+            runs = board["superseded"]
+            lines = [("would supersede " if board["dry_run"]
+                      else "superseded ") + f"{len(runs)} run(s), each kept "
+                     "with its result:"]
+            lines += [f"  {run['id']}  {run['step']} ({run['scope_label']}), "
+                      f"attempt {run['attempt']}" for run in runs]
+        elif args.action == "assign":
+            board = book.assign(db, manuscript, args.step, args.actor)
+            board["next"] = f"authorlm book status -m {name}"
+            lines = [f"{board['step']}: {board['was']} → {board['actor']} "
+                     f"({board['path']}); runs already started keep "
+                     "their actor"]
+        else:
+            board = book.show_run(db, manuscript, args.run_id)
+            run = board["run"]
+            board["next"] = f"authorlm book status -m {name}"
+            lines = [f"{run['id']}  {run['step']} ({run['scope_label']}), "
+                     f"attempt {run['attempt']}: {run['status']}, "
+                     f"{run['actor']}",
+                     f"  pack: {board['pack_path']}",
+                     f"  result keys: {', '.join(run['result']) or 'none'} "
+                     "(--json prints the result)",
+                     f"  register uses recorded: {len(board['uses'])}"]
+            if run["superseded_reason"]:
+                lines.append(f"  superseded: {run['superseded_reason']}")
+    except OSError as err:
+        sys.exit(f"error: {err}")
+    except (LookupError, ValueError) as err:
+        sys.exit(f"error: {err}")
+    _print_board(args, board, lines)
+
+
+def _add_register_parser(sub, common) -> None:
+    """`authorlm register <verb>`: one leaf parser per verb."""
+    p = sub.add_parser(
+        "register",
+        help="the register of settled choices: the author's words and the "
+             "machine's reading of them, and the work that rests on each")
+    verbs = p.add_subparsers(dest="action", required=True)
+
+    def leaf(name: str, text: str, example: str):
+        parser = verbs.add_parser(
+            name, parents=[common], help=text, description=text,
+            epilog=f"example: {example}")
+        parser.add_argument("--json", action="store_true",
+                            help="print the board as one JSON object")
+        parser.set_defaults(func=cmd_register)
+        return parser
+
+    def words(parser, verb: str) -> None:
+        parser.add_argument("--author-words", dest="author_words",
+                            help=f"{verb}: the author's words, verbatim")
+        parser.add_argument("--reading",
+                            help=f"{verb}: the machine's reading of those "
+                                 "words, one to three sentences")
+        parser.add_argument("--test",
+                            help=f"{verb}: the entry restated as a check a "
+                                 "chapter meets or fails")
+
+    from .register import KINDS as kinds
+    from .register import MODES as modes
+
+    q = leaf("add", "propose an entry; it is settled only by 'settle'",
+             "authorlm register add reader newcomer --author-words "
+             "'Someone who has never meditated.' --reading 'The reader is "
+             "new to the practice.'")
+    q.add_argument("kind", choices=kinds, help="the kind of choice")
+    q.add_argument("key", help="a short slug naming the entry, e.g. "
+                               "chapter-one")
+    words(q, "add")
+    q.add_argument("--scope", help="the chapter the choice is about (file "
+                                   "name or dc- id; default: the whole book)")
+    q = leaf("settle", "settle an entry, showing the author's words and "
+                       "the reading side by side; needs both",
+             "authorlm register settle reader/newcomer")
+    q.add_argument("entry", help="the entry: kind/key or its id")
+    words(q, "settle a proposed entry")
+    q = leaf("reopen", "mark a settled entry reopened and list the work "
+                       "that rested on it",
+             "authorlm register reopen reader/newcomer --reason 'the "
+             "author wants experts too'")
+    q.add_argument("entry", help="the entry: kind/key or its id")
+    q.add_argument("--reason", help="why it is reopened")
+    q = leaf("revise", "change an entry's words or reading: a new entry "
+                       "supersedes the old one, which is kept, and the "
+                       "work that rested on the old one is listed",
+             "authorlm register revise reader/newcomer --reading 'A "
+             "newcomer; no length limit.'")
+    q.add_argument("entry", help="the entry: kind/key or its id")
+    words(q, "revise")
+    q.add_argument("--reason", help="why it changed")
+    q = leaf("list", "the register's entries by kind, with a count per "
+                     "status", "authorlm register list --kind thesis")
+    q.add_argument("--kind", choices=kinds, help="only this kind")
+    q.add_argument("--status", choices=["proposed", "settled", "reopened",
+                                        "superseded"],
+                   help="only this status")
+    q.add_argument("--superseded", action="store_true",
+                   help="include superseded entries")
+    q = leaf("show", "one entry: the author's words and the reading side "
+                     "by side, and every use labelled applies or infers",
+             "authorlm register show reader/newcomer")
+    q.add_argument("entry", help="the entry: kind/key or its id")
+    q = leaf("use", "record that a piece of work rests on a settled entry, "
+                    "and whether it applies the entry or infers from it",
+             "authorlm register use reader/newcomer --mode infers --actor "
+             "agent:drafter --document one.md --note 'left the Pali terms "
+             "out'")
+    q.add_argument("entry", help="the entry: kind/key or its id")
+    q.add_argument("--mode", required=True, choices=modes,
+                   help="applies: the work does what the entry says; "
+                        "infers: the work goes beyond what it says")
+    q.add_argument("--actor", required=True,
+                   help="who did the work, e.g. agent:drafter or "
+                        "human:author")
+    q.add_argument("--note", help="what rests on the entry, in a line")
+    q.add_argument("--document", help="the chapter the work is in (file "
+                                      "name or dc- id)")
+    q.add_argument("--step-run", dest="step_run",
+                   help="the book workflow run that did the work (sr- id)")
+    q = leaf("uses", "the work that rests on one entry",
+             "authorlm register uses reader/newcomer")
+    q.add_argument("entry", help="the entry: kind/key or its id")
+
+
+def _add_book_parser(sub, common) -> None:
+    """`authorlm book <verb>`: one leaf parser per verb."""
+    p = sub.add_parser(
+        "book",
+        help="a book as a workflow of roles, each step done by a person or "
+             "an agent: what is next, the pack for a step, the record of "
+             "each run, and restarting from any step")
+    verbs = p.add_subparsers(dest="action", required=True)
+
+    def leaf(name: str, text: str, example: str):
+        parser = verbs.add_parser(
+            name, parents=[common], help=text, description=text,
+            epilog=f"example: {example}")
+        parser.add_argument("--json", action="store_true",
+                            help="print the board as one JSON object")
+        parser.set_defaults(func=cmd_book)
+        return parser
+
+    def scope(parser) -> None:
+        parser.add_argument("--scope",
+                            help="the chapter or part (file name or dc- "
+                                 "id); leave out for a whole-book step")
+
+    q = leaf("init", "write the default workflow definition into the book "
+                     "(_book/workflow.toml)", "authorlm book init")
+    q.add_argument("--overwrite", action="store_true",
+                   help="replace a definition that is already there, and "
+                        "any changes made to it, with the default")
+    leaf("status", "every step with its state per scope, and who is "
+                   "waited on", "authorlm book status")
+    leaf("next", "the step runs that can start now; marks nothing",
+         "authorlm book next")
+    q = leaf("start", "start a step: records the run, writes its pack to a "
+                      "file and prints the path; a person's step waits and "
+                      "notifies them",
+             "authorlm book start draft --scope one.md")
+    q.add_argument("step", help="the step id")
+    scope(q)
+    q.add_argument("--note", help="a short note kept with the run")
+    q = leaf("done", "record what a run handed back and mark it done",
+             "authorlm book done sr-0123456789ab --result-json result.json")
+    q.add_argument("run_id", help="the run id (sr-…)")
+    q.add_argument("--result-json", dest="result_json", metavar="FILE",
+                   help="a file holding the result as one JSON object, or "
+                        "- to read it from standard input")
+    q = leaf("restart", "run a step again: its run and every run that "
+                        "followed from it are kept and marked superseded, "
+                        "and the rerun is handed the old result as "
+                        "reference only",
+             "authorlm book restart draft --scope one.md --reason 'the "
+             "author gave the wrong year'")
+    q.add_argument("step", help="the step id")
+    scope(q)
+    q.add_argument("--reason", required=True, help="what was wrong")
+    q.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="list the runs that would be superseded and write "
+                        "nothing")
+    q = leaf("assign", "give a step to an agent or to a named person, in "
+                       "the book's definition file",
+             "authorlm book assign line-edit human:author")
+    q.add_argument("step", help="the step id")
+    q.add_argument("actor", help="agent, or human:<who>")
+    q = leaf("show", "one run: its state, pack, result and the register "
+                     "uses recorded under it",
+             "authorlm book show sr-0123456789ab --json")
+    q.add_argument("run_id", help="the run id (sr-…)")
+    q = leaf("fail", "mark a running or waiting run failed, with the "
+                     "reason; the step can then be started again",
+             "authorlm book fail sr-0123456789ab --reason 'the subagent "
+             "stopped before writing the chapter'")
+    q.add_argument("run_id", help="the run id (sr-…)")
+    q.add_argument("--reason", required=True, help="what went wrong")
+    q = leaf("history", "every status change of every run, oldest first",
+             "authorlm book history --step draft --scope one.md")
+    scope(q)
+    q.add_argument("--step", help="only this step's runs")
+    q = leaf("diagram", "the workflow as a Mermaid flowchart drawn from "
+                        "the definition; with --scope, each step's status "
+                        "there",
+             "authorlm book diagram --scope one.md")
+    scope(q)
+
+
 def cmd_prompts(args):
     from . import prompt_registry as pr
 
@@ -9821,6 +10278,9 @@ def build_parser() -> argparse.ArgumentParser:
                                   "note: the notebook entry")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_devedit)
+
+    _add_register_parser(sub, common)
+    _add_book_parser(sub, common)
 
     p = sub.add_parser(
         "prompts",

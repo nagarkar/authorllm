@@ -140,6 +140,12 @@ Session-start backups of the SQLite store (OPS-4).
 
 Learning Engine (RFC AuthorLM §17.8, Chapter 8).
 
+## `authorlm.book`
+
+`authorlm/authorlm/book.py`
+
+A book as a workflow of roles: the state machine and the record of who did which step of one book, and what each step handed back.
+
 ## `authorlm.branding`
 
 `authorlm/authorlm/branding.py`
@@ -482,6 +488,12 @@ Proposals against settled knowledge.
 
 Shared readings — one whole-essay reading for a family of global filters (issue #412).
 
+## `authorlm.register`
+
+`authorlm/authorlm/register.py`
+
+The register of settled choices: every choice the author has made about a book, kept with the author's words verbatim and the machine's reading of them side by side.
+
 ## `authorlm.revisions`
 
 `authorlm/authorlm/revisions.py`
@@ -721,6 +733,12 @@ Offline checks for tools/author_watch.py: the one watcher for the Dev edit and M
 `authorlm/tests/test_beat_repetition.py`
 
 Beat-by-beat repetition: the drafter is shown what earlier essays already say about the beat's concepts, the critic and the lint read only the book (never the files toc.toml declares outside), and a borrowed term set in italics once stays italic.
+
+## `tests.test_book_workflow`
+
+`authorlm/tests/test_book_workflow.py`
+
+A book as a workflow of roles (book.py): each step is done by a person or an agent, chosen per book; AuthorLM is the state machine and the record. It says what is next, hands out the pack and records the result, and calls no model. These tests enforce the rules the module docstring states: a step runs only after the steps it follows; a human step waits and names the person; a pack lists what the role is handed and never limits what it may read, except that an independent reader is not handed earlier outputs; any step can be restarted, and what it and its dependents produced is kept, marked superseded and offered to the rerun as reference with no authority.
 
 ## `tests.test_branding`
 
@@ -1339,6 +1357,12 @@ Shared readings: one reading per essay per filter family (readings.py, issue #41
 `authorlm/tests/test_refuse_sidecar.py`
 
 `structure.refuse_sidecar` is the named door every filter / lens / intent verb shares for `pronunciations.md`.
+
+## `tests.test_register`
+
+`authorlm/tests/test_register.py`
+
+The register of settled choices (register.py): every choice the author settles is an entry holding the author's words verbatim and the machine's reading of them, and every piece of work that rests on an entry records a use labelled applies or infers. These tests enforce the rules the module docstring states: no entry is settled without both words and reading; a settled entry is never edited in place (a change makes a new entry that supersedes the old one and returns the work that rested on it); an entry can be reopened; a key is unique among the live entries of its kind.
 
 ## `tests.test_reply_records`
 

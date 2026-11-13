@@ -839,6 +839,98 @@ workflow over `authorlm devedit` (devedit.py owns the run folder,
   push <file>`; a file whose tab has pending suggested edits is settled
   first, never pushed over.
 
+## The book workflow and the register (`authorlm book`, `authorlm register`)
+
+A book is a workflow of roles; each step is done by an agent or a named
+person, chosen per book in `<manuscript>/_book/workflow.toml`. AuthorLM is
+the state machine and the record (`authorlm/book.py`, `register.py`): it
+says what is next, hands out the pack and records the result. It calls no
+model. **You** (or a subagent you start) carry out an agent step. Both
+need `document_ids` on (`authorlm manuscript set --document-ids on`).
+
+**The loop you drive:**
+
+1. `authorlm book next`: what can start now. (`book status` shows every
+   step, and who is waited on.)
+2. `authorlm book start <step> [--scope <chapter file>]`: records the run
+   and writes its pack to `_book/packs/<run-id>.md`. Read the pack and
+   follow it, or hand its path to a subagent. The pack lists what the role
+   is handed; it never limits what the role may read. An `independent`
+   step is the exception: its reader is not handed what earlier steps
+   returned, so do not pass that along either.
+3. Do the step within its contract. `leaves_alone` is binding: a problem
+   that belongs to an earlier step goes in the result as filed back, not
+   fixed.
+4. `authorlm book done <run-id> --result-json <file>`: the result is one
+   JSON object (`summary`, `artifacts`, `register_entries`, `filed_back`,
+   `register_uses`). **For an agent step that is given the register,
+   `register_uses` is required** and `book done` is declined without it:
+   a list of `{"entry": "<kind/key or id>", "mode": "applies"|"infers",
+   "note": "<what rests on it>", "document": "<file, optional>"}`, one
+   per entry the work rested on, or `"register_uses": "none"` with a
+   `register_uses_reason`. `book done` records each use under the run;
+   do not also run `register use` for them. An inference is fine and
+   often needed; it must be labelled `infers`, never `applies`. When you
+   hand a step to a subagent, tell it to return this list.
+5. Go to 1 without stopping while the next step is an agent's. When the
+   step is a person's (`human:author`), `book start` marks it waiting and
+   notifies them: ask them in chat, record what they say, then `book done`.
+
+**Restart from any point:** `authorlm book restart <step> [--scope <s>]
+--reason '<what was wrong>'` (`--dry-run` lists first). The run and every
+run that followed from it, for that scope and the scopes inside it, are
+kept and marked superseded. The next `book start` hands the old result to
+the rerun as reference only: it is not the standard, and you do not keep,
+match or repair it. A part or book step already done on the old work is
+flagged on `book status`; tell the author, who decides whether to restart
+it too.
+
+**When a step cannot be finished** (a subagent stopped, an input is
+missing): `authorlm book fail <run-id> --reason '…'`. The steps after it
+stay blocked; `book start` makes the next attempt, which is told why the
+last one failed.
+
+**The definition may change mid-book.** Steps are matched by id. `book
+status` flags a run made under an earlier version of its step's contract;
+tell the author, who decides whether to restart it.
+
+**Other verbs:** `book init` writes the default definition (`--overwrite`
+replaces the book's own); `book assign <step> agent|human:<who>` gives a
+step to an agent or a person; `book show <run-id>` shows one run; `book
+history [--step <id>] [--scope <s>]` lists every status change in time
+order (an append-only log); `book diagram [--scope <s>]` prints the
+workflow as Mermaid flowchart text (`--json` gives nodes, edges and each
+node's status, for a page to draw). A node's status is the same state
+`book status` gives (blocked, ready, running, waiting, done, failed); a
+step that was restarted shows its attempt number and a second mark
+(`reran`), never "superseded".
+
+**The register** holds every choice the author has settled (brief answers,
+shape, theses, voice, arcs, terms, claims, rulings). A new choice is the
+author's; keeping to settled ones is your work.
+
+- `register add <kind> <key> --author-words '…' --reading '…' [--scope
+  <chapter>]`: the author's words go in **verbatim**; the reading is your
+  one-to-three-sentence statement of what they settle.
+- `register settle <kind/key>`: needs both. **Show the author the reading
+  when you settle it** and ask whether it is what they meant; your reading
+  is not always theirs.
+- **Every act that rests on an entry records a use and says which kind:**
+  `register use <kind/key> --mode applies|infers --actor <who> [--step-run
+  <run-id>] [--document <file>] --note '…'`. `applies`: you did what the
+  entry says. `infers`: you went beyond what it says. Never tell the
+  author "you told me to" about an inference.
+- `register revise <kind/key> …` changes words or reading: a new entry
+  supersedes the old one (kept), and the verb lists the work that rested
+  on the old one. `register reopen <kind/key>` does the same listing
+  without changing it. Go through that list with the author.
+- `register list`, `register show <kind/key>` (words and reading side by
+  side, every use labelled, with the step and run it came from),
+  `register uses <kind/key>`.
+- Inside a workflow step the uses go in the result (`register_uses`,
+  above) and `book done` writes them; `register use` by hand is for work
+  done outside a step run.
+
 ## Ask OpenAI what's best (`authorlm ask`)
 When the author says "ask OpenAI what's best" (or "ask OpenAI", "what does
 OpenAI say", "second opinion from OpenAI") about a passage, a decision or
