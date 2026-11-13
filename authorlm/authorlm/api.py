@@ -6727,11 +6727,30 @@ def restore_emptied_forms(marked: str, replaces: list[dict]) -> str:
     its green half (`<<old>>{{}}`, or a bare `<<old>>`) put back to its
     old text, so the settle reads a decline and not a rewording to
     nothing."""
+    from .gdocs import rendered_text
+
     for t in replaces:
         old = re.escape(t["proposed_old"])
         marked = re.sub(
             r"(?:~~)*<<" + old + r">>(?:~~)*(?:\{\{\s*\}\}|(?!~~|\{\{))",
             lambda m, t=t: t["proposed_old"], marked, count=1)
+
+    # Emptied (or bare) forms whose old half is only the export's
+    # emphasis wrapping of proposed_old — the exact regex above misses
+    # `<<*term*>>{{}}`. Restore the staged old so decline keeps the
+    # passage instead of leaving markers or, after rendered matching in
+    # final_text_from_marked, deleting it for an empty green half.
+    emptied = []
+    for form in form_grammar.pending_forms(marked):
+        if form["kind"] != "replace" or (form["new"] or "").strip():
+            continue
+        hit = next((t for t in replaces
+                    if rendered_text(form["old"])
+                    == rendered_text(t["proposed_old"])), None)
+        if hit is not None:
+            emptied.append((form["start"], form["end"], hit["proposed_old"]))
+    for start, end, text in sorted(emptied, reverse=True):
+        marked = marked[:start] + text + marked[end:]
     return marked
 
 

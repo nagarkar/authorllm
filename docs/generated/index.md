@@ -1340,6 +1340,12 @@ Shared readings: one reading per essay per filter family (readings.py, issue #41
 
 Paragraph-record reply unwrap (`_reply_records`) and JSON schema shape.
 
+## `tests.test_resolve_emphasized_old`
+
+`authorlm/tests/test_resolve_emphasized_old.py`
+
+Doc export can wrap a struck old half in emphasis (`<<*term*>>` for a staged `term`). pair_external_forms already pairs those; landing must too — otherwise Accept collapses to the emphasized OLD and records declined.
+
 ## `tests.test_resolve_pointers`
 
 `authorlm/tests/test_resolve_pointers.py`
