@@ -227,6 +227,26 @@ def _file_line_re(name: str) -> re.Pattern:
     return re.compile(rf'^\s*file\s*=\s*["\']{re.escape(name)}["\']\s*$')
 
 
+_TOC_OUTSIDE_RE = re.compile(r"^[ \t]*outside[ \t]*=[ \t]*\[.*?\]", re.M | re.S)
+
+
+def rename_toc_file(toc_text: str, old: str, new: str) -> str:
+    """toc.toml with every reference to the file `old` naming `new`: its
+    own `file =` line, each `parent =` line that points at it, and its
+    entry in the `outside` list. PURE TEXT SUBSTITUTION on those lines
+    alone, for the reason `insert_toc_entry` gives: comments, attributes
+    and line endings the author wrote are never relaid. Text that does
+    not mention `old` comes back unchanged."""
+    quoted = rf'(["\']){re.escape(old)}\2'
+    line = re.compile(rf'^(\s*(?:file|parent)\s*=\s*){quoted}(\s*)$', re.M)
+    out = line.sub(lambda m: f"{m.group(1)}{m.group(2)}{new}{m.group(2)}"
+                             f"{m.group(3)}", toc_text)
+    entry = re.compile(rf'(["\']){re.escape(old)}\1')
+    return _TOC_OUTSIDE_RE.sub(
+        lambda m: entry.sub(lambda e: f"{e.group(1)}{new}{e.group(1)}",
+                            m.group(0)), out)
+
+
 def _descendants_of(chapters: list[dict], ancestor: str) -> set[str]:
     """Files whose parent chain reaches `ancestor`, in document order so
     a child of a descendant counts too."""

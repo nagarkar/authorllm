@@ -222,6 +222,12 @@ def register_manuscript(db: Database, name: str, path: str,
         from .extraction import set_manuscript_extraction
 
         set_manuscript_extraction(db, row, False)
+    # A manuscript registered from now on has document ids from its first
+    # collect. One with no such key in its metadata existed before the
+    # setting and is off (docs.document_ids_enabled).
+    from . import docs
+
+    docs._write_setting(db, row, True)
     return dict(row)
 
 
@@ -348,13 +354,25 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
                                publisher: str | None = None,
                                copyright_year: int | str | None = None,
                                language: str | None = None,
-                               extraction: bool | str | None = None) -> dict:
+                               extraction: bool | str | None = None,
+                               document_ids: bool | str | None = None) -> dict:
     """Update publication identity without exposing the internal KO metadata.
 
-    `extraction` (on/off) is the one setting here that is not identity:
-    the per-manuscript concept-extraction switch, which lives in the KO
-    metadata and is written through its own door."""
+    `extraction` and `document_ids` (on/off) are the two settings here
+    that are not identity: the per-manuscript concept-extraction switch
+    and the document ids setting (`docs.set_document_ids`; turning it on
+    backs the database up first, then seeds the rows). Both live in the
+    KO metadata and are written through their own doors. When
+    `document_ids` is given the result carries what that door did, as
+    `document_ids`."""
     changes = {}
+    if document_ids is not None:
+        if isinstance(document_ids, bool):
+            ids_switch = document_ids
+        elif str(document_ids).strip().lower() in ("on", "off"):
+            ids_switch = str(document_ids).strip().lower() == "on"
+        else:
+            raise ValueError("document-ids is on or off")
     if extraction is not None:
         from .extraction import set_manuscript_extraction
 
@@ -385,7 +403,7 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
         changes["copyright_year"] = parse_copyright_year(copyright_year)
     if language is not None:
         changes["language"] = parse_language(language)
-    if not changes and extraction is None:
+    if not changes and extraction is None and document_ids is None:
         raise ValueError(
             "provide --author, --copyright-owner, --paperback-isbn, "
             "--hardcover-isbn, --trim-size, --bleed, --narrator, "
@@ -398,7 +416,13 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
         manuscript.update(changes)
     if extraction is not None:
         set_manuscript_extraction(db, manuscript, switch)
-    return manuscript_metadata(manuscript)
+    identity = manuscript_metadata(manuscript)
+    if document_ids is not None:
+        from . import docs
+
+        identity["document_ids"] = docs.set_document_ids(
+            db, manuscript, ids_switch)
+    return identity
 
 
 def resolve_file(db: Database, path: str) -> dict | None:
@@ -2028,7 +2052,12 @@ def write_digest(db: Database, manuscript: dict, payload=None,
     meta = loads(writeup["metadata"], {})
     source = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
                     (writeup["source_version_id"],))
-    source_text = (loads(source["files"], {}).get(writeup["file"], "")
+    from . import docs
+
+    # Under whichever name the file had when the version was pinned.
+    source_text = (docs.snapshot_text(db, manuscript["id"],
+                                      loads(source["files"], {}),
+                                      writeup["file"]) or ""
                    if source else "")
     # Two conditions, two truths. Collapsing them into one message told a
     # rewrite over a blank source that "this writeup created" its file,
@@ -2951,7 +2980,11 @@ def write_abandon(db: Database, manuscript: dict, config: dict,
                     (writeup["source_version_id"],))
     restored = False
     if source:
-        content = loads(source["files"], {}).get(writeup["file"])
+        from . import docs
+
+        content = docs.snapshot_text(db, manuscript["id"],
+                                     loads(source["files"], {}),
+                                     writeup["file"])
         if content is not None:
             path.write_text(content, encoding="utf-8")
             restored = True
@@ -2997,6 +3030,26 @@ def analyze(db: Database, manuscript: dict, llm: LLMClient) -> list[dict]:
     return analyze_pending(db, manuscript, llm)
 
 
+def rename_document(db: Database, manuscript: dict, config: dict,
+                    file: str, new_name: str, force: bool = False,
+                    dry_run: bool = False) -> dict:
+    """`doc rename`: rename a chapter and carry its records
+    (`docs.rename_doc`). Collects first, so the text as it stood is in a
+    snapshot, and after, so the rename is observed; the report is the
+    carry report with that second collect's as `collect`. `dry_run`
+    reports what would move and writes nothing."""
+    from . import docs
+
+    docs.check_rename(db, manuscript, file, new_name, force=force)
+    if dry_run:
+        return docs.rename_doc(db, manuscript, file, new_name, force=force,
+                               apply=False)
+    collect(db, manuscript, config, source="pre-doc-rename")
+    report = docs.rename_doc(db, manuscript, file, new_name, force=force)
+    report["collect"] = collect(db, manuscript, config)
+    return report
+
+
 def diff_versions(db: Database, manuscript: dict, older: int | None = None,
                   newer: int | None = None, file_filter: str | None = None) -> dict:
     versions = db.all(
@@ -3025,15 +3078,26 @@ def diff_versions(db: Database, manuscript: dict, older: int | None = None,
     old_label = f"v{old_v['version_no']}" if old_v else "∅"
     new_label = f"v{new_v['version_no']}"
     files: dict[str, list[str]] = {}
+    # A file renamed between the two versions is one document: it is
+    # diffed against the text it had under its earlier name.
+    from . import docs
+
+    earlier = {name: docs.earlier_name(db, manuscript["id"], name,
+                                       old_files, new_files)
+               for name in new_files if name not in old_files}
+    renamed_away = {was for was in earlier.values() if was}
     for name in sorted(set(old_files) | set(new_files)):
+        if name in renamed_away:
+            continue
         if file_filter and file_filter.lower() not in name.lower():
             continue
-        old_text, new_text = old_files.get(name, ""), new_files.get(name, "")
-        if old_text == new_text:
+        was = earlier.get(name) or name
+        old_text, new_text = old_files.get(was, ""), new_files.get(name, "")
+        if old_text == new_text and was == name:
             continue
         files[name] = list(difflib.unified_diff(
             old_text.splitlines(), new_text.splitlines(),
-            fromfile=f"{old_label}/{name}", tofile=f"{new_label}/{name}",
+            fromfile=f"{old_label}/{was}", tofile=f"{new_label}/{name}",
             lineterm="",
         ))
     return {"old": old_label, "new": new_label, "files": files}

@@ -2158,6 +2158,24 @@ run the CLI via Bash:
   sheet, or a series charter is about the book, so propose a profile (or
   a style element for voice rules) and register it (see Profiles)
   instead of a tab or an `outside` entry.
+- rename: `authorlm doc rename <file> <new-name> -m <manuscript>` renames
+  a chapter and carries everything recorded under its name (summaries,
+  style, intents, review threads, dev edit items, audio takes, toc.toml,
+  the Doc link). `--dry-run` shows what would move. It needs the
+  manuscript's `document_ids` setting on (`authorlm manuscript show`
+  prints it): on for a manuscript registered since the setting exists,
+  off for an older one, where `doc rename` is declined and a rename on
+  disk is still seen as a removal and an addition. Turning it on,
+  `authorlm manuscript set --document-ids on -m <manuscript>`, backs up
+  the workspace database and gives every chapter its id; it is the
+  author's call, never run it unasked. Never rename a
+  chapter with `mv`: with the setting on, a rename in Finder or Obsidian
+  is healed at the next
+  collect, but only when the text is unchanged or nearly so. It is
+  declined while the file is checked out to Google Docs, has a live
+  filter run, a writeup in flight or pending forms: finish that first.
+  The Doc tab keeps its old title until the next `doc push` of the file,
+  which retitles the same tab.
 - bind: `authorlm doc bind <doc-id-or-url> -m <manuscript>` adopts an
   EXISTING master Doc for a manuscript that has none (a fresh workspace,
   a cloud session): it records the id and the container tab, writes

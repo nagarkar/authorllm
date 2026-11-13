@@ -8,6 +8,16 @@ machine-maintained excerpts and clip keys, which are kept current before the
 snapshot. `api.collect` is this function, re-exported, so every surface keeps
 calling it there; the modules below the surfaces import it from here.
 
+For a manuscript whose `document_ids` setting is on (`docs.py`; off, none
+of this runs and a collect is what it was before documents had ids), a
+file renamed outside AuthorLM (Finder, Obsidian) is one document under a
+new name, never a removal and an addition: before the snapshot, a collect
+pairs each name that left with the name that arrived carrying its text
+(`revisions.pair_renames`) and carries the document's records to the new
+name (`docs.carry_rename`, the function behind `doc rename`), so the rename
+heals here. After the snapshot every file has its document row
+(`docs.ensure_documents`).
+
 It sits in the editing area because `directives` and `media_road` collect after
 landing an edit, and it reads only areas at or below its own.
 """
@@ -27,7 +37,8 @@ from .guidance import compute_prerequisite_gaps
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
 from .revisions import (collect_revision, detect_transitions, is_placeholder,
-                        massive_deletions, read_manuscript_files)
+                        iter_manuscript_paths, massive_deletions,
+                        pair_renames, read_manuscript_files)
 from .sessions import NO_EPISODE
 
 
@@ -67,6 +78,26 @@ def _deprecate_departed_summaries(db: Database, manuscript: dict, sums) -> list[
     return deprecated
 
 
+def _carry_renames_on_disk(db: Database, manuscript: dict,
+                           before) -> list[dict]:
+    """Files renamed on disk since the last snapshot, each carried to its
+    new name (`docs.carry_rename`); returns the carry reports. Reads the
+    files only when a name left AND a name arrived, so a collect with no
+    rename pays one directory listing."""
+    from . import docs
+
+    root = Path(manuscript["path"])
+    if before is None or not root.is_dir():
+        return []
+    old_files: dict[str, str] = loads(before["files"], {})
+    names = set(iter_manuscript_paths(root))
+    if not (set(old_files) - names) or not (names - set(old_files)):
+        return []
+    pairs = pair_renames(old_files, read_manuscript_files(root))
+    return [docs.carry_rename(db, manuscript, old, new)
+            for old, new in sorted(pairs.items())]
+
+
 def collect(db: Database, manuscript: dict, config: dict,
             auto: bool = False, source: str = "snapshot",
             episode=None) -> dict:
@@ -91,9 +122,14 @@ def collect(db: Database, manuscript: dict, config: dict,
     §15.17's completion analysis report that goal as served by an edit
     sweep. Refusing to guess is the doctrine (§15.19 rule 2); this is
     that refusal made mechanical."""
+    from . import docs
+
     mid = manuscript["id"]
+    # The manuscript's `document_ids` setting: off, no rename is paired
+    # or carried and no document row is written.
+    document_ids = docs.document_ids_enabled(db, manuscript)
     if auto:
-        flagged = massive_deletions(db, manuscript)
+        flagged = massive_deletions(db, manuscript, renames=document_ids)
         if flagged:
             return {"staged": [{"file": f, "removed_percent": p} for f, p in flagged]}
 
@@ -121,12 +157,19 @@ def collect(db: Database, manuscript: dict, config: dict,
         "ORDER BY version_no DESC LIMIT 1",
         (mid,),
     )
+    # A rename made outside AuthorLM is carried BEFORE the snapshot, so
+    # the version recorded here already holds toc.toml with the new name
+    # and every scan below finds the document's records under it.
+    carried = (_carry_renames_on_disk(db, manuscript, before)
+               if document_ids else [])
     version = collect_revision(db, manuscript, session["id"] if session else None,
                                source=source)
     if version is None:
         return {"unchanged": True}
 
-    transitions = detect_transitions(db, mid, dict(before) if before else None, version)
+    transitions = detect_transitions(db, mid, dict(before) if before else None,
+                                     version, renames=document_ids)
+    docs.ensure_documents(db, manuscript)
     attached = False
     if episode is NO_EPISODE:
         # Filed under NO goal, deliberately (filter-pass design §1.8).
@@ -164,7 +207,9 @@ def collect(db: Database, manuscript: dict, config: dict,
     # stale by source_hash; downstream rows get the tolerated flag.
     from . import summaries as sums
 
-    changed_files = sorted({t["location"].split("#", 1)[0] for t in transitions})
+    # A rename alone changes no text: only the edits made with it count.
+    changed_files = sorted({t["location"].split("#", 1)[0] for t in transitions
+                            if t["kind"] != "file_renamed"})
     sums.mark_changed(db, manuscript, changed_files)
     deprecated_summaries = _deprecate_departed_summaries(db, manuscript, sums)
     vanished_proposals = []
@@ -253,6 +298,17 @@ def collect(db: Database, manuscript: dict, config: dict,
         report["suggestions_stale"] = staled
     if deprecated_summaries:
         report["summaries_deprecated"] = deprecated_summaries
+    renamed = [loads(t["detail"], {}) for t in transitions
+               if t["kind"] == "file_renamed"]
+    if renamed:
+        report["renamed"] = [{"from": r["from"], "to": r["to"]}
+                             for r in renamed]
+        left = [f"{c['to']}: {item}" for c in carried for item in c["left"]]
+        if left:
+            report["renamed_left"] = left
+        stale = [c["to"] for c in carried if c["tab_title_stale"]]
+        if stale:
+            report["renamed_tabs"] = stale
 
     # Illustration slots are a scan-derived registry; a collect is the
     # moment the author learns about unrendered tags ("new illustrations

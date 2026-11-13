@@ -531,6 +531,16 @@ class _SurgicalDocFake:
             self.tabs = [t for t in self.tabs
                          if t["id"] != req["deleteTab"].get("tabId")]
             return {}
+        if "title" in req.get("updateDocumentTabProperties", {}).get(
+                "fields", "").split(","):
+            # A retitle (gdocs._retitle_tabs, after `doc rename`). Modelled
+            # from the Docs API reference, not from a recording: no
+            # scenario in tests/doc_cache/ retitles a tab.
+            props = req["updateDocumentTabProperties"]["tabProperties"]
+            tab = self._tab(props.get("tabId"))
+            if tab is not None:
+                tab["title"] = props["title"]
+            return {}
         return {}          # styles, bullets, tab moves: accepted, ignored
 
 
