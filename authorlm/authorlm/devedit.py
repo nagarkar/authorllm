@@ -1503,7 +1503,7 @@ def _apply_decision(db, folder: Path, manuscript: dict, row: dict,
 # Essay agents run one at a time in reading order, so each pack carries the
 # arcs every earlier agent proposed (`_earlier_arcs`).
 # `gather` records every item in the database (`devedit_items`); `group` writes the
-# integrator's `groups.json`; the integrator writes `integrated.json` (items
+# integrator's `groups.json` {items, groups}; the integrator writes `integrated.json` (items
 # kept, edited, merged or dropped, with `links`); each checker writes
 # `checks/<id>.json` {result: pass|fix|drop|reconsider, proposed?, reason};
 # `build_queue` puts what passed into the review queue (queued rows).
@@ -1580,7 +1580,9 @@ def group(db, folder: Path) -> list[dict]:
     """The integrator's input: items grouped wherever two of them could
     conflict — they use the same term, touch the same concept of the
     argument map, sit where one concept is relied on and another is
-    justified, or touch the same paragraph. Groups of one are left out."""
+    justified, or touch the same paragraph. Groups of one are left out.
+    Writes `groups.json` as {items: every gathered item, groups: [...]};
+    returns the groups."""
     items = gathered(db, folder)
     files = _disk_files_for(folder)
     done = set(finished(folder))
@@ -1614,7 +1616,9 @@ def group(db, folder: Path) -> list[dict]:
             add("paragraph", f"{item['file']}@{item['order']}", item["id"])
     out = [{"kind": kind, "key": key, "items": sorted(ids)}
            for (kind, key), ids in sorted(groups.items()) if len(ids) > 1]
-    _write_json(folder / "groups.json", out)
+    # The integrator reads the items from here too: they live in the
+    # database, and its prompt sees only files.
+    _write_json(folder / "groups.json", {"items": items, "groups": out})
     return out
 
 
