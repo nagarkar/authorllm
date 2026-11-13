@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -28,7 +29,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 
-from test_passes import DOC_ESSAY, _doc_run, _SurgicalDocFake  # noqa: E402
+from test_passes import (DOC_ESSAY, _ALPHA_OLD, _GAMMA_NEW,  # noqa: E402
+                         _GAMMA_OLD, _doc_run, _lens_forms_out,
+                         _SurgicalDocFake)
 
 from authorlm import api, audiobook, forms_page, gdocs  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
@@ -602,6 +605,98 @@ def filter_forms_are_cards_and_merge(root: Path) -> None:
                  (manuscript["id"],))
     check("the filter run is settled, as `filter resolve` leaves it",
           run["status"] == "settled" and _open(db, manuscript) == 0, run)
+    # 2026-11-13 (recapitulation.md, claim-status): the reworded cards
+    # read as "accepted" and the run as "active" right after Merge. The
+    # record says otherwise: a rewording, in the Doc or on the page, is
+    # revised evidence and its thread keeps the staged text.
+    ev = sorted(r["signal"] for r in db.all(
+        "SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+        "evidence_type = 'filter_edit' AND signal != 'accepted'",
+        (manuscript["id"],)))
+    # ('accepted' rows are the triage verdicts, before the forms went out.)
+    check("each rewording is revised evidence, the decline declined",
+          ev == ["declined", "revised", "revised"], ev)
+    revised = db.all(
+        "SELECT proposed_new, metadata FROM doc_threads WHERE "
+        "manuscript_id = ? AND origin_type = 'filter' AND state = 'cleaned'",
+        (manuscript["id"],))
+    check("a revised thread holds the author's words and the staged ones",
+          sorted(r["proposed_new"] for r in revised)
+          == ["Gamma, my words.", "Omega ends it."]
+          and all(json.loads(r["metadata"]).get("original_new")
+                  for r in revised), [dict(r) for r in revised])
+    check("the merge pushed: the tab's text is the file's",
+          gdocs.unchanged_since_push(db, manuscript, "solo.md")
+          and " ".join(tab.split()) == " ".join(text.split()), (tab, text))
+
+
+# ------------------------------------------------------------ lens forms
+# Forms a lens wrote into a tab (`lens push`) are cards too, labelled
+# with the lens, and Merge lands them through `lens resolve`'s own code.
+# A file whose only open forms are a lens's is listed.
+
+def lens_forms_are_cards_and_merge(root: Path) -> None:
+    print("lens forms:")
+    db, manuscript, ms, fake = _lens_forms_out(root, "lens-ws",
+                                               _SurgicalDocFake)
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"].update(
+        checked_out=True, pushed_hash=_h(normalize_markdown(DOC_ESSAY)))
+    gdocs._save_mapping(db, manuscript, meta)
+    ws = root / "lens-ws"
+    audiobook._SESSIONS.pop((str(ws), "book"), None)
+    audiobook.session(str(ws), "book", inline=True)
+    listing = _call(ws, fake, "list")
+    group = next((g for g in listing["files"] if g["file"] == "solo.md"),
+                 None)
+    check("a file whose only open forms are a lens's is listed",
+          group is not None, listing)
+    forms = {f["old"]: f for f in group["forms"]}
+    check("the lens's forms are cards labelled with the lens, not a "
+          "count under others",
+          len(forms) == 2 and group["others"] == {}
+          and all(f["producer"] == "lens" and f["found"]
+                  for f in forms.values())
+          and group["origins"] == ["tidy-lens"], group)
+    r = _call(ws, fake, "decide", id=forms[_ALPHA_OLD]["id"],
+              verdict="edit", seen=forms[_ALPHA_OLD]["current"],
+              text="Alpha opens the essay, once.")
+    check("an edit ruling is held on a lens form", "error" not in r, r)
+    r = _call(ws, fake, "decide", id=forms[_GAMMA_OLD]["id"],
+              verdict="decline", seen=forms[_GAMMA_OLD]["current"])
+    check("a decline ruling is held on a lens form", "error" not in r, r)
+    r = _call(ws, fake, "merge", file="solo.md")
+    check("merge lands the lens forms and pushes",
+          r["stopped"] is None and r["pushed"] is True
+          and r["modified"] == 1 and r["declined"] == 1, r)
+    text = (ms / "solo.md").read_text()
+    check("the file has the page's words and the declined paragraph kept",
+          "Alpha opens the essay, once." in text and _GAMMA_OLD in text
+          and _GAMMA_NEW not in text and "<<" not in text, text)
+    tab = fake.tab_text("solo.md")
+    check("the tab is cleared and reads as the file",
+          "<<" not in tab and "{{" not in tab
+          and "Alpha opens the essay, once." in tab, (tab, r))
+    ev = sorted(r["signal"] for r in db.all(
+        "SELECT signal FROM evidence WHERE manuscript_id = ? AND "
+        "evidence_type = 'lens_edit'", (manuscript["id"],)))
+    check("the page's edit is revised lens evidence, the decline declined",
+          ev == ["declined", "revised"], ev)
+    check("no lens form is left open", _open(db, manuscript) == 0)
+
+
+def lens_resolve_reads_an_emptied_half_as_decline(root: Path) -> None:
+    print("lens resolve, emptied green half:")
+    db, manuscript, ms, fake = _lens_forms_out(root, "lens-empty-ws",
+                                               _SurgicalDocFake)
+    fake.edit("tab-2", "{{" + _GAMMA_NEW + "}}", "{{}}")
+    with contextlib.redirect_stdout(io.StringIO()):
+        done = api.lens_resolve(db, manuscript, {}, "solo.md",
+                                services=lambda: (fake, fake))
+    text = (ms / "solo.md").read_text()
+    check("an emptied green half is a decline, the old text kept",
+          done["declined"] == 1 and done["accepted"] == 1
+          and _GAMMA_OLD in text, (done, text))
 
 
 def main() -> None:
@@ -613,7 +708,9 @@ def main() -> None:
                merge_stops_on_conflict, merge_never_pulls_a_stale_tab,
                merge_keeps_illustration_lines, unknown_method,
                queue_runs_one_merge_at_a_time,
-               filter_forms_are_cards_and_merge):
+               filter_forms_are_cards_and_merge,
+               lens_forms_are_cards_and_merge,
+               lens_resolve_reads_an_emptied_half_as_decline):
         fn(root)
     print(f"OK — {PASSED} Merge forms checks")
 

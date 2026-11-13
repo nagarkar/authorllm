@@ -1135,9 +1135,14 @@ the harness builds `new` from the unit itself and stages a doc thread with
 the finding itself is always kept. `lens push <essay>` then writes the
 staged lens edits into the essay's tab as `<<old>>{{new}}` forms and
 `lens resolve <essay>` reads the tab back — the filter doc road's contract
-verbatim: the tab is the review, untouched = accept, old-restored =
-decline, reworded (or hand-resolved) = the author's words win, one
+verbatim: the tab is the review, untouched = accept, old-restored or an
+emptied green half = decline, reworded (or hand-resolved) = the author's
+words win, one
 producer's forms per tab, evidence as `lens_edit` under no episode.
+The forms are also cards on the Merge forms page, labelled with the lens
+(Accept / Edit / Decline; a judgment tag takes Accept or Decline only);
+its Merge runs the same `lens resolve`, with the page's rulings typed
+into the tab first, then the guarded `doc push`.
 Ruling on a FINDING (`lens review` / conversation) and settling its EDIT
 are independent verdicts — accepting the finding does not apply the edit.
 When registering findings on the author's behalf, include `replacement`

@@ -3,9 +3,10 @@ place, ruled on there and merged one file at a time.
 
 An outside caller (`revise stage`) puts its revisions in a file's Doc tab as
 `<<old>>{{new}}` forms; the author rules on them in the tab and `revise
-resolve` lands them. A filter pass on the Doc road (`filter push`) puts
-its forms there the same way, and `filter resolve` lands them. With forms spread over many tabs the author hunted for
-them; this page lists them all, grouped by file, with the text each form's
+resolve` lands them. A filter pass on the Doc road (`filter push`) and a
+lens (`lens push`) put their forms there the same way, and `filter
+resolve` / `lens resolve` land them. With forms spread over many tabs
+the author hunted for them; this page lists them all, grouped by file, with the text each form's
 green half holds NOW (so an edit the author made in the Doc shows), the
 paragraph around it, and Accept / Edit / Decline.
 
@@ -25,11 +26,12 @@ file, what the author would do by hand, and stops where a person must look:
    and is never pulled (2026-11-10: a staging pulled a stale tab over the
    file and reverted another session's accepted edits).
 4. `api.resolve_revisions` per outside caller, `api.filter_resolve` per
-   filter run, with the page's rulings applied to the tab's text as if
-   typed there (`rulings`). The outside caller's resolve keeps a local
+   filter run, `api.lens_resolve` once for all the file's lens forms,
+   with the page's rulings applied to the tab's text as if typed there (`rulings`). The outside caller's resolve keeps a local
    edit the tab has not seen, puts the illustration embed lines back, and
-   clears the tab; a filter's resolve leaves the tab to step 6, as the
-   filter protocol's `doc push` after `filter resolve`.
+   clears the tab; a lens's resolve clears its own forms in place; a
+   filter's resolve leaves the tab to step 6, as the filter protocol's
+   `doc push` after `filter resolve`.
 5. Every `![](_illustrations/...)` line the file had is still there, or is
    put back under its tag; one that cannot be is said, and nothing is
    pushed.
@@ -56,8 +58,11 @@ from .revisions import EMBED_LINE, strip_embed_lines
 
 RULING_KEY = "page_ruling"
 # The producers whose forms are ruled and merged here: outside callers
-# (`revise stage`) and filter passes on the Doc road (`filter push`).
-PRODUCERS = (api.EXTERNAL_ORIGIN, api.FILTER_ORIGIN)
+# (`revise stage`), filter passes on the Doc road (`filter push`) and
+# lenses (`lens push`). Every file with an open form from any of them is
+# listed.
+PRODUCERS = (api.EXTERNAL_ORIGIN, api.FILTER_ORIGIN, api.LENS_ORIGIN)
+_IN = ", ".join("?" for _ in PRODUCERS)
 VERDICTS = ("accept", "edit", "decline")
 
 
@@ -66,10 +71,10 @@ VERDICTS = ("accept", "edit", "decline")
 def open_threads(db: Database, manuscript: dict,
                  file: str | None = None) -> dict[str, list[dict]]:
     """file → its open threads (`written`) from the page's producers, in
-    staging order, each with `origin`: the outside caller's name, or the
-    filter's. Files with none are absent."""
+    staging order, each with `origin`: the outside caller's name, the
+    filter's, or the lens's. Files with none are absent."""
     sql = ("SELECT * FROM doc_threads WHERE manuscript_id = ? "
-           "AND origin_type IN (?, ?) AND state = 'written'")
+           f"AND origin_type IN ({_IN}) AND state = 'written'")
     args: list[Any] = [manuscript["id"], *PRODUCERS]
     if file is not None:
         sql += " AND file = ?"
@@ -85,6 +90,10 @@ def open_threads(db: Database, manuscript: dict,
                              (run_id,))
                 filters[run_id] = run["filter"] if run else ""
             t["origin"] = filters[run_id]
+        elif t["origin_type"] == api.LENS_ORIGIN:
+            # origin_id is '<lens>@<hash>:<file>:<ordinal>'.
+            t["origin"] = (t.get("origin_id") or "").split(":", 1)[0] \
+                .split("@", 1)[0]
         else:
             t["origin"] = _meta(t).get("origin") or ""
         out.setdefault(t["file"], []).append(t)
@@ -102,12 +111,12 @@ def ruling_of(thread: dict) -> dict | None:
 
 def _other_forms(db: Database, manuscript: dict, file: str) -> dict[str, int]:
     """origin_type → how many of its forms are out in `file`'s tab, for
-    every producer not ruled here (a lens, a critique, a margin
-    proposal). They also block new forms."""
+    every producer not ruled here (a critique, a margin proposal). They
+    also block new forms."""
     rows = db.all(
         "SELECT origin_type, COUNT(*) AS n FROM doc_threads WHERE "
         "manuscript_id = ? AND file = ? AND state = 'written' "
-        "AND origin_type NOT IN (?, ?) GROUP BY origin_type",
+        f"AND origin_type NOT IN ({_IN}) GROUP BY origin_type",
         (manuscript["id"], file, *PRODUCERS))
     return {r["origin_type"]: r["n"] for r in rows}
 
@@ -289,6 +298,11 @@ def decide(db: Database, manuscript: dict, thread_id: str, verdict: str,
         form_grammar.assert_no_pending_markers("", text)
         if text == seen:
             verdict = "accept"
+        elif (thread["origin_type"] == api.LENS_ORIGIN
+              and not thread.get("proposed_old")):
+            raise ValueError("a lens judgment is kept or declined as it "
+                             "stands; to say it otherwise, Decline it and "
+                             "write your own")
     ruling = {"verdict": verdict, "seen": seen, "at": now_iso(),
               "text": text if verdict == "edit" else None}
     meta[RULING_KEY] = ruling
@@ -446,13 +460,19 @@ def merge(db: Database, manuscript: dict, file: str, service, docs_service,
 
     by_origin: dict[tuple[str, str], list[dict]] = {}
     for t in threads:
-        by_origin.setdefault((t["origin_type"], t["origin"]), []).append(t)
+        # One `lens resolve` lands every lens's forms in the file at once.
+        key = ((api.LENS_ORIGIN, "lens") if t["origin_type"] == api.LENS_ORIGIN
+               else (t["origin_type"], t["origin"]))
+        by_origin.setdefault(key, []).append(t)
     for (producer, origin), group in by_origin.items():
         rulings = {t["id"]: _landing_text(ruling_of(t)) for t in group
                    if t["id"] in pairs}
         if producer == api.FILTER_ORIGIN:
             done = _land_filter(db, manuscript, rel, origin, rulings,
                                 service, docs_service, config)
+        elif producer == api.LENS_ORIGIN:
+            done = _land_lens(db, manuscript, rel, rulings,
+                              service, docs_service, config)
         else:
             done = api.resolve_revisions(db, manuscript, rel, origin,
                                          service, docs_service, config,
@@ -517,6 +537,26 @@ def _land_filter(db: Database, manuscript: dict, rel: str, name: str,
                 services=lambda: (service, docs_service), rulings=rulings)
     except (LookupError, ValueError) as err:
         return {"landed": False, "state": "filter", "warnings": [str(err)]}
+    modified = len(done.get("diffs") or [])
+    return {"landed": True, "warnings": done.get("warnings") or [],
+            "accepted": done["accepted"] - modified, "modified": modified,
+            "declined": done["declined"]}
+
+
+def _land_lens(db: Database, manuscript: dict, rel: str,
+               rulings: dict[str, str], service, docs_service,
+               config: dict | None) -> dict:
+    """Every lens form in `rel`, landed by `lens resolve` (the tab read
+    back: untouched accepts, an emptied green half declines, a rewording
+    is the author's), with the page's rulings typed in first. Its own
+    forms leave the tab in place; the push is merge's."""
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            done = api.lens_resolve(
+                db, manuscript, config or {}, rel,
+                services=lambda: (service, docs_service), rulings=rulings)
+    except (LookupError, ValueError) as err:
+        return {"landed": False, "state": "lens", "warnings": [str(err)]}
     modified = len(done.get("diffs") or [])
     return {"landed": True, "warnings": done.get("warnings") or [],
             "accepted": done["accepted"] - modified, "modified": modified,
