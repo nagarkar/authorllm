@@ -980,6 +980,12 @@ The Merge forms page's Conflicts (`forms_page.settle`, `forms_page.land_conflict
 
 The Merge forms page (`forms_page.dispatch`, `/api/forms`): every open outside revision listed as the Doc holds it, ruled on the page, and merged one file at a time.
 
+## `tests.test_forms_paragraph_helpers`
+
+`authorlm/tests/test_forms_paragraph_helpers.py`
+
+`forms_page._paragraph_around` / `_paragraph_before` supply the prefix/suffix/anchor strings the Merge Forms page shows around each open form.
+
 ## `tests.test_gallery`
 
 `authorlm/tests/test_gallery.py`
@@ -1309,6 +1315,18 @@ Hermetic tests: pdf2md must not treat margin stamps as a text layer.
 `authorlm/tests/test_peel_embed_suffix.py`
 
 `revisions.peel_embed_suffix` keeps illustration settle from raising false "text drifted" when an embed line is glued under its `[Illustration: …]` tag.
+
+## `tests.test_pick_primary`
+
+`authorlm/tests/test_pick_primary.py`
+
+`api._pick_primary` chooses the most specific intent member for a writeup — file over nearest chapter over farther chapter over manuscript — and refuses to break a tie at the winning tier.
+
+## `tests.test_plan_concepts`
+
+`authorlm/tests/test_plan_concepts.py`
+
+`writing._plan_concepts` unions every concept name across a beat plan, de-duplicating case-insensitively and sorting by the lowercased key.
 
 ## `tests.test_preview_voice_stamp`
 
