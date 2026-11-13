@@ -47,7 +47,8 @@ a beat.
   the note under it, as a margin comment follows what it comments on.
   (Explain's standalone tag is a paragraph of its own because it asks
   for new prose; a suggestion has nothing of its own to be.) A standalone
-  tag with nothing before it is refused on apply. Two open tags on one
+  tag with nothing before it is refused on apply. The search never
+  crosses a heading: a note directly under a heading has no target (#420). Two open tags on one
   paragraph are landed one at a time.
 
 ## 2. Collect reports, chat evaluates, apply lands

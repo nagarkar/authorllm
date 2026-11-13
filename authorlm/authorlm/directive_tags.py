@@ -31,6 +31,7 @@ TAGS = {
     "judgment": re.compile(r"\[Judgment:\s*(?P<body>[^\[\]\n]+?)\s*\]", re.IGNORECASE),
 }
 _LABEL_OPT = re.compile(r"\s*\|\s*label:\s*(?P<label>[A-Za-z]+)\s*$", re.IGNORECASE)
+_HEADING = re.compile(r"#{1,6}\s")
 _PARAGRAPH = re.compile(r"[^\n]+(?:\n[^\n]+)*")
 # A standalone Suggestion evaluates authorial prose (design §1), never a
 # heading, footnote definition, directive/media tag, or close-tag unit
@@ -69,9 +70,18 @@ def _is_prose_suggestion_target(unit: str) -> bool:
 def _prior_prose_target(paragraphs: list[tuple[int, int, str]], start: int
                         ) -> tuple[int, int, str] | None:
     """The nearest prose blank-line unit entirely before `start`, skipping
-    structural markup a margin note never evaluates."""
-    return next(((a, b, p) for a, b, p in reversed(paragraphs)
-                 if b <= start and _is_prose_suggestion_target(p)), None)
+    structural markup a margin note never evaluates — but never across a
+    heading: a note under a heading belongs to that section, and reaching
+    into the section above made two notes in different sections collide
+    and could rewrite the wrong paragraph (#420). None then."""
+    for a, b, p in reversed(paragraphs):
+        if b > start:
+            continue
+        if _HEADING.match(p.lstrip()):
+            return None
+        if _is_prose_suggestion_target(p):
+            return (a, b, p)
+    return None
 
 
 def scan_text(text: str, kind: str) -> list[dict]:
