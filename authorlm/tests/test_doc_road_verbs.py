@@ -497,6 +497,124 @@ def list_and_join(root: Path) -> None:
           and "second item" in fake.tab_text("solo.md"), msg)
 
 
+NUMBERED = ("# Solo\n\n"
+            "Named premises:\n\n"
+            "1. the taxonomy of the first section;\n"
+            "2. that an act is minimal;\n"
+            "3. that persistence is the default act.\n\n"
+            "Body cites Before Consciousness, 25 here.\n\n"
+            "References\n\n"
+            "1. Coopersmith, J. (2010). *Energy, the Subtle Concept*.\n"
+            "2. Fredkin, E. (1990). Digital mechanics.\n"
+            "3. Wolfram, S. (2020). A class of models.\n")
+
+_NUMBER = re.compile(r"\d+\. ")
+
+
+class _NumberedListFake(_SurgicalDocFake):
+    """A numbered list as Google holds it (#427): one Doc paragraph per
+    item, the numbering a list glyph and not text, so the Docs API reads
+    an item without its `1. `; the export writes the numbers back and
+    joins consecutive items with single newlines. The tab body keeps the
+    numbers, so the export carries them; `documents().get` drops them
+    from each paragraph's text run, as the real API does."""
+
+    def _paras(self, markdown: str) -> list[str]:
+        out = []
+        for p in super()._paras(markdown):
+            lines = p.split("\n")
+            if len(lines) > 1 and all(_NUMBER.match(l) for l in lines):
+                out.extend(lines)
+            else:
+                out.append(p)
+        return out
+
+    def _content(self, body: str) -> list[dict]:
+        out = super()._content(body)
+        for item in out:
+            run = item["paragraph"]["elements"][0]["textRun"]
+            run["content"] = _NUMBER.sub("", run["content"], count=1)
+        return out
+
+    def files(self):
+        inner = super().files()
+
+        class _Files:
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+            def export(self, fileId=None, mimeType=None):
+                text = inner.export(fileId=fileId,
+                                    mimeType=mimeType).execute().decode()
+                joined = re.sub(r"(?m)^(\d+\. [^\n]*)\n\n(?=\d+\. )",
+                                r"\1\n", text)
+                while joined != text:
+                    text, joined = joined, re.sub(
+                        r"(?m)^(\d+\. [^\n]*)\n\n(?=\d+\. )", r"\1\n",
+                        joined)
+
+                class _Req:
+                    def execute(self):
+                        return text.encode("utf-8")
+                return _Req()
+        return _Files()
+
+    def comments(self):
+        # One open margin comment on the tab: a comment-bearing tab is
+        # what sends a push down the diff-push road, as SMSTTD's were.
+        class _Req:
+            def execute(self):
+                return {"comments": [{
+                    "id": "c-1", "content": "keep me",
+                    "quotedFileContent": {"value": "Named premises:"},
+                    "resolved": False, "author": {"displayName": "A"},
+                    "createdTime": "2026-11-13T00:00:00Z",
+                    "replies": []}]}
+
+        class _Comments:
+            def list(self, **kw):
+                return _Req()
+        return _Comments()
+
+
+def numbered_lists(root: Path) -> None:
+    print("F2b. numbered lists, one mid-tab and one ending it (#427):")
+    units = gdocs._md_units(NUMBERED)
+    check("_md_units splits a list block that ends the file into its "
+          "items (its trailing newline is not a line)",
+          "3. Wolfram, S. (2020). A class of models." in units
+          and len(units) == 10, str(units))
+    check("a Doc list item without its number is the export's item",
+          gdocs._same_para("the taxonomy of the first section;",
+                           "1. the taxonomy of the first section;"))
+    got = gdocs._split_hard_breaks(
+        ["Named premises:", "1. one\n2. two"],
+        ["Named premises:", "one", "two"])
+    check("a numbered block the tab holds as items splits against them",
+          got == ["Named premises:", "1. one", "2. two"], str(got))
+
+    ws, db, manuscript, ms, fake = _fixture(root, "numbered-ws", NUMBERED,
+                                            fake_cls=_NumberedListFake)
+    links = gdocs._mapping(db, manuscript)
+    links["gdocs"]["solo.md"]["checked_out"] = False
+    links["gdocs"]["solo.md"]["pushed_hash"] = None
+    gdocs._save_mapping(db, manuscript, links)
+    revisions = [{"old": "Before Consciousness, 25",
+                  "new": "Recapitulation, Sermon One", "note": "cite"}]
+    with _google(fake):
+        code, out, err = _run(["--workspace", str(ws), "revise", "stage",
+                               "solo.md", "--origin", "local-edits"],
+                              stdin=json.dumps(revisions))
+    check("revise stage lands a form on a tab with numbered lists",
+          code == 0 and "1 staged" in out
+          and "<<Before Consciousness, 25>>{{Recapitulation, Sermon One}}"
+          in fake.tab_text("solo.md"), out + err)
+    check("the list items stand, numbered, one paragraph each",
+          "\n2. that an act is minimal;\n" in fake.tab_text("solo.md")
+          and "\n3. Wolfram, S. (2020). A class of models.\n"
+          in fake.tab_text("solo.md"), fake.tab_text("solo.md"))
+
+
 class _SoftBreakJoinFake(_SurgicalDocFake):
     """Google's markdown import reads a soft line break inside a
     paragraph as a space: consecutive tag lines with no blank line
@@ -1608,6 +1726,7 @@ def main_test() -> None:
         resolve_comments(root)
         divergence(root)
         list_and_join(root)
+        numbered_lists(root)
         stacked_tags(root)
         spacing_join(root)
         toc_conflict(root)
