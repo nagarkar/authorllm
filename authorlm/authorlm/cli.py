@@ -223,7 +223,8 @@ def cmd_manuscript(args):
                 narrator=args.narrator, publisher=args.publisher,
                 copyright_year=args.copyright_year,
                 language=args.language,
-                extraction=args.extraction)
+                extraction=args.extraction,
+                document_ids=args.document_ids)
         except ValueError as err:
             raise SystemExit(f"error: {err}")
     else:
@@ -251,6 +252,31 @@ def cmd_manuscript(args):
     if not manuscript_extraction_enabled(db, manuscript):
         print("  extraction: off for this manuscript  — "
               "'manuscript set --extraction on' turns it back on")
+    from . import docs as _docs
+
+    if _docs.document_ids_enabled(db, manuscript):
+        print("  document_ids: on  — a renamed chapter keeps its records "
+              "('doc rename', or a rename on disk at the next collect)")
+    else:
+        print("  document_ids: off  — a renamed chapter is seen as removed "
+              "and added; 'manuscript set --document-ids on' turns it on "
+              "(backs up the database first)")
+    change = identity.get("document_ids")
+    if change and change["changed"] and change["enabled"]:
+        from . import backup as _backup
+
+        print(f"Document ids turned on for {identity['name']}:")
+        print("  backup first: " + (
+            change["backup"] or "the newest backup already equals the "
+            f"database ({_backup.backup_dir(db.path)})"))
+        print(f"  {len(change['seeded'])} document(s) given an id; no "
+              "other record was changed.")
+        print("  next: authorlm doc rename <file> <new-name>  (or rename "
+              "on disk and collect)")
+    elif change and change["changed"]:
+        print(f"Document ids turned off for {identity['name']}: the "
+              "document rows already made are kept; nothing is paired or "
+              "carried from here.")
 
 
 def _manuscript_tables(db: Database) -> list[str]:
@@ -9582,6 +9608,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="concept extraction for this manuscript alone; "
                         "the global [extraction] enabled switch still "
                         "wins when it is off")
+    p.add_argument("--document-ids", default=None, choices=["on", "off"],
+                   dest="document_ids",
+                   help="stable ids for this manuscript's chapters, so a "
+                        "renamed chapter keeps its records; on backs up "
+                        "the database first, then gives every file its id "
+                        "(on for a new manuscript, off for one that "
+                        "existed before the setting)")
     p.set_defaults(func=cmd_manuscript)
 
     p = sub.add_parser("unregister", help="remove a manuscript and ALL its data (clean slate)")

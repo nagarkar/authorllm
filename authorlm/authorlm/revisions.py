@@ -5,9 +5,10 @@ checksummed version. The analyzer computes editorial transitions between
 successive versions by diffing paragraph sequences per file.
 
 A snapshot records each file under the name it had then, and is never
-rewritten. A file that left under one name and arrived under another with
-the same or nearly the same text is one document renamed (`pair_renames`),
-never a removal and an addition: its transition is `file_renamed`, its
+rewritten. For a manuscript with document ids on (`docs.py`), a file that
+left under one name and arrived under another with the same or nearly the
+same text is one document renamed (`pair_renames`), never a removal and
+an addition: its transition is `file_renamed`, its
 paragraphs are diffed against the old name's text, and a reader of an old
 snapshot finds a document through its name history (`docs.names_of`).
 """
@@ -272,12 +273,14 @@ def pair_renames(old_files: dict[str, str],
 
 
 def massive_deletions(db: Database, manuscript: dict,
-                      shrink_ratio: float = 0.7, min_chars: int = 500) -> list[tuple[str, int]]:
+                      shrink_ratio: float = 0.7, min_chars: int = 500,
+                      renames: bool = False) -> list[tuple[str, int]]:
     """Files on disk that lost more than (1 - shrink_ratio) of their content
     versus the last collected version — likely editor accidents. Returns
     (relative path, percent removed) pairs. Used only by the auto-collect
-    path: a manual `collect` always proceeds. A renamed file
-    (`pair_renames`) lost nothing and is never flagged."""
+    path: a manual `collect` always proceeds. With `renames` (the
+    manuscript's `document_ids` setting is on) a renamed file
+    (`pair_renames`) lost nothing and is not flagged."""
     latest = db.one(
         "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
         "ORDER BY version_no DESC LIMIT 1",
@@ -287,7 +290,7 @@ def massive_deletions(db: Database, manuscript: dict,
         return []
     old_files: dict[str, str] = loads(latest["files"], {})
     disk = read_manuscript_files(Path(manuscript["path"]))
-    renamed = pair_renames(old_files, disk)
+    renamed = pair_renames(old_files, disk) if renames else {}
     flagged = []
     for name, old_text in old_files.items():
         if len(old_text) < min_chars or name in renamed:
@@ -317,13 +320,16 @@ def _snippet(text: str, limit: int = 80) -> str:
 
 
 def detect_transitions(
-    db: Database, manuscript_id: str, before: dict | None, after: dict
+    db: Database, manuscript_id: str, before: dict | None, after: dict,
+    renames: bool = False,
 ) -> list[dict]:
     """Compute editorial transitions between two manuscript versions and
-    persist them as immutable observations. A renamed file
+    persist them as immutable observations. With `renames` (the
+    manuscript's `document_ids` setting is on) a renamed file
     (`pair_renames`) is one `file_renamed` transition at its new name,
     followed by the paragraph edits made along with the rename, diffed
-    against the text it had under the old name."""
+    against the text it had under the old name; without it, a removal
+    and an addition."""
     old_files: dict[str, str] = loads(before["files"], {}) if before else {}
     new_files: dict[str, str] = loads(after["files"], {})
     transitions: list[dict] = []
@@ -342,7 +348,7 @@ def detect_transitions(
         db.insert("editorial_transitions", row)
         transitions.append(row)
 
-    renamed = pair_renames(old_files, new_files)
+    renamed = pair_renames(old_files, new_files) if renames else {}
     renamed_from = {new: old for old, new in renamed.items()}
     for name in sorted(set(old_files) | set(new_files)):
         if name in renamed:

@@ -15,6 +15,20 @@ it was recorded under (NAME_HISTORY_COLUMNS: version snapshots and the
 transitions that point into them); a reader of an old snapshot finds the
 document through its name history (`names_of`, `snapshot_text`).
 
+Document ids are a per-manuscript setting, `document_ids` (on | off), kept
+in `manuscripts.metadata` as `{"document_ids": {"enabled": true}}`
+(`document_ids_enabled`, `set_document_ids`; `authorlm manuscript set
+--document-ids on|off`). Registration writes it on, so a new manuscript has
+ids from its first collect; a manuscript whose metadata has no such key
+existed before the setting and is off. While it is off nothing in this
+module writes: no document row is seeded, a collect pairs and carries no
+rename (a file renamed on disk is a removal and an addition, and the
+auto-collect deletion guard holds it, exactly as before documents had
+ids), and `doc rename` is declined with the command that turns the
+setting on. Turning it on is the one migration moment: a backup of the
+workspace database is taken first (`backup.run`), then the rows are
+seeded.
+
 Document rows are created lazily (`ensure_documents`) for every file that
 is both in the latest snapshot and on disk, so a rename waiting for its
 collect is never mistaken for a new document. At most one ACTIVE row per
@@ -35,6 +49,12 @@ Decisions:
   tests/test_document_identity.py::RenameVerbTests::test_rename_carries_every_record_to_the_new_name
   and
   tests/test_document_identity.py::RenameOnDiskTests::test_a_rename_on_disk_heals_at_the_next_collect.
+- An existing manuscript is untouched until its owner turns document ids
+  on, after a backup: with the setting off a collect behaves as it did
+  before documents had ids. Enforced by:
+  tests/test_document_identity.py::DocumentIdsSwitchTests::test_off_a_rename_on_disk_collects_exactly_as_it_did_before
+  and
+  tests/test_document_identity.py::DocumentIdsSwitchTests::test_turning_it_on_backs_up_first_then_seeds_every_file.
 - `doc rename` is declined while the file is checked out to Google Docs,
   has a live filter run, a writeup in flight or pending forms: each holds
   state tied to the name while it runs. A rename made outside AuthorLM in
@@ -255,6 +275,75 @@ def revive_doc(manuscript: dict, query: str) -> Path:
 
 # ------------------------------------------------------------ identity
 
+SETTING = "document_ids"
+
+
+def _turn_on_hint(manuscript: dict) -> str:
+    return (f"authorlm manuscript set --document-ids on "
+            f"-m {manuscript.get('name', '<manuscript>')}")
+
+
+def document_ids_enabled(db: Database, manuscript: dict) -> bool:
+    """The per-manuscript `document_ids` setting, kept in
+    `manuscripts.metadata` as `{"document_ids": {"enabled": true}}`.
+    ABSENT MEANS OFF: registration writes it on, so a manuscript with no
+    such key is one that existed before the setting, and it stays as it
+    was until its owner turns the setting on.
+
+    Read from the row, never from the caller's dict, for the reason
+    `extraction.manuscript_extraction_enabled` gives: the Doc mapping
+    rewrites that column under a loaded manuscript."""
+    row = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                 (manuscript["id"],))
+    meta = loads(row["metadata"] if row else None, {})
+    return bool((meta.get(SETTING) or {}).get("enabled", False))
+
+
+def _write_setting(db: Database, manuscript: dict, enabled: bool) -> None:
+    """Merged into the row's current metadata (the Doc mapping and the
+    extraction switch live beside it) and mirrored into the caller's
+    dict, as `extraction.set_manuscript_extraction` does."""
+    row = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                 (manuscript["id"],))
+    meta = loads(row["metadata"] if row else None, {})
+    meta[SETTING] = {**(meta.get(SETTING) or {}), "enabled": bool(enabled)}
+    encoded = json.dumps(meta)
+    db.update("manuscripts", manuscript["id"], {"metadata": encoded})
+    manuscript["metadata"] = encoded
+
+
+def set_document_ids(db: Database, manuscript: dict, enabled: bool) -> dict:
+    """Turn the `document_ids` setting on or off; returns `{enabled,
+    changed, backup, seeded}`.
+
+    Turning it on for a manuscript that has it off is the migration
+    moment, and the only one: the workspace database is backed up first
+    (`backup.run`, as a session start does; `backup` is the path of the
+    copy, or None when the newest backup already equals the database),
+    then every file gets its document row (`seeded`, their names). A
+    backup that fails leaves the setting off and nothing written.
+    Turning it off keeps the rows already made: they are a record, and
+    turning it on again takes them back up."""
+    from . import backup
+
+    was = document_ids_enabled(db, manuscript)
+    report = {"enabled": bool(enabled), "changed": was != bool(enabled),
+              "backup": None, "seeded": []}
+    if not enabled or was:
+        _write_setting(db, manuscript, enabled)
+        return report
+    result = backup.run(db)
+    if not result.get("ok"):
+        raise ValueError(
+            "document ids stay off: the backup that must come first failed "
+            f"({result.get('error')}); the backups go to "
+            f"{backup.backup_dir(db.path)}")
+    report["backup"] = result.get("path")
+    _write_setting(db, manuscript, True)
+    report["seeded"] = sorted(r["relpath"]
+                              for r in ensure_documents(db, manuscript))
+    return report
+
 def _history(row) -> list[dict]:
     return loads(row["names"], [])
 
@@ -306,11 +395,12 @@ def ensure_documents(db: Database, manuscript: dict) -> list[dict]:
     document. A document whose file is in neither is retired; a file
     under `_retired/` no document accounts for is seeded retired; a file
     that comes back (revived, or added again) takes its retired row and
-    id back. toc.toml is structure, not a document."""
+    id back. toc.toml is structure, not a document. Writes nothing while
+    the manuscript's `document_ids` setting is off."""
     from .structure import TOC_FILENAME
 
     root = Path(manuscript["path"])
-    if not root.is_dir():
+    if not root.is_dir() or not document_ids_enabled(db, manuscript):
         return []
     mid = manuscript["id"]
     latest = db.one(
@@ -367,6 +457,10 @@ def document_id(db: Database, manuscript: dict, relpath: str) -> str:
     if row is None:
         ensure_documents(db, manuscript)
         row = _row_named(db, manuscript["id"], relpath)
+    if row is None and not document_ids_enabled(db, manuscript):
+        raise LookupError(
+            f"no document named '{relpath}': document ids are off for this "
+            f"manuscript. Turn them on: {_turn_on_hint(manuscript)}")
     if row is None:
         raise LookupError(
             f"no document named '{relpath}'. A new or renamed file gets "
@@ -822,7 +916,8 @@ def _name_already_used(db: Database, manuscript: dict, new: str) -> list[str]:
 def check_rename(db: Database, manuscript: dict, query: str, new_name: str,
                  force: bool = False) -> tuple[str, str]:
     """Resolve and vet a rename; returns `(old relpath, new relpath)` and
-    writes nothing. Declined, each with its fix, when: the file is the
+    writes nothing. Declined, each with its fix, when: the manuscript's
+    `document_ids` setting is off; the file is the
     table of contents or a sidecar; the new name is taken (in the
     manuscript or in `_retired/`); the file has a live filter run, a
     writeup in flight, pending `<<old>>{{new}}` forms, or is checked out
@@ -834,6 +929,12 @@ def check_rename(db: Database, manuscript: dict, query: str, new_name: str,
 
     root = Path(manuscript["path"])
     mid = manuscript["id"]
+    if not document_ids_enabled(db, manuscript):
+        raise ValueError(
+            "document ids are off for this manuscript (its 'document_ids' "
+            "setting), so 'doc rename' has nothing to carry its records "
+            "with. Turn them on first (a backup is taken, then every file "
+            f"gets its id): {_turn_on_hint(manuscript)}")
     old = _resolve_relpath(manuscript, query)
     if old == TOC_FILENAME:
         raise ValueError(f"{TOC_FILENAME} is the table of contents, not a "

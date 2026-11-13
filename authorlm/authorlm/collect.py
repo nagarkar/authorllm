@@ -8,7 +8,9 @@ machine-maintained excerpts and clip keys, which are kept current before the
 snapshot. `api.collect` is this function, re-exported, so every surface keeps
 calling it there; the modules below the surfaces import it from here.
 
-A file renamed outside AuthorLM (Finder, Obsidian) is one document under a
+For a manuscript whose `document_ids` setting is on (`docs.py`; off, none
+of this runs and a collect is what it was before documents had ids), a
+file renamed outside AuthorLM (Finder, Obsidian) is one document under a
 new name, never a removal and an addition: before the snapshot, a collect
 pairs each name that left with the name that arrived carrying its text
 (`revisions.pair_renames`) and carries the document's records to the new
@@ -120,9 +122,14 @@ def collect(db: Database, manuscript: dict, config: dict,
     §15.17's completion analysis report that goal as served by an edit
     sweep. Refusing to guess is the doctrine (§15.19 rule 2); this is
     that refusal made mechanical."""
+    from . import docs
+
     mid = manuscript["id"]
+    # The manuscript's `document_ids` setting: off, no rename is paired
+    # or carried and no document row is written.
+    document_ids = docs.document_ids_enabled(db, manuscript)
     if auto:
-        flagged = massive_deletions(db, manuscript)
+        flagged = massive_deletions(db, manuscript, renames=document_ids)
         if flagged:
             return {"staged": [{"file": f, "removed_percent": p} for f, p in flagged]}
 
@@ -153,15 +160,15 @@ def collect(db: Database, manuscript: dict, config: dict,
     # A rename made outside AuthorLM is carried BEFORE the snapshot, so
     # the version recorded here already holds toc.toml with the new name
     # and every scan below finds the document's records under it.
-    carried = _carry_renames_on_disk(db, manuscript, before)
+    carried = (_carry_renames_on_disk(db, manuscript, before)
+               if document_ids else [])
     version = collect_revision(db, manuscript, session["id"] if session else None,
                                source=source)
     if version is None:
         return {"unchanged": True}
 
-    transitions = detect_transitions(db, mid, dict(before) if before else None, version)
-    from . import docs
-
+    transitions = detect_transitions(db, mid, dict(before) if before else None,
+                                     version, renames=document_ids)
     docs.ensure_documents(db, manuscript)
     attached = False
     if episode is NO_EPISODE:

@@ -222,6 +222,12 @@ def register_manuscript(db: Database, name: str, path: str,
         from .extraction import set_manuscript_extraction
 
         set_manuscript_extraction(db, row, False)
+    # A manuscript registered from now on has document ids from its first
+    # collect. One with no such key in its metadata existed before the
+    # setting and is off (docs.document_ids_enabled).
+    from . import docs
+
+    docs._write_setting(db, row, True)
     return dict(row)
 
 
@@ -348,13 +354,25 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
                                publisher: str | None = None,
                                copyright_year: int | str | None = None,
                                language: str | None = None,
-                               extraction: bool | str | None = None) -> dict:
+                               extraction: bool | str | None = None,
+                               document_ids: bool | str | None = None) -> dict:
     """Update publication identity without exposing the internal KO metadata.
 
-    `extraction` (on/off) is the one setting here that is not identity:
-    the per-manuscript concept-extraction switch, which lives in the KO
-    metadata and is written through its own door."""
+    `extraction` and `document_ids` (on/off) are the two settings here
+    that are not identity: the per-manuscript concept-extraction switch
+    and the document ids setting (`docs.set_document_ids`; turning it on
+    backs the database up first, then seeds the rows). Both live in the
+    KO metadata and are written through their own doors. When
+    `document_ids` is given the result carries what that door did, as
+    `document_ids`."""
     changes = {}
+    if document_ids is not None:
+        if isinstance(document_ids, bool):
+            ids_switch = document_ids
+        elif str(document_ids).strip().lower() in ("on", "off"):
+            ids_switch = str(document_ids).strip().lower() == "on"
+        else:
+            raise ValueError("document-ids is on or off")
     if extraction is not None:
         from .extraction import set_manuscript_extraction
 
@@ -385,7 +403,7 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
         changes["copyright_year"] = parse_copyright_year(copyright_year)
     if language is not None:
         changes["language"] = parse_language(language)
-    if not changes and extraction is None:
+    if not changes and extraction is None and document_ids is None:
         raise ValueError(
             "provide --author, --copyright-owner, --paperback-isbn, "
             "--hardcover-isbn, --trim-size, --bleed, --narrator, "
@@ -398,7 +416,13 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
         manuscript.update(changes)
     if extraction is not None:
         set_manuscript_extraction(db, manuscript, switch)
-    return manuscript_metadata(manuscript)
+    identity = manuscript_metadata(manuscript)
+    if document_ids is not None:
+        from . import docs
+
+        identity["document_ids"] = docs.set_document_ids(
+            db, manuscript, ids_switch)
+    return identity
 
 
 def resolve_file(db: Database, path: str) -> dict | None:

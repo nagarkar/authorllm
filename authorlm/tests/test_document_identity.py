@@ -40,8 +40,8 @@ assert Path(authorlm.__file__).resolve().parent == HERE.parent / "authorlm", (
 
 from test_passes import _SurgicalDocFake  # noqa: E402
 
-from authorlm import (api, devedit, docs, gdocs, generation,  # noqa: E402
-                      revisions, structure, summaries)
+from authorlm import (api, backup, devedit, docs, gdocs,  # noqa: E402
+                      generation, revisions, structure, summaries)
 from authorlm.cli import main as cli_main  # noqa: E402
 from authorlm.db import SCHEMA, ko_fields  # noqa: E402
 
@@ -635,6 +635,172 @@ class RenameOnDiskTests(Workspace):
         self.assertIn("file_added", kinds)
         self.assertNotIn("file_renamed", kinds)
         self.assertEqual(report["new_paragraphs"], 9)
+
+
+class DocumentIdsSwitchTests(Workspace):
+    """Document ids are a per-manuscript setting
+    (`manuscripts.metadata.document_ids.enabled`): on for a manuscript
+    registered from now on, off (absent) for one that already existed,
+    which then behaves exactly as it did before documents had ids until
+    the owner turns the setting on, after a backup."""
+
+    def make_existing(self) -> None:
+        """This manuscript as one registered before the setting existed:
+        no `document_ids` key in its metadata, no document rows."""
+        meta = json.loads(self.db.one(
+            "SELECT metadata FROM manuscripts WHERE id = ?",
+            (self.mid,))["metadata"])
+        meta.pop("document_ids")
+        self.db.update("manuscripts", self.mid,
+                       {"metadata": json.dumps(meta)})
+        self.db.conn.execute("DELETE FROM documents WHERE manuscript_id = ?",
+                             (self.mid,))
+        self.db.conn.commit()
+
+    def document_rows(self) -> int:
+        return self.db.one("SELECT COUNT(*) AS n FROM documents")["n"]
+
+    def test_a_manuscript_registered_now_has_ids_from_its_first_collect(self):
+        self.assertTrue(docs.document_ids_enabled(self.db, self.manuscript))
+        self.assertEqual(self.document_rows(), 3)
+
+    def test_a_manuscript_that_already_existed_has_them_off(self):
+        self.make_existing()
+        self.assertFalse(docs.document_ids_enabled(self.db, self.manuscript))
+
+    def test_off_a_rename_on_disk_collects_exactly_as_it_did_before(self):
+        self.make_existing()
+        api.define_style_guide(self.db, self.manuscript, "essays")
+        api.attach_style(self.db, self.manuscript, "old.md", "essays")
+        self.link("old.md", tab_id="tab-2", checked_out=False)
+        toc_before = (self.root / "toc.toml").read_text(encoding="utf-8")
+        (self.root / "old.md").rename(self.root / "new.md")
+
+        # The auto path holds it as a suspicious deletion, as before.
+        held = quiet(api.collect, self.db, self.manuscript, {}, auto=True)
+        self.assertEqual(
+            held, {"staged": [{"file": "old.md", "removed_percent": 100}]})
+
+        # A manual collect records a removal and an addition, as before:
+        # the transitions and counts below are what the code on main
+        # writes for this change, worked out from revisions.py there.
+        report = quiet(api.collect, self.db, self.manuscript, {})
+        self.assertEqual(report["transitions"], [
+            {"kind": "file_added", "location": "new.md",
+             "summary": "New file: new.md"},
+            {"kind": "file_removed", "location": "old.md",
+             "summary": "File removed: old.md"}])
+        self.assertEqual(report["new_files"], ["new.md"])
+        self.assertEqual(report["new_paragraphs"], 9)  # the title and 8
+        for key in ("renamed", "renamed_left", "renamed_tabs"):
+            self.assertNotIn(key, report)
+        stored = [(r["kind"], r["location"], r["summary"], r["detail"])
+                  for r in self.db.all(
+                      "SELECT * FROM editorial_transitions WHERE "
+                      "version_after = (SELECT id FROM manuscript_versions "
+                      "ORDER BY version_no DESC LIMIT 1) ORDER BY location")]
+        self.assertEqual(stored, [
+            ("file_added", "new.md", "New file: new.md",
+             '{"paragraphs": 9}'),
+            ("file_removed", "old.md", "File removed: old.md", "{}")])
+        # Nothing was carried, seeded or rewritten.
+        self.assertEqual(self.document_rows(), 0)
+        self.assertEqual(self.attached_guide("old.md"), "essays")
+        self.assertIsNone(self.attached_guide("new.md"))
+        self.assertEqual(self.links()["old.md"]["tab_id"], "tab-2")
+        self.assertNotIn("new.md", self.links())
+        self.assertEqual((self.root / "toc.toml").read_text(encoding="utf-8"),
+                         toc_before)
+
+    def test_off_doc_rename_is_declined_and_names_the_setting(self):
+        self.make_existing()
+        with self.assertRaises(ValueError) as caught:
+            quiet(api.rename_document, self.db, self.manuscript, {},
+                  "old.md", "new.md")
+        self.assertIn("authorlm manuscript set --document-ids on -m book",
+                      str(caught.exception))
+        self.assertTrue((self.root / "old.md").exists())
+        self.assertEqual(self.document_rows(), 0)
+
+    def test_off_no_resolver_call_seeds_a_row(self):
+        self.make_existing()
+        self.assertEqual(docs.ensure_documents(self.db, self.manuscript), [])
+        self.assertEqual(docs.list_documents(self.db, self.manuscript), [])
+        with self.assertRaises(LookupError) as caught:
+            docs.document_id(self.db, self.manuscript, "old.md")
+        self.assertIn("--document-ids on", str(caught.exception))
+        self.assertEqual(self.document_rows(), 0)
+
+    def test_turning_it_on_backs_up_first_then_seeds_every_file(self):
+        self.make_existing()
+        folder = backup.backup_dir(self.db.path)
+        before = set(folder.iterdir()) if folder.exists() else set()
+        result = api.update_manuscript_metadata(
+            self.db, self.manuscript, document_ids="on")["document_ids"]
+        made = set(folder.iterdir()) - before
+        self.assertEqual(len(made), 1)
+        self.assertEqual(result["backup"], str(next(iter(made))))
+        # The backup holds the state BEFORE the change: no rows, no key.
+        import sqlite3
+        copy = sqlite3.connect(result["backup"])
+        try:
+            self.assertEqual(copy.execute(
+                "SELECT COUNT(*) FROM documents").fetchone()[0], 0)
+            self.assertNotIn("document_ids", json.loads(copy.execute(
+                "SELECT metadata FROM manuscripts").fetchone()[0]))
+        finally:
+            copy.close()
+        self.assertEqual(result["enabled"], True)
+        self.assertEqual(result["seeded"],
+                         ["child.md", "old.md", "other.md"])
+        self.assertTrue(docs.document_ids_enabled(self.db, self.manuscript))
+        self.assertEqual(self.document_rows(), 3)
+        # And from here a rename on disk heals.
+        (self.root / "old.md").rename(self.root / "new.md")
+        report = quiet(api.collect, self.db, self.manuscript, {}, auto=True)
+        self.assertEqual(report["renamed"],
+                         [{"from": "old.md", "to": "new.md"}])
+
+    def test_it_stays_off_when_the_backup_fails(self):
+        self.make_existing()
+        saved = backup.perform_backup
+        backup.perform_backup = lambda db: {"ok": False, "error": "disk full"}
+        try:
+            with self.assertRaises(ValueError) as caught, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                api.update_manuscript_metadata(
+                    self.db, self.manuscript, document_ids="on")
+        finally:
+            backup.perform_backup = saved
+        self.assertIn("disk full", str(caught.exception))
+        self.assertFalse(docs.document_ids_enabled(self.db, self.manuscript))
+        self.assertEqual(self.document_rows(), 0)
+
+    def test_turning_it_off_keeps_the_rows_and_stops_the_pairing(self):
+        api.update_manuscript_metadata(self.db, self.manuscript,
+                                       document_ids="off")
+        self.assertFalse(docs.document_ids_enabled(self.db, self.manuscript))
+        self.assertEqual(self.document_rows(), 3)
+        (self.root / "old.md").rename(self.root / "new.md")
+        report = quiet(api.collect, self.db, self.manuscript, {})
+        self.assertEqual(sorted(self.kinds(report)),
+                         ["file_added", "file_removed"])
+
+    def test_the_manuscript_verb_shows_and_sets_it(self):
+        self.make_existing()
+        argv = ["--workspace", str(self.workspace), "manuscript"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli_main(argv + ["show"])
+        self.assertIn("document_ids: off", out.getvalue())
+        self.assertIn("manuscript set --document-ids on", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli_main(argv + ["set", "--document-ids", "on"])
+        self.assertIn("document_ids: on", out.getvalue())
+        self.assertIn("3 document", out.getvalue())
+        self.assertIn(str(backup.backup_dir(self.db.path)), out.getvalue())
+        self.assertEqual(self.document_rows(), 3)
 
 
 class TocRenameTests(unittest.TestCase):
