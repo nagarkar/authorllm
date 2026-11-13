@@ -285,6 +285,11 @@ def test_gather_group_and_build_queue() -> None:
         check("both items share the term Dharma",
               any(g["kind"] == "term" and g["key"] == "Dharma"
                   and g["items"] == ["one-1.1", "two-1.1"] for g in groups), groups)
+        written = json.loads((folder / "groups.json").read_text())
+        check("groups.json carries the full items and the groups",
+              [i["id"] for i in written["items"]] == ["one-1.1", "two-1.1"]
+              and written["items"][0]["proposed"] and written["groups"] == groups,
+              written)
         (folder / "integrated.json").write_text(json.dumps(items))
         (folder / "checks").mkdir()
         (folder / "checks" / "one-1.1.json").write_text(json.dumps(
