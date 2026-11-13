@@ -3,7 +3,8 @@ place, ruled on there and merged one file at a time.
 
 An outside caller (`revise stage`) puts its revisions in a file's Doc tab as
 `<<old>>{{new}}` forms; the author rules on them in the tab and `revise
-resolve` lands them. With forms spread over many tabs the author hunted for
+resolve` lands them. A filter pass on the Doc road (`filter push`) puts
+its forms there the same way, and `filter resolve` lands them. With forms spread over many tabs the author hunted for
 them; this page lists them all, grouped by file, with the text each form's
 green half holds NOW (so an edit the author made in the Doc shows), the
 paragraph around it, and Accept / Edit / Decline.
@@ -23,10 +24,12 @@ file, what the author would do by hand, and stops where a person must look:
    whose text is an OLDER version of the local file is stale, not an edit,
    and is never pulled (2026-11-10: a staging pulled a stale tab over the
    file and reverted another session's accepted edits).
-4. `api.resolve_revisions` per origin, with the page's rulings applied to
-   the tab's text as if typed there (`rulings`). It keeps a local edit the
-   tab has not seen, puts the illustration embed lines back, and clears the
-   tab (a push, or `settle_forms_in_tab`).
+4. `api.resolve_revisions` per outside caller, `api.filter_resolve` per
+   filter run, with the page's rulings applied to the tab's text as if
+   typed there (`rulings`). The outside caller's resolve keeps a local
+   edit the tab has not seen, puts the illustration embed lines back, and
+   clears the tab; a filter's resolve leaves the tab to step 6, as the
+   filter protocol's `doc push` after `filter resolve`.
 5. Every `![](_illustrations/...)` line the file had is still there, or is
    put back under its tag; one that cannot be is said, and nothing is
    pushed.
@@ -52,6 +55,9 @@ from .normalize import clamp, normalize_markdown
 from .revisions import EMBED_LINE, strip_embed_lines
 
 RULING_KEY = "page_ruling"
+# The producers whose forms are ruled and merged here: outside callers
+# (`revise stage`) and filter passes on the Doc road (`filter push`).
+PRODUCERS = (api.EXTERNAL_ORIGIN, api.FILTER_ORIGIN)
 VERDICTS = ("accept", "edit", "decline")
 
 
@@ -59,17 +65,29 @@ VERDICTS = ("accept", "edit", "decline")
 
 def open_threads(db: Database, manuscript: dict,
                  file: str | None = None) -> dict[str, list[dict]]:
-    """file → its open outside-revision threads (`written`), in staging
-    order. Files with none are absent."""
+    """file → its open threads (`written`) from the page's producers, in
+    staging order, each with `origin`: the outside caller's name, or the
+    filter's. Files with none are absent."""
     sql = ("SELECT * FROM doc_threads WHERE manuscript_id = ? "
-           "AND origin_type = ? AND state = 'written'")
-    args: list[Any] = [manuscript["id"], api.EXTERNAL_ORIGIN]
+           "AND origin_type IN (?, ?) AND state = 'written'")
+    args: list[Any] = [manuscript["id"], *PRODUCERS]
     if file is not None:
         sql += " AND file = ?"
         args.append(file)
     out: dict[str, list[dict]] = {}
+    filters: dict[str, str] = {}
     for row in db.all(sql + " ORDER BY created_at, id", tuple(args)):
-        out.setdefault(row["file"], []).append(dict(row))
+        t = dict(row)
+        if t["origin_type"] == api.FILTER_ORIGIN:
+            run_id = (t.get("origin_id") or "").split(":", 1)[0]
+            if run_id not in filters:
+                run = db.one("SELECT filter FROM filter_runs WHERE id = ?",
+                             (run_id,))
+                filters[run_id] = run["filter"] if run else ""
+            t["origin"] = filters[run_id]
+        else:
+            t["origin"] = _meta(t).get("origin") or ""
+        out.setdefault(t["file"], []).append(t)
     return out
 
 
@@ -84,13 +102,13 @@ def ruling_of(thread: dict) -> dict | None:
 
 def _other_forms(db: Database, manuscript: dict, file: str) -> dict[str, int]:
     """origin_type → how many of its forms are out in `file`'s tab, for
-    every producer that is not an outside caller (a pass, a margin
-    proposal). These are not ruled here; they also block new forms."""
+    every producer not ruled here (a lens, a critique, a margin
+    proposal). They also block new forms."""
     rows = db.all(
         "SELECT origin_type, COUNT(*) AS n FROM doc_threads WHERE "
         "manuscript_id = ? AND file = ? AND state = 'written' "
-        "AND origin_type != ? GROUP BY origin_type",
-        (manuscript["id"], file, api.EXTERNAL_ORIGIN))
+        "AND origin_type NOT IN (?, ?) GROUP BY origin_type",
+        (manuscript["id"], file, *PRODUCERS))
     return {r["origin_type"]: r["n"] for r in rows}
 
 
@@ -123,7 +141,8 @@ def _form_row(thread: dict, form: dict | None, marked: str | None,
     meta = _meta(thread)
     old = thread.get("proposed_old") or ""
     row: dict[str, Any] = {
-        "id": thread["id"], "origin": meta.get("origin") or "",
+        "id": thread["id"], "origin": thread.get("origin") or "",
+        "producer": thread["origin_type"],
         "note": thread.get("note") or "", "kind": "replace" if old else "insert",
         "old": old, "proposed": thread.get("proposed_new") or "",
         "current": None, "found": form is not None,
@@ -244,8 +263,8 @@ def decide(db: Database, manuscript: dict, thread_id: str, verdict: str,
     of the form markers. Nothing is written to the Doc or the file."""
     row = db.one("SELECT * FROM doc_threads WHERE id = ? AND manuscript_id = ?",
                  (thread_id, manuscript["id"]))
-    if row is None or row["origin_type"] != api.EXTERNAL_ORIGIN:
-        raise LookupError(f"no outside revision {thread_id} on this manuscript")
+    if row is None or row["origin_type"] not in PRODUCERS:
+        raise LookupError(f"no open form {thread_id} on this manuscript")
     thread = dict(row)
     if thread["state"] != "written":
         raise ValueError(f"form {thread_id} is no longer open "
@@ -425,14 +444,19 @@ def merge(db: Database, manuscript: dict, file: str, service, docs_service,
                 f"{rel} was edited in the Doc since the last push; that edit "
                 f"was pulled into the file first.")
 
-    by_origin: dict[str, list[dict]] = {}
+    by_origin: dict[tuple[str, str], list[dict]] = {}
     for t in threads:
-        by_origin.setdefault(_meta(t).get("origin") or "", []).append(t)
-    for origin, group in by_origin.items():
+        by_origin.setdefault((t["origin_type"], t["origin"]), []).append(t)
+    for (producer, origin), group in by_origin.items():
         rulings = {t["id"]: _landing_text(ruling_of(t)) for t in group
                    if t["id"] in pairs}
-        done = api.resolve_revisions(db, manuscript, rel, origin, service,
-                                     docs_service, config, rulings=rulings)
+        if producer == api.FILTER_ORIGIN:
+            done = _land_filter(db, manuscript, rel, origin, rulings,
+                                service, docs_service, config)
+        else:
+            done = api.resolve_revisions(db, manuscript, rel, origin,
+                                         service, docs_service, config,
+                                         rulings=rulings)
         result["warnings"] += done.get("warnings") or []
         if not done.get("landed"):
             return stop("resolve",
@@ -477,6 +501,26 @@ def merge(db: Database, manuscript: dict, file: str, service, docs_service,
                          + ("" if result["pushed"] else "; the tab was not "
                             "brought up to the file"))
     return result
+
+
+def _land_filter(db: Database, manuscript: dict, rel: str, name: str,
+                 rulings: dict[str, str], service, docs_service,
+                 config: dict | None) -> dict:
+    """One filter run's forms in `rel`, landed by `filter resolve` (the
+    tab read back: untouched accepts, an emptied green half declines, a
+    rewording is the author's), with the page's rulings typed in first.
+    The same shape as `resolve_revisions`' result; the push is merge's."""
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            done = api.filter_resolve(
+                db, manuscript, config or {}, rel, name=name,
+                services=lambda: (service, docs_service), rulings=rulings)
+    except (LookupError, ValueError) as err:
+        return {"landed": False, "state": "filter", "warnings": [str(err)]}
+    modified = len(done.get("diffs") or [])
+    return {"landed": True, "warnings": done.get("warnings") or [],
+            "accepted": done["accepted"] - modified, "modified": modified,
+            "declined": done["declined"]}
 
 
 # --------------------------------------------------------------- conflicts

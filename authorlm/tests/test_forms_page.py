@@ -28,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 
-from test_passes import _SurgicalDocFake  # noqa: E402
+from test_passes import DOC_ESSAY, _doc_run, _SurgicalDocFake  # noqa: E402
 
 from authorlm import api, audiobook, forms_page, gdocs  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
@@ -535,6 +535,75 @@ def queue_runs_one_merge_at_a_time(_root: Path) -> None:
           seen[-1] == "a.md" and len(seen) == 4, seen)
 
 
+# ---------------------------------------------------------- filter forms
+# Forms a filter pass wrote into a tab (`filter push`) are ruled and
+# merged on the page like an outside caller's (it-1eeeae6c6d52). Merge
+# lands them through `filter resolve`'s own code, then pushes.
+
+def _filter_staged(root: Path, name: str):
+    """A doc-road filter run on solo.md: three paragraphs' rewrites out
+    in the tab as forms, pushed from a known base."""
+    db, manuscript, ms, fake = _doc_run(
+        root, name, {2: "Alpha, said once.", 4: "Gamma, said plainly.",
+                     6: "Omega closes it."})
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = api.filter_push(db, manuscript, {}, "solo.md",
+                              services=lambda: (fake, fake))
+    assert out["written"] == 3, out
+    meta = gdocs._mapping(db, manuscript)
+    meta["gdocs"]["solo.md"].update(
+        checked_out=True,
+        pushed_hash=_h(normalize_markdown(DOC_ESSAY)))
+    gdocs._save_mapping(db, manuscript, meta)
+    ws = root / name
+    audiobook._SESSIONS.pop((str(ws), "book"), None)
+    audiobook.session(str(ws), "book", inline=True)
+    return ws, db, manuscript, ms, fake
+
+
+def filter_forms_are_cards_and_merge(root: Path) -> None:
+    print("filter forms:")
+    ws, db, manuscript, ms, fake = _filter_staged(root, "filter-ws")
+    listing = _call(ws, fake, "list")
+    group = next(g for g in listing["files"] if g["file"] == "solo.md")
+    forms = {f["proposed"]: f for f in group["forms"]}
+    check("the filter's forms are cards, not a count under others",
+          len(forms) == 3 and group["others"] == {}
+          and all(f["producer"] == "filter" and f["found"]
+                  for f in forms.values())
+          and group["origins"] == ["duplicate-words"], group)
+    fake.edit("tab-2", "{{Gamma, said plainly.}}", "{{Gamma, my words.}}")
+    forms = {f["proposed"]: f for g in _call(ws, fake, "list")["files"]
+             for f in g["forms"]}
+    for proposed, verdict, text in (
+            ("Alpha, said once.", "decline", None),
+            ("Gamma, said plainly.", "accept", None),
+            ("Omega closes it.", "edit", "Omega ends it.")):
+        r = _call(ws, fake, "decide", id=forms[proposed]["id"],
+                  verdict=verdict, seen=forms[proposed]["current"], text=text)
+        check(f"a {verdict} ruling is held on a filter form",
+              "error" not in r, r)
+    r = _call(ws, fake, "merge", file="solo.md")
+    check("merge lands the filter's forms and pushes",
+          r["stopped"] is None and r["pushed"] is True
+          and r["accepted"] == 0 and r["modified"] == 2
+          and r["declined"] == 1, r)
+    text = (ms / "solo.md").read_text()
+    check("the file has each ruling: the Doc's words, the page's words, "
+          "the declined paragraph kept",
+          "Alpha opens the essay" in text and "Alpha, said once." not in text
+          and "Gamma, my words." in text and "Omega ends it." in text
+          and "<<" not in text and "{{" not in text, text)
+    tab = fake.tab_text("solo.md")
+    check("the tab is cleared and reads as the file",
+          "<<" not in tab and "{{" not in tab and "Omega ends it." in tab,
+          tab)
+    run = db.one("SELECT status FROM filter_runs WHERE manuscript_id = ?",
+                 (manuscript["id"],))
+    check("the filter run is settled, as `filter resolve` leaves it",
+          run["status"] == "settled" and _open(db, manuscript) == 0, run)
+
+
 def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="forms-page-"))
     for fn in (rulings_on_marked_text, list_shows_the_doc_as_it_stands,
@@ -543,7 +612,8 @@ def main() -> None:
                merge_stops_on_a_doc_edit_after_ruling,
                merge_stops_on_conflict, merge_never_pulls_a_stale_tab,
                merge_keeps_illustration_lines, unknown_method,
-               queue_runs_one_merge_at_a_time):
+               queue_runs_one_merge_at_a_time,
+               filter_forms_are_cards_and_merge):
         fn(root)
     print(f"OK — {PASSED} Merge forms checks")
 
