@@ -752,6 +752,12 @@ Comment context on the pull (it adds where a Doc comment's anchor sits and the s
 
 Realization vs first-mention firewall (`concept_pattern` / `mention_pattern`).
 
+## `tests.test_conflict_region_helpers`
+
+`authorlm/tests/test_conflict_region_helpers.py`
+
+`forms_page.conflict_segments` / `region_text` / `_wrap_like` / `_landing_text` / `_touches_tag` decide what a Merge-forms conflict card puts on disk, and what a ruled form's green half carries into resolve.
+
 ## `tests.test_context`
 
 `authorlm/tests/test_context.py`
