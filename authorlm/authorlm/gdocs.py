@@ -5266,11 +5266,13 @@ def _md_units(markdown: str) -> list[str]:
     2026-10-25)."""
     out: list[str] = []
     for block in _md_paragraphs(markdown):
-        lines = block.split("\n")
+        # Blank lines are not lines here: the file's last block ends in
+        # its trailing newline, and an empty last line kept a closing
+        # list (a references list) whole (#427).
+        lines = [l for l in block.split("\n") if l.strip()]
         if len(lines) > 1 and (all(_LIST_ITEM.match(l) for l in lines)
-                               or all(_TAG_LINE.match(l)
-                                      for l in lines if l.strip())):
-            out.extend(l for l in lines if l.strip())
+                               or all(_TAG_LINE.match(l) for l in lines)):
+            out.extend(lines)
         else:
             out.append(block)
     return out
@@ -5311,7 +5313,10 @@ def _split_hard_breaks(export_paras: list[str],
 
 
 def _norm_para(text: str) -> str:
-    return re.sub(r"\W+", "", text).lower()
+    """Word characters only, lowercased, list marker aside: a Doc list
+    item's numbering is a glyph, not text, so the Docs API reads `foo`
+    where the export reads `1. foo` (#427)."""
+    return re.sub(r"\W+", "", _LIST_ITEM.sub("", text, count=1)).lower()
 
 
 def _same_para(a: str, b: str, width: int = 40) -> bool:
