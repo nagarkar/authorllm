@@ -8732,6 +8732,12 @@ def cmd_style(args):
                 print(ui.bold("Attachments:"))
                 for a in overview["attachments"]:
                     print(f"  {a['file']} → {a['guide']}")
+            if overview["defaults"]:
+                print(ui.bold("Workspace defaults (library/style-defaults.toml):"))
+                for d in overview["defaults"]:
+                    by = (f" — displaced by {', '.join(i[:8] for i in d['displaced_by'])}"
+                          if d["displaced_by"] else "")
+                    print(f"  [{d['id']}] {d['statement'][:70]}…{by}")
         elif args.action == "guide":
             row = api.define_style_guide(db, manuscript, args.params[0],
                                          parent=args.parent)
@@ -8757,13 +8763,16 @@ def cmd_style(args):
             print(ui.bold(f"Effective style for {result['file']} "
                           f"({len(result['elements'])} element(s), nearest first):"))
             for element in result["elements"]:
-                if element["file"]:
+                if element.get("default"):
+                    where = "workspace default"
+                elif element["file"]:
                     where = f"{element['file']} (file-local)"
                 else:
                     guide_row = db.one("SELECT name FROM style_guides WHERE id = ?",
                                        (element["guide_id"],))
                     where = guide_row["name"] if guide_row else "?"
-                print(f"  [{element['id'][:8]}] ({element['aspect']}, {where}) "
+                shown = element["id"] if element.get("default") else element["id"][:8]
+                print(f"  [{shown}] ({element['aspect']}, {where}) "
                       f"{element['statement']}")
                 if element["notes"]:
                     print(ui.dim(f"      {element['notes']}"))
@@ -10775,7 +10784,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--file", help="add: file for a file-local element")
     p.add_argument("--notes", help="add: free-text notes (inspect/avoid hints)")
     p.add_argument("--overrides",
-                   help="add: id (prefix) of the inherited element this displaces")
+                   help="add: id (prefix) of the inherited element this displaces, "
+                        "or default:<key> for a workspace default; a comma list "
+                        "displaces several")
     p.set_defaults(func=cmd_style)
 
     p = sub.add_parser("status", help="show current state")

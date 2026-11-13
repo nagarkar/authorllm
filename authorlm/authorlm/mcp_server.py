@@ -1453,7 +1453,9 @@ def add_style_law(aspect: str, statement: str, guide: str | None = None,
     structure | formatting | citation | rhetoric | figure (figurative language, prose) | tone | illustration (image law, consumed only by the illustration renderer). Scope to
     exactly one of `guide` (name) or `file` (file-local override). `notes`
     holds free-text inspect/avoid hints; `overrides` names the id (prefix)
-    of an inherited element this one displaces."""
+    of an inherited element this one displaces, or `default:<key>` for a
+    workspace default (get_style without file lists them); a comma list
+    displaces several."""
     def run():
         db = _db()
         return api.add_style_law(
