@@ -815,6 +815,16 @@ def compose_marked_text(text: str, threads: list[dict]) -> str:
     return "\n\n".join(head + out) + "\n"
 
 
+def _same_old_half(form_old: str, proposed_old: str) -> bool:
+    """True when the form's old half is the thread's proposed_old, or the
+    Doc export's rendered wrapping of it (`<<*term*>>` for staged `term`;
+    same rule as `api.pair_external_forms`)."""
+    if form_old == proposed_old:
+        return True
+    from .gdocs import rendered_text
+    return rendered_text(form_old) == rendered_text(proposed_old)
+
+
 def final_text_from_marked(marked: str,
                            written: list[dict] | None = None,
                            kinds: tuple[str, ...] = ("replace", "insert")
@@ -845,11 +855,14 @@ def final_text_from_marked(marked: str,
     critique_forms = []
     keep_new: set[tuple[int, int]] = set()
     # Pass 1: exact matches (replaces by old half; inserts by new half).
+    # Replaces also match when the export wrapped the struck old half in
+    # emphasis — pair_external_forms already pairs those; landing must.
     for form in forms:
         match = None
         if form["kind"] == "replace":
             match = next((t for t in unmatched
-                          if t["proposed_old"] == form["old"]), None)
+                          if _same_old_half(form["old"], t["proposed_old"])),
+                         None)
         elif form["kind"] == "insert":
             match = next((t for t in unmatched
                           if t["proposed_old"] == ""
@@ -939,14 +952,16 @@ def record_resolution(db: Database, manuscript_id: str, file: str,
                                  origin_type=origin_type)
     diffs = []
     unmatched = list(threads)
-    # Replaces match by their verbatim OLD half (law). Insertions match
-    # by proposed_new first; post-edited insertions fall back FIFO among
-    # the remaining insertion threads (same rule as final_text_from_marked).
+    # Replaces match by their OLD half (verbatim, or the Doc export's
+    # rendered wrapping — same as final_text_from_marked). Insertions
+    # match by proposed_new first; post-edited insertions fall back FIFO
+    # among the remaining insertion threads.
     for form in forms:
         match = None
         if form["kind"] == "replace":
             match = next((t for t in unmatched
-                          if t["proposed_old"] == form["old"]), None)
+                          if _same_old_half(form["old"], t["proposed_old"])),
+                         None)
         elif form["kind"] == "insert":
             match = next((t for t in unmatched
                           if t["proposed_old"] == ""
