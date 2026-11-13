@@ -4425,7 +4425,8 @@ def cmd_filter(args):
                     print(ui.yellow(f"  {row['name']}: MALFORMED — "
                                     f"{row['error'].splitlines()[0]}"))
                     continue
-                print(f"  {row['name']} [{row['class']}]: {row['summary']}")
+                lib = " (library)" if row.get("source") == "library" else ""
+                print(f"  {row['name']} [{row['class']}]{lib}: {row['summary']}")
             return
 
         if args.action == "show":
@@ -4573,6 +4574,13 @@ def cmd_filter(args):
             print(ui.green(
                 f"Registry {'replaced' if result['replaced'] else 'frozen'} "
                 f"for this run ({len(result['registry']):,} chars)."))
+            reading = result.get("reading")
+            if reading:
+                print(ui.dim(
+                    f"Shared reading '{reading['group']}' "
+                    + ("reused from an earlier pass on this essay — no call."
+                       if reading["reused"] else
+                       "recorded; the other passes of the family reuse it.")))
             if result["replaced"]:
                 print(ui.yellow("!! the run's cached prefix is invalidated "
                                 "— on the native path the next unit call "

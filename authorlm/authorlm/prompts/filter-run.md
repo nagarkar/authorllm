@@ -1,7 +1,9 @@
 # Filter pass — one essay, unit by unit
 
-You are applying ONE ratified editorial filter to ONE essay of a philosophy
-manuscript, unit by unit. A unit is a paragraph. THE FILTER, below, states the
+You are applying ONE ratified editorial filter to ONE essay or chapter of a
+manuscript, unit by unit. The manuscript may be argument, narrative, a story for
+children, commentary or verse; STYLE LAW, AUDIENCE PROFILE and the filter's own
+registry say which. A unit is a paragraph. THE FILTER, below, states the
 concern and is the only concern you are working on: you are not improving the
 essay, you are passing each unit through this one filter.
 
@@ -28,6 +30,11 @@ For each unit in THE UNITS you return either `keep` or `replace`.
   qualification in a phrase), never the finished text. Collect reports the
   open tag and the footnote road drafts it with the author. A tag never spans
   a line and never contains a bracket.
+- **Queries are planted, never answered.** Where THE FILTER marks a rule
+  (ask), return `replace` with the unit unchanged except for one tag planted
+  straight after the sentence: `[Suggestion: Query: <the question in one line,
+  naming both readings>]`. Never also change the sentence. A tag never spans a
+  line and never contains a bracket.
 - STYLE LAW is binding and outranks your instinct in every case. It is the
   author's ratified law, printed whole, one element per line with its aspect in
   brackets — so when a filter tells you to work from "the established motif

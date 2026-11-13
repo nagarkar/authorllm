@@ -53,6 +53,7 @@ from .revisions import (
 # reached corner. `passes` imports `api` only from inside function
 # bodies and `staging` imports neither, so no cycle is created.
 from . import passes
+from . import readings
 from . import staging
 from . import structure
 
@@ -4543,6 +4544,20 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
             f"every unit is judged against the same bytes. To rewrite it — "
             f"which invalidates this run's cached prefix and re-bills it on "
             f"the native path — pass --replace.")
+    group = meta.get("reading")
+    shared = readings.current(db, mid, group, rel) if group else None
+    if shared and not replace and reply is None:
+        # The family already read this essay: copy that reading, no call,
+        # so the passes cannot read the essay two ways. Edits since do not
+        # refresh it; only --replace does.
+        _freeze_registry(db, run, shared["registry"], shared["id"],
+                         reused=True)
+        return {"run": run, "filter": name, "file": rel, "payload": None,
+                "prompt_location": fg.prompt_location(),
+                "unit_count": len(units), "registry": shared["registry"],
+                "native": False, "warnings": warnings, "replaced": False,
+                "reading": {"group": group, "id": shared["id"],
+                            "reused": True, "from_run": shared["run_id"]}}
     payload = fg.assemble_prelude(db, manuscript, run, body, units,
                                   text=text, dictionary=dictionary,
                                   summaries=meta.get("summaries", False),
@@ -4564,10 +4579,28 @@ def filter_prelude(db: Database, manuscript: dict, config: dict, name: str,
         info["usage_line"] = client.stats_line()
     else:
         return info
-    db.update("filter_runs", run["id"], {"registry": registry})
-    run["registry"] = registry
+    if not group:
+        db.update("filter_runs", run["id"], {"registry": registry})
+        run["registry"] = registry
+        return {**info, "registry": registry, "run": run,
+                "replaced": bool(replace)}
+    row = readings.record(db, mid, group, rel, registry, run["id"])
+    _freeze_registry(db, run, registry, row["id"], reused=False)
     return {**info, "registry": registry, "run": run,
-            "replaced": bool(replace)}
+            "replaced": bool(replace),
+            "reading": {"group": group, "id": row["id"], "reused": False}}
+
+
+def _freeze_registry(db: Database, run: dict, registry: str,
+                     reading_id: str, reused: bool) -> None:
+    """Copy the reading into the run. The run never reads the shared row
+    again, so nothing recorded later can change what it judges against."""
+    meta = loads(run["metadata"], {})
+    meta["reading"] = {"id": reading_id, "reused": reused}
+    db.update("filter_runs", run["id"],
+              {"registry": registry, "metadata": json.dumps(meta)})
+    run["registry"] = registry
+    run["metadata"] = json.dumps(meta)
 
 
 def _pronunciation_prelude(db: Database, manuscript: dict, config: dict,

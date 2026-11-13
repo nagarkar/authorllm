@@ -1153,6 +1153,30 @@ code. `filter add <name>` with the artifact on stdin; `filter list`,
 the same read-then-ratify rule; the loop itself (`run`/`prelude`/
 `record`/`settle`/…) stays a CLI-only surface.
 
+**The shared library.** `authorlm/library/filters/` in the repo holds
+filters written for any manuscript (the three `strunk-and-white-*` passes,
+ratified 2026-11-12). Every manuscript sees them in `filter list`, marked
+`(library)`, and runs them by name with no install step; they are read in
+place, so an edit in the repo reaches every book. A manuscript's own
+`_filters/<name>.md` of the same name overrides the library's for that book
+only (`filter add` of a library name writes that override). Never copy a
+library filter into a manuscript unless the author wants that book to differ.
+
+**Shared readings.** A global filter whose front matter says `reading =
+"<group>"` shares one whole-essay reading per essay with the rest of its group
+(the strunk-and-white passes are group `strunk-and-white`). The first `filter
+prelude` in the group on an essay reads it and records the reading; every later
+pass on that essay reuses it with no call (the CLI says "reused"), even after
+edits, so the order is simply concision, grammar, mechanics, each prelude then
+run. The reading describes the essay's form, so edits do not refresh it; only
+`filter prelude <name> <essay> --replace` reads the essay again. Each run keeps
+its own copy, so a replaced reading never changes a live run. Conventions where
+English allows several forms are settled up front by the default style laws,
+not by the reading.
+
+**Default style law.** Where a convention has a workspace default (see "Default
+style law" below), the filters follow it as STYLE LAW and plant no question.
+
 **Three filters are written and waiting to be ratified**, in full, in
 `docs/filter-pass-design.md`'s appendix:
 
@@ -2436,6 +2460,14 @@ without it}}`, or `<<tag>>{{}}` for a standalone), local pristine, then
 — a deleted form keeps the paragraph and its tag open — and pushes
 clean. A second apply while forms are out, and `doc push`, are refused
 naming `suggestion resolve`. Exports strip an unresolved tag and warn.
+
+**A suggestion whose gist begins `Query:` is a question for the author**,
+planted by a filter's (ask) rule (the strunk-and-white filters in
+`authorlm/library/filters/` plant them). Put it to the author verbatim,
+with both readings, and draft nothing until the author answers: the
+filter declined to guess, so the collaborator must not guess either. A
+`Query: style sheet:` question is answered by a STYLE LAW row (`style
+add`), then the tag is declined with the ruling as its reason.
 
 ## Media for podcasts (`[Clip: …]`, `[Collage: …]`, `[Montage: …]` — design: authorlm/docs/video-clips-design.md)
 

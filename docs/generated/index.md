@@ -476,6 +476,12 @@ Registry of every LLM prompt AuthorLM sends, and where each lives.
 
 Proposals against settled knowledge.
 
+## `authorlm.readings`
+
+`authorlm/authorlm/readings.py`
+
+Shared readings — one whole-essay reading for a family of global filters (issue #412).
+
 ## `authorlm.revisions`
 
 `authorlm/authorlm/revisions.py`
@@ -920,6 +926,12 @@ The migration verbs (docs/extraction-redesign.md §5, §9 phase 5): backup, migr
 
 The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, §9 phase 1): `extraction.assemble` and `authorlm extract <file>`.
 
+## `tests.test_filter_library`
+
+`authorlm/tests/test_filter_library.py`
+
+The shared filter library: `authorlm/library/filters/` is read in place by every manuscript, and a manuscript's own `_filters/<name>.md` overrides a library filter of the same name.
+
 ## `tests.test_filter_reply_json`
 
 `authorlm/tests/test_filter_reply_json.py`
@@ -1309,6 +1321,12 @@ Lazy-preview stamp and orphan sweep (#227).
 `authorlm/tests/test_pronunciation_param_diff.py`
 
 `generation.pronunciation_diff` / `param_diff` flag a stale take for re-render.
+
+## `tests.test_readings`
+
+`authorlm/tests/test_readings.py`
+
+Shared readings: one reading per essay per filter family (readings.py, issue #412).
 
 ## `tests.test_refuse_sidecar`
 

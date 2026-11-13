@@ -7,7 +7,8 @@ way the write verb's autoregressive loop conditions each beat. A filter
 is therefore a lens-shaped artifact whose findings are pre-cast as edits,
 and which routes through the edit door instead of the guidance queue.
 
-The artifact lives at `<manuscript>/_filters/<name>.md` — a SIBLING
+The artifact lives at `<manuscript>/_filters/<name>.md` (or, shared by
+every manuscript, in the repo's `library/filters/`; see `library_dir`) — a SIBLING
 directory to `_lenses/`, not a shared one with a kind marker. Three
 reasons, in order of weight:
 
@@ -39,6 +40,7 @@ class set is open: a design that implies an open set gets handed a
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -86,7 +88,11 @@ PRELUDES = ("pronunciations",)
 # (audiobook-pipeline-design §5.4) can only ever name a real voice. Like
 # `summaries` and `profiles` it is context, not a prelude: nothing is
 # proposed before the units are judged.
-KEYS = ("class", "state", "prelude", "summaries", "profiles", "cast")
+# `reading` (a slug) names a family of GLOBAL filters that share one
+# whole-essay reading per essay instead of each making its own
+# (readings.py, issue #412). Global only: the reading IS the registry.
+KEYS = ("class", "state", "prelude", "summaries", "profiles", "cast",
+        "reading")
 
 DELIMITER = "---"
 
@@ -97,8 +103,42 @@ class FilterError(ValueError):
     fails loudly where it was made rather than at the first run."""
 
 
-def _filter_path(manuscript: dict, name: str) -> Path:
+# The shared library: filters written for any manuscript (the
+# strunk-and-white set), kept in the repo beside the package and read in
+# place, never copied. A manuscript sees every library filter as if it
+# were its own; a filter of the same name in the manuscript's `_filters/`
+# wins, so `filter add` of a library name is how one book overrides it.
+# `filter add` always writes to the manuscript; the library is edited in
+# the repo and changes reach every book at their next run (a running
+# filter's artifact is frozen at run start, so a live run is unaffected).
+LIBRARY_ENV = "AUTHORLM_FILTER_LIBRARY"
+
+
+def library_dir() -> Path:
+    """`authorlm/library/filters/` in the checkout, or the directory
+    named by AUTHORLM_FILTER_LIBRARY (tests point it at a temp dir, or at
+    an empty one to see a manuscript alone)."""
+    override = os.environ.get(LIBRARY_ENV, "")
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parent.parent / "library" / "filters"
+
+
+def _own_path(manuscript: dict, name: str) -> Path:
     return Path(manuscript["path"]) / FILTER_DIR / f"{name}.md"
+
+
+def _filter_path(manuscript: dict, name: str) -> Path:
+    """The manuscript's own artifact if it has one, else the library's
+    if that exists, else the manuscript path (where `filter add` writes
+    and what a missing-filter error names)."""
+    own = _own_path(manuscript, name)
+    if own.is_file():
+        return own
+    shared = library_dir() / f"{name}.md"
+    if _NAME.match(name or "") and shared.is_file():
+        return shared
+    return own
 
 
 def parse_front_matter(text: str) -> tuple[dict, str]:
@@ -209,9 +249,21 @@ def parse_front_matter(text: str) -> tuple[dict, str]:
     if not body:
         raise FilterError("a filter is its prompt — there is nothing "
                           "after the front matter.")
+    reading = meta.get("reading")
+    if reading is not None:
+        if not isinstance(reading, str) or not _NAME.match(reading):
+            raise FilterError(
+                "`reading` is a short kebab-case name for a family of "
+                "global filters that share one reading of each essay — "
+                "e.g. reading = \"strunk-and-white\".")
+        if klass != "global":
+            raise FilterError(
+                "`reading` is for GLOBAL filters only: the shared reading "
+                "is the registry a global prelude writes.")
     return {"class": klass, "state": (state or "").strip(),
             "prelude": prelude, "summaries": summaries,
-            "profiles": [k.strip() for k in profiles], "cast": cast}, body
+            "profiles": [k.strip() for k in profiles], "cast": cast,
+            "reading": reading}, body
 
 
 def add_filter(manuscript: dict, name: str, text: str) -> tuple[Path, dict]:
@@ -224,7 +276,7 @@ def add_filter(manuscript: dict, name: str, text: str) -> tuple[Path, dict]:
         raise FilterError("a filter is its prompt — pass the artifact "
                           "(front matter and prompt) on stdin")
     meta, _body = parse_front_matter(text)
-    path = _filter_path(manuscript, name)
+    path = _own_path(manuscript, name)
     path.parent.mkdir(exist_ok=True)
     path.write_text(text.strip() + "\n", encoding="utf-8")
     return path, meta
@@ -245,30 +297,48 @@ def summary_of(body: str) -> str:
     return ""
 
 
+def _artifacts(manuscript: dict) -> list[tuple[Path, str]]:
+    """`(path, source)` for every filter this manuscript sees, by name:
+    its own `_filters/*.md` ("manuscript"), then each library filter it
+    does not override ("library")."""
+    found: dict[str, tuple[Path, str]] = {}
+    lib = library_dir()
+    if lib.is_dir():
+        for path in lib.glob("*.md"):
+            if _NAME.match(path.stem):
+                found[path.stem] = (path, "library")
+    own = Path(manuscript["path"]) / FILTER_DIR
+    if own.is_dir():
+        for path in own.glob("*.md"):
+            found[path.stem] = (path, "manuscript")
+    return [found[k] for k in sorted(found)]
+
+
 def list_filters(manuscript: dict) -> list[dict]:
-    """Every artifact in `_filters/`, with its class and summary.
+    """Every artifact the manuscript sees, with its class, summary and
+    source ("manuscript" for its own `_filters/`, "library" for a shared
+    one it does not override).
 
     A malformed artifact is LISTED, with its error where its summary
     would be, rather than hidden: a filter the author wrote and cannot
     see is worse than one they can see is broken."""
-    directory = Path(manuscript["path"]) / FILTER_DIR
-    if not directory.is_dir():
-        return []
     out = []
-    for path in sorted(directory.glob("*.md")):
+    for path, source in _artifacts(manuscript):
         text = path.read_text(encoding="utf-8")
         try:
             meta, body = parse_front_matter(text)
         except FilterError as err:
             out.append({"name": path.stem, "class": None, "state": "",
                         "prelude": None, "summaries": False,
-                        "profiles": [], "summary": "", "error": str(err)})
+                        "profiles": [], "summary": "", "error": str(err),
+                        "source": source})
             continue
         out.append({"name": path.stem, "class": meta["class"],
                     "state": meta["state"], "prelude": meta["prelude"],
                     "summaries": meta["summaries"],
                     "profiles": meta["profiles"],
-                    "summary": summary_of(body), "error": None})
+                    "summary": summary_of(body), "error": None,
+                    "source": source})
     return out
 
 
@@ -287,7 +357,10 @@ def load_filter(manuscript: dict, name: str) -> tuple[dict, str]:
 def show_filter(manuscript: dict, name: str) -> dict:
     path = _filter_path(manuscript, name)
     meta, body = load_filter(manuscript, name)
-    return {"name": name, "path": str(path), "class": meta["class"],
+    source = "manuscript" if path == _own_path(manuscript, name) \
+        else "library"
+    return {"name": name, "path": str(path), "source": source,
+            "class": meta["class"],
             "state": meta["state"], "prelude": meta["prelude"],
             "summaries": meta["summaries"],
             "profiles": meta["profiles"],
