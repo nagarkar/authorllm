@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { deveditTransport, formsTransport, request, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
 import { DevEdit } from "./DevEdit";
-import { MergeForms, type FormsTab } from "./MergeForms";
+import { MergeForms, type FormsActions, type FormsTab } from "./MergeForms";
 
 // Mirrors audiobook.Session.status (authorlm/audiobook.py).
 interface ChapterSummary { stem: string; title: string; total: number; generated: number; previewed: number; remaining: number; remainingCharacters: number; stitched: string | null; stitchStale: boolean; }
@@ -75,6 +75,10 @@ export function App() {
   const [term, setTerm] = useState<string>(parseHash().term);
   const [formsTabs, setFormsTabs] = useState<FormsTab[]>([]);
   const [formsTab, setFormsTab] = useState<string>("");
+  const [formsActions, setFormsActions] = useState<FormsActions | null>(null);
+  const onFormsTabs = useCallback((tabs: FormsTab[], actions: FormsActions) => {
+    setFormsTabs(tabs); setFormsActions(actions);
+  }, []);
   const [error, setError] = useState<string>("");
   const [confirm, setConfirm] = useState<null | {label: string; run: () => Promise<void>}>(null);
   const [now, setNow] = useState<{source: Source; id: string} | null>(null);
@@ -214,6 +218,19 @@ export function App() {
             {formsTabs.map(t => <option key={t.file} value={t.file}>{t.file.replace(/\.md$/, "")} — {formsTabLabel(t)}</option>)}
           </select>
         </div>}
+        {mode === "forms" && formsTabs.length > 0 && (() => {
+          const cur = formsTabs.find(t => t.file === formsTab) ?? formsTabs[0];
+          const waiting = cur.merging || cur.queued >= 0;
+          const all = formsTabs.filter(t => t.ready && !t.merging && t.queued < 0);
+          return <div className="bar">
+            <button className="btn take" disabled={!cur.ready || waiting} onClick={() => formsActions?.mergeTab(cur.file)}>
+              {cur.merging ? "Merging…" : cur.queued >= 0 ? "In the queue" : "Merge this tab"}
+            </button>
+            <button className="btn" disabled={!all.length} onClick={() => formsActions?.mergeAll()}>
+              Merge all{all.length ? ` (${all.length})` : ""}
+            </button>
+          </div>;
+        })()}
         {mode === "chapters" && <div className="bar">
           <select value={stem} onChange={e => { setNow(null); setStem(e.target.value); }} aria-label="Chapter">
             {book.chapters.map(c => (
@@ -246,7 +263,7 @@ export function App() {
       {error && <div className="status bad">{error}</div>}
       {mode === "pron" && <Workbench key={ms} transport={workbenchTransport} manuscript={ms} initialTerm={term || undefined} />}
       {mode === "devedit" && <DevEdit key={ms} transport={deveditTransport} manuscript={ms} />}
-      {mode === "forms" && <MergeForms key={ms} transport={formsTransport} manuscript={ms} tab={formsTab} onTabs={setFormsTabs} />}
+      {mode === "forms" && <MergeForms key={ms} transport={formsTransport} manuscript={ms} tab={formsTab} onTabs={onFormsTabs} />}
       {mode === "chapters" && <JobStrip jobs={jobs} held={status.held || []} onForms={openForms} />}
 
       {mode === "chapters" && chapter && cur && (
@@ -437,6 +454,8 @@ function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onForms, on
 // a form gone from the tab (or from a tab not found) counts as invalid.
 // A tab changed on both sides also counts its conflict cards.
 function formsTabLabel(t: FormsTab): string {
+  if (t.merging) return "merging now";
+  if (t.queued >= 0) return t.queued ? `queued to merge, ${t.queued} ahead` : "queued to merge, next";
   const decided = t.count - t.toRule - t.invalid;
   return [t.conflicts ? `${t.conflicts} conflict${t.conflicts === 1 ? "" : "s"}` : null,
     t.toRule ? `${t.toRule} to rule` : decided ? "all ruled, ready to merge" : null,

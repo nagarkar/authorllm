@@ -371,6 +371,17 @@ def merge_stops_on_a_doc_edit_after_ruling(root: Path) -> None:
           r)
     check("nothing landed", (ms / "solo.md").read_text() == ESSAY
           and _open(db, manuscript) == 4)
+    listing = _call(ws, fake, "list")
+    beta = _by_note(listing).get("beta") or next(
+        f for f in listing["files"][0]["forms"] if "Beta" in (f["current"] or ""))
+    check("the list sends that form back to To rule, flagged with the old ruling",
+          beta["ruling"] is None and beta["ruling_stale"]
+          and beta["ruling_stale"]["verdict"] == "accept"
+          and listing["files"][0]["undecided"] == 1, beta)
+    _call(ws, fake, "decide", id=beta["id"], verdict="accept", seen=beta["current"])
+    again = _call(ws, fake, "list")["files"][0]
+    check("a new ruling on the Doc's text clears the flag",
+          again["undecided"] == 0 and all(not f["ruling_stale"] for f in again["forms"]), again)
 
 
 # -------------------------------------------------------------- safety
