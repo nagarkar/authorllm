@@ -1,0 +1,255 @@
+# The default book workflow: the steps a ghostwritten book goes through,
+# large to small, with the author in control.
+#
+# `authorlm book init` copies this file into a book as
+# `<manuscript>/_book/workflow.toml`. From then on the copy is the book's
+# own: change the steps, their order, or who does each one there
+# (`authorlm book assign <step> agent|human:<who>` changes an actor).
+# Read by authorlm/book.py, which documents every key:
+#
+#   id            the step's name
+#   role          the trade doing it
+#   actor         "agent", or "human:<who>" (the run waits for that person)
+#   grain         book | part | chapter: how often the step runs
+#   after         the steps this one follows
+#   gives         what the role is handed up front (never a limit on what
+#                 it may read): brief, register, outline, chapter, part,
+#                 manuscript, summaries, or a step id for what it returned
+#   returns       what the role hands back
+#   leaves_alone  what the role does not change. A problem that belongs
+#                 to an earlier step is filed back, not fixed.
+#   independent   true: the reader is not handed what earlier steps
+#                 returned, so it judges the text cold
+
+# ---- intake: what the book is for
+
+[[step]]
+id = "intake-brief"
+role = "interviewer"
+actor = "human:author"
+grain = "book"
+gives = ["register"]
+returns = "The author's answers on purpose, reader, promise, comparable books and takeaways, each a settled register entry: the author's words verbatim and the reading the author agreed to."
+leaves_alone = "Everything the author did not say. No answer is guessed, filled in or improved."
+
+[[step]]
+id = "intake-sources"
+role = "researcher"
+actor = "agent"
+grain = "book"
+after = ["intake-brief"]
+gives = ["brief", "register"]
+returns = "A list of the source material the author supplied (talks, notes, transcripts, earlier writing): where each is, what it covers, and what the brief needs that no source covers."
+leaves_alone = "The sources themselves and the brief. Gaps are listed, not filled."
+
+# ---- shape and voice: settled by the author before any chapter is written
+
+[[step]]
+id = "shape-proposal"
+role = "structural editor"
+actor = "agent"
+grain = "book"
+after = ["intake-sources"]
+gives = ["brief", "register", "intake-sources"]
+returns = "A proposed outline (parts, chapters, one thesis per chapter) and the story arcs, as proposed register entries of kind shape, thesis and arc, each with its reading. Nothing settled."
+leaves_alone = "The brief. A proposal that needs the brief changed says so and stops there."
+
+[[step]]
+id = "shape"
+role = "author"
+actor = "human:author"
+grain = "book"
+after = ["shape-proposal"]
+gives = ["brief", "register", "shape-proposal"]
+returns = "The outline and arcs as the author settles them: each proposed entry settled, revised in the author's words, or dropped, and toc.toml matching the settled outline."
+leaves_alone = "Nothing. The shape of the book is the author's choice."
+
+[[step]]
+id = "voice-sample"
+role = "drafter"
+actor = "agent"
+grain = "book"
+after = ["shape"]
+gives = ["brief", "register", "outline", "intake-sources"]
+returns = "Two or three sample passages in distinct candidate voices, drawn from the author's own material, with a proposed register entry of kind voice for each."
+leaves_alone = "The outline, the arcs and the brief."
+
+[[step]]
+id = "voice-approval"
+role = "author"
+actor = "human:author"
+grain = "book"
+after = ["voice-sample"]
+gives = ["register", "voice-sample"]
+returns = "The voice the author chooses, as a settled register entry of kind voice in the author's own words."
+leaves_alone = "Nothing. The voice is the author's choice."
+
+# ---- each chapter: interview, draft, then three checks
+
+[[step]]
+id = "chapter-interview"
+role = "interviewer"
+actor = "human:author"
+grain = "chapter"
+after = ["voice-approval"]
+gives = ["brief", "register", "outline", "chapter"]
+returns = "What the author wants this chapter to say: its claims, stories and terms as settled register entries scoped to the chapter, in the author's words."
+leaves_alone = "The chapter's thesis and place in the outline. An answer that changes either is filed back to shape."
+
+[[step]]
+id = "draft"
+role = "drafter"
+actor = "agent"
+grain = "chapter"
+after = ["chapter-interview"]
+gives = ["brief", "register", "outline", "chapter", "summaries", "chapter-interview"]
+returns = "The chapter drafted in its file, and a use recorded for every register entry the draft rests on, applies or infers."
+leaves_alone = "The outline, the thesis, the voice and every other chapter. No claim, story or term the author did not supply is invented; a gap is filed back to the chapter interview."
+
+[[step]]
+id = "lint"
+role = "linter"
+actor = "agent"
+grain = "chapter"
+after = ["draft"]
+gives = ["register", "chapter"]
+returns = "The mechanical findings on the draft (repetition, filler, broken forms, style law), each with its place in the chapter, and the fixes made."
+leaves_alone = "What the chapter claims and how it is built. Only mechanical defects are fixed."
+
+[[step]]
+id = "critic"
+role = "critic"
+actor = "agent"
+grain = "chapter"
+after = ["lint"]
+gives = ["brief", "register", "chapter"]
+returns = "A reader's judgment of the chapter against the brief and its thesis: what works, what fails, each finding with evidence from the text."
+leaves_alone = "The chapter text. A critic reports and changes nothing."
+independent = true
+
+[[step]]
+id = "consistency"
+role = "continuity editor"
+actor = "agent"
+grain = "chapter"
+after = ["critic"]
+gives = ["register", "outline", "chapter", "summaries"]
+returns = "A check of the chapter's thesis, claims, arcs and terms against the register: each entry met, failed or not reached, with the passage, and each inference the draft made that the author never settled."
+leaves_alone = "The chapter text and the register. A conflict is reported for the author, never resolved by choosing a side."
+
+# ---- each part: the author reads
+
+[[step]]
+id = "part-read"
+role = "author"
+actor = "human:author"
+grain = "part"
+after = ["consistency"]
+gives = ["register", "part", "critic", "consistency"]
+returns = "The author's verdict on the part: what stands, what to change, and any choice to reopen, in the author's words."
+leaves_alone = "Nothing. The author may change anything."
+
+# ---- the whole book: large problems first, then small
+
+[[step]]
+id = "assessment"
+role = "manuscript assessor"
+actor = "agent"
+grain = "book"
+after = ["part-read"]
+gives = ["brief", "register", "manuscript"]
+returns = "An assessment of the whole manuscript: what the book delivers against what the brief promises, and its largest problems, each with evidence."
+leaves_alone = "The manuscript. An assessment changes nothing."
+independent = true
+
+[[step]]
+id = "developmental-edit"
+role = "developmental editor"
+actor = "agent"
+grain = "book"
+after = ["assessment"]
+gives = ["brief", "register", "outline", "manuscript", "summaries"]
+returns = "Proposed structural changes (order, cuts, additions, an argument that does not hold), each with its reason and the decision it needs from the author. Proposals only."
+leaves_alone = "The manuscript text and the sentences. Nothing is applied before the author decides."
+
+[[step]]
+id = "developmental-decisions"
+role = "author"
+actor = "human:author"
+grain = "book"
+after = ["developmental-edit"]
+gives = ["register", "developmental-edit"]
+returns = "The author's decision on each proposed change, as settled register entries of kind ruling, and the accepted changes applied."
+leaves_alone = "Nothing. Each structural decision is the author's."
+
+[[step]]
+id = "line-edit"
+role = "line editor"
+actor = "agent"
+grain = "book"
+after = ["developmental-decisions"]
+gives = ["register", "manuscript"]
+returns = "The prose edited sentence by sentence for clarity, rhythm and the settled voice, with a list of the changes."
+leaves_alone = "Structure, order, and what the text claims. A structural problem is filed back to the developmental edit."
+
+[[step]]
+id = "copyedit"
+role = "copy editor"
+actor = "agent"
+grain = "book"
+after = ["line-edit"]
+gives = ["register", "manuscript"]
+returns = "Grammar, spelling, punctuation and consistency of terms corrected to the style law, with a style sheet of the choices made."
+leaves_alone = "Structure, claims and the author's voice. A sentence that needs rewriting is filed back to the line edit."
+
+[[step]]
+id = "fact-check"
+role = "fact checker"
+actor = "agent"
+grain = "book"
+after = ["copyedit"]
+gives = ["register", "manuscript", "intake-sources"]
+returns = "Every checkable fact, name, date and quotation with its source and a verdict: confirmed, wrong, or not found."
+leaves_alone = "The text. A wrong fact is reported for the author to correct; it is not corrected here."
+
+[[step]]
+id = "production"
+role = "production editor"
+actor = "agent"
+grain = "book"
+after = ["fact-check"]
+gives = ["register", "manuscript"]
+returns = "The book assembled for publication: front and back matter, illustrations placed, the exports built, and a list of what each export still lacks."
+leaves_alone = "The words. Production changes how the book is laid out, never what it says."
+
+[[step]]
+id = "proofread"
+role = "proofreader"
+actor = "agent"
+grain = "book"
+after = ["production"]
+gives = ["manuscript"]
+returns = "The errors left in the produced book (typos, broken layout, wrong references), each with its place."
+leaves_alone = "Wording, style and structure. Only plain errors are corrected; anything larger is filed back."
+independent = true
+
+[[step]]
+id = "cold-read"
+role = "cold reader"
+actor = "agent"
+grain = "book"
+after = ["proofread"]
+gives = ["manuscript"]
+returns = "One reader's account of reading the finished book start to finish: where it held them, where it lost them, and whether it kept its promise."
+leaves_alone = "The book. A cold reader reports and changes nothing."
+independent = true
+
+[[step]]
+id = "approval"
+role = "author"
+actor = "human:author"
+grain = "book"
+after = ["cold-read"]
+gives = ["register", "proofread", "cold-read"]
+returns = "The author's approval to publish, or the list of what must change first."
+leaves_alone = "Nothing. Approval is the author's alone."

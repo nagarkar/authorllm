@@ -558,6 +558,84 @@ CREATE TABLE IF NOT EXISTS triage_drafts (
     UNIQUE (manuscript_id, triage_type, object_id)
 );
 
+-- The register of settled choices (register.py): one row per choice, with
+-- the author's words verbatim and the machine's reading of them side by
+-- side. A settled row's words and reading never change in place: a change
+-- is a new row whose `supersedes` names the old one. A key is unique among
+-- the live rows (proposed, settled, reopened) of its kind in a manuscript,
+-- kept in code (register.add).
+CREATE TABLE IF NOT EXISTS register_entries (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    kind TEXT NOT NULL,           -- one of register.KINDS
+    key TEXT NOT NULL,            -- a short slug
+    author_words TEXT NOT NULL DEFAULT '',  -- verbatim, never paraphrased
+    reading TEXT NOT NULL DEFAULT '',       -- the machine's reading of them
+    test TEXT,                    -- the entry as a check a chapter meets or fails
+    status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | settled |
+                                  -- reopened | superseded
+    scope_document_id TEXT,       -- NULL: the whole book; else a dc- id
+    supersedes TEXT,              -- the entry this one replaced
+    settled_at TEXT,              -- when it was last settled
+    note TEXT                     -- why it was reopened or revised
+);
+
+-- Work that rests on a register entry (register.use): which entry, who did
+-- the work, and whether the work applies the entry as written or infers
+-- something the entry does not say.
+CREATE TABLE IF NOT EXISTS register_uses (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,       -- register_entries.id
+    step_run_id TEXT,             -- step_runs.id, when a workflow step did it
+    document_id TEXT,             -- the dc- id of the chapter the work is in
+    actor TEXT NOT NULL,
+    mode TEXT NOT NULL,           -- applies | infers
+    note TEXT NOT NULL DEFAULT ''
+);
+
+-- One attempt at one step of a book's workflow for one scope (book.py).
+-- The scope is the whole book, a part (the dc- id of the part's opening
+-- document; NULL when the book has no parts and is read as one) or a
+-- chapter (its dc- id). Nothing here is deleted: a restart marks runs
+-- superseded and the next attempt is a new row.
+CREATE TABLE IF NOT EXISTS step_runs (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    step TEXT NOT NULL,           -- the step id in the book's definition
+    scope_kind TEXT NOT NULL,     -- book | part | chapter
+    scope_document_id TEXT,       -- NULL for the book, else a dc- id
+    attempt INTEGER NOT NULL,     -- 1, 2, ... per step and scope
+    status TEXT NOT NULL,         -- running | waiting | done | failed |
+                                  -- superseded; changed only by
+                                  -- book._transition, which logs the change
+    actor TEXT NOT NULL,          -- copied from the definition at start
+    note TEXT NOT NULL DEFAULT '',
+    result TEXT NOT NULL DEFAULT '{{}}',  -- JSON: what the role handed back
+    finished_at TEXT,
+    superseded_by TEXT,           -- the next attempt's run id, once started
+    superseded_reason TEXT,       -- the reason given to `book restart`
+    failed_reason TEXT,           -- the reason given to `book fail`
+    definition_hash TEXT NOT NULL,  -- the definition file when it started
+    contract_hash TEXT NOT NULL   -- this step's contract when it started
+);
+
+-- The append-only log of a book workflow (book.py): one row per change of
+-- a step run's status, written in the same transaction as the change.
+-- Rows are never updated or deleted.
+CREATE TABLE IF NOT EXISTS step_events (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,         -- step_runs.id
+    step TEXT NOT NULL,
+    scope_kind TEXT NOT NULL,     -- book | part | chapter
+    scope_document_id TEXT,       -- NULL for the book, else a dc- id
+    from_status TEXT,             -- NULL: the run was started
+    to_status TEXT NOT NULL,
+    actor TEXT NOT NULL,          -- the run's actor, or `restart`
+    reason TEXT NOT NULL DEFAULT ''
+);
+
 CREATE INDEX IF NOT EXISTS idx_triage_runs_lookup
     ON triage_runs (manuscript_id, triage_type, profile_id, profile_version, created_at);
 CREATE INDEX IF NOT EXISTS idx_triage_assessments_lookup

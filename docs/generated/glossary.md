@@ -2,6 +2,19 @@
 
 # Glossary
 
+- **actor** (`authorlm.book`): who carries out a step: `agent`, or `human:<who>`.
+- **grain** (`authorlm.book`): how often a step runs: once for the `book`, once per `part`, or once per `chapter`.
+- **independent step** (`authorlm.book`): a step whose reader must judge the text cold: its pack withholds what earlier steps returned.
 - **item** (`authorlm.devedit`): one proposed change: an exact original passage and its proposed replacement, or a structural move stated in one line.
+- **pack** (`authorlm.book`): what a role is handed when its run starts: its contract, the register entries in scope, what the steps before it returned, and, on a rerun, the superseded result as reference.
+- **reading** (`authorlm.register`): the machine's restatement, in one to three sentences, of what the author's words settle.
+- **register** (`authorlm.register`): the record of the choices the author has settled for one manuscript, the tables `register_entries` and `register_uses`.
+- **register entry** (`authorlm.register`): one choice: its kind, its key, the author's words, the machine's reading, an optional test, and its scope (the whole book or one document).
+- **register use** (`authorlm.register`): a record that a piece of work rests on an entry, in one of two modes: `applies` (the work does what the entry says) or `infers` (the work goes beyond what the entry says).
 - **run** (`authorlm.devedit`): one developmental edit of one manuscript, the folder `_devedit/<run-id>/`.
+- **step** (`authorlm.book`): one role's turn in the workflow: its id, role, actor, grain, the steps it follows, what it is given, what it returns and what it leaves alone.
+- **step contract** (`authorlm.book`): what a step asks of its role: its role, grain, the steps it follows, what it is given, what it returns and what it leaves alone. Not its actor.
+- **step event** (`authorlm.book`): one change of a step run's status, a row of `step_events`: the run, the status before and after, who, and why.
+- **step run** (`authorlm.book`): one attempt at one step for one scope, a row of `step_runs`: running (an agent has it), waiting (a person has it), done, failed (kept; the step can be started again), or superseded (kept, replaced by a restart).
 - **term index** (`authorlm.terms`): every recurring term of the manuscript, with its locations (file, section heading, paragraph number) and its definition-shaped sentences, from `Terms.index()`.
+- **workflow definition** (`authorlm.book`): the book's own list of steps, `_book/workflow.toml`.
