@@ -5589,7 +5589,8 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
 
     `seen` is the push guard's read, {tab, revision}: the first pass
     uses its tab text instead of exporting the whole Doc again, provided
-    the Doc's revision has not moved since. Every write names the
+    the Doc's revision has not moved since; when it has, the tab is read
+    afresh instead. Every write names the
     revision it was planned against (Google declines it if the Doc moved
     in between), and a push whose writes and read-back form one unbroken
     chain records the revision it left as this tab's `doc_rev`; the next
@@ -5645,7 +5646,10 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                  ) -> tuple[str, list[dict], list[str]]:
         """The tab's export and its Doc paragraphs, aligned: hard-break
         joins the Doc's own paragraphs explain are split back apart.
-        `reuse` is the guard's read, used in place of an export."""
+        `reuse` is the guard's read, used in place of an export while the
+        Doc still stands at its revision. The revision is Doc-wide, so an
+        edit to any tab makes it stale: then it is simply not reused,
+        and the tab is read afresh (#417)."""
         if reuse is not None:
             before, md = reuse.get("revision"), reuse["tab"]
         else:
@@ -5657,8 +5661,7 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
         revs["sure"] = (revs["now"] if before and before == revs["now"]
                         else None)
         if reuse is not None and revs["sure"] is None:
-            raise DocChanged(f"{relpath}: the Doc changed during the push. "
-                             "push again")
+            return read_tab()
         return md, paras, _split_hard_breaks(
             _md_units(md), [d["text"] for d in paras])
 

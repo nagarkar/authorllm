@@ -11736,6 +11736,44 @@ def main_test() -> None:
             "A distinctive orrery sentence to anchor a comment.\n")
         push_doc(db, api.get_manuscript(db), "06-orrery.md", service=stub,
                  docs_service=stub)
+
+        # #417 (it-504ef4a8173b): the revision is Doc-wide, so an edit to
+        # ANOTHER tab between the guard's read and the push's first read
+        # left the guard's read stale and the push raised DocChanged on
+        # every retry while someone edited elsewhere. A stale guard read
+        # is simply not reused: the push reads the tab afresh and lands.
+        from authorlm.gdocs import _refuse_doc_changed, diff_push
+
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails, lacquered.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        guard_read = _refuse_doc_changed(
+            db, api.get_manuscript(db), manuscript_bridge(manuscript),
+            "06-orrery.md", stub, stub)
+        choice_tab = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                          if t["title"] == "01-choice.md")
+        stub.set_tab("01-choice.md", choice_tab + "\nEdited elsewhere.\n")
+        try:
+            elsewhere = diff_push(db, api.get_manuscript(db), "06-orrery.md",
+                                  stub, stub, seen=guard_read)
+        except DocChanged as err:
+            elsewhere = {"raised": str(err)}
+        orrery_now = next(t["text"] for t in stub.state["docs"]["doc-2"]
+                          if t["title"] == "06-orrery.md")
+        check("a guard read gone stale by an edit to another tab is read "
+              "afresh, and the push lands instead of raising DocChanged",
+              guard_read is not None
+              and guard_read.get("revision") != stub.documents()._rev()
+              and elsewhere.get("mode") == "diff"
+              and "lacquered" in orrery_now,
+              str((guard_read, elsewhere, orrery_now)))
+        stub.set_tab("01-choice.md", choice_tab)
+        stub.set_tab("06-orrery.md", orrery_tab)
+        (ms / "06-orrery.md").write_text(
+            "# Orrery\n\nBrass planets on brass rails, polished.\n\n"
+            "A distinctive orrery sentence to anchor a comment.\n")
+        push_doc(db, api.get_manuscript(db), "06-orrery.md", service=stub,
+                 docs_service=stub)
         stub.add_comment("c-nowhere", "a quote matching no file at all",
                          "Where does this belong?")
         check("an unattributable anchor makes every mapped tab bearing",
