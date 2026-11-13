@@ -1394,6 +1394,12 @@ The [Signature: uri] tag: plain text in the files, a signature block (image, aut
 
 `hygiene.stale_suggestions` marks pending bridge / prerequisite guidance moot when collect later realizes the concept or closes the gap.
 
+## `tests.test_strip_pending_own_line_stack`
+
+`authorlm/tests/test_strip_pending_own_line_stack.py`
+
+`form_grammar.strip_pending` / `approved_text` must clear every own-line insertion `pending_forms` lists — including footnote definitions stacked with a single newline (Docs export shape).
+
 ## `tests.test_structure_find_file`
 
 `authorlm/tests/test_structure_find_file.py`
