@@ -14,7 +14,9 @@ interface Section {
   generatedAt: string | null; moved: Moved | null;
 }
 interface Chapter extends ChapterSummary { quality: string; durationSecs: number | null; sections: Section[]; stitchedUrl: string | null; inRetailSample: string[]; }
-interface Job { id: number; kind: string; state: string; message: string; stem?: string | null; characters: number; done: number; of: number; ordinals?: number[]; at: string; finishedAt?: string; }
+interface Job { id: number; kind: string; state: string; message: string; stem?: string | null; characters: number; done: number; of: number; ordinals?: number[]; at: string; finishedAt?: string; held?: boolean; link?: string; }
+// A file whose tab the page did not push (the Doc side moved, or forms wait).
+interface Held { file: string; state: string; message: string; }
 interface Status {
   book: { title: string; quality: string; exportedAt: string | null; manuscript: string; chapters: ChapterSummary[] };
   chapter: Chapter | null;
@@ -22,6 +24,7 @@ interface Status {
   export: { stale: boolean; changed: string[]; exported: string | null; reason: string };
   account: { remaining: number; used: number; limit: number; at: string } | null;
   jobs: { running: Job | null; queued: Job[]; recent: Job[] };
+  held?: Held[]; formsLink?: string;
 }
 type Source = "preview" | "take";
 
@@ -118,6 +121,7 @@ export function App() {
     setMs(name);
   }, []);
   const openWord = useCallback((t: string) => { setTerm(t); setMode("pron"); window.scrollTo({top: 0}); }, []);
+  const openForms = useCallback(() => { setMode("forms"); window.scrollTo({top: 0}); }, []);
   useEffect(() => {
     const t = setInterval(() => load(stem), busy ? 2000 : 10000);
     return () => clearInterval(t);
@@ -243,7 +247,7 @@ export function App() {
       {mode === "pron" && <Workbench key={ms} transport={workbenchTransport} manuscript={ms} initialTerm={term || undefined} />}
       {mode === "devedit" && <DevEdit key={ms} transport={deveditTransport} manuscript={ms} />}
       {mode === "forms" && <MergeForms key={ms} transport={formsTransport} manuscript={ms} tab={formsTab} onTabs={setFormsTabs} />}
-      {mode === "chapters" && <JobStrip jobs={jobs} />}
+      {mode === "chapters" && <JobStrip jobs={jobs} held={status.held || []} onForms={openForms} />}
 
       {mode === "chapters" && chapter && cur && (
         <ChapterBar chapter={chapter}
@@ -266,7 +270,7 @@ export function App() {
         <Card key={sec.id} sec={sec} stem={stem}
           retail={chapter.inRetailSample.includes(sec.id)}
           playing={now?.id === sec.id ? now.source : null}
-          onPlay={play} onWord={openWord} onEdited={onEdited}
+          onPlay={play} onWord={openWord} onEdited={onEdited} onForms={openForms}
           onGenerate={() => act("generate", {stem, ids: [sec.id]})}
           onRetake={() => setConfirm({
             label: `Re-render ¶ ${sec.ordinal} — ${fmt(sec.characters)} characters? The current take is replaced.`,
@@ -287,20 +291,29 @@ export function App() {
   );
 }
 
-function JobStrip({jobs}: {jobs: Status["jobs"]}) {
+// A link to the Merge forms page, where the two versions of a tab are settled.
+function FormsLink({href, onForms}: {href?: string; onForms: () => void}) {
+  return <> <a href={href || "#"} onClick={e => { e.preventDefault(); onForms(); }}>Open Merge forms</a></>;
+}
+const jobName = (kind: string) => kind === "autopush" ? "push after edit" : kind;
+
+function JobStrip({jobs, held, onForms}: {jobs: Status["jobs"]; held: Held[]; onForms: () => void}) {
   const r = jobs.running;
   const last = jobs.recent[jobs.recent.length - 1];
-  if (!r && !jobs.queued.length && !last) return null;
+  const notes = held.filter(h => !(last && last.held && last.message === h.message));
+  if (!r && !jobs.queued.length && !last && !notes.length) return null;
   return (
     <div className="jobs">
       {r && <div className="job running">
-        <span className="spin" /> <b>{r.kind}</b>{r.stem ? ` ${r.stem}` : ""}{r.of ? ` ${r.done}/${r.of}` : ""}{r.characters ? ` · ${fmt(r.characters)} chars` : ""}
+        <span className="spin" /> <b>{jobName(r.kind)}</b>{r.stem ? ` ${r.stem}` : ""}{r.of ? ` ${r.done}/${r.of}` : ""}{r.characters ? ` · ${fmt(r.characters)} chars` : ""}
         {r.message ? <span className="small"> — {r.message}</span> : null}
       </div>}
-      {jobs.queued.length > 0 && <div className="job small">{jobs.queued.length} queued: {jobs.queued.map(j => `${j.kind}${j.ordinals ? " ¶ " + j.ordinals.join(",") : ""}`).join(" · ")}</div>}
-      {!r && last && <div className={`job small ${last.state === "failed" ? "bad" : "ok"}`}>
-        {last.kind}{last.stem ? ` ${last.stem}` : ""}{last.ordinals ? ` ¶ ${last.ordinals.join(",")}` : ""}: {last.message} ({when(last.finishedAt)})
+      {jobs.queued.length > 0 && <div className="job small">{jobs.queued.length} queued: {jobs.queued.map(j => `${jobName(j.kind)}${j.ordinals ? " ¶ " + j.ordinals.join(",") : ""}`).join(" · ")}</div>}
+      {!r && last && <div className={`job small ${last.state === "failed" ? "bad" : last.held ? "warn" : "ok"}`}>
+        {jobName(last.kind)}{last.stem ? ` ${last.stem}` : ""}{last.ordinals ? ` ¶ ${last.ordinals.join(",")}` : ""}: {last.message} ({when(last.finishedAt)})
+        {last.link && <FormsLink href={last.link} onForms={onForms} />}
       </div>}
+      {notes.map(h => <div key={h.file} className="job small warn">{h.message}<FormsLink onForms={onForms} /></div>)}
     </div>
   );
 }
@@ -325,25 +338,26 @@ function ChapterBar({chapter, onGenerateAll, onStitch}: {chapter: Chapter; onGen
   );
 }
 
-interface SourceBlock { file: string; line: number; markdown: string; }
+interface SourceBlock { file: string; line: number; markdown: string; warning?: string; link?: string; }
 
-function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate, onRetake}: {
+function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onForms, onGenerate, onRetake}: {
   sec: Section; stem: string; retail: boolean; playing: Source | null;
   onPlay: (s: Source, sec: Section) => void; onWord: (term: string) => void; onEdited: (id: string) => Promise<void>;
+  onForms: () => void;
   onGenerate: () => void; onRetake: () => void;
 }) {
   const badge = sec.kind === "heading" ? `H${sec.level ?? ""}` : "¶";
   // Editing on the spot (2026-10-26): the box holds the paragraph's markdown
   // as it is in the file; Save writes it back and the server re-exports, so
   // the card comes back under a new id with nothing rendered.
-  const [edit, setEdit] = useState<null | {where: string; text: string}>(null);
+  const [edit, setEdit] = useState<null | {where: string; text: string; warning?: string; link?: string}>(null);
   const [saving, setSaving] = useState<"" | "opening" | "saving">("");
   const [editError, setEditError] = useState("");
   const openEdit = async () => {
     setSaving("opening"); setEditError("");
     try {
       const src = await request<SourceBlock>("source", {stem, id: sec.id});
-      setEdit({where: `${src.file}:${src.line}`, text: src.markdown});
+      setEdit({where: `${src.file}:${src.line}`, text: src.markdown, warning: src.warning, link: src.link});
     } catch (err) { setEditError((err as Error).message); }
     setSaving("");
   };
@@ -392,6 +406,7 @@ function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate,
             <span className="where">{edit.where}</span>
             <button className="close" onClick={() => void save()} disabled={saving === "saving"} aria-label="Save and close">✕</button>
           </div>
+          {edit.warning && <div className="moved">{edit.warning}<FormsLink href={edit.link} onForms={() => { cancel(); onForms(); }} /></div>}
           <textarea className="markdown" value={edit.text}
             onChange={e => setEdit({...edit, text: e.target.value})} aria-label={`Markdown of ¶ ${sec.ordinal}`} autoFocus />
           {editError && <div className="moved bad-note">{editError}</div>}
@@ -420,9 +435,11 @@ function Card({sec, stem, retail, playing, onPlay, onWord, onEdited, onGenerate,
 
 // The Tab menu's count: forms to rule are only those the tab still holds;
 // a form gone from the tab (or from a tab not found) counts as invalid.
+// A tab changed on both sides also counts its conflict cards.
 function formsTabLabel(t: FormsTab): string {
   const decided = t.count - t.toRule - t.invalid;
-  return [t.toRule ? `${t.toRule} to rule` : decided ? "all ruled, ready to merge" : null,
+  return [t.conflicts ? `${t.conflicts} conflict${t.conflicts === 1 ? "" : "s"}` : null,
+    t.toRule ? `${t.toRule} to rule` : decided ? "all ruled, ready to merge" : null,
     t.toRule && decided ? `${decided} decided` : null,
     t.invalid ? `${t.invalid} invalid` : null].filter(Boolean).join(", ");
 }

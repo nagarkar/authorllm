@@ -2407,7 +2407,7 @@ def check_audiobook_page() -> None:
             gdocs.pull_doc, gdocs.get_service, gdocs.get_docs_service = real_pull, real[1], real[2]
         check("a pull job brings down only the chapter's own tab",
               pulled == ["kindness.md"] and job["state"] == "done"
-              and job["message"] == "the Doc matches the files", str(job))
+              and job["message"] == "the Doc matches kindness.md", str(job))
         # The server opened without -m (key "*"); the page then names the
         # manuscript, and must reach the same session, never a second worker.
         audiobook._SESSIONS[(str(ws), "*")] = audiobook._SESSIONS.pop((str(ws), "Scratch"))
@@ -2669,8 +2669,10 @@ def check_audiobook_continuation_edit() -> None:
         job = s.enqueue("pull", stem="kindness")
         check("Pull asks for both tabs and names a two-sided continuation",
               pulled == ["kindness.md", "kindness-2.md"] and job["state"] == "done"
-              and job["message"] == "the Doc matches the files · changed on both sides, "
-                                    "left alone: kindness-2.md", str(job))
+              and job["message"] == "the Doc matches kindness.md · changed on both sides, "
+                                    "left alone: kindness-2.md (settle it on the Merge "
+                                    "forms page)"
+              and job.get("link") == "#Scratch/forms", str(job))
 
         def pull_missing(db, manuscript, query=None, **kw):
             return {"changed": [], "unchanged": [], "conflicts": [],
@@ -2700,7 +2702,8 @@ def check_audiobook_continuation_edit() -> None:
         job = s.enqueue("pull", stem="kindness")
         texts = [x["text"] for x in s.status("kindness")["chapter"]["sections"]]
         check("a pulled continuation re-exports, and its card shows the Doc's text",
-              job["state"] == "done" and job["message"] == "pulled kindness-2.md"
+              job["state"] == "done"
+              and job["message"] == "pulled kindness-2.md · the Doc matches kindness.md"
               and "The Doc's wording of the recap." in texts, str(job))
     finally:
         gdocs.push_doc, gdocs.pull_doc, gdocs.get_service, gdocs.get_docs_service = real
