@@ -1167,42 +1167,8 @@ its own copy, so a replaced reading never changes a live run. Conventions where
 English allows several forms are settled up front by the default style laws,
 not by the reading.
 
-**Default style law (ratified 2026-11-12).** Where English allows more than
-one valid form, every manuscript starts with a decided one: the defaults in
-`authorlm/library/style-defaults.toml`, read in place as the LOWEST layer of
-every file's effective guide (`authorlm style show <file>` marks them
-`workspace default`; `authorlm style guides` and `get_style` without a file
-list them with any law that displaces each). The filters follow them like any
-law, so a book never gets a style-sheet question on a point a default
-decides. The defaults, by key:
-
-- `serial-comma`: always ("truth, beauty, and goodness").
-- `clause-comma`: comma before and/but/or joining two independent clauses;
-  may drop when both are short and tight.
-- `possessive-s`: names take a bare apostrophe (Charles', Socrates');
-  common nouns take 's (the boss's); plurals bare (the gods').
-- `quotation-marks`: curly, American (periods and commas inside).
-- `dash`: closed em dash (a—b); en dash only for ranges.
-- `semicolons`: allowed in standard use.
-- `ellipsis`: the single character …
-- `colon-capital`: lowercase after a colon, even before a full sentence.
-- `numbers`: words for zero to one hundred and round numbers, figures
-  otherwise; figures for years, dates, % and units.
-- `compound-modifiers`: hyphenated before the noun, open after; none after -ly.
-- `italics`: Chicago (long-work titles, unfamiliar foreign words, words as
-  words, rare emphasis; short-work titles in quotation marks).
-- `spelling`: American, Merriam-Webster's first form (toward, judgment).
-
-**Changing a default.** For every book: edit the row in
-`style-defaults.toml` (only on the author's word; it reaches every manuscript
-at once). For one book: add that book's own law naming the default it
-displaces, `authorlm style add <aspect> "<statement>" --guide "<root guide>"
---overrides default:<key>` (MCP `add_style_law(overrides="default:<key>")`;
-a comma list displaces several). A book's law that contradicts a default
-without naming it leaves both in the guide, so always link it. Linked on
-2026-11-12: Parables' "no dashes, no semicolons" law displaces `default:dash`
-and `default:semicolons`; SMSTTD's "own chapters plain roman" law and DON's
-"Sanskrit roman in verse" law displace `default:italics`.
+**Default style law.** Where a convention has a workspace default (see "Default
+style law" below), the filters follow it as STYLE LAW and plant no question.
 
 **Three filters are written and waiting to be ratified**, in full, in
 `docs/filter-pass-design.md`'s appendix:
