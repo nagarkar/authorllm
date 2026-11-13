@@ -6781,11 +6781,88 @@ def check_stage_revisions(root: Path, FakeGoogle) -> None:
               "names itself"))
 
 
+def check_suggestion_sections_and_checkout() -> None:
+    """Issue #420: a standalone [Suggestion:] never reaches across a
+    heading into the previous section (two notes in different sections
+    were reported as acting on the same paragraph, and a note under a
+    heading would have rewritten the last paragraph of the section
+    above); and a Doc-road apply that stops on a bad item keeps the
+    file checked out, so the retry does not slip onto the direct road."""
+    from authorlm import directives as dv
+    from authorlm import gdocs as gdocs_mod
+
+    text = ("# Essay\n\n"
+            "## One\n\n"
+            "First section prose.\n\n"
+            "[Suggestion: sharpen this]\n\n"
+            "## Two\n\n"
+            "[Suggestion: open the section with a case]\n\n"
+            "Second section prose.\n")
+    tags = directive_tags.scan_text(text, "suggestion")
+    check("#420: a standalone note directly under a heading has no target "
+          "(never the prose of the section above)",
+          tags[0]["target"] == "First section prose."
+          and tags[1]["target"] is None, repr(tags))
+
+    root = Path(tempfile.mkdtemp(prefix="authorlm-sugg-420-"))
+    try:
+        ms = root / "manuscript"
+        ms.mkdir()
+        (ms / "wall.md").write_text(text)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli_main(["--workspace", str(root), "init", "--name",
+                      "sugg-420", "--path", str(ms)])
+        db = api.open_db(str(root))
+        man = api.get_manuscript(db)
+        with contextlib.redirect_stdout(io.StringIO()):
+            api.collect(db, man, {})
+        err = ""
+        try:
+            dv.apply(db, man, {}, "suggestion", "wall.md",
+                     [(1, "Sharper."), (2, "A case.")])
+        except ValueError as e:
+            err = str(e)
+        check("#420: two notes in different sections never collide; the "
+              "one under a heading is named as having no prose before it",
+              "same paragraph" not in err and "tag #2" in err
+              and (ms / "wall.md").read_text() == text, err)
+
+        meta = gdocs_mod._mapping(db, man)
+        links = meta.setdefault("gdocs", {})
+        links["_master_id"] = "doc-fake"
+        links["wall.md"] = {"tab_id": "tab-1", "checked_out": True}
+        gdocs_mod._save_mapping(db, man, meta)
+
+        def fake_level(db_, man_, rel, *a, **k):
+            m = gdocs_mod._mapping(db_, man_)
+            m["gdocs"][rel]["checked_out"] = False   # pull levels and clears
+            gdocs_mod._save_mapping(db_, man_, m)
+            return {"pulled": [rel]}
+
+        orig = gdocs_mod.level_from_doc
+        gdocs_mod.level_from_doc = fake_level
+        try:
+            try:
+                dv.apply(db, man, {}, "suggestion", "wall.md",
+                         [(9, "No such tag.")], services=lambda: (None, None))
+            except ValueError:
+                pass
+        finally:
+            gdocs_mod.level_from_doc = orig
+        still = gdocs_mod.doc_status(db, man).get("wall.md", {})
+        check("#420: a Doc-road apply that stops on a bad item leaves the "
+              "file checked out (the retry stays on the Doc road)",
+              still.get("checked_out") is True, repr(still))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main_test() -> None:
     check_critic_checklist_and_lint_draft()
     check_morph_scope_and_critic_nearest()
     check_directives()
     check_suggestions()
+    check_suggestion_sections_and_checkout()
     check_critique_resolve_reembeds()
     check_client_resolution()
     check_client_stamps()
