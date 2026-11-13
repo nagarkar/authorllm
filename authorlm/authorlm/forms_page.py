@@ -14,7 +14,9 @@ file, what the author would do by hand, and stops where a person must look:
 
 1. Read the file three ways (`gdocs.doc_three_way`). Changed on both sides
    since the last push (`conflict`): stop, show both sides of `doc diff`.
-   No forced pull (it drops local edits) and no push over it.
+   No forced pull (it drops local edits) and no push over it. Such a
+   file is settled under Conflicts instead (`land_conflict`, below),
+   once its forms are merged.
 2. Every form still in the tab has a ruling, and its green half still reads
    as it did when it was ruled; otherwise stop and say which.
 3. Only the tab moved (`doc_ahead`): pull it first, an ordinary pull. A tab
@@ -168,20 +170,24 @@ def _diff_sides(view: dict) -> dict:
 
 
 def listing(db: Database, manuscript: dict, service, docs_service) -> dict:
-    """Every open form, by file, as the Doc holds it now. Read-only: one
+    """Every open form, by file, as the Doc holds it now, and every file
+    changed on both sides (Conflicts), forms or not. Read-only: one
     export of the master Doc (`gdocs.read_manuscript`), and for a file in
-    conflict its three-way view. No Google call when nothing is open."""
+    conflict its three-way view and its cards (`conflict_view`). No
+    Google call when the manuscript has no master Doc."""
     groups = open_threads(db, manuscript)
     links = gdocs.doc_status(db, manuscript)
     master = links.get("_master_id")
     out: dict[str, Any] = {"doc_url": gdocs.tab_url(master) if master else None,
-                           "files": [], "total": 0}
-    if not groups:
+                           "files": [], "total": 0, "conflicts": 0}
+    if not master:
         return out
     read = gdocs.read_manuscript(db, manuscript, service, docs_service)
     root = Path(manuscript["path"])
-    for rel in sorted(groups):
-        threads = groups[rel]
+    in_conflict = {rel for rel, e in read["files"].items()
+                   if e.get("state") == "conflict"}
+    for rel in sorted(set(groups) | in_conflict):
+        threads = groups.get(rel, [])
         entry = read["files"].get(rel) or {}
         marked = entry.get("marked")
         pairs = api.pair_external_forms(marked, threads) if marked else {}
@@ -206,14 +212,22 @@ def listing(db: Database, manuscript: dict, service, docs_service) -> dict:
                          f"open form(s) are merged"
                          + (" and the other producers' forms ("
                             + ", ".join(f"{n} {o}" for o, n in others.items())
-                            + ") are settled" if others else "") + ".")}
+                            + ") are settled" if others else "") + ".")
+            if rows else ""}
         if state == "conflict":
             try:
-                info["diff"] = _diff_sides(gdocs.doc_three_way(
-                    db, manuscript, rel, service, docs_service))
+                view = gdocs.doc_three_way(db, manuscript, rel, service,
+                                           docs_service)
+                info["diff"] = _diff_sides(view)
+                info["conflict"] = conflict_view(db, manuscript, rel, view)
             except LookupError as err:
                 info["diff"] = {"base_found": False, "doc": "", "local": "",
                                 "note": str(err)}
+                info["conflict"] = {"key": None, "base_found": False,
+                                    "note": str(err), "regions": [],
+                                    "decided": 0, "held": None,
+                                    "ready": False}
+            out["conflicts"] += 1
         out["files"].append(info)
         out["total"] += len(rows)
     return out
@@ -362,8 +376,7 @@ def merge(db: Database, manuscript: dict, file: str, service, docs_service,
         return stop("conflict",
                     f"{rel} changed both in the file and in its tab since the "
                     f"last push. Nothing was pulled, landed or pushed. Compare "
-                    f"the two sides below, then settle them with 'authorlm doc "
-                    f"merge {rel}' before merging here.",
+                    f"the two sides under Conflicts.",
                     diff=_diff_sides(view))
 
     pairs = api.pair_external_forms(view["tab"], threads)
@@ -466,6 +479,318 @@ def merge(db: Database, manuscript: dict, file: str, service, docs_service,
     return result
 
 
+# --------------------------------------------------------------- conflicts
+# A file changed both in the file and in its tab since the last push is
+# settled here instead of by hand (`doc merge`, edit the markers, `doc
+# pull --force`, copy, collect, `doc push`; done so on 2026-11-12). The
+# two sides merge against the last pushed base (`gdocs.merge3`); a region
+# only one side changed merges by itself, and each region both changed is
+# a card: Keep mine, Keep the Doc's, Keep both, or Edit. Choices are held
+# in the manuscript's metadata (`conflict_rulings`, by file, by region id)
+# until the file lands, as form rulings are held on their threads.
+#
+# A region's id is the hash of its three texts, so a region that reads
+# the same after a recompute keeps its choice, and one that changed is a
+# new card. The whole conflict has a `key` (the hash of the three sides);
+# landing takes the key the page showed and recomputes first: a side
+# that moved since means a new state to look at, not a landing.
+
+CONFLICT_KEY = "conflict_rulings"
+CONFLICT_VERDICTS = ("mine", "doc", "both", "edit")
+
+
+def _sides_key(local: str, base: str, doc: str) -> str:
+    return gdocs.text_hash(local + "\x00" + base + "\x00" + doc)
+
+
+def conflict_segments(local: str, base: str, doc: str
+                      ) -> list[str | dict]:
+    """The three-way merge of `local` and `doc` against `base`, as a list
+    of clean text (str, already merged) and regions both sides changed
+    ({id, local, base, doc}, each the region's lines with their line
+    ends). Joining the clean parts with one choice per region gives the
+    merged text."""
+    merged, _ = gdocs.merge3(local, base, doc, diff3=True)
+    out: list[str | dict] = []
+    clean: list[str] = []
+    region: dict | None = None
+    side = ""
+    seen: dict[str, int] = {}
+    for line in merged.splitlines(keepends=True):
+        bare = line.rstrip("\n")
+        if region is None and bare == "<<<<<<< local":
+            if clean:
+                out.append("".join(clean))
+                clean = []
+            region = {"local": "", "base": "", "doc": ""}
+            side = "local"
+        elif region is not None and side == "local" and bare == "||||||| base":
+            side = "base"
+        elif region is not None and side in ("local", "base") \
+                and bare == "=======":
+            side = "doc"
+        elif region is not None and side == "doc" and bare == ">>>>>>> doc":
+            rid = _sides_key(region["local"], region["base"], region["doc"])
+            seen[rid] = seen.get(rid, 0) + 1
+            region["id"] = rid if seen[rid] == 1 else f"{rid}-{seen[rid]}"
+            out.append(region)
+            region = None
+        elif region is not None:
+            region[side] += line
+        else:
+            clean.append(line)
+    if region is not None:  # an unterminated region: never guessed at
+        raise LookupError("the three-way merge came back with an unclosed "
+                          "region; settle this file with 'authorlm doc "
+                          "merge' by hand")
+    if clean:
+        out.append("".join(clean))
+    return out
+
+
+def _touches_tag(*texts: str) -> bool:
+    from .illus import parse_tag
+
+    return any(parse_tag(ln) for t in texts for ln in t.split("\n"))
+
+
+def _wrap_like(text: str, like: str) -> str:
+    """`text` with the blank lines `like` had before and after it, so a
+    choice sits in the merged text as the region did."""
+    body = like.strip("\n")
+    if not body:
+        return text.strip("\n") + "\n"
+    lead = like[:len(like) - len(like.lstrip("\n"))]
+    trail = like[len(like.rstrip("\n")):] or "\n"
+    return lead + text.strip("\n") + trail
+
+
+def region_text(region: dict, ruling: dict) -> str:
+    """What one choice puts in place of a region."""
+    verdict = ruling["verdict"]
+    mine, doc = region["local"], region["doc"]
+    if verdict == "mine":
+        return mine
+    if verdict == "doc":
+        return doc
+    if verdict == "both":
+        if not mine.strip():
+            return doc
+        if not doc.strip():
+            return mine
+        return mine.rstrip("\n") + "\n\n" + doc.lstrip("\n")
+    like = mine if mine.strip() else doc
+    return _wrap_like(ruling.get("text") or "", like)
+
+
+def _held_rulings(db: Database, manuscript: dict, rel: str) -> dict:
+    return dict((gdocs._read_metadata(db, manuscript).get(CONFLICT_KEY)
+                 or {}).get(rel) or {})
+
+
+def _forms_out(db: Database, manuscript: dict, rel: str) -> str | None:
+    """Why a conflict cannot land yet: forms are out in its tab (one
+    producer at a time). None when it can."""
+    n = len(open_threads(db, manuscript, rel).get(rel, []))
+    others = _other_forms(db, manuscript, rel)
+    if not n and not others:
+        return None
+    parts = ([f"{n} open form{'s' if n != 1 else ''}"] if n else []) + [
+        f"{k} {o} form{'s' if k != 1 else ''}" for o, k in others.items()]
+    return (f"This tab still has {' and '.join(parts)} out. One change lands "
+            f"on a tab at a time, so this conflict can be settled here but "
+            f"lands only once those forms are merged.")
+
+
+def conflict_view(db: Database, manuscript: dict, rel: str, view: dict
+                  ) -> dict:
+    """The page's Conflicts entry for one file, from its `doc_three_way`
+    view: {key, base_found, note, regions: [{id, local, doc, base,
+    illustration, ruling}], decided, held, ready}. `held` says why it
+    cannot land (forms out); `ready` is every card decided and nothing
+    held."""
+    out: dict[str, Any] = {"key": None, "base_found": False, "note": "",
+                           "regions": [], "decided": 0,
+                           "held": _forms_out(db, manuscript, rel),
+                           "ready": False}
+    if view.get("base") is None:
+        out["note"] = (f"No pushed base is on record for {rel}, so the two "
+                       f"sides cannot be told apart here. Run 'authorlm doc "
+                       f"diff {rel}' and settle it by hand.")
+        return out
+    local, base, doc = view["local"], view["base"], view["doc"]
+    rulings = _held_rulings(db, manuscript, rel)
+    out.update(key=_sides_key(local, base, doc), base_found=True)
+    for seg in conflict_segments(local, base, doc):
+        if isinstance(seg, str):
+            continue
+        ruling = rulings.get(seg["id"])
+        out["regions"].append({
+            "id": seg["id"], "local": seg["local"].strip("\n"),
+            "doc": seg["doc"].strip("\n"), "base": seg["base"].strip("\n"),
+            "illustration": _touches_tag(seg["local"], seg["doc"],
+                                         seg["base"]),
+            "ruling": ruling})
+    out["decided"] = sum(1 for r in out["regions"] if r["ruling"])
+    out["ready"] = (out["decided"] == len(out["regions"])
+                    and not out["held"])
+    return out
+
+
+def settle(db: Database, manuscript: dict, file: str, region: str,
+           verdict: str, text: str | None = None) -> dict:
+    """Hold a choice on one conflict card until the file lands: mine,
+    doc, both, or edit (with `text`, the region as the author wants it;
+    paragraphs separated by blank lines), or clear to take it back.
+    Nothing is written to the Doc or the file."""
+    if not file or not region:
+        raise ValueError("a choice names its file and its card")
+    meta = gdocs._mapping(db, manuscript)
+    held = meta.setdefault(CONFLICT_KEY, {})
+    mine = held.setdefault(file, {})
+    if verdict == "clear":
+        mine.pop(region, None)
+        if not mine:
+            held.pop(file, None)
+        gdocs._save_mapping(db, manuscript, meta)
+        return {"file": file, "region": region, "ruling": None}
+    if verdict not in CONFLICT_VERDICTS:
+        raise ValueError(f"a choice is one of {', '.join(CONFLICT_VERDICTS)} "
+                         f"or clear")
+    if verdict == "edit":
+        text = "\n".join(ln.rstrip() for ln in (text or "").split("\n")
+                         ).strip("\n")
+        if not text.strip():
+            raise ValueError("an edit needs text; to keep one side as it "
+                             "is, choose that side")
+        form_grammar.assert_no_pending_markers("", text)
+        if any(ln.startswith(("<<<<<<<", "=======", ">>>>>>>", "|||||||"))
+               for ln in text.split("\n")):
+            raise ValueError("the text still holds merge markers; take "
+                             "them out")
+    ruling = {"verdict": verdict, "at": now_iso(),
+              "text": text if verdict == "edit" else None}
+    mine[region] = ruling
+    gdocs._save_mapping(db, manuscript, meta)
+    return {"file": file, "region": region, "ruling": ruling}
+
+
+def _clear_rulings(db: Database, manuscript: dict, rel: str) -> None:
+    meta = gdocs._mapping(db, manuscript)
+    if rel in (meta.get(CONFLICT_KEY) or {}):
+        meta[CONFLICT_KEY].pop(rel, None)
+        gdocs._save_mapping(db, manuscript, meta)
+
+
+def land_conflict(db: Database, manuscript: dict, file: str, key: str | None,
+                  service, docs_service, config: dict | None = None) -> dict:
+    """Land one file's settled conflict: recompute the regions and stop
+    (`moved`, with the new `conflict`) when either side changed since the
+    page's `key`; then a forced pull (the Doc's text becomes the base;
+    the file's text was collected first, so it stays in history), the
+    merged text written with every picture line kept, collect, and the
+    normal push (surgical when the tab carries comments or threads).
+    Returns the merge result's shape with `kept` (counts per choice);
+    `stopped` is forms, gone, nobase, moved, undecided, pictures, pull,
+    or None when it landed."""
+    rel = file
+    links = gdocs.doc_status(db, manuscript)
+    tab = (links.get(rel) or {}).get("tab_id") if isinstance(
+        links.get(rel), dict) else None
+    result: dict[str, Any] = {
+        "file": rel, "stopped": None, "message": "", "conflict_landing": True,
+        "accepted": 0, "modified": 0, "declined": 0,
+        "kept": {v: 0 for v in CONFLICT_VERDICTS},
+        "warnings": [], "pushed": False,
+        "url": gdocs.tab_url(links.get("_master_id"), tab)
+        if links.get("_master_id") else None}
+
+    def stop(why: str, message: str, **extra: Any) -> dict:
+        result.update(stopped=why, message=message, **extra)
+        return result
+
+    held = _forms_out(db, manuscript, rel)
+    if held:
+        return stop("forms", held + " Nothing was pulled or pushed.")
+    view = gdocs.doc_three_way(db, manuscript, rel, service, docs_service)
+    if view["state"] != "conflict":
+        return stop("gone", f"{rel} is no longer changed on both sides "
+                            f"(now: {view['state']}). Refresh the page.")
+    info = conflict_view(db, manuscript, rel, view)
+    if not info["base_found"]:
+        return stop("nobase", info["note"], conflict=info)
+    if key != info["key"]:
+        return stop("moved", f"{rel} changed in the file or in its tab since "
+                             f"these cards were shown. Here is the new "
+                             f"state; check the cards and Merge again. "
+                             f"Nothing was pulled or pushed.",
+                    conflict=info)
+    open_cards = [r for r in info["regions"] if not r["ruling"]]
+    if open_cards:
+        return stop("undecided", f"{len(open_cards)} card(s) in {rel} have "
+                                 f"no choice yet.", conflict=info)
+
+    rulings = _held_rulings(db, manuscript, rel)
+    parts: list[str] = []
+    for seg in conflict_segments(view["local"], view["base"], view["doc"]):
+        if isinstance(seg, str):
+            parts.append(seg)
+        else:
+            ruling = rulings[seg["id"]]
+            result["kept"][ruling["verdict"]] += 1
+            parts.append(region_text(seg, ruling))
+    merged = normalize_markdown("".join(parts))
+
+    root = Path(manuscript["path"])
+    path = root / rel
+    before = path.read_text(encoding="utf-8") if path.exists() else ""
+    from .illus import capture_embeds, reembed
+    final, _back, missing = keep_embeds(
+        before, reembed(merged, root, capture_embeds(before)), root)
+    if missing:
+        return stop("pictures",
+                    f"{len(missing)} picture line(s) of {rel} would find no "
+                    f"place in the merged text (its tag is gone?): "
+                    + "; ".join(missing) + ". Nothing was pulled or pushed; "
+                    "keep the side that has the tag, or put the tag back "
+                    "in an edit.", conflict=info)
+
+    quiet = contextlib.redirect_stdout(io.StringIO())
+    with quiet:
+        # The file's own text goes into history before the pull covers it.
+        api.collect(db, manuscript, config or {}, source="forms-page-conflict")
+    report = gdocs.pull_doc(db, manuscript, rel, service=service,
+                            docs_service=docs_service, force=True)
+    landed_pull = rel in report.get("changed", []) or rel in report.get(
+        "unchanged", [])
+    if not landed_pull:
+        why = [k for k in ("conflicts", "missing", "marked", "unterminated",
+                           "sidecar_unparsable") if rel in report.get(k, [])]
+        return stop("pull", f"the forced pull of {rel} did not come down "
+                            f"({', '.join(why) or 'no reason given'}); "
+                            f"nothing was written or pushed")
+    path.write_text(final, encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, config or {}, source="forms-page-conflict")
+    _clear_rulings(db, manuscript, rel)
+    if gdocs.unchanged_since_push(db, manuscript, rel):
+        result["pushed"] = True
+    else:
+        try:
+            gdocs.push_doc(db, manuscript, rel, service=service,
+                           docs_service=docs_service, guard=True)
+            result["pushed"] = True
+        except Exception as err:  # noqa: BLE001 — the guard and Google's errors
+            result["warnings"].append(f"not pushed: {err}")
+    k = result["kept"]
+    result["message"] = (f"{rel}: {len(info['regions'])} card(s) settled "
+                         f"({k['mine']} kept mine, {k['doc']} kept the "
+                         f"Doc's, {k['both']} kept both, {k['edit']} edited)"
+                         + ("" if result["pushed"] else "; the tab was not "
+                            "brought up to the file"))
+    return result
+
+
 # ----------------------------------------------------------------- transport
 
 # ------------------------------------------------------------------ queue
@@ -502,8 +827,9 @@ def _run_queue(key: tuple, run_one) -> None:
                 return
             file = q["pending"].pop(0)
             q["running"] = file
+            fn = q.setdefault("calls", {}).pop(file, run_one)
         try:
-            result = run_one(file)
+            result = fn(file)
         except Exception as err:  # noqa: BLE001 — reported on the page
             result = {"file": file, "stopped": "error",
                       "message": f"{type(err).__name__}: {err}",
@@ -528,6 +854,9 @@ def enqueue(key: tuple, file: str, run_one, start: bool = True) -> dict:
         if file != q["running"] and file not in q["pending"]:
             q["pending"].append(file)
             q["results"].pop(file, None)
+            # Each entry runs the call it was queued with (a forms merge
+            # or a conflict landing), on the one worker.
+            q.setdefault("calls", {})[file] = run_one
         if start and q["thread"] is None:
             q["thread"] = threading.Thread(
                 target=_run_queue, args=(key, run_one), daemon=True,
@@ -539,7 +868,10 @@ def enqueue(key: tuple, file: str, run_one, start: bool = True) -> dict:
 def dispatch(method: str, params: dict[str, Any],
              workspace: str | None = None) -> dict:
     """The page's API (`/api/forms`): list, decide, merge (at once),
-    enqueue (merge on the queue's thread) and queue (its state). Every method
+    enqueue (merge on the queue's thread; with `conflict: true` and the
+    `key` the page showed, land the file's settled conflict instead),
+    queue (its state), settle (hold a choice on one conflict card) and
+    land (a conflict landing at once). Every method
     names the manuscript. The database and the Google services are the
     audio page's session's, as for the Dev edit."""
     from . import audiobook
@@ -549,8 +881,7 @@ def dispatch(method: str, params: dict[str, Any],
     db = session._thread_db()
     try:
         if method == "list":
-            groups = open_threads(db, manuscript)
-            if not groups:
+            if not gdocs.doc_status(db, manuscript).get("_master_id"):
                 return listing(db, manuscript, None, None)
             _config, service, docs_service = session._doc_services()
             return listing(db, manuscript, service, docs_service)
@@ -562,12 +893,27 @@ def dispatch(method: str, params: dict[str, Any],
             config, service, docs_service = session._doc_services()
             return merge(db, manuscript, str(params["file"]), service,
                          docs_service, config)
+        if method == "settle":
+            return settle(db, manuscript, str(params["file"]),
+                          str(params["region"]), str(params["verdict"]),
+                          params.get("text"))
+        if method == "land":
+            config, service, docs_service = session._doc_services()
+            return land_conflict(db, manuscript, str(params["file"]),
+                                 params.get("key"), service, docs_service,
+                                 config)
         key = (workspace, manuscript["name"])
         if method == "enqueue":
+            seen_key = params.get("key")
+            conflict = bool(params.get("conflict"))
+
             def run_one(file: str) -> dict:
                 # The worker's own thread: its own database connection.
                 tdb = session._thread_db()
                 config, service, docs_service = session._doc_services()
+                if conflict:
+                    return land_conflict(tdb, manuscript, file, seen_key,
+                                         service, docs_service, config)
                 return merge(tdb, manuscript, file, service, docs_service,
                              config)
             return enqueue(key, str(params["file"]), run_one)

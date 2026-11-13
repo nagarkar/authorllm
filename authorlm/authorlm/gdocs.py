@@ -2057,6 +2057,56 @@ def unchanged_since_push(db: Database, manuscript: dict, query: str,
     return hashlib.sha256(text.encode()).hexdigest()[:16] == entry["pushed_hash"]
 
 
+def doc_side_state(db: Database, manuscript: dict, query: str, service,
+                   docs_service, bridge: "DocBridge | None" = None) -> dict:
+    """Has the Doc side of one file moved since its last push or pull?
+    The audiobook page asks after each saved edit, to push on its own
+    when it has not (2026-11-12). Returns {relpath, state, fast}: state
+    is doc_three_way's (unchanged | local_ahead | doc_ahead | conflict),
+    or "unlinked" for a file with no tab or never pushed.
+
+    The cheap way first: Google moves the master Doc's revision id on
+    any edit to any tab, so it is not per tab on its own, but `doc_rev`
+    is. It records the revision at which this tab was seen to hold its
+    pushed base (a diff push's read-back, a pull, or this check). While
+    the Doc still stands at that revision, nobody has edited any tab,
+    so the tab is the base and the state is decided from the local file
+    with one small read of Google. Otherwise the tab is read
+    (doc_three_way) and, when it still holds the base, the revision it
+    was read at is recorded so the next check is the cheap one."""
+    bridge = bridge or manuscript_bridge(manuscript)
+    relpath, path = _resolve(bridge, query)
+    links = _mapping(db, manuscript).get(bridge.meta_key, {})
+    entry = links.get(relpath) if isinstance(links.get(relpath), dict) else {}
+    master_id = links.get("_master_id")
+    if not (master_id and entry.get("tab_id") and entry.get("pushed_hash")):
+        return {"relpath": relpath, "state": "unlinked", "fast": True}
+    revision = doc_revision(docs_service, master_id)
+    if revision and entry.get("doc_rev") == revision:
+        local = strip_embed_lines(path.read_text(encoding="utf-8")
+                                  if path.exists() else "")
+        if find_pushed_base(db, manuscript, relpath, entry["pushed_hash"],
+                            also=(local,)) is not None:
+            same = unchanged_since_push(db, manuscript, relpath, bridge=bridge)
+            return {"relpath": relpath, "fast": True,
+                    "state": "unchanged" if same else "local_ahead"}
+    view = doc_three_way(db, manuscript, relpath, service, docs_service,
+                         bridge=bridge)
+    if (view["state"] in ("unchanged", "local_ahead") and view.get("revision")
+            and view["tab"] == view["doc"]
+            and text_hash(view["doc"]) == view["base_hash"]):
+        # The revision was read before the tab, so the tab is at least
+        # that new: recording it can only make a later check miss the
+        # cheap way, never pass it wrongly.
+        _keep_pushed(db, manuscript, view["doc"])
+        meta = _mapping(db, manuscript)
+        now = meta.get(bridge.meta_key, {}).get(relpath)
+        if isinstance(now, dict) and now.get("pushed_hash") == view["base_hash"]:
+            now["doc_rev"] = view["revision"]
+            _save_mapping(db, manuscript, meta)
+    return {"relpath": relpath, "state": view["state"], "fast": False}
+
+
 def _stamp_pushed(db: Database, manuscript: dict, bridge: DocBridge,
                   relpath: str) -> None:
     """Record when the author's push last landed this tab (`pushed_at`,
@@ -2638,10 +2688,12 @@ def unified(a: str, b: str, from_name: str, to_name: str) -> str:
 
 
 def merge3(local: str, base: str, doc: str,
-           relpath: str = "") -> tuple[str, list[int]]:
+           relpath: str = "", diff3: bool = False) -> tuple[str, list[int]]:
     """`git merge-file -p` of local and doc against base (labels
     local/base/doc): the merged text and the line of each conflict
-    region's '<<<<<<< local' marker."""
+    region's '<<<<<<< local' marker. `diff3` adds each region's base
+    lines after a '||||||| base' marker (the Merge forms page's
+    Conflicts cards show all three)."""
     import subprocess
     import tempfile
 
@@ -2652,7 +2704,8 @@ def merge3(local: str, base: str, doc: str,
             names[side].write_text(text, encoding="utf-8")
         try:
             run = subprocess.run(
-                ["git", "merge-file", "-p", "-L", "local", "-L", "base",
+                ["git", "merge-file", "-p", *(["--diff3"] if diff3 else []),
+                 "-L", "local", "-L", "base",
                  "-L", "doc", str(names["local"]), str(names["base"]),
                  str(names["doc"])],
                 capture_output=True, text=True)
@@ -3019,6 +3072,12 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
             del links[f]  # drop_link's work, on the meta this pull saves
             report.setdefault("pruned", []).append(f)
 
+    # The revision read before the export: a file this pull leaves
+    # holding its tab's text records it as `doc_rev`, so the audiobook
+    # page's check after an edit (doc_side_state) can skip reading the
+    # tab while the Doc stands there.
+    pull_rev = (doc_revision(docs_service, master_id)
+                if docs_service is not None else None)
     data = master_export(service, docs_service, master_id, db)
     whole = unescape_export_math(
         data.decode("utf-8") if isinstance(data, bytes) else str(data))
@@ -3063,6 +3122,7 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         if dangling:
             report.setdefault("dangling_images", {})[relpath] = dangling
         text = normalize_markdown(sections[relpath])
+        tab_text = text
         # Margin threads: pending spans (<<old>>{{new}}) are review
         # state living only in the Doc; canonical local text is the old
         # half until the author approves (docs/margin-threads-design.md).
@@ -3156,6 +3216,11 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
         entry["checked_out"] = False
         # The pulled content is the new agreed base for three-way compare.
         entry["pushed_hash"] = hashlib.sha256(text.encode()).hexdigest()[:16]
+        if pull_rev and tab_text == text:
+            _keep_pushed(db, manuscript, text)
+            entry["doc_rev"] = pull_rev
+        else:
+            entry.pop("doc_rev", None)
 
     # Illustration prompt tabs: same three-way discipline, reported under
     # their display path so conflicts and changes read like file paths.

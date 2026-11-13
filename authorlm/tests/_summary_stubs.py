@@ -59,7 +59,7 @@ def essay_summary(user: str) -> str:
     coverage check has something real to be loud about."""
     unit = user.split("THE UNIT: ", 1)[1].split("\n", 1)[0]
     return (f"MOVES: [1] the stub's canned summary of {unit}.\n"
-            "MOTIFS: none\nDOES NOT: none")
+            "MOTIFS: none\nARCS: none\nDOES NOT: none")
 
 
 def reply(system: str, user: str) -> str | None:

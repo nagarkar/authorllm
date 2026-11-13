@@ -15,11 +15,21 @@ function road(path: string): Transport {
   return {
     async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
       const named = manuscript && params.manuscript == null ? {...params, manuscript} : params;
-      const response = await fetch(path, {
+      const init = {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({method, params: named}),
-      });
+      };
+      // A request cut off mid-flight (the phone suspended the page, or the
+      // server restarted) surfaces as a TypeError, "Load failed" in Safari.
+      // Try once more after a short pause before showing it.
+      let response: Response;
+      try {
+        response = await fetch(path, init);
+      } catch {
+        await new Promise((r) => setTimeout(r, 800));
+        response = await fetch(path, init);
+      }
       const body = await response.json();
       if (!response.ok || body.ok === false) throw new Error(body.error || `Request failed (${response.status})`);
       return body.result as T;

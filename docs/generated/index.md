@@ -698,6 +698,12 @@ Issue #300, 2026-10-26: Mac say preview must not require an ElevenLabs voice.
 
 Issue #173: default voices are explicitly declared in audiobook.toml.
 
+## `tests.test_audiobook_autopush`
+
+`authorlm/tests/test_audiobook_autopush.py`
+
+The audiobook page's push after an edit (2026-11-12), hermetic.
+
 ## `tests.test_beat_repetition`
 
 `authorlm/tests/test_beat_repetition.py`
@@ -944,6 +950,12 @@ footnote_prefixes must stay injective when nested paths share a stem.
 
 `form_grammar.form_remnants` / `strip_form_remnants` clean hand-resolved Doc forms after pull.
 
+## `tests.test_forms_conflicts`
+
+`authorlm/tests/test_forms_conflicts.py`
+
+The Merge forms page's Conflicts (`forms_page.settle`, `forms_page.land_conflict`, `/api/forms` list / settle / land / enqueue): a file changed both in the file and in its Doc tab since the last push, settled in the browser instead of by hand.
+
 ## `tests.test_forms_page`
 
 `authorlm/tests/test_forms_page.py`
@@ -1003,6 +1015,12 @@ Retake must not destroy a good paragraph take when the write fails mid-flight.
 `authorlm/tests/test_holds_doc_edits.py`
 
 `gdocs._holds_doc_edits` is the push-guard door for a hand-settled conflict.
+
+## `tests.test_illus_batch_render`
+
+`authorlm/tests/test_illus_batch_render.py`
+
+`illus render` with no fragment renders every unrendered slot, one after another, exactly as single-slot renders would.
 
 ## `tests.test_interlocutor`
 
@@ -1501,6 +1519,12 @@ Distil beliefs from the author's decisions already on record.
 `authorlm/tools/convert_llm_cache.py`
 
 One-off: convert authorlm's record/replay recordings to llmlm's cache format.
+
+## `tools.devedit_watch`
+
+`authorlm/tools/devedit_watch.py`
+
+Emit one line per author action on the dev edit page, and a COMPLETE line when a batch is done: every decision of a stage answered, or every queued item of a file decided.
 
 ## `tools.pdf2md`
 

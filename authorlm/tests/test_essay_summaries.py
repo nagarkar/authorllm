@@ -100,6 +100,7 @@ class FakeEssayLLM:
         return ((f"FLOW: {flow}\n" if not self.drop_flow else "")
                 + f"MOVES: {moves or 'none'} The essay {unit}.\n"
                 + "MOTIFS: the door, the key\n"
+                + "ARCS: none\n"
                 + "DOES NOT: re-explain the Field\n"
                 + "INTRODUCES: the model must not write this")
 
@@ -142,22 +143,22 @@ def main_test() -> None:
 
         print("rendering (ruling 6, §6.6):")
         block, missing = sums.render_essay_block(
-            "FLOW: a; b.\nMOVES: [1] x.\nMOTIFS: m\nDOES NOT: d\n"
+            "FLOW: a; b.\nMOVES: [1] x.\nMOTIFS: m\nARCS: the cookie, starts\nDOES NOT: d\n"
             "INTRODUCES: smuggled",
             {"introduces": ["Field"], "assumes": ["Choice", "the key"],
              "promises": [], "debts": ["Choice"]})
-        check("the eight labels in stored order, derived lists rendered as "
+        check("the nine labels in stored order, derived lists rendered as "
               "comma-separated terms, 'none' for an empty one, and a label "
               "the model wrote against orders is dropped",
               block == ("FLOW: a; b.\nMOVES: [1] x.\nINTRODUCES: Field\n"
                         "ASSUMES: Choice, the key\nPROMISES: none\n"
-                        "DEBTS: Choice\nMOTIFS: m\nDOES NOT: d")
+                        "DEBTS: Choice\nMOTIFS: m\nARCS: the cookie, starts\nDOES NOT: d")
               and missing == [], block)
         block, missing = sums.render_essay_block(
             "MOVES: [1] x.", {k: [] for k in ("introduces", "assumes",
                                             "promises", "debts")})
         check("a model label left out is rendered 'none' and reported",
-              "FLOW: none" in block and missing == ["FLOW", "MOTIFS", "DOES NOT"],
+              "FLOW: none" in block and missing == ["FLOW", "MOTIFS", "ARCS", "DOES NOT"],
               str((block, missing)))
         check("the reader load no longer parses the rendered lists: it "
               "declares paragraph records (step 5, ruling 10)",
