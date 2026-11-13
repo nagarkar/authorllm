@@ -1716,6 +1716,34 @@ def read_budget(root: Path) -> None:
           fake.count("comments") <= 1, _budget(fake, "resolve"))
 
 
+def devedit_push(root: Path) -> None:
+    """An ordinary `doc push` of a file marks that file's accepted dev edit
+    items pushed, with a push event: the page stops listing it."""
+    print("\n-- doc push marks dev edit items pushed")
+    from authorlm import devedit
+
+    ws, db, manuscript, ms, fake = _fixture(root, "devedit-push-ws")
+    run = ms / "_devedit" / "2026-11-13"
+    run.mkdir(parents=True)
+    (ms / "solo.md").write_text(BASE.replace("Beta two.", "Beta, mine."))
+    mid, name = devedit._key(db, run)
+    row = {"id": "solo-1.1", "file": "solo.md", "tier": "must",
+           "original": "Beta two.", "proposed": "Beta, mine.",
+           "verdict": "accept", "final": "Beta, mine.",
+           "decided": "2026-11-13T09:00:00Z", "applied": "2026-11-13T09:00:00Z"}
+    devedit._store(db, devedit._put(db, mid, name, row, queued=True), row)
+    check("the accepted item waits for a push",
+          devedit.unpushed(db, run) == ["solo.md"], str(devedit.unpushed(db, run)))
+    with _google(fake):
+        gdocs.push_doc(db, manuscript, "solo.md", service=fake,
+                       docs_service=fake, guard=True)
+    check("after the push nothing waits",
+          devedit.unpushed(db, run) == [], str(devedit.unpushed(db, run)))
+    check("the push is an event on the item",
+          [e["event"] for e in devedit.events(db, run, "solo-1.1")] == ["push"],
+          str(devedit.events(db, run)))
+
+
 def main_test() -> None:
     root = Path(tempfile.mkdtemp(prefix="authorlm-docverbs-"))
     try:
@@ -1732,6 +1760,7 @@ def main_test() -> None:
         toc_conflict(root)
         toc_doc_only_tabs(root)
         read_budget(root)
+        devedit_push(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     print(f"\nall checks passed ({PASSED})")

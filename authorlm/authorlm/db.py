@@ -288,6 +288,50 @@ CREATE TABLE IF NOT EXISTS doc_threads (
     UNIQUE (manuscript_id, origin_type, origin_id)
 );
 
+-- The developmental edit's record (devedit.py): one row per item of a run,
+-- the current view. `body` holds the item as proposed (JSON: original,
+-- proposed, move, tier, why, reason, finding, check, ...); the state the
+-- author's verdicts change lives in its own columns, so each verdict is one
+-- row update in one transaction and two writers never overwrite each other.
+CREATE TABLE IF NOT EXISTS devedit_items (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    run TEXT NOT NULL,            -- the run folder's name, _devedit/<run>
+    item_id TEXT NOT NULL,        -- the item id within the run
+    file TEXT NOT NULL,           -- relpath the item edits
+    ord INTEGER NOT NULL DEFAULT 0,  -- review order (reading order, position)
+    gathered INTEGER NOT NULL DEFAULT 0, -- 1: gathered from the findings
+    queued INTEGER NOT NULL DEFAULT 0,   -- 1: in the review queue
+    body TEXT NOT NULL DEFAULT '{{}}',
+    verdict TEXT,                 -- accept | reject | defer
+    final TEXT,                   -- the text the verdict settled on
+    reason_given TEXT,
+    author_text TEXT,             -- the author's own wording on a reject/defer
+    revised INTEGER NOT NULL DEFAULT 0,
+    decided TEXT,                 -- when the last verdict landed
+    applied TEXT,                 -- when the file took the change (NULL: not)
+    reverted TEXT,                -- when an applied change was undone
+    pushed TEXT,                  -- when the file reached the Doc since
+    UNIQUE (manuscript_id, run, item_id)
+);
+
+-- Append-only history beside an item table: one row per verdict, apply,
+-- undo or push, with its time and actor. `source` names the record the
+-- item belongs to ('devedit'; Merge forms may write here in the same shape).
+CREATE TABLE IF NOT EXISTS edit_events (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    source TEXT NOT NULL,         -- devedit
+    run TEXT NOT NULL DEFAULT '',
+    item_id TEXT NOT NULL,
+    file TEXT NOT NULL DEFAULT '',
+    event TEXT NOT NULL,          -- verdict | revise | apply | undo | push | import
+    verdict TEXT,
+    detail TEXT NOT NULL DEFAULT '{{}}',  -- JSON: final, reason, author_text, ...
+    at TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT ''        -- page | chat | authorlm | import
+);
+
 CREATE TABLE IF NOT EXISTS illus_proposals (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL,
@@ -502,6 +546,8 @@ CREATE INDEX IF NOT EXISTS idx_triage_assessments_lookup
     ON triage_assessments (manuscript_id, triage_type, object_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_triage_drafts_lookup
     ON triage_drafts (manuscript_id, triage_type, object_id);
+CREATE INDEX IF NOT EXISTS idx_edit_events_item
+    ON edit_events (manuscript_id, source, run, item_id);
 """
 
 

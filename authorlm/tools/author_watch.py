@@ -7,8 +7,8 @@ so an agent running this under a Monitor can act without waiting for chat.
     python3 -u authorlm/tools/author_watch.py --manuscript SMSTTD
     python3 -u authorlm/tools/author_watch.py --run <folder> --manuscript SMSTTD
 
-Dev edit (`--run`), read from the run folder, the same lines as
-devedit_watch.py:
+Dev edit (`--run`), read from the run folder (stage decisions) and the
+database (the items and verdicts, `devedit.queue`; `--workspace`):
     DECISION stage <st> #<n>: <answer>
     COMPLETE decisions stage <st>
     VERDICT <id>: <verdict>[ — reason: …][ — with the author's edited text …]
@@ -50,12 +50,25 @@ def _load(path: Path, default):
 # ---------------------------------------------------------------- dev edit
 
 class DevEditWatch:
-    def __init__(self, run: Path):
+    def __init__(self, run: Path, workspace: str | None = None, db=None):
         self.run = run
+        self.workspace = workspace
+        self._db = db
         self.seen_dec: dict = {}
         self.seen_ver: dict = {}
         self.done_files: set = set()
         self.done_stages: set = set()
+
+    def items(self) -> list:
+        """The run's queue, from the database (devedit.queue)."""
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from authorlm import api, devedit
+        if self._db is None:
+            self._db = api.open_db(self.workspace)
+        try:
+            return devedit.queue(self._db, self.run)
+        except Exception:  # noqa: BLE001 — a locked database reads again next pass
+            return []
 
     def poll(self, first: bool) -> list[str]:
         out: list[str] = []
@@ -73,7 +86,7 @@ class DevEditWatch:
                 self.done_stages.add(st)
                 out.append(f"COMPLETE decisions stage {st}")
         by: dict[str, list] = {}
-        for i in _load(self.run / "queue.json", []):
+        for i in self.items():
             by.setdefault(i["file"], []).append(i)
             if i.get("verdict") and self.seen_ver.get(i["id"]) != i["verdict"]:
                 if not first:
@@ -82,7 +95,7 @@ class DevEditWatch:
                         extra += f" — reason: {i['reason_given']}"
                     if i.get("author_text"):
                         extra += (" — with the author's edited text "
-                                  "(author_text in queue.json)")
+                                  "(author_text on the item)")
                     out.append(f"VERDICT {i['id']}: {i['verdict']}{extra}")
                 self.seen_ver[i["id"]] = i["verdict"]
         for f, items in by.items():
@@ -215,7 +228,7 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
     watches: list = []
     if args.run:
-        watches.append(DevEditWatch(Path(args.run)))
+        watches.append(DevEditWatch(Path(args.run), args.workspace))
     if args.manuscript:
         watches.append(FormsWatch(args.manuscript, args.port, args.workspace))
     if not watches:

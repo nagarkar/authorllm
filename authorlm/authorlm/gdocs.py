@@ -1816,6 +1816,7 @@ def push_doc(db: Database, manuscript: dict, query: str,
         result.update(doc_id=master, url=tab_url(master, tab),
                       created=False, locally_normalized=False)
         _stamp_pushed(db, manuscript, bridge, relpath)
+        _devedit_pushed(db, manuscript, relpath)
         return result
     text = path.read_text(encoding="utf-8")
     normalized = normalize_markdown(text)
@@ -1846,6 +1847,7 @@ def push_doc(db: Database, manuscript: dict, query: str,
     entry["pushed_hash"] = hashlib.sha256(normalized.encode()).hexdigest()[:16]
     entry["pushed_at"] = now_iso()
     _save_mapping(db, manuscript, meta)
+    _devedit_pushed(db, manuscript, relpath)
     return {
         "relpath": relpath,
         "doc_id": master_id,
@@ -1853,6 +1855,14 @@ def push_doc(db: Database, manuscript: dict, query: str,
         "created": created,
         "locally_normalized": locally_normalized,
     }
+
+
+def _devedit_pushed(db: Database, manuscript: dict, relpath: str) -> None:
+    """The file is on the Doc now: its accepted (or undone) developmental
+    edit items stop waiting for a push, whichever road pushed it."""
+    from . import devedit
+
+    devedit.pushed_to_doc(db, manuscript["id"], relpath)
 
 
 def _refuse_overlap_early(db: Database, manuscript: dict,
