@@ -60,6 +60,22 @@ CREATE TABLE IF NOT EXISTS manuscript_versions (
     session_id TEXT
 );
 
+-- A manuscript file's identity (docs.py). The id is the document; `relpath`
+-- is the name it carries now, a display name with history. `names` is that
+-- history: a JSON list of {{relpath, from, to}}, oldest first, the entry in
+-- force having `to` null. At most one ACTIVE row per (manuscript, relpath),
+-- kept in code (docs.ensure_documents, docs.carry_rename): a retired or
+-- removed file keeps its row and its last name, so the name may be taken
+-- again by another document.
+CREATE TABLE IF NOT EXISTS documents (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL REFERENCES manuscripts(id),
+    relpath TEXT NOT NULL,        -- the current name, relative to the root
+    status TEXT NOT NULL DEFAULT 'active',  -- active | retired (in _retired/,
+                                  -- or gone from the manuscript)
+    names TEXT NOT NULL DEFAULT '[]'
+);
+
 CREATE TABLE IF NOT EXISTS illustration_prompt_versions (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL REFERENCES manuscripts(id),
@@ -77,6 +93,8 @@ CREATE TABLE IF NOT EXISTS editorial_transitions (
     version_before TEXT,          -- manuscript_versions.id (NULL for the first version)
     version_after TEXT NOT NULL,
     kind TEXT NOT NULL,           -- insert | delete | rewrite | file_added | file_removed
+                                  -- | file_renamed (location: the new name;
+                                  -- detail: from, to, similarity)
     location TEXT NOT NULL,       -- file[#nearest-heading]
     summary TEXT NOT NULL,
     detail TEXT NOT NULL DEFAULT '{{}}'

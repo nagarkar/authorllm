@@ -3,6 +3,13 @@
 The collector snapshots the manuscript directory into an immutable,
 checksummed version. The analyzer computes editorial transitions between
 successive versions by diffing paragraph sequences per file.
+
+A snapshot records each file under the name it had then, and is never
+rewritten. A file that left under one name and arrived under another with
+the same or nearly the same text is one document renamed (`pair_renames`),
+never a removal and an addition: its transition is `file_renamed`, its
+paragraphs are diffed against the old name's text, and a reader of an old
+snapshot finds a document through its name history (`docs.names_of`).
 """
 
 from __future__ import annotations
@@ -202,12 +209,75 @@ def collect_revision(
     return row
 
 
+# A removed file and an added file are one renamed document when their
+# words match at least this closely (lint.closest_by_ratio over the word
+# sequences). Conservative on purpose: a missed pairing costs a
+# `doc rename` to repair, a wrong one moves an essay's records onto a
+# different essay.
+RENAME_SIMILARITY_FLOOR = 0.9
+
+
+def _pairable(name: str, text: str) -> bool:
+    """A file whose text can identify it: not structure (toc.toml), not
+    empty, and not the mid-rewrite placeholder, which is the same text in
+    every file that holds it."""
+    from .structure import TOC_FILENAME
+
+    return (name != TOC_FILENAME and bool(text.strip())
+            and not is_placeholder(text))
+
+
+def pair_renames(old_files: dict[str, str],
+                 new_files: dict[str, str]) -> dict[str, str]:
+    """`{old name: new name}` for every file that was renamed between two
+    snapshots: a name only in `old_files` paired with a name only in
+    `new_files` whose text is identical or at least
+    RENAME_SIMILARITY_FLOOR similar. One to one, and the same on every
+    run: the closest pair is taken first, ties by name."""
+    from .lint import closest_by_ratio
+
+    removed = sorted(n for n in old_files
+                     if n not in new_files and _pairable(n, old_files[n]))
+    added = sorted(n for n in new_files
+                   if n not in old_files and _pairable(n, new_files[n]))
+    if not removed or not added:
+        return {}
+    scored: list[tuple[float, str, str]] = []
+    for old in removed:
+        old_words = old_files[old].split()
+        for new in added:
+            if old_files[old] == new_files[new]:
+                scored.append((1.0, old, new))
+                continue
+            new_words = new_files[new].split()
+            # The ratio cannot exceed 2·shorter/(both): skip the diff
+            # when the lengths alone rule the pair out.
+            if (2 * min(len(old_words), len(new_words))
+                    < RENAME_SIMILARITY_FLOOR
+                    * (len(old_words) + len(new_words))):
+                continue
+            hit, ratio = closest_by_ratio(
+                old_files[old], [new_files[new]], str.split,
+                floor=RENAME_SIMILARITY_FLOOR)
+            if hit is not None:
+                scored.append((ratio, old, new))
+    pairs: dict[str, str] = {}
+    taken: set[str] = set()
+    for _ratio, old, new in sorted(scored, key=lambda s: (-s[0], s[1], s[2])):
+        if old in pairs or new in taken:
+            continue
+        pairs[old] = new
+        taken.add(new)
+    return pairs
+
+
 def massive_deletions(db: Database, manuscript: dict,
                       shrink_ratio: float = 0.7, min_chars: int = 500) -> list[tuple[str, int]]:
     """Files on disk that lost more than (1 - shrink_ratio) of their content
     versus the last collected version — likely editor accidents. Returns
     (relative path, percent removed) pairs. Used only by the auto-collect
-    path: a manual `collect` always proceeds."""
+    path: a manual `collect` always proceeds. A renamed file
+    (`pair_renames`) lost nothing and is never flagged."""
     latest = db.one(
         "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
         "ORDER BY version_no DESC LIMIT 1",
@@ -217,9 +287,10 @@ def massive_deletions(db: Database, manuscript: dict,
         return []
     old_files: dict[str, str] = loads(latest["files"], {})
     disk = read_manuscript_files(Path(manuscript["path"]))
+    renamed = pair_renames(old_files, disk)
     flagged = []
     for name, old_text in old_files.items():
-        if len(old_text) < min_chars:
+        if len(old_text) < min_chars or name in renamed:
             continue
         new_len = len(disk.get(name, ""))
         if new_len < len(old_text) * shrink_ratio:
@@ -249,7 +320,10 @@ def detect_transitions(
     db: Database, manuscript_id: str, before: dict | None, after: dict
 ) -> list[dict]:
     """Compute editorial transitions between two manuscript versions and
-    persist them as immutable observations."""
+    persist them as immutable observations. A renamed file
+    (`pair_renames`) is one `file_renamed` transition at its new name,
+    followed by the paragraph edits made along with the rename, diffed
+    against the text it had under the old name."""
     old_files: dict[str, str] = loads(before["files"], {}) if before else {}
     new_files: dict[str, str] = loads(after["files"], {})
     transitions: list[dict] = []
@@ -268,21 +342,32 @@ def detect_transitions(
         db.insert("editorial_transitions", row)
         transitions.append(row)
 
+    renamed = pair_renames(old_files, new_files)
+    renamed_from = {new: old for old, new in renamed.items()}
     for name in sorted(set(old_files) | set(new_files)):
-        if name not in old_files:
+        if name in renamed:
+            continue  # recorded under its new name, below
+        was = renamed_from.get(name, name)
+        if name in renamed_from:
+            record(
+                "file_renamed", name,
+                f"File renamed: {was} → {name}",
+                {"from": was, "to": name},
+            )
+        elif name not in old_files:
             record(
                 "file_added", name,
                 f"New file: {name}",
                 {"paragraphs": len(_paragraphs(new_files[name]))},
             )
             continue
-        if name not in new_files:
+        elif name not in new_files:
             record("file_removed", name, f"File removed: {name}", {})
             continue
-        if old_files[name] == new_files[name]:
+        if old_files[was] == new_files[name]:
             continue
 
-        old_paras = _paragraphs(old_files[name])
+        old_paras = _paragraphs(old_files[was])
         new_paras = _paragraphs(new_files[name])
         matcher = difflib.SequenceMatcher(a=old_paras, b=new_paras, autojunk=False)
         for op, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -365,6 +450,11 @@ def _version_text(db: Database, version_id: str | None,
                   file: str) -> str | None:
     if not version_id:
         return None
-    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?",
-                 (version_id,))
-    return loads(row["files"], {}).get(file) if row else None
+    row = db.one("SELECT manuscript_id, files FROM manuscript_versions "
+                 "WHERE id = ?", (version_id,))
+    if not row:
+        return None
+    from .docs import snapshot_text
+
+    return snapshot_text(db, row["manuscript_id"], loads(row["files"], {}),
+                         file)

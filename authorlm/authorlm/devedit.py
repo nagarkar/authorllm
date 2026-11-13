@@ -320,6 +320,133 @@ def run_dir(manuscript: dict, run_id: str | None = None) -> Path:
     return root(manuscript) / run_id
 
 
+# ------------------------------------------------------------------ rename
+#
+# A run names an essay three ways: by its relpath (coverage, stage files,
+# an item's `file`, the notebook headings), by its stem in file names
+# (`findings/<stem>.json`, `findings/<stem>--p2.json`,
+# `stages/<n>/arcs/<stem>.json`), and by the item ids `gather` mints from
+# the findings file's stem (`<stem>-1.2`, `<stem>--p2-1.2`), which also
+# name `checks/<id>.json`. When the essay is renamed all three follow, the
+# ids included: left under the old stem, the next `gather` would mint new
+# ids from the renamed findings file and the verdicts, checks and events
+# recorded under the old ones would be orphaned. Prose a person or agent
+# wrote (the letters, the argument map, the notebook's body) keeps the
+# name it was written with.
+
+def _stem_names(old_stem: str) -> tuple[re.Pattern, re.Pattern]:
+    """(file-name pattern, item-id pattern) for an essay's stem: the stem
+    with an optional pass or arc suffix, and for an id the `-N.M` tail."""
+    suffix = r"((?:--[A-Za-z0-9]+)?(?:-\d+\.\d+)?)"
+    tail = r"((?:--[A-Za-z0-9]+)?-\d+\.\d+)"
+    return (re.compile(rf"^{re.escape(old_stem)}{suffix}$"),
+            re.compile(rf"^{re.escape(old_stem)}{tail}$"))
+
+
+def _renamed_value(value: Any, old: str, new: str, item_id: re.Pattern,
+                   new_stem: str) -> Any:
+    """`value` (parsed JSON) with the relpath `old` and the essay's item
+    ids renamed, in strings and in dict keys at every depth."""
+    def name(text: str) -> str:
+        if text == old:
+            return new
+        m = item_id.match(text)
+        return new_stem + m.group(1) if m else text
+
+    if isinstance(value, str):
+        return name(value)
+    if isinstance(value, list):
+        return [_renamed_value(v, old, new, item_id, new_stem) for v in value]
+    if isinstance(value, dict):
+        return {name(k): _renamed_value(v, old, new, item_id, new_stem)
+                for k, v in value.items()}
+    return value
+
+
+def rename_file(db, manuscript: dict, old: str, new: str, changes) -> dict:
+    """Every run of this manuscript follows the essay `old` to its new
+    name (`docs.carry_rename` calls this; see the note above for what
+    follows and what keeps the old name). Returns `{runs, left}`: the
+    runs changed, and what could not move because the new name was
+    already taken there. File moves and rewrites go through `changes`
+    (`docs.DiskChanges`), so the caller can undo them; the rows are
+    written without a commit of their own, inside the caller's
+    transaction."""
+    mid = manuscript["id"]
+    old_stem, new_stem = Path(old).stem, Path(new).stem
+    file_name, item_id = _stem_names(old_stem)
+    if old_stem == new_stem:
+        # A move between folders: only the relpath changes, never an id.
+        item_id = re.compile(r"(?!)")
+    changed_runs: list[str] = []
+    left: list[str] = []
+    for run in runs(manuscript):
+        folder = root(manuscript) / run
+        changed = False
+        for path in sorted(folder.rglob("*.json")):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except ValueError:
+                continue
+            renamed = _renamed_value(value, old, new, item_id, new_stem)
+            if renamed != value:
+                changes.write(path, json.dumps(renamed, indent=2,
+                                               ensure_ascii=False) + "\n")
+                changed = True
+        if old_stem != new_stem:
+            for path in sorted([*folder.glob("findings/*.json"),
+                                *folder.glob("checks/*.json"),
+                                *folder.glob("stages/*/arcs/*.json")]):
+                m = file_name.match(path.stem)
+                if not m:
+                    continue
+                target = path.with_name(f"{new_stem}{m.group(1)}.json")
+                if target.exists():
+                    left.append(str(path.relative_to(folder.parent.parent)))
+                    continue
+                changes.move(path, target)
+                changed = True
+        notes = folder / NOTEBOOK
+        if notes.exists():
+            text = notes.read_text(encoding="utf-8")
+            renamed_text = re.sub(rf"^## {re.escape(old)} — ",
+                                  lambda _m: f"## {new} — ", text, flags=re.M)
+            if renamed_text != text:
+                changes.write(notes, renamed_text)
+                changed = True
+        if changed:
+            changed_runs.append(run)
+    for table, json_column in (("devedit_items", "body"),
+                               ("edit_events", "detail")):
+        for row in db.all(
+                f"SELECT id, run, item_id, file, {json_column} AS payload "
+                f"FROM {table} WHERE manuscript_id = ?", (mid,)):
+            m = item_id.match(row["item_id"])
+            new_id = new_stem + m.group(1) if m else row["item_id"]
+            if (new_id != row["item_id"] and table == "devedit_items"
+                    and db.one("SELECT 1 FROM devedit_items WHERE "
+                               "manuscript_id = ? AND run = ? AND item_id = ?",
+                               (mid, row["run"], new_id))):
+                left.append(f"devedit item {row['run']}/{row['item_id']}")
+                continue
+            payload = row["payload"]
+            try:
+                before = json.loads(payload)
+                after = _renamed_value(before, old, new, item_id, new_stem)
+                new_payload = (payload if after == before
+                               else json.dumps(after, ensure_ascii=False))
+            except (TypeError, ValueError):
+                new_payload = payload
+            new_file = new if row["file"] == old else row["file"]
+            if (new_id, new_file, new_payload) == (
+                    row["item_id"], row["file"], payload):
+                continue
+            db.conn.execute(
+                f"UPDATE {table} SET item_id = ?, file = ?, {json_column} = ? "
+                "WHERE id = ?", (new_id, new_file, new_payload, row["id"]))
+    return {"runs": changed_runs, "left": left}
+
+
 ARCHIVE_ROOT = Path.home() / ".authorlm" / "archive"
 
 

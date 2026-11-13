@@ -1593,8 +1593,11 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
     row = db.one("SELECT files FROM manuscript_versions WHERE id = ?", (pin,))
     if not row:
         sys.exit("error: pinned version is missing from the record.")
-    files = loads(row["files"], {})
-    if file not in files:
+    from . import docs as _docs
+
+    # Under whichever name the essay had when the version was pinned.
+    pinned_text = _docs.snapshot_text(db, mid, loads(row["files"], {}), file)
+    if pinned_text is None:
         sys.exit(f"error: pinned version has no {file}.")
     # Snapshot the current disk state before it's overwritten below — an
     # uncollected local edit made since the pin must not be silently
@@ -1603,7 +1606,7 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
     config = _load_config(args)
     with contextlib.redirect_stdout(io.StringIO()):
         api.collect(db, manuscript, config, source="pre-critique-rollback")
-    (Path(manuscript["path"]) / file).write_text(files[file], encoding="utf-8")
+    (Path(manuscript["path"]) / file).write_text(pinned_text, encoding="utf-8")
     for t in passes.staged_threads(db, mid, file,
                                    states=("written", "accepted", "proposed",
                                            "rejected")):
@@ -3317,6 +3320,14 @@ def _print_collect_report(report):
     if report.get("new_files"):
         print(ui.yellow("New chapter file(s) observed: "
                         + ", ".join(report["new_files"])))
+    for pair in report.get("renamed", []):
+        print(f"Renamed chapter observed: {pair['from']} → {pair['to']} "
+              + ui.dim("(its records follow it)"))
+    for item in report.get("renamed_left", []):
+        print(ui.yellow(f"  left under the old name: {item}"))
+    for name in report.get("renamed_tabs", []):
+        print(ui.dim(f"  {name}: its Doc tab keeps the old title until "
+                     f"'authorlm doc push {name}' retitles it."))
     print(f"Detected {len(report['transitions'])} editorial transition(s).")
     for transition in report["transitions"][:10]:
         print(f"  • [{transition['kind']}] {transition['location']}: {transition['summary']}")
@@ -8217,6 +8228,19 @@ def cmd_doc(args):
                      "'doc create-manuscript'."))
         return
 
+    if args.action == "rename":
+        if not args.name or len(args.more) != 1:
+            sys.exit("usage: doc rename <file> <new-name> [--dry-run] "
+                     "[--force]")
+        try:
+            result = api.rename_document(
+                db, manuscript, _load_config(args), args.name, args.more[0],
+                force=args.force, dry_run=args.dry_run)
+        except (FileExistsError, LookupError, ValueError) as err:
+            sys.exit(f"error: {err}")
+        _print_rename(result, dry_run=args.dry_run)
+        return
+
     if not args.name:
         sys.exit(f"usage: doc {args.action} <name>")
     try:
@@ -8244,6 +8268,34 @@ def cmd_doc(args):
     except (FileExistsError, LookupError, ValueError) as err:
         sys.exit(f"error: {err}")
     cmd_collect(args)  # record the mechanical change as an observation now
+
+
+def _print_rename(result: dict, dry_run: bool) -> None:
+    """The board of `doc rename`: counts and paths, never content."""
+    verb = "Would rename" if dry_run else "Renamed"
+    print(f"{verb} {result['from']} → {result['to']} "
+          + ui.dim(f"(document {result['document']}, same id)"))
+    records = sum(result["records"].values())
+    carried = "would follow" if dry_run else "followed"
+    moved = "would be moved" if dry_run else "moved"
+    print(f"  {records} record(s) in {len(result['records'])} place(s) "
+          f"{carried} it; {len(result['files'])} file(s) {moved} or "
+          "rewritten.")
+    for place, n in sorted(result["records"].items()):
+        print(ui.dim(f"    {place}: {n}"))
+    for path in result["files"]:
+        print(ui.dim(f"    {path}"))
+    for item in result["left"]:
+        print(ui.yellow(f"  left under the old name: {item}"))
+    if dry_run:
+        print(ui.dim("Nothing was written. Run it without --dry-run to "
+                     "rename."))
+        return
+    if result["tab_title_stale"]:
+        print(ui.dim(f"next: authorlm doc push {result['to']}  (its Doc tab "
+                     "keeps the old title until a push retitles it; the "
+                     "same tab, no new one)"))
+    _print_collect_report(result["collect"])
 
 
 def _print_analysis(summaries: list[dict]) -> None:
@@ -8939,16 +8991,27 @@ def cmd_diff(args):
     new_files = loads(new_v["files"], {})
     old_label = f"v{old_v['version_no']}" if old_v else "∅"
     printed = False
+    # A file renamed between the two versions is one document: it is
+    # diffed against the text it had under its earlier name.
+    from . import docs as _docs
+
+    earlier = {name: _docs.earlier_name(db, manuscript["id"], name,
+                                        old_files, new_files)
+               for name in new_files if name not in old_files}
+    renamed_away = {was for was in earlier.values() if was}
     for name in sorted(set(old_files) | set(new_files)):
+        if name in renamed_away:
+            continue
         if file_filter and file_filter.lower() not in name.lower():
             continue
-        old_text, new_text = old_files.get(name, ""), new_files.get(name, "")
-        if old_text == new_text:
+        was = earlier.get(name) or name
+        old_text, new_text = old_files.get(was, ""), new_files.get(name, "")
+        if old_text == new_text and was == name:
             continue
         printed = True
         for line in difflib.unified_diff(
             old_text.splitlines(), new_text.splitlines(),
-            fromfile=f"{old_label}/{name}", tofile=f"v{new_v['version_no']}/{name}",
+            fromfile=f"{old_label}/{was}", tofile=f"v{new_v['version_no']}/{name}",
             lineterm="",
         ):
             if line.startswith(("+++", "---")):
@@ -9861,11 +9924,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_diff)
 
     p = sub.add_parser(
-        "doc", help="manage chapter files: list, add, retire, revive, "
+        "doc", help="manage chapter files: list, add, rename, retire, "
+                    "revive, "
                     "push/pull (Google Docs), diff/merge against the pushed "
                     "base, resolve-comments, create-manuscript, auth",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="examples:\n"
+               "  doc rename becker.md denial.md   rename a chapter; its "
+               "summaries, style, intents, Doc tab, audio and review "
+               "records follow it (--dry-run shows what would move)\n"
                "  doc push becker.md          push one file's tab\n"
                "  doc pull                    pull every tab\n"
                "  doc bind <doc-id-or-url>    adopt an existing master Doc "
@@ -9876,7 +9943,8 @@ def build_parser() -> argparse.ArgumentParser:
                "_drafts/becker.merged.md (never pushes)\n"
                "  doc resolve-comments AAAB AAAC   resolve addressed "
                "comments with a receipt")
-    p.add_argument("action", choices=["list", "add", "retire", "revive",
+    p.add_argument("action", choices=["list", "add", "rename", "retire",
+                                      "revive",
                                       "show", "push", "pull", "open", "auth",
                                       "bind", "create-manuscript", "threads",
                                       "propose", "decide", "diff", "merge",
@@ -9886,8 +9954,12 @@ def build_parser() -> argparse.ArgumentParser:
                                            "merge); bind: the Doc id or URL; "
                                            "resolve-comments: the "
                                            "first comment id")
-    p.add_argument("more", nargs="*", metavar="COMMENT_ID",
-                   help="resolve-comments: further comment ids")
+    p.add_argument("more", nargs="*", metavar="MORE",
+                   help="rename: the new file name; resolve-comments: "
+                        "further comment ids")
+    p.add_argument("--dry-run", action="store_true",
+                   help="rename: show what would be renamed and carried; "
+                        "write nothing")
     p.add_argument("--out", metavar="PATH",
                    help="merge: write the merge here (default "
                         "_drafts/<stem>.merged.md under the manuscript)")
@@ -9901,7 +9973,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="pull: take the Doc's version even if the local file "
                         "changed since the push (local edits stay in history); "
-                        "bind: replace a master Doc already recorded")
+                        "bind: replace a master Doc already recorded; "
+                        "rename: rename although an earlier file of the new "
+                        "name left records behind (those that collide stay "
+                        "under the old name)")
     p.add_argument("--rebuild", action="store_true",
                    help="push: rebuild the file's tab even though it carries "
                         "comments, accepting that their anchors are "

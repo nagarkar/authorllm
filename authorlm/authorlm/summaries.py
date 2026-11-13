@@ -153,7 +153,12 @@ def inflight_sources(db: Database, manuscript: dict) -> dict[str, str | None]:
         "LEFT JOIN manuscript_versions v ON v.id = w.source_version_id "
         "WHERE w.manuscript_id = ? AND w.status = 'active'",
         (manuscript["id"],))
-    return {r["file"]: loads(r["files"], {}).get(r["file"]) for r in rows}
+    from .docs import snapshot_text
+
+    # Under whichever name the file had when the version was pinned.
+    return {r["file"]: snapshot_text(db, manuscript["id"],
+                                     loads(r["files"], {}), r["file"])
+            for r in rows}
 
 
 def _context_units(db: Database, manuscript: dict

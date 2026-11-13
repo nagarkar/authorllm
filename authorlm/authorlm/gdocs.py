@@ -919,9 +919,9 @@ def bind_master(db: Database, manuscript: dict, doc_ref: str,
 def ensure_master(db: Database, manuscript: dict, meta: dict,
                   drive, docs_service, bridge: DocBridge | None = None) -> str:
     """One master Doc per bridge, one tab per file (tab title = the
-    filename, reading order). Creates whatever is missing, retires the
-    blank default tab, drops old per-file doc links, and records
-    _master_id plus per-file tab ids."""
+    filename, reading order). Creates whatever is missing, retitles the
+    tab of a renamed file, retires the blank default tab, drops old
+    per-file doc links, and records _master_id plus per-file tab ids."""
     bridge = bridge or manuscript_bridge(manuscript)
     entry = meta.setdefault(bridge.meta_key, {})
     master_id = entry.get("_master_id")
@@ -935,6 +935,7 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
         master_id = entry["_master_id"] = result["id"]
         # Each new incarnation of the master Doc bumps the doc version.
         entry["_doc_version"] = entry.get("_doc_version", 0) + 1
+    _retitle_tabs(docs_service, master_id, entry)
     existing = {title: tid for tid, title in _doc_tabs(docs_service, master_id)}
     order = _reading_order_files(bridge)
 
@@ -1546,6 +1547,70 @@ def drop_link(db: Database, manuscript: dict, relpath: str,
     del links[relpath]
     _save_mapping(db, manuscript, meta)
     return True
+
+
+def rename_link(db: Database, manuscript: dict, old: str, new: str,
+                meta_key: str = "gdocs") -> bool:
+    """Carry `old`'s Doc link to `new` (`docs.carry_rename` calls this):
+    the same tab id, push base and checkout, under the new name. Google
+    is not called. The tab still carries its old title, so the entry
+    records it as `tab_title`, and the next push or pull that holds a
+    Docs service retitles the tab (`_retitle_tabs`) instead of adding a
+    second one. The recorded tab tree (`_tab_structure`) is renamed with
+    it. True when a link was carried."""
+    meta = _mapping(db, manuscript)
+    links = meta.get(meta_key, {})
+    entry = links.get(old)
+    if not isinstance(entry, dict) or new in links:
+        return False
+    del links[old]
+    if entry.get("tab_id"):
+        # Renamed twice between pushes: the Doc still shows the first title.
+        entry.setdefault("tab_title", old)
+        if entry["tab_title"] == new:
+            del entry["tab_title"]
+    links[new] = entry
+    if links.get("_tab_structure"):
+        links["_tab_structure"] = [
+            [new if name == old else name for name in pair]
+            for pair in links["_tab_structure"]]
+    _save_mapping(db, manuscript, meta)
+    return True
+
+
+def _retitle_tabs(docs_service, master_id: str, entry: dict) -> list[str]:
+    """Give each tab whose file was renamed (`rename_link` left its old
+    title in `tab_title`) the file's new name, so tabs keep matching
+    files by title. Returns the files retitled. A tab the Doc no longer
+    has needs no title: its mark is dropped and the caller adds a tab as
+    for any new file. A title Google declines to change stops the push
+    with the hand repair, never a second tab."""
+    pending = {name: e for name, e in entry.items()
+               if isinstance(e, dict) and e.get("tab_title")
+               and e.get("tab_id")}
+    if not pending:
+        return []
+    title_of = dict(_doc_tabs(docs_service, master_id))
+    retitled = []
+    for name, file_entry in pending.items():
+        current = title_of.get(file_entry["tab_id"])
+        if current is not None and current != name:
+            try:
+                docs_service.documents().batchUpdate(
+                    documentId=master_id,
+                    body={"requests": [{"updateDocumentTabProperties": {
+                        "tabProperties": {"tabId": file_entry["tab_id"],
+                                          "title": name},
+                        "fields": "title"}}]},
+                ).execute()
+            except Exception as err:
+                raise LookupError(
+                    f"could not retitle the Doc tab '{current}' to "
+                    f"'{name}' ({err}). Rename the tab to '{name}' by hand "
+                    "in the Doc, then push again.") from err
+            retitled.append(name)
+        del file_entry["tab_title"]
+    return retitled
 
 
 def doc_status(db: Database, manuscript: dict) -> dict:
@@ -2636,10 +2701,15 @@ def find_pushed_base(db: Database, manuscript: dict, relpath: str,
         text = kept.read_text(encoding="utf-8")
         if text_hash(text) == base_hash:
             return text
-    rows = db.all(
+    # A snapshot holds the file under the name it had then: read each
+    # name the document has carried, the current one first.
+    from .docs import names_of
+
+    rows = [row for name in names_of(db, manuscript["id"], relpath)
+            for row in db.all(
         "SELECT json_extract(files, ?) AS text FROM manuscript_versions "
         "WHERE manuscript_id = ? ORDER BY version_no DESC",
-        ('$."' + relpath.replace('"', '\\"') + '"', manuscript["id"]))
+        ('$."' + name.replace('"', '\\"') + '"', manuscript["id"]))]
     seen: set[str] = set()
     for row in rows:
         raw = row["text"]
@@ -3022,6 +3092,9 @@ def pull_doc(db: Database, manuscript: dict, query: str | None = None,
     tab_doc = None
     if docs_service is not None:
         try:
+            # A file renamed since the last push: its tab takes the new
+            # name first, so the sections below are found by title.
+            _retitle_tabs(docs_service, master_id, links)
             tab_doc = master_doc(docs_service, master_id)
             walk_tabs(tab_doc.get("tabs", []), tab_props, doc_pairs)
             if bridge.meta_key == "gdocs":

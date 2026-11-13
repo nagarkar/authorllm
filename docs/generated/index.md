@@ -240,7 +240,7 @@ Inline directives: `[Footnote: …]`, `[Explain: …]` and `[Suggestion: …]` �
 
 `authorlm/authorlm/docs.py`
 
-Mechanical document management (RFC §16.1 Level 3).
+Chapter files as documents: a document's identity is its `dc-` id (the `documents` table), and its relpath is a display name with history. This module owns that identity, the rename that carries a document's records to a new name, and the mechanical edits (add, retire, revive; RFC §16.1 Level 3).
 
 ## `authorlm.drive_upload`
 
@@ -841,6 +841,12 @@ The Doc-road failures of 2026-10-30 (discernment.md, SMSTTD), reproduced against
 `authorlm/tests/test_doc_road_verbs.py`
 
 Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, `doc merge`, `doc resolve-comments`, `revise stage|resolve`, `footnote apply --from-json`, the diff-push divergence message and the pull's TOC-conflict pairs.
+
+## `tests.test_document_identity`
+
+`authorlm/tests/test_document_identity.py`
+
+A document's identity is its `dc-` id; its relpath is a display name with history (docs.py). These tests enforce the owner's ruling that a chapter can be renamed cheaply: every record keyed by the file's name follows it, whether the rename is the `doc rename` verb or a rename in Finder or Obsidian that the next collect detects.
 
 ## `tests.test_drive_doc_gone`
 
