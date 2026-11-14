@@ -33,6 +33,7 @@ interface Conflict {
 interface FileGroup {
   file: string; url: string | null; state: string; count: number; forms: Form[];
   origins: string[]; others: Record<string, number>; undecided: number; blocking: string; diff?: Diff;
+  pushed_at?: string | null;
   conflict?: Conflict;
 }
 interface Listing { doc_url: string | null; files: FileGroup[]; total: number; conflicts: number; }
@@ -89,6 +90,27 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
   const [queue, setQueue] = useState<Queue>({pending: [], running: null, results: {}});
   const results = queue.results;
   const done = useRef(0);
+  // Merge results sit below the forms, folded to one line. They are
+  // cleared (hidden; the server keeps them) when the author switches
+  // tab, and when a new merge lands: whatever was shown before that
+  // merge started goes once its first success arrives.
+  const [hidden, setHidden] = useState<Set<string>>(() => new Set());
+  const before = useRef<Set<string> | null>(null);
+  const shownTab = useRef(tab);
+  useEffect(() => {
+    if (shownTab.current === tab) return;
+    shownTab.current = tab;
+    setHidden(h => new Set([...h, ...Object.values(queue.results).map(resultKey)]));
+  }, [tab, queue.results]);
+  useEffect(() => {
+    const prior = before.current;
+    if (!prior) return;
+    const fresh = Object.values(queue.results).filter(r => !prior.has(resultKey(r)));
+    if (fresh.some(r => !r.stopped)) {
+      before.current = null;
+      setHidden(h => new Set([...h, ...prior]));
+    }
+  }, [queue.results]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -165,12 +187,13 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
   }, [queue.results, load]);
 
   const merge = useCallback(async (file: string, conflictKey?: string) => {
+    if (!before.current) before.current = new Set(Object.values(queue.results).map(resultKey));
     try {
       const q = await transport.request<Queue & {error?: string}>("enqueue",
         conflictKey ? {manuscript, file, conflict: true, key: conflictKey} : {manuscript, file});
       if (q.error) setError(q.error); else setQueue(q);
     } catch (err) { setError((err as Error).message); }
-  }, [transport, manuscript]);
+  }, [transport, manuscript, queue.results]);
   // Merge all: every tab nothing blocks and not already in the queue, in
   // the Tab menu's order; the server still runs them one after another.
   const mergeAll = useCallback(async () => {
@@ -190,7 +213,7 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
   }, [data, queue, merge, mergeAll, onTabs]);
 
   if (!data && !error) return <div className="boot">Reading the open forms from the Doc…</div>;
-  const landed = Object.values(results).filter(r => !data?.files.some(g => g.file === r.file));
+  const shown = Object.values(results).filter(r => !hidden.has(resultKey(r)));
   return (
     <div className="forms">
       {error && <div className="status bad">{error}</div>}
@@ -203,21 +226,47 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
         {active && <div className="muted forms-queue">{queue.running ? <><span className="spin" /> Merging {queue.running}</> : "Starting the queue"}{queue.pending.length ? `; queued: ${queue.pending.join(", ")}` : ""}. You can keep ruling meanwhile.</div>}
         <div className="muted">Rule on each form, then Merge this tab (or Merge all): the file lands the rulings and its tab is brought up to it. A file changed both here and in its tab is settled under Conflicts. Nothing reaches the Doc or the file before Merge.</div>
       </div>
-      {landed.map(r => <ResultBox key={r.file} r={r} />)}
       {data && data.files.length === 0 && <div className="card muted">No outside revision, filter form or lens form is open on this manuscript, and no file is changed on both sides.</div>}
       {data?.files.filter(g => g.file === (data.files.some(x => x.file === tab) ? tab : data.files[0]?.file)).map(g => (
-        <FileCard key={g.file} g={g} result={results[g.file]} merging={queue.running === g.file}
+        <FileCard key={g.file} g={g} merging={queue.running === g.file}
           queued={queue.pending.indexOf(g.file)}
           onDecide={decide}
           onLand={() => void merge(g.file, g.conflict?.key ?? undefined)}
           onSettle={(c, verdict, text) => settle(g.file, c, verdict, text)} />
       ))}
+      {shown.length > 0 && <ResultsSummary results={shown} />}
     </div>
   );
 }
 
-function FileCard({ g, result, merging, queued, onDecide, onLand, onSettle }: {
-  g: FileGroup; result?: MergeResult; merging: boolean; queued: number;
+const resultKey = (r: MergeResult) => `${r.file}|${JSON.stringify(r)}`;
+
+// The last merge, one line: how many files merged, how many were not
+// pushed or not merged. Opened, failures come first.
+function ResultsSummary({ results }: { results: MergeResult[] }) {
+  const failed = (r: MergeResult) => !!r.stopped || !r.pushed;
+  const merged = results.filter(r => !r.stopped).length;
+  const notPushed = results.filter(r => !r.stopped && !r.pushed).length;
+  const notMerged = results.length - merged;
+  const parts = [`${merged} file${merged === 1 ? "" : "s"} merged`];
+  if (notPushed) parts.push(`${notPushed} not pushed`);
+  if (notMerged) parts.push(`${notMerged} not merged`);
+  const sorted = [...results.filter(failed), ...results.filter(r => !failed(r))];
+  return (
+    <details className={`card forms-results${notPushed || notMerged ? " has-bad" : ""}`}>
+      <summary>Last merge: {parts.join(", ")}</summary>
+      {sorted.map(r => <ResultBox key={r.file} r={r} />)}
+    </details>
+  );
+}
+
+function pushedWhen(at: string): string {
+  const d = new Date(at);
+  return isNaN(d.getTime()) ? at : d.toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
+}
+
+function FileCard({ g, merging, queued, onDecide, onLand, onSettle }: {
+  g: FileGroup; merging: boolean; queued: number;
   onDecide: (f: Form, verdict: string, text?: string) => Promise<string | null>;
   onLand: () => void; onSettle: (c: Card, verdict: string, text?: string) => Promise<string | null>;
 }) {
@@ -237,6 +286,7 @@ function FileCard({ g, result, merging, queued, onDecide, onLand, onSettle }: {
         <h2 className="forms-file-name">{g.file}</h2>
         {g.count > 0 && <span className="badge">{g.count} not merged</span>}
         <span className={`state${conflict ? " forms-conflict" : ""}`}>{STATE_WORDS[g.state] ?? g.state}</span>
+        <span className="muted forms-pushed" title="When this tab was last pushed to the Google Doc">{g.pushed_at ? `pushed ${pushedWhen(g.pushed_at)}` : "no push recorded yet"}</span>
         {g.url && <a className="pill" href={g.url} target="_blank" rel="noreferrer">Open tab ↗</a>}
       </div>
       {(g.origins.length > 0 || g.blocking) && <div className="muted">{g.origins.length ? `From ${g.origins.join(", ")}. ` : ""}{g.blocking}</div>}
@@ -244,7 +294,6 @@ function FileCard({ g, result, merging, queued, onDecide, onLand, onSettle }: {
       {(merging || queued >= 0 || blockedBy) && <div className="muted">
         {merging ? <><span className="spin" /> Merging now.</> : queued >= 0 ? `In the merge queue${queued ? `, ${queued} ahead` : ", next"}.` : blockedBy}
       </div>}
-      {result && <ResultBox r={result} />}
       <div className="devedit-actions">
         <button className={`pill${view === "open" ? " on" : ""}`} onClick={() => setView("open")}>To rule · {open.length}</button>
         <button className={`pill${view === "decided" ? " on" : ""}`} onClick={() => setView("decided")}>Decided · {decided.length}</button>
