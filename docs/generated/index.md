@@ -770,6 +770,12 @@ Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
 
 `clients._clamped_delta` / `_scale_models` sit on the chat-usage discontinuity path: when a transcript file is replaced or truncated, the ledger must never invent negative spend and must never guess a per-model split of a clamped total.
 
+## `tests.test_cli_covers_retired_tools`
+
+`authorlm/tests/test_cli_covers_retired_tools.py`
+
+The four jobs only the retired MCP server could do, now on the CLI.
+
 ## `tests.test_clip_edit_json`
 
 `authorlm/tests/test_clip_edit_json.py`
