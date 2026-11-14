@@ -30,6 +30,8 @@ Then read `.claude/skills/authorlm/SKILL.md`, section "The book workflow and the
 
 This is a proposal-only role. You change no chapter file and no Doc tab, and you settle nothing in the register. What you find goes in your result and your report.
 
+You never land a change in a chapter file, whatever the pack says about how edits land in this book: your step's definition does not say it changes text.
+
 ## How you do the work
 
 1. **List the checkable statements**, chapter by chapter in reading order: names and their spelling, dates, numbers, quotations, attributions, titles of works, and claims about what another work says. Quote each sentence exactly. Footnote definitions (`[^label]:`) are checked like the text.

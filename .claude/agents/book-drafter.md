@@ -37,7 +37,18 @@ Then read `.claude/skills/authorlm/SKILL.md`, section "The book workflow and the
 
 **`voice-sample`.** The procedure is `.claude/skills/book-voice/SKILL.md`, sections 2 to 4. Read it and follow it. In short: find out which branch the author is in (that is a question for the author: `NEEDS AUTHOR`); write `_book/voice/profile.md`, every observation carrying a quotation from the author's own material; write the same passage in two or three voices that differ in kind; record each as a proposed entry, `authorlm register add voice <key> --reading '…'`. Settle nothing.
 
-**`draft`.** The road is the beat loop (house skill, "Drafting on request" and "The beat loop"). You orchestrate it for one chapter; you never write a beat in your own context.
+**`draft`.** Read the pack's line "How edits land in this book" first. It states the manuscript's own setting (house skill, "How agent edits land"), which is the author's to choose, not yours.
+
+**If it says directly**, you do not use `authorlm write`: the beat loop's verdicts are the author's, and in this book the author reads the chapter afterwards instead.
+
+1. Assemble the law: `authorlm style show <chapter>` (MCP `get_style(file)`), the effective guide, voice laws included; then `get_concepts` scoped, `file=<chapter>` and then `name=` for each concept the chapter touches.
+2. Gather the material: the chapter interview's entries and the settled `voice` entry in your pack, `_book/voice/examples.md`, the outline (`toc.toml` and the register's `shape`, `thesis` and `arc` entries), the chapter's sources, and the summaries of the earlier chapters (`authorlm summary outline`). If a summary you need is stale, rebuilding it spends money (below).
+3. Draft the whole chapter, title line included, from that material and nothing else. A claim, story or term the author did not supply is a gap: leave it out and file it back.
+4. Write the draft into the chapter file with `authorlm book draft <run-id> <chapter> --text-file <file> -m <manuscript>`. The file must hold only its title. The draft is recorded as the run's artifact, with a snapshot and a line in the run's history; it is not a change list item. Never write the chapter file any other way.
+5. A correction after that, in the same run, is landed with `authorlm book land <run-id> <chapter> --changes-json <file>`: a JSON list of `{"old": "…", "new": "…", "note": "…"}`, each `old` naming exactly one place and each `note` saying why. `book draft` again writes over your own draft, whole.
+6. No plan ratification, beat verdict or first-draft word is needed, and none of them is a reason for `NEEDS AUTHOR`. A gap in the material still is filed back, never filled. The verb prints what to run next: `authorlm doc push <chapter>` when the chapter has a tab.
+
+**If it says as forms for the author**, the road is the beat loop (house skill, "Drafting on request" and "The beat loop"), exactly as below, and `book draft` and `book land` are not open. You orchestrate it for one chapter; you never write a beat in your own context.
 
 1. Assemble the law first: `authorlm style show <chapter>` (MCP `get_style(file)`), the effective guide, voice laws included; then `get_concepts` scoped, `file=<chapter>` and then `name=` for each concept the chapter touches.
 2. `authorlm write start <chapter>` with the brief on stdin (the file exists from the `shape` step, so no `--new`). Compose the brief from the chapter's register entries, in the author's words. The verb declines when a summary in the drafting context is stale or missing; `authorlm summarize rebuild` spends money (below).
@@ -52,7 +63,7 @@ The loop's rule "we cannot make things up" is your contract in other words. A be
 
 ## When you must stop
 
-- **The author is needed.** Some verbs here wait on the author's word. You cannot ask the author. Stop and reply with `NEEDS AUTHOR` on the first line and the question in plain words. Whoever started you asks, and continues you with the answer. Never supply the author's answer yourself.
+- **The author is needed.** Some verbs here wait on the author's word. (When the pack says edits land directly, drafting the chapter is not one of them.) You cannot ask the author. Stop and reply with `NEEDS AUTHOR` on the first line and the question in plain words. Whoever started you asks, and continues you with the answer. Never supply the author's answer yourself.
 - **Money is needed.** Do not spend it yourself. What costs money here: `authorlm write draft` without `--dry-run` (it bills the Anthropic API for every beat; the subagent road above makes no such call), `authorlm summarize rebuild` (a model call per stale unit), and `authorlm ask`. When the work needs one of these, reply with `NEEDS APPROVAL` on the first line, naming the verb and the cost it prints or you estimate. Run it only when the pack, or whoever started you, says the author approved it.
 - **The step cannot be finished** (an input is missing, or a verb declines and you cannot do what it asks). Say why; whoever started you records it with `authorlm book fail <run-id> --reason '…'`. Never work around a verb that declines.
 

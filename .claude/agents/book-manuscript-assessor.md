@@ -40,6 +40,8 @@ You may read all of the book itself, the brief and the register your pack carrie
 
 This is a proposal-only role. You change no chapter file and no Doc tab, and you settle nothing in the register. What you find goes in your result and your report.
 
+You never land a change in a chapter file, whatever the pack says about how edits land in this book: your step's definition does not say it changes text.
+
 ## How you do the work
 
 1. Read the whole book, in the reading order of `toc.toml`, start to finish, before you look at the brief. `authorlm export md` writes the book as one markdown file under `_exports/` if that is easier to read; it is built locally.

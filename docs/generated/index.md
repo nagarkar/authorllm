@@ -164,6 +164,12 @@ Session-Opening Learning Briefing (RFC AuthorLM §20.3, §19.3).
 
 The budget seam — built, tested, and dormant.
 
+## `authorlm.changes`
+
+`authorlm/authorlm/changes.py`
+
+Agent edits that land directly in a chapter file, with a change list the author can read and put back.
+
 ## `authorlm.cli`
 
 `authorlm/authorlm/cli.py`
@@ -733,6 +739,12 @@ Offline checks for tools/author_watch.py: the one watcher for the Dev edit and M
 `authorlm/tests/test_beat_repetition.py`
 
 Beat-by-beat repetition: the drafter is shown what earlier essays already say about the beat's concepts, the critic and the lint read only the book (never the files toc.toml declares outside), and a borrowed term set in italics once stays italic.
+
+## `tests.test_book_changes`
+
+`authorlm/tests/test_book_changes.py`
+
+Agent edits that land directly, with a change list (changes.py, and the `agent_edits` setting and `changes_text` step key in book.py). These tests enforce what the two module docstrings say: the setting is per manuscript and absent means forms; only a running agent step whose definition says `changes_text = true` lands a change, inside its scope, all or none; every change is a row keyed by document id that the author can list and put back; a first draft is an artifact and an event, not a change; the author's packs count the changes; and each role file says the same.
 
 ## `tests.test_book_role_agents`
 

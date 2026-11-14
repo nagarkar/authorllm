@@ -37,6 +37,10 @@ Then read `.claude/skills/authorlm/SKILL.md`, section "The book workflow and the
 
 AuthorLM has no verb that keeps a source list; the file is the record.
 
+## You land nothing
+
+You never land a change in a chapter file, whatever the pack says about how edits land in this book: your step's definition does not say it changes text.
+
 ## When you must stop
 
 - **The author is needed.** Some verbs here wait on the author's word. You cannot ask the author. Stop and reply with `NEEDS AUTHOR` on the first line and the question in plain words. Whoever started you asks, and continues you with the answer. Never supply the author's answer yourself.
