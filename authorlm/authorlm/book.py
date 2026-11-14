@@ -105,6 +105,17 @@ Decisions:
   record a use, `applies` or `infers`, for each entry its work rests on.
   Enforced by:
   tests/test_book_workflow.py::PackTests::test_the_pack_carries_the_register_in_scope.
+- Each agent role may have a role file in the checkout,
+  `.claude/agents/book-<role slug>.md`: a Claude Code subagent that says
+  how that trade does its step with AuthorLM's existing verbs. When one
+  exists, an agent step's pack names it near the top, so whoever starts
+  the step knows which subagent to hand it to. The role file is advice on
+  method; the contract in the pack is the one in force. A missing role
+  file, or a package installed outside a checkout, changes nothing else.
+  Enforced by:
+  tests/test_book_role_agents.py::PackNamesTheRoleFileTests::test_an_agent_steps_pack_names_its_role_file
+  and
+  tests/test_book_role_agents.py::PackNamesTheRoleFileTests::test_a_role_without_a_file_gets_a_pack_that_names_none.
 
 Terms:
 - **workflow definition**: the book's own list of steps,
@@ -129,6 +140,8 @@ Terms:
   rerun, the superseded result as reference.
 - **independent step**: a step whose reader must judge the text cold: its
   pack withholds what earlier steps returned.
+- **role file**: a Claude Code subagent file for one agent role,
+  `.claude/agents/book-<role slug>.md`, named in that role's packs.
 """
 
 from __future__ import annotations
@@ -151,6 +164,7 @@ DEFINITION_FILENAME = "workflow.toml"
 PACKS_DIR = "packs"
 RUN_PREFIX = "sr"
 EVENT_PREFIX = "se"
+ROLE_FILE_PREFIX = "book-"
 GRAINS = ("book", "part", "chapter")
 BOOK = "book"
 STEP_KEYS = ("id", "role", "actor", "grain", "after", "gives", "returns",
@@ -232,6 +246,40 @@ def default_definition_path() -> Path:
     a book starts from."""
     return (Path(__file__).resolve().parent.parent / "library"
             / "book-workflow.toml")
+
+
+def role_slug(role: str) -> str:
+    """A role's name as a file-name slug: "copy editor" gives
+    "copy-editor". The one place a role's name becomes a slug."""
+    return "-".join(re.findall(r"[a-z0-9]+", role.lower()))
+
+
+def role_agent_name(role: str) -> str:
+    """The name of a role's subagent, and the stem of its role file:
+    "copy editor" gives "book-copy-editor"."""
+    return ROLE_FILE_PREFIX + role_slug(role)
+
+
+def role_files_dir() -> Path:
+    """`.claude/agents/` in the checkout this package runs from: where the
+    role files are. The folder is absent when the package is installed
+    outside a checkout; `role_file` then finds nothing."""
+    return (Path(__file__).resolve().parent.parent.parent / ".claude"
+            / "agents")
+
+
+def role_file(role: str) -> Path | None:
+    """The role file for `role` (`.claude/agents/book-<slug>.md`), or None
+    when the checkout has none. A role file says how the role does its
+    work with AuthorLM's verbs; a role without one is still carried out
+    from its pack alone."""
+    if not role_slug(role):
+        return None
+    try:
+        path = role_files_dir() / f"{role_agent_name(role)}.md"
+        return path if path.is_file() else None
+    except OSError:
+        return None
 
 
 def _strings(table: dict, key: str, where: str) -> tuple[str, ...]:
@@ -922,7 +970,17 @@ def _pack(db: Database, manuscript: dict, definition: Definition,
         f"{run['attempt']}", "",
         f"Run {run['id']} of the book workflow for {manuscript['name']}. "
         + (f"This step is {who}'s: ask them, and record what they say in "
-           "their own words." if who else "This step is an agent's."), "",
+           "their own words." if who else "This step is an agent's."), ""]
+    role_path = None if who else role_file(step.role)
+    if role_path:
+        lines += [
+            f"Role file: {role_path}", "",
+            f"Hand this step to the subagent `{role_agent_name(step.role)}`"
+            ", giving it the path of this pack "
+            f"({pack_path(manuscript, run['id'])}). The role file says how "
+            "the role does its work; the contract below is the one in "
+            "force for this book.", ""]
+    lines += [
         "## Your contract", "",
         f"- Role: {step.role}", "- You are given:",
         *_given(manuscript, book_layout, step, scope),
@@ -982,7 +1040,8 @@ def start(db: Database, manuscript: dict, step_id: str,
           scope: str | None = None, *, note: str = "",
           notify=None) -> dict:
     """Start the next attempt at a step for a scope and write its pack;
-    returns `{run, pack_path, waiting_on, notified, next}`. An agent's run
+    returns `{run, pack_path, waiting_on, notified, role_file,
+    next}`. An agent's run
     is `running`; a person's is `waiting`, and that person is notified
     (`notify(title, body)`, by default the SuperLM notifier)."""
     _require_document_ids(db, manuscript)
@@ -1040,9 +1099,14 @@ def start(db: Database, manuscript: dict, step_id: str,
             f"{name}: waiting on {who}",
             f"The book workflow step '{step.id}' ({where.label}) is "
             f"waiting on {who}. See: authorlm book status -m {name}"))
+    role_path = None if who else role_file(step.role)
+    how = (f"Hand {path} to the subagent {role_agent_name(step.role)} "
+           f"(role file {role_path}), or read it and follow it"
+           if role_path else f"Read {path} and follow it")
     return {"run": show_run(db, manuscript, row["id"])["run"],
             "pack_path": str(path), "waiting_on": who, "notified": notified,
-            "next": f"Read {path} and follow it; then: authorlm book done "
+            "role_file": str(role_path) if role_path else None,
+            "next": f"{how}; then: authorlm book done "
                     f"{row['id']} --result-json <file> -m {name}"}
 
 

@@ -734,6 +734,12 @@ Offline checks for tools/author_watch.py: the one watcher for the Dev edit and M
 
 Beat-by-beat repetition: the drafter is shown what earlier essays already say about the beat's concepts, the critic and the lint read only the book (never the files toc.toml declares outside), and a borrowed term set in italics once stays italic.
 
+## `tests.test_book_role_agents`
+
+`authorlm/tests/test_book_role_agents.py`
+
+The role files of the book workflow (`.claude/agents/book-<role>.md`): one Claude Code subagent per agent role of the default workflow (`library/book-workflow.toml`), saying how that trade does its step with AuthorLM's existing verbs. These tests enforce what book.py's docstring says of them: every agent role has a file named for it; every agent step is claimed by exactly one file, its role's; an independent role's file carries the independence rule; and an agent step's pack names the role file, so whoever starts the step knows which subagent to hand it to.
+
 ## `tests.test_book_workflow`
 
 `authorlm/tests/test_book_workflow.py`
