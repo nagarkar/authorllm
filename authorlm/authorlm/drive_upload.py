@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .db import Database
 from .export import DOCX_MIME, build_docx, load_settings, write_combined_export
-from .gdocs import GDOC_MIME, _ensure_folder, _mapping, _save_mapping
+from .gdocs import GDOC_MIME, _ensure_folder, _execute, _mapping, _save_mapping
 
 EXPORT_KEY = "_export"  # metadata.gdocs key; '_' keeps reconcile/pull away
 
@@ -55,18 +55,18 @@ def export_manuscript(db: Database, manuscript: dict, service=None,
         media = MediaFileUpload(str(docx_path), mimetype=DOCX_MIME)
         if entry.get("doc_id"):
             try:
-                service.files().update(fileId=entry["doc_id"],
-                                       media_body=media).execute()
+                _execute(service.files().update(fileId=entry["doc_id"],
+                                       media_body=media))
             except Exception as err:
                 if not _doc_gone(err):
                     raise
                 entry["doc_id"] = None  # deleted in Drive — recreate below
         if not entry.get("doc_id"):
-            created = service.files().create(
+            created = _execute(service.files().create(
                 body={"name": doc_title, "mimeType": GDOC_MIME,
                       "parents": [_ensure_folder(manuscript, meta, service)]},
                 media_body=media, fields="id",
-            ).execute()
+            ))
             entry["doc_id"] = created["id"]
             result["created"] = True
         result["doc_id"] = entry["doc_id"]
@@ -107,9 +107,9 @@ def upload_export(db: Database, manuscript: dict, path: Path, service,
     created, info = False, None
     if entry.get("file_id"):
         try:
-            info = service.files().update(
+            info = _execute(service.files().update(
                 fileId=entry["file_id"], media_body=media,
-                fields="id,webViewLink").execute()
+                fields="id,webViewLink"))
         except Exception as err:
             if not _doc_gone(err):
                 raise
@@ -119,8 +119,8 @@ def upload_export(db: Database, manuscript: dict, path: Path, service,
                 "parents": [_ensure_folder(manuscript, meta, service)]}
         if as_doc:
             body["mimeType"] = GDOC_MIME
-        info = service.files().create(body=body, media_body=media,
-                                      fields="id,webViewLink").execute()
+        info = _execute(service.files().create(body=body, media_body=media,
+                                      fields="id,webViewLink"))
         entry["file_id"] = info["id"]
         created = True
     entry["as_doc"] = as_doc

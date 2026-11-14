@@ -1034,6 +1034,12 @@ Hermetic tests for tools/gallery.py — self-contained image-review pages.
 
 `gdocs.clamp` is the one truncation used in Doc fault lines, settle receipts, and CLI proposal diffs.
 
+## `tests.test_gdocs_retry`
+
+`authorlm/tests/test_gdocs_retry.py`
+
+`gdocs._execute` rides out Docs/Drive quota and server errors (#440).
+
 ## `tests.test_generated_docs`
 
 `authorlm/tests/test_generated_docs.py`
