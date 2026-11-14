@@ -46,6 +46,48 @@ GDOC_MIME = "application/vnd.google-apps.document"
 MARKDOWN_MIME = "text/markdown"
 
 
+# ------------------------------------------------------- API retry (#440)
+
+RETRY_TRIES = 6          # attempts in all, so five waits
+RETRY_MAX_WAIT = 65.0    # seconds; outlasts the Docs per-minute write quota
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def _sleep(seconds: float) -> None:  # seam for tests
+    import time
+    time.sleep(seconds)
+
+
+def _execute(request, *, tries: int = RETRY_TRIES):
+    """Run one Docs/Drive API request, retrying 429 and 5xx answers with
+    exponential backoff and jitter (Retry-After wins when Google sends it).
+    Every bridge `.execute()` goes through here; anything else raises."""
+    import random
+    from googleapiclient.errors import HttpError
+    for attempt in range(tries):
+        try:
+            return request.execute()
+        except HttpError as err:
+            status = getattr(getattr(err, "resp", None), "status", None)
+            try:
+                status = int(status)
+            except (TypeError, ValueError):
+                status = None
+            if status not in _RETRY_STATUSES or attempt == tries - 1:
+                raise
+            wait = min(RETRY_MAX_WAIT, 2.0 ** (attempt + 2)) * random.uniform(0.75, 1.0)
+            header = None
+            resp = getattr(err, "resp", None)
+            if resp is not None and hasattr(resp, "get"):
+                header = resp.get("retry-after") or resp.get("Retry-After")
+            try:
+                if header is not None:
+                    wait = min(RETRY_MAX_WAIT, max(wait, float(header)))
+            except ValueError:
+                pass
+            _sleep(wait)
+
+
 # ------------------------------------------------- Doc import and export text
 
 _FOOTNOTE_SYNTAX = re.compile(r"\[\^")
@@ -499,13 +541,13 @@ def fetch_open_comments(service, doc_id: str) -> list[dict]:
     tab/essay attribution happens later, by quote matching."""
     comments, token = [], None
     while True:
-        resp = service.comments().list(
+        resp = _execute(service.comments().list(
             fileId=doc_id, pageToken=token, includeDeleted=False,
             pageSize=100,  # Drive's most; its default of 20 took 8 pages
             fields="nextPageToken,comments(id,content,quotedFileContent,"
                    "resolved,author(displayName),createdTime,"
                    "replies(id,content,author(displayName)))",
-        ).execute()
+        ))
         # Drive entity-encodes quoted text and comment bodies (&#39;
         # for an apostrophe): unescape at the boundary so attribution
         # matches the manuscript and evidence stores the author's actual
@@ -691,11 +733,11 @@ def resolve_comments_with_receipt(db: Database, service, doc_id: str,
     resolved = 0
     for comment_id in comment_ids:
         try:
-            service.replies().create(
+            _execute(service.replies().create(
                 fileId=doc_id, commentId=comment_id,
                 body={"action": "resolve", "content": receipt},
                 fields="id",
-            ).execute()
+            ))
         except Exception as err:
             print(f"warning: could not resolve comment {comment_id} ({err});"
                   " it will be re-offered on the next pull.", file=sys.stderr)
@@ -887,8 +929,8 @@ def bind_master(db: Database, manuscript: dict, doc_ref: str,
         raise LookupError(
             f"{manuscript['name']} is already bound to "
             f"{tab_url(current)}; pass --force to replace it")
-    doc = docs_service.documents().get(
-        documentId=master_id, includeTabsContent=False).execute()
+    doc = _execute(docs_service.documents().get(
+        documentId=master_id, includeTabsContent=False))
     tab_props: list[tuple[str, str]] = []
     walk_tabs(doc.get("tabs", []), tab_props, [])
     titles = [t for _, t in tab_props]
@@ -927,11 +969,11 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
     master_id = entry.get("_master_id")
     if not master_id:
         folder_id = _ensure_folder(manuscript, meta, drive)
-        result = drive.files().create(
+        result = _execute(drive.files().create(
             body={"name": bridge.doc_name, "mimeType": GDOC_MIME,
                   "parents": [folder_id]},
             fields="id",
-        ).execute()
+        ))
         master_id = entry["_master_id"] = result["id"]
         # Each new incarnation of the master Doc bumps the doc version.
         entry["_doc_version"] = entry.get("_doc_version", 0) + 1
@@ -950,11 +992,11 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
         if not container_id:
             container_id = existing.get(bridge.doc_name)
             if not container_id:
-                reply = docs_service.documents().batchUpdate(
+                reply = _execute(docs_service.documents().batchUpdate(
                     documentId=master_id,
                     body={"requests": [{"addDocumentTab": {
                         "tabProperties": {"title": bridge.doc_name}}}]},
-                ).execute()
+                ))
                 container_id = reply["replies"][0]["addDocumentTab"][
                     "tabProperties"]["tabId"]
             entry["_container_tab"] = container_id
@@ -964,7 +1006,7 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
 
     missing = [f for f in order if f not in existing]
     if missing:
-        reply = docs_service.documents().batchUpdate(
+        reply = _execute(docs_service.documents().batchUpdate(
             documentId=master_id,
             body={"requests": [
                 {"addDocumentTab": {"tabProperties": {
@@ -973,7 +1015,7 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
                        if container_id else {})}}}
                 for name in missing
             ]},
-        ).execute()
+        ))
         for name, r in zip(missing, reply.get("replies", [])):
             existing[name] = r["addDocumentTab"]["tabProperties"]["tabId"]
     # The Reader load lives in the manifest tab now. A Doc from before
@@ -983,10 +1025,10 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
     entry.pop(OLD_READER_LOAD_TITLE, None)
     if old_load:
         try:
-            docs_service.documents().batchUpdate(
+            _execute(docs_service.documents().batchUpdate(
                 documentId=master_id,
                 body={"requests": [{"deleteTab": {"tabId": old_load}}]},
-            ).execute()
+            ))
         except Exception:
             pass  # a stale derived tab is cosmetic, never fatal
     # The blank default tab is noise once real tabs exist.
@@ -994,11 +1036,11 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
              if title not in order and title.startswith("Tab ")]
     if stray and len(existing) > len(stray):
         try:
-            docs_service.documents().batchUpdate(
+            _execute(docs_service.documents().batchUpdate(
                 documentId=master_id,
                 body={"requests": [{"deleteTab": {"tabId": tid}}
                                    for tid in stray]},
-            ).execute()
+            ))
         except Exception:
             pass  # a lingering empty default tab is cosmetic, never fatal
     for name in order:
@@ -1010,11 +1052,11 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
     try:
         manifest_id = existing.get(MANIFEST_TITLE)
         if not manifest_id:
-            reply = docs_service.documents().batchUpdate(
+            reply = _execute(docs_service.documents().batchUpdate(
                 documentId=master_id,
                 body={"requests": [{"addDocumentTab": {
                     "tabProperties": {"title": MANIFEST_TITLE}}}]},
-            ).execute()
+            ))
             manifest_id = reply["replies"][0]["addDocumentTab"][
                 "tabProperties"]["tabId"]
         entry["_manifest_tab"] = manifest_id
@@ -1048,8 +1090,8 @@ def ensure_master(db: Database, manuscript: dict, meta: dict,
             move = next_tab_move(current_ids, desired_ids)
             if move is None:
                 break
-            docs_service.documents().batchUpdate(
-                documentId=master_id, body={"requests": [move]}).execute()
+            _execute(docs_service.documents().batchUpdate(
+                documentId=master_id, body={"requests": [move]}))
     except Exception:
         pass  # a stale order is cosmetic, never fatal to a push
     _save_mapping(db, manuscript, meta)
@@ -1173,8 +1215,8 @@ def _write_manifest(docs_service, master_id: str, tab_id: str,
         "text": manifest_text(manuscript_name, doc_version, inventory,
                               stats, matter=matter,
                               reader_load=reader_load)}})
-    docs_service.documents().batchUpdate(
-        documentId=master_id, body={"requests": requests}).execute()
+    _execute(docs_service.documents().batchUpdate(
+        documentId=master_id, body={"requests": requests}))
 
 
 CONTAINER_SENTINEL = ("Automatically generated by AuthorLM. "
@@ -1193,8 +1235,8 @@ def _write_container(docs_service, master_id: str, tab_id: str) -> None:
     requests.append({"insertText": {
         "location": {"tabId": tab_id, "index": 1},
         "text": CONTAINER_SENTINEL}})
-    docs_service.documents().batchUpdate(
-        documentId=master_id, body={"requests": requests}).execute()
+    _execute(docs_service.documents().batchUpdate(
+        documentId=master_id, body={"requests": requests}))
 
 
 def next_tab_move(current: list[str], desired: list[str]) -> dict | None:
@@ -1596,13 +1638,13 @@ def _retitle_tabs(docs_service, master_id: str, entry: dict) -> list[str]:
         current = title_of.get(file_entry["tab_id"])
         if current is not None and current != name:
             try:
-                docs_service.documents().batchUpdate(
+                _execute(docs_service.documents().batchUpdate(
                     documentId=master_id,
                     body={"requests": [{"updateDocumentTabProperties": {
                         "tabProperties": {"tabId": file_entry["tab_id"],
                                           "title": name},
                         "fields": "title"}}]},
-                ).execute()
+                ))
             except Exception as err:
                 raise LookupError(
                     f"could not retitle the Doc tab '{current}' to "
@@ -1639,10 +1681,10 @@ def _ensure_folder(manuscript: dict, meta: dict, service) -> str:
     entry = meta.setdefault("gdocs", {})
     if entry.get("_folder_id"):
         return entry["_folder_id"]
-    result = service.files().create(
+    result = _execute(service.files().create(
         body={"name": f"AuthorLM — {manuscript['name']}", "mimeType": FOLDER_MIME},
         fields="id",
-    ).execute()
+    ))
     entry["_folder_id"] = result["id"]
     return result["id"]
 
@@ -1706,14 +1748,14 @@ def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
 
     media = MediaInMemoryUpload(markdown.encode("utf-8"),
                                 mimetype=MARKDOWN_MIME)
-    temp = service.files().create(
+    temp = _execute(service.files().create(
         body={"name": temp_name, "mimeType": GDOC_MIME},
         media_body=media, fields="id",
-    ).execute()
+    ))
     try:
-        temp_doc = docs_service.documents().get(documentId=temp["id"]).execute()
+        temp_doc = _execute(docs_service.documents().get(documentId=temp["id"]))
     finally:
-        service.files().delete(fileId=temp["id"]).execute()
+        _execute(service.files().delete(fileId=temp["id"]))
 
     requests: list[dict] = []
     end = _tab_end(docs_service, master_id, tab_id)
@@ -1722,8 +1764,8 @@ def _rewrite_tab(service, docs_service, master_id: str, tab_id: str,
             "tabId": tab_id, "startIndex": 1, "endIndex": end - 1}}})
     requests += transplant_requests(temp_doc, tab_id)
     if requests:
-        docs_service.documents().batchUpdate(
-            documentId=master_id, body={"requests": requests}).execute()
+        _execute(docs_service.documents().batchUpdate(
+            documentId=master_id, body={"requests": requests}))
 
 
 # The remedy each producer's pending forms are settled by. A refusal
@@ -2474,11 +2516,11 @@ def sync_tab_structure(db: Database, manuscript: dict, docs_service) -> dict:
             props["parentTabId"] = tid_of.get(parent, "")
             fields = "index,parentTabId"
         try:
-            docs_service.documents().batchUpdate(
+            _execute(docs_service.documents().batchUpdate(
                 documentId=master_id,
                 body={"requests": [{"updateDocumentTabProperties": {
                     "tabProperties": props, "fields": fields}}]},
-            ).execute()
+            ))
         except Exception:
             # Live finding 2026-08-05 (verified by matrix test): the Docs
             # API 500s on ALL property updates to ROOT-LEVEL tabs — index,
@@ -2542,8 +2584,8 @@ def doc_revision(docs_service, master_id: str) -> str | None:
     changes it on every edit to any tab. None when it cannot be read,
     which callers treat as "changed": the safe side."""
     try:
-        got = docs_service.documents().get(
-            documentId=master_id, fields="revisionId").execute()
+        got = _execute(docs_service.documents().get(
+            documentId=master_id, fields="revisionId"))
     except Exception:  # noqa: BLE001 — unknown revision: read the tab
         return None
     return got.get("revisionId") if isinstance(got, dict) else None
@@ -2594,9 +2636,9 @@ def master_doc(docs_service, master_id: str) -> dict:
     if held is not None and doc_revision(docs_service, master_id) == \
             held.get("revisionId"):
         return held
-    doc = docs_service.documents().get(
+    doc = _execute(docs_service.documents().get(
         documentId=master_id, includeTabsContent=True,
-        fields=MASTER_FIELDS).execute()
+        fields=MASTER_FIELDS))
     if isinstance(doc, dict) and doc.get("revisionId"):
         memo["doc"] = doc
     else:
@@ -2658,8 +2700,8 @@ def master_export(service, docs_service, master_id: str,
         if kept is not None:
             memo.update(export_rev=revision, export=kept)
             return kept
-    data = service.files().export(
-        fileId=master_id, mimeType=MARKDOWN_MIME).execute()
+    data = _execute(service.files().export(
+        fileId=master_id, mimeType=MARKDOWN_MIME))
     text = data.decode("utf-8") if isinstance(data, bytes) else str(data)
     if revision and doc_revision(docs_service, master_id) == revision:
         memo.update(export_rev=revision, export=text)
@@ -3851,8 +3893,8 @@ def _write_illus_root(docs_service, master_id: str, tab_id: str) -> None:
     requests.append({"insertText": {
         "location": {"tabId": tab_id, "index": 1},
         "text": ILLUS_SENTINEL}})
-    docs_service.documents().batchUpdate(
-        documentId=master_id, body={"requests": requests}).execute()
+    _execute(docs_service.documents().batchUpdate(
+        documentId=master_id, body={"requests": requests}))
 
 
 def push_prompt_tabs(db: Database, manuscript: dict, service,
@@ -3890,11 +3932,11 @@ def push_prompt_tabs(db: Database, manuscript: dict, service,
     if illus_id is None:
         if not local:
             return report  # no prompts and no tab: nothing to mirror
-        reply = docs_service.documents().batchUpdate(
+        reply = _execute(docs_service.documents().batchUpdate(
             documentId=master_id,
             body={"requests": [{"addDocumentTab": {
                 "tabProperties": {"title": ILLUS_TAB_TITLE}}}]},
-        ).execute()
+        ))
         illus_id = reply["replies"][0]["addDocumentTab"][
             "tabProperties"]["tabId"]
         children = []
@@ -3904,11 +3946,11 @@ def push_prompt_tabs(db: Database, manuscript: dict, service,
     report["unknown"] = plan["unknown"]
     report["renamed"] = plan["renamed"]
     for name in plan["create"]:
-        reply = docs_service.documents().batchUpdate(
+        reply = _execute(docs_service.documents().batchUpdate(
             documentId=master_id,
             body={"requests": [{"addDocumentTab": {"tabProperties": {
                 "title": name, "parentTabId": illus_id}}}]},
-        ).execute()
+        ))
         tab_id = reply["replies"][0]["addDocumentTab"][
             "tabProperties"]["tabId"]
         links[ILLUS_KEY_PREFIX + name] = {"tab_id": tab_id}
@@ -3922,10 +3964,10 @@ def push_prompt_tabs(db: Database, manuscript: dict, service,
         if name in plan["rewrite"]:
             report["updated"].append(name)
     for name, tab_id in plan["prune"]:
-        docs_service.documents().batchUpdate(
+        _execute(docs_service.documents().batchUpdate(
             documentId=master_id,
             body={"requests": [{"deleteTab": {"tabId": tab_id}}]},
-        ).execute()
+        ))
         links.pop(ILLUS_KEY_PREFIX + name, None)
         report["pruned"].append(name)
     try:
@@ -4095,16 +4137,16 @@ def propose_change(db: Database, manuscript: dict, comment_id: str,
             "the passage may have changed; re-draft against current text")
     start, end = span
     requests = _mark_replace_requests(tab_id, start, end, old, new)
-    docs_service.documents().batchUpdate(
-        documentId=master_id, body={"requests": requests}).execute()
+    _execute(docs_service.documents().batchUpdate(
+        documentId=master_id, body={"requests": requests}))
 
     reply_id = None
     try:
-        reply = service.replies().create(
+        reply = _execute(service.replies().create(
             fileId=master_id, commentId=comment_id,
             body={"content": PREFIX + "proposed — " + note},
             fields="id",
-        ).execute()
+        ))
         reply_id = reply.get("id")
     except Exception:
         pass  # the marker edit is the proposal; the reply is a courtesy
@@ -4553,8 +4595,8 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
                                              master_id, tab_id)
             if tab_old:
                 tab_old_of[t["id"]] = tab_old
-            docs_service.documents().batchUpdate(
-                documentId=master_id, body={"requests": requests}).execute()
+            _execute(docs_service.documents().batchUpdate(
+                documentId=master_id, body={"requests": requests}))
             written.append(t)
         except Exception as err:  # noqa: BLE001 — per-thread, keep going
             failed.append((t, str(err)))
@@ -4624,11 +4666,11 @@ def write_pending_forms(db: Database, manuscript: dict, file: str,
                                               rendered_text(t["proposed_new"]))
             span = _locate_in_tab(docs_service, master_id, tab_id, form)
             if span is not None:
-                docs_service.documents().batchUpdate(
+                _execute(docs_service.documents().batchUpdate(
                     documentId=master_id,
                     body={"requests": _unmark_replace_requests(
                         tab_id, span[0], tab_old, t["proposed_new"])}
-                ).execute()
+                ))
             written.remove(t)
             failed.append((t, "export proof: the markdown export does not "
                               "give this paragraph's old half back verbatim "
@@ -4805,11 +4847,11 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
             span = _locate_in_tab(docs_service, master_id, tab_id,
                                   full[:close + 2])
             if span is not None:
-                docs_service.documents().batchUpdate(
+                _execute(docs_service.documents().batchUpdate(
                     documentId=master_id, body={"requests": [
                         {"deleteContentRange": {"range": {
                             "tabId": tab_id, "startIndex": span[1] - 2,
-                            "endIndex": span[1]}}}]}).execute()
+                            "endIndex": span[1]}}}]}))
     if outcomes:
         full = tab_text()
         outcomes = [o for o in outcomes if find_form(full, o) is not None]
@@ -4874,8 +4916,8 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
                     "paragraphStyle": {
                         "namedStyleType": f"HEADING_{len(heading.group(1))}"},
                     "fields": "namedStyleType"}}]
-        docs_service.documents().batchUpdate(
-            documentId=master_id, body={"requests": requests}).execute()
+        _execute(docs_service.documents().batchUpdate(
+            documentId=master_id, body={"requests": requests}))
     # Read-back: none of these forms may still be in the tab, whole or
     # in part. A form with a marker gone is not "settled": it was left
     # half removed, and the resolve said the tab was clean (2026-10-30).
@@ -5010,8 +5052,8 @@ def _replace_pending(db: Database, manuscript: dict, thread: dict,
                       "endIndex": start + _utf16_len(replacement)},
             "textStyle": {}, "fields": "strikethrough,foregroundColor"}},
     ]
-    docs_service.documents().batchUpdate(
-        documentId=master_id, body={"requests": requests}).execute()
+    _execute(docs_service.documents().batchUpdate(
+        documentId=master_id, body={"requests": requests}))
 
     # Read-back verification (ratified: equivalence or loud failure).
     runs = _tab_runs(docs_service, master_id, tab_id)
@@ -5105,11 +5147,11 @@ def advance_threads(db: Database, manuscript: dict, open_comments: list,
             body = {"content": PREFIX + receipt}
             if actions[-1]["action"] in ("cleaned", "declined"):
                 body["action"] = "resolve"
-            reply = service.replies().create(
+            reply = _execute(service.replies().create(
                 fileId=_mapping(db, manuscript)[bridge.meta_key]["_master_id"],
                 commentId=thread["origin_id"],
                 body=body, fields="id",
-            ).execute()
+            ))
             th.set_state(db, dict(th.get_thread(db, mid,
                                                 thread["origin_id"])),
                          actions[-1]["action"], reply_id=reply.get("id"))
@@ -5245,8 +5287,8 @@ def apply_tab_spacing(docs_service, master_id: str, tab_id: str,
         body: dict = {"requests": requests}
         if chain and chain.get("rev"):
             body["writeControl"] = {"requiredRevisionId": chain["rev"]}
-        reply = docs_service.documents().batchUpdate(
-            documentId=master_id, body=body).execute()
+        reply = _execute(docs_service.documents().batchUpdate(
+            documentId=master_id, body=body))
         if chain is not None:
             chain["rev"] = _written_revision(reply) if chain.get("rev") else None
     return len(requests)
@@ -5971,16 +6013,16 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
                 chunk = escape_math(escape_footnotes(chunk))
                 media = MediaInMemoryUpload(chunk.encode("utf-8"),
                                             mimetype=MARKDOWN_MIME)
-                temp = service.files().create(
+                temp = _execute(service.files().create(
                     body={"name": f"authorlm-diff-{Path(relpath).stem}",
                           "mimeType": GDOC_MIME},
                     media_body=media, fields="id",
-                ).execute()
+                ))
                 try:
-                    temp_doc = docs_service.documents().get(
-                        documentId=temp["id"]).execute()
+                    temp_doc = _execute(docs_service.documents().get(
+                        documentId=temp["id"]))
                 finally:
-                    service.files().delete(fileId=temp["id"]).execute()
+                    _execute(service.files().delete(fileId=temp["id"]))
                 if not doc_paras:
                     # Empty tab: nothing to insert before or after, so
                     # the block lands at the body's start (index 1),
@@ -6051,8 +6093,8 @@ def diff_push(db: Database, manuscript: dict, relpath: str,
             if planned:
                 body["writeControl"] = {"requiredRevisionId": planned}
             try:
-                reply = docs_service.documents().batchUpdate(
-                    documentId=master_id, body=body).execute()
+                reply = _execute(docs_service.documents().batchUpdate(
+                    documentId=master_id, body=body))
             except HttpError as err:
                 if planned and "revision" in str(err).lower():
                     raise DocChanged(f"{relpath}: the Doc changed during "
@@ -6148,12 +6190,12 @@ def decide_thread(db: Database, manuscript: dict, comment_id: str,
     if reason:
         receipt += f" — {reason}"
     try:
-        service.replies().create(
+        _execute(service.replies().create(
             fileId=_mapping(db, manuscript)[bridge.meta_key]["_master_id"],
             commentId=comment_id,
             body={"content": th.PREFIX + receipt, "action": "resolve"},
             fields="id",
-        ).execute()
+        ))
         row = db.one(
             "SELECT id FROM doc_comments WHERE manuscript_id = ? "
             "AND comment_id = ?", (mid, comment_id))
