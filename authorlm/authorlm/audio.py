@@ -269,9 +269,11 @@ def _validate_chapter_config(value: object, where: str) -> None:
         _validate_voice_key(chapter.get("voice"), f"{label} ({name}).voice")
 
 
-def init(manuscript: dict) -> dict:
+def init(manuscript: dict, *, compiled: bool = False) -> dict:
     """Seed missing audio configuration files, preserving existing bytes.
-    Refuses when both already exist: each file belongs to the author."""
+    Refuses when both already exist: each file belongs to the author.
+    `compiled` seeds "Compiled by" credits in place of "Written by", for a
+    manuscript an outside caller keeps (`api.outside_callers`)."""
     root = audio_dir(manuscript)
     config = root / CONFIG_FILENAME
     cast = root / CAST_FILENAME
@@ -287,6 +289,10 @@ def init(manuscript: dict) -> dict:
     # manuscript (ruling 2026-10-18); the author never makes one by hand.
     seed_config = DEFAULT_CONFIG_TEXT.replace(
         'dictionary = ""', f"dictionary = {json.dumps(manuscript['name'])}", 1)
+    if compiled:
+        seed_config = seed_config.replace(
+            ". Written by {author}.", ". Compiled by {author}.", 1).replace(
+            ", written by {author} and", ", compiled by {author} and", 1)
     for path, content in ((config, seed_config), (cast, SEED_CAST)):
         if path.exists():
             unchanged.append(str(path))

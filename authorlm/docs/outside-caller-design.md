@@ -336,6 +336,7 @@ api.caller_metadata(db, manuscript, origin) -> dict
 api.set_caller_metadata(db, manuscript, origin, values) -> dict
 api.outstanding_revisions(db, manuscript, origin) -> {file: int}
 api.withdraw_revisions(db, manuscript, file, origin) -> [{"id", "old", "new", "note"}]
+api.outside_callers(db, manuscript) -> [origin, ...]
 ```
 
 - **Settings.** A caller's own keys (ytlm keeps the Doc's title and
@@ -351,6 +352,20 @@ api.withdraw_revisions(db, manuscript, file, origin) -> [{"id", "old", "new", "n
   `withdrawn`; any other producer's are left alone. The forms stay in
   the tab until the caller rebuilds it from the local file with
   `gdocs.push_doc`, which those threads no longer hold.
+- **Whose manuscript.** `outside_callers` names the callers with
+  settings on the manuscript (under `callers`, or at the top level
+  under `ytlm`, `beelm` or `corpuslm` from before that key), read from
+  the row; empty means one of the owner's own books. This, not the
+  extraction switch, is how AuthorLM tells a caller's manuscript apart:
+  the owner turns extraction off on books of their own, while a caller
+  always records its settings here. A caller that wants the marks below
+  calls `set_caller_metadata` once at registration.
+- **Audiobook credits (added 2026-11-07).** `audio init` seeds such a
+  manuscript's `_audio/audiobook.toml` with "Compiled by {author}" in
+  the opening credit and "compiled by {author}" in the closing one, in
+  place of "written by" (`docs/audiobook-pipeline-design.md`, the
+  `[credits]` table). It decides once, when it writes the file; a file
+  already seeded is the author's and is not rewritten.
 
 ---
 
