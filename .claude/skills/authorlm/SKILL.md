@@ -876,6 +876,17 @@ need `document_ids` on (`authorlm manuscript set --document-ids on`).
    step is a person's (`human:author`), `book start` marks it waiting and
    notifies them: ask them in chat, record what they say, then `book done`.
 
+**Role files.** Each agent role of the default workflow has a role file,
+`.claude/agents/book-<role>.md` (the copy editor's is `book-copy-editor`):
+a subagent that knows its contract and which AuthorLM verbs its trade
+uses. An agent step's pack names it near the top (`Role file: …`), and
+`book start` prints it. Hand the step to the subagent of that name, with
+the pack's path and, for an independent step, nothing else. The subagent
+may come back with `NEEDS AUTHOR` (a question only the author can answer)
+or `NEEDS APPROVAL` (a verb that spends money): ask the author, then
+continue the same subagent with the answer. A step whose pack names no
+role file is done from the pack alone.
+
 **Restart from any point:** `authorlm book restart <step> [--scope <s>]
 --reason '<what was wrong>'` (`--dry-run` lists first). The run and every
 run that followed from it, for that scope and the scopes inside it, are
