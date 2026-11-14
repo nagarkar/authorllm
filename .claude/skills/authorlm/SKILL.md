@@ -1355,6 +1355,18 @@ place, so an edit in the repo reaches every book. A manuscript's own
 only (`filter add` of a library name writes that override). Never copy a
 library filter into a manuscript unless the author wants that book to differ.
 
+**The lens library.** `authorlm/library/lenses/` holds lenses written for any
+manuscript (`plain-reader`, promoted from SMSTTD 2026-11-13). Every book sees
+them in `lens list` and `lens show`, marked `(library)`, and runs them by name
+(`lens run plain-reader <essay.md>`) with no install step; they are read in
+place. A library lens never joins `lens sweep` by itself: name it with
+`--only plain-reader` (ruled 2026-11-13, so a book that is not ready is never
+handed a lens nobody chose). A book's own `_lenses/<name>.md` of the same name
+wins for that book. `authorlm lens promote <name>` moves a book's own lens
+into the library byte for byte (the book keeps it by the same name; an
+existing library lens is left as it is). A lens that names the `audience` or
+`passes` input reads that book's own profile and filter roster.
+
 **Shared readings.** A global filter whose front matter says `reading =
 "<group>"` shares one whole-essay reading per essay with the rest of its group
 (the strunk-and-white passes are group `strunk-and-white`). The first `filter

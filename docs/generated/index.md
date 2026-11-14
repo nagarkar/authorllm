@@ -1118,6 +1118,12 @@ Interlocutor tests (docs/interlocutor-design.md).
 
 Footnote `| label:` override parsing (`directives._LABEL_OPT`).
 
+## `tests.test_lens_library`
+
+`authorlm/tests/test_lens_library.py`
+
+The lens library: a lens promoted from one book is seen, listed and run on another, joins a sweep only when named, and the book's own lens of the same name wins. Also pins the shipped `plain-reader` library lens.
+
 ## `tests.test_lens_protection`
 
 `authorlm/tests/test_lens_protection.py`

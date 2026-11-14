@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import tomllib
 from dataclasses import dataclass
@@ -97,8 +98,68 @@ class LensError(ValueError):
     every load, so a typo fails where it was written."""
 
 
-def _lens_path(manuscript: dict, name: str) -> Path:
+# The shared library: lenses written for any manuscript, kept in the repo
+# beside the package (`authorlm/library/lenses/`) and read in place, as
+# library filters are. A manuscript SEES every library lens: `lens list`,
+# `lens show` and `lens run <name>` work on any book at once, and a lens of
+# the same name in the book's own `_lenses/` wins. A library lens never
+# joins a sweep by itself: `lens sweep` runs the book's own lenses, plus a
+# library lens only when `--only` names it (ruled 2026-11-13: a book that
+# is not ready is never handed a lens nobody chose for it). `lens promote`
+# moves a book's lens into the library.
+LIBRARY_ENV = "AUTHORLM_LENS_LIBRARY"
+
+
+def library_dir() -> Path:
+    """`authorlm/library/lenses/` in the checkout, or the directory named
+    by AUTHORLM_LENS_LIBRARY (tests point it at a temp dir)."""
+    override = os.environ.get(LIBRARY_ENV, "")
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parent.parent / "library" / "lenses"
+
+
+def _own_path(manuscript: dict, name: str) -> Path:
     return Path(manuscript["path"]) / LENS_DIR / f"{name}.md"
+
+
+def _lens_path(manuscript: dict, name: str) -> Path:
+    """The book's own artifact if it has one, else the library's if that
+    exists, else the book's path (where `lens add` writes and what a
+    missing-lens error names)."""
+    own = _own_path(manuscript, name)
+    if own.is_file():
+        return own
+    shared = library_dir() / f"{name}.md"
+    if _NAME.match(name or "") and shared.is_file():
+        return shared
+    return own
+
+
+def lens_source(manuscript: dict, name: str) -> str:
+    return "manuscript" if _lens_path(manuscript, name) == \
+        _own_path(manuscript, name) else "library"
+
+
+def promote_lens(manuscript: dict, name: str) -> Path:
+    """Move the book's own lens `name` into the library, byte for byte.
+    The book keeps using it by the same name, now from the library. Will
+    not overwrite a library lens of that name, and will not move a
+    malformed one."""
+    own = _own_path(manuscript, name)
+    if not own.is_file():
+        raise LookupError(f"'{name}' is not one of this book's own lenses "
+                          f"(looked for {own}).")
+    text = own.read_text(encoding="utf-8")
+    parse_lens(text)
+    target = library_dir() / f"{name}.md"
+    if target.exists():
+        raise ValueError(f"the library already has a lens '{name}' "
+                         f"({target}); it is left as it is.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    own.unlink()
+    return target
 
 
 def parse_lens(text: str) -> tuple[dict, str]:
@@ -195,7 +256,7 @@ def add_lens(manuscript: dict, name: str, prompt: str) -> Path:
     if not prompt.strip():
         raise ValueError("a lens is its prompt — pass the prompt on stdin")
     parse_lens(prompt)                      # refuse before writing
-    path = _lens_path(manuscript, name)
+    path = _own_path(manuscript, name)
     path.parent.mkdir(exist_ok=True)
     path.write_text(prompt.strip() + "\n", encoding="utf-8")
     return path
@@ -213,23 +274,35 @@ def summary_of(body: str) -> str:
 
 
 def list_lenses(manuscript: dict) -> list[dict]:
-    """Every artifact in `_lenses/`, with its class. A malformed one is
-    listed with its error where its summary would be, never hidden."""
+    """Every lens the book sees: its own `_lenses/*.md` ("manuscript"),
+    then each library lens it does not override ("library"), with its
+    class. A malformed one is listed with its error where its summary
+    would be, never hidden."""
+    found: dict[str, tuple[Path, str]] = {}
+    lib = library_dir()
+    if lib.is_dir():
+        for path in lib.glob("*.md"):
+            if _NAME.match(path.stem):
+                found[path.stem] = (path, "library")
     directory = Path(manuscript["path"]) / LENS_DIR
-    if not directory.is_dir():
-        return []
+    if directory.is_dir():
+        for path in directory.glob("*.md"):
+            found[path.stem] = (path, "manuscript")
     out = []
-    for path in sorted(directory.glob("*.md")):
+    for key in sorted(found):
+        path, source = found[key]
         text = path.read_text(encoding="utf-8")
         try:
             meta, body = parse_lens(text)
         except LensError as err:
             out.append({"name": path.stem, "class": None, "inputs": [],
-                        "targets": [], "summary": "", "error": str(err)})
+                        "targets": [], "summary": "", "error": str(err),
+                        "source": source})
             continue
         out.append({"name": path.stem, "class": meta["class"],
                     "inputs": meta["inputs"], "targets": meta["targets"],
-                    "summary": summary_of(body), "error": None})
+                    "summary": summary_of(body), "error": None,
+                    "source": source})
     return out
 
 
@@ -1304,7 +1377,10 @@ def findings(db: Database, manuscript: dict, file: str,
 
 def sweep_order(manuscript: dict, only: list[str] | None = None,
                 skip: list[str] | None = None) -> list[str]:
-    installed = [l["name"] for l in list_lenses(manuscript) if not l["error"]]
+    rows = [l for l in list_lenses(manuscript) if not l["error"]]
+    # A library lens joins the sweep only when --only names it.
+    installed = [l["name"] for l in rows if l["source"] == "manuscript"
+                 or (only and l["name"] in only)]
     ordered = [n for n in SWEEP_ORDER if n in installed]
     ordered += sorted(n for n in installed if n not in SWEEP_ORDER)
     if only:
