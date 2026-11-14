@@ -63,10 +63,14 @@ import re
 from . import docs
 from .db import Database, ko_fields, now_iso
 
-KINDS = ("purpose", "reader", "promise", "comparable", "takeaway", "shape",
-         "thesis", "voice", "arc", "term", "claim", "ruling")
+KINDS = ("purpose", "reader", "promise", "comparable", "takeaway", "success",
+         "shape", "thesis", "voice", "arc", "term", "claim", "ruling")
 # The kinds that together are the book's brief.
-BRIEF_KINDS = ("purpose", "reader", "promise", "comparable", "takeaway")
+# `success` is what makes a chapter, and the book, succeed: the brief's
+# central entry, drafted by the interviewer from the others and argued out
+# with the author.
+BRIEF_KINDS = ("purpose", "reader", "promise", "comparable", "takeaway",
+               "success")
 LIVE_STATUSES = ("proposed", "settled", "reopened")
 MODES = ("applies", "infers")
 ENTRY_PREFIX = "re"

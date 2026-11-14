@@ -29,7 +29,7 @@ role = "interviewer"
 actor = "human:author"
 grain = "book"
 gives = ["register"]
-returns = "The author's answers on purpose, reader, promise, comparable books and takeaways, each a settled register entry: the author's words verbatim and the reading the author agreed to."
+returns = "The author's answers on purpose, reader, promise, comparable books and takeaways, and the definition of a successful chapter and a successful book argued out from them, each a settled register entry: the author's words verbatim and the reading the author agreed to."
 leaves_alone = "Everything the author did not say. No answer is guessed, filled in or improved."
 
 [[step]]
