@@ -5846,6 +5846,18 @@ def cmd_lens(args):
         print(f"Lens '{args.name}' ratified → {path}")
         return
 
+    if args.action == "promote":
+        if not args.name:
+            raise SystemExit("usage: authorlm lens promote <name>")
+        try:
+            path = lenses.promote_lens(manuscript, args.name)
+        except (lenses.LensError, LookupError, ValueError) as err:
+            raise SystemExit(f"error: {err}")
+        print(f"Lens '{args.name}' moved to the library → {path}\n"
+              f"Every book now sees it; run it by name, or name it in "
+              f"'lens sweep --only {args.name}'.")
+        return
+
     if args.action == "show":
         if not args.name:
             raise SystemExit("usage: authorlm lens show <name>")
@@ -5853,7 +5865,9 @@ def cmd_lens(args):
         if not path.is_file():
             raise SystemExit(f"error: no lens '{args.name}' "
                              "('lens list' shows them).")
-        print(ui.bold(f"Lens '{args.name}' — {path}"))
+        src = " (library)" if lenses.lens_source(manuscript, args.name) \
+            == "library" else ""
+        print(ui.bold(f"Lens '{args.name}'{src} — {path}"))
         try:
             meta, _body = lenses.parse_lens(path.read_text(encoding="utf-8"))
             print(ui.dim(f"class {meta['class']}; inputs "
@@ -5876,7 +5890,9 @@ def cmd_lens(args):
                 print(f"  {row['name']}: MALFORMED — {row['error']}")
                 continue
             tgt = f" → {','.join(row['targets'])}" if row["targets"] else ""
-            print(f"  {row['name']} [{row['class']}{tgt}]: {row['summary']}")
+            lib = " (library)" if row.get("source") == "library" else ""
+            print(f"  {row['name']}{lib} [{row['class']}{tgt}]: "
+                  f"{row['summary']}")
         return
     if args.action == "findings":
         target = args.name or args.file
@@ -10698,14 +10714,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "lens",
-        help="author-defined lenses (_lenses/*.md prompts): add, list, "
+        help="author-defined lenses (_lenses/*.md prompts, plus the shared "
+             "library's): add, list, show, promote <name> (move into the "
+             "library), "
              "run <name> <file>, register (external findings on stdin), "
              "review <n>, push <file> (staged lens edits → Doc forms), "
              "resolve <file> (read the tab back)")
     p.add_argument("action",
-                   choices=["add", "list", "show", "run", "register",
-                            "review", "push", "resolve", "status", "sweep",
-                            "findings", "repair", "unmark"])
+                   choices=["add", "list", "show", "promote", "run",
+                            "register", "review", "push", "resolve",
+                            "status", "sweep", "findings", "repair",
+                            "unmark"])
     p.add_argument("--force", action="store_true",
                    help="unmark: rebuild the tab from the file even though "
                         "that loses edits typed in the tab since the push")
@@ -10746,7 +10765,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run --native / register / sweep --native: record the "
                         "staged edits but do not push them to the Doc tab "
                         "(the local road; the Doc road is the default)")
-    p.add_argument("--only", help="sweep: comma-separated lens names to run")
+    p.add_argument("--only", help="sweep: comma-separated lens names to run "
+                                  "(the only way a library lens joins a "
+                                  "sweep)")
     p.add_argument("--skip", help="sweep: comma-separated lens names to skip")
     p.add_argument("--accept", action="store_true")
     p.add_argument("--reject", action="store_true")
