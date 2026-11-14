@@ -36,9 +36,26 @@ Then read `.claude/skills/authorlm/SKILL.md`, section "The book workflow and the
 6. **The audiobook's sources**, when the pack says an audiobook is in scope (house skill, "The audiobook"): `authorlm audio export` writes the manifests in `_audio/` (and creates the book's pronunciation dictionary on ElevenLabs if the account has none), then `authorlm audio check` reports readiness. `authorlm audio preview` renders free previews on this Mac.
 7. **The list.** For each export: what was built, where it is, and what it still lacks.
 
+## How an edit lands
+
+Read the pack's line "How edits land in this book" first. It states the manuscript's own setting (house skill, "How agent edits land"), which is the author's to choose, not yours.
+
+**If it says directly:**
+
+1. Every change you make to a chapter file, a tag placed, a break, a piece of front or back matter the author supplied, is landed with `authorlm book land <run-id> <file> --changes-json <file> -m <manuscript>`: a JSON list of `{"old": "…", "new": "…", "note": "…"}`. `old` is the smallest span that names exactly one place in the file. `note` is required: why, and by what law, register entry or filter. Never change a chapter file any other way.
+2. Land in batches, one chapter at a time. A batch is all or none: when the verb declines, it names each item that is wrong and changes nothing; correct those items and land again. To cut words, keep a few neighbouring words in both `old` and `new`, so the change can be found again and put back.
+3. No first-draft word, Doc-tab form or author verdict is needed. Do not stage forms (`revise stage`, `filter apply`), and do not stop with `NEEDS AUTHOR` over a change that is yours to make. The author reads the change list at the part read and at approval (`authorlm book changes`) and can put any change back (`authorlm book revert`).
+4. `book land` declines when the chapter's tab in the Google Doc holds edits the file does not have, or forms not yet settled. Pull the tab (`authorlm doc pull <file>`) and land again; if forms are out, stop with `NEEDS AUTHOR`. After a landing the verb prints what to run next: `authorlm doc push <file>` when the chapter has a tab.
+5. `book done` adds the count of the changes you landed to your result. Your own list of changes in the result may be short: the change list is the record.
+
+**If it says as forms for the author**, nothing here changes: you work as "How you do the work" says, the house skill's rules for changing a chapter file hold (section "Google Docs bridge": "First draft, then forms", and the push rules), and `book land` is not open.
+
+Either way you change layout, never the words: a fault in the words is filed back.
+
+
 ## When you must stop
 
-- **The author is needed.** Some verbs here wait on the author's word. You cannot ask the author. Stop and reply with `NEEDS AUTHOR` on the first line and the question in plain words. Whoever started you asks, and continues you with the answer. Never supply the author's answer yourself.
+- **The author is needed.** Some verbs here wait on the author's word. (When the pack says edits land directly, a change that is yours to make is not one of them: land it.) You cannot ask the author. Stop and reply with `NEEDS AUTHOR` on the first line and the question in plain words. Whoever started you asks, and continues you with the answer. Never supply the author's answer yourself.
 - **Money is needed.** Do not spend it yourself. What costs money here: `authorlm illus render` and `illus rerender` (one image-model call per candidate; say the count), `authorlm illus scan` (a model pass per file), `authorlm audio generate`, `audio retake` and `audio audition` with `--live` (ElevenLabs, by the character; the verb prints the cost first), `authorlm summarize rebuild`. When the work needs one of these, reply with `NEEDS APPROVAL` on the first line, naming the verb and the cost it prints or you estimate. Run it only when the pack, or whoever started you, says the author approved it.
 - **The step cannot be finished** (an input is missing, or a verb declines and you cannot do what it asks). Say why; whoever started you records it with `authorlm book fail <run-id> --reason '…'`. Never work around a verb that declines.
 

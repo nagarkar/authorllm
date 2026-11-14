@@ -30,6 +30,8 @@ Then read `.claude/skills/authorlm/SKILL.md`, section "The book workflow and the
 
 This is a proposal-only role. You change no chapter file and no Doc tab, and you settle nothing in the register. What you find goes in your result and your report.
 
+You never land a change in a chapter file, whatever the pack says about how edits land in this book: your step's definition does not say it changes text.
+
 ## How you do the work
 
 1. **The register.** `authorlm register list`, and `authorlm register show <kind/key>` for each entry in scope (the author's words, the reading, and every use recorded against it). Go through them one at a time: met, failed or not reached, with the passage quoted.

@@ -224,7 +224,8 @@ def cmd_manuscript(args):
                 copyright_year=args.copyright_year,
                 language=args.language,
                 extraction=args.extraction,
-                document_ids=args.document_ids)
+                document_ids=args.document_ids,
+                agent_edits=args.agent_edits)
         except ValueError as err:
             raise SystemExit(f"error: {err}")
     else:
@@ -261,6 +262,16 @@ def cmd_manuscript(args):
         print("  document_ids: off  — a renamed chapter is seen as removed "
               "and added; 'manuscript set --document-ids on' turns it on "
               "(backs up the database first)")
+    from . import book as _book
+
+    if _book.agent_edits(db, manuscript) == "direct":
+        print("  agent_edits: direct  — in the book workflow, a step that "
+              "changes text lands its changes in the chapter file with a "
+              "change list ('book changes', 'book revert')")
+    else:
+        print("  agent_edits: forms  — an agent's edit waits for the author "
+              "as a form; 'manuscript set --agent-edits direct' lets the "
+              "book workflow's editors land changes with a change list")
     change = identity.get("document_ids")
     if change and change["changed"] and change["enabled"]:
         from . import backup as _backup
@@ -2474,8 +2485,34 @@ def cmd_register(args):
     _print_board(args, board, lines)
 
 
+def _change_lines(change: dict) -> list[str]:
+    """One change as an author reads it: the words before and after in
+    full, and the reason."""
+    state = ("" if change["status"] == "applied" else
+             f"  PUT BACK by {change['reverted_by']}: "
+             f"{change['reverted_reason']}")
+    return [f"{change['id']}  {change['file']}  {change['role']} "
+            f"({change['step']}, run {change['run']}){state}",
+            f"  was:     «{change['old']}»",
+            f"  became:  «{change['new']}»",
+            f"  why:     {change['note']}", ""]
+
+
+def _read_changes_json(source: str):
+    text = (sys.stdin.read() if source == "-"
+            else Path(source).read_text(encoding="utf-8"))
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"the changes are not valid JSON: {err}")
+
+
 def _book_status_lines(board: dict) -> list[str]:
-    lines = []
+    lines = ["agent edits: " + (
+        "direct (a step that changes text lands its changes in the "
+        "chapter file; authorlm book changes lists them)"
+        if board["agent_edits"] == "direct" else
+        "forms (an agent's edit waits for the author)")]
     for wait in board["waiting_on"]:
         where = "" if wait["scope"] == "book" else f" ({wait['label']})"
         asked = "" if wait["asked"] else "  (not asked yet: start the step)"
@@ -2570,12 +2607,89 @@ def cmd_book(args):
             board = {"run": run, "next": f"authorlm book next -m {name}"}
             lines = [f"Failed: {run['step']} ({run['scope_label']}), "
                      f"run {run['id']}: {run['failed_reason']}"]
+        elif args.action in ("land", "draft"):
+            from . import changes
+
+            config = _load_config(args)
+            if args.action == "land":
+                board = changes.land(
+                    db, manuscript, config, args.run_id, args.file,
+                    _read_changes_json(args.changes_json),
+                    workspace=args.workspace)
+                lines = [f"Landed {len(board['landed'])} change(s) in "
+                         f"{board['file']} ({board['role']}, run "
+                         f"{board['run']}):", ""]
+                for change in board["landed"]:
+                    lines += _change_lines(change)
+            else:
+                text = (sys.stdin.read() if args.text_file == "-"
+                        else Path(args.text_file).read_text(encoding="utf-8"))
+                board = changes.draft(db, manuscript, config, args.run_id,
+                                      args.file, text,
+                                      workspace=args.workspace)
+                lines = [f"Drafted {board['file']}: {board['words']} words "
+                         f"(run {board['run']})"
+                         + (", written over the earlier draft, which is "
+                            "kept in the snapshot before this one"
+                            if board["replaced"] else "")]
+        elif args.action == "changes":
+            from . import changes
+
+            board = changes.list_changes(
+                db, manuscript, run=args.run, step=args.step,
+                scope=args.scope, file=args.file, status=args.status,
+                since=args.since)
+            lines = []
+            for change in board["changes"]:
+                lines += _change_lines(change)
+            counts = board["counts"]
+            lines.append(f"{counts['applied']} applied, "
+                         f"{counts['reverted']} put back"
+                         if board["changes"] else "No change matches.")
+        elif args.action == "revert":
+            from . import changes
+
+            board = changes.revert(
+                db, manuscript, _load_config(args), args.change_ids,
+                run=args.run, reason=args.reason or "", by=args.by,
+                workspace=args.workspace)
+            lines = []
+            for change in board["reverted"]:
+                lines += [f"Put back {change['id']} in {change['file']}:",
+                          f"  «{change['new']}»",
+                          f"  is again «{change['old']}»", ""]
+            for item in board["declined"]:
+                lines += [ui.yellow(f"Left as it is: {item['id']} in "
+                                    f"{item['file']}: {item['why']}"), ""]
+            _print_board(args, board, lines)
+            if board["declined"]:
+                sys.exit(1)
+            return
+        elif args.action == "lint":
+            from . import changes
+
+            board = changes.lint_chapter(db, manuscript, args.file)
+            lines = []
+            for finding in board["findings"]:
+                lines += [f"[{finding['severity']}] {finding['code']}: "
+                          f"{finding['message']}",
+                          ("  the paragraph that opens «"
+                           if finding["code"] == "reading-grade" else "  «")
+                          + f"{finding['quote']}»", ""]
+            counts = board["counts"]
+            lines.append(f"{board['file']}: " + (", ".join(
+                f"{counts[name]} {name}" for name in ("error", "warning",
+                                                      "info")
+                if counts.get(name)) or "clean"))
         elif args.action == "history":
             board = book.history(db, manuscript, scope=args.scope,
                                  step=args.step)
             lines = [f"{e['at'][:19]}  {e['step']} ({e['scope_label']})  "
-                     f"{e['from_status'] or 'started'} → {e['to_status']}  "
-                     f"{e['run']}  {e['actor']}"
+                     + (f"{e['to_status']} (noted)"
+                        if e["from_status"] == e["to_status"] else
+                        f"{e['from_status'] or 'started'} → "
+                        f"{e['to_status']}")
+                     + f"  {e['run']}  {e['actor']}"
                      + (f"  {e['reason']}" if e["reason"] else "")
                      for e in board["events"]] or ["No step has run yet."]
         elif args.action == "diagram":
@@ -2789,6 +2903,66 @@ def _add_book_parser(sub, common) -> None:
              "authorlm book history --step draft --scope one.md")
     scope(q)
     q.add_argument("--step", help="only this step's runs")
+    q = leaf("land", "land a batch of changes in one chapter file under a "
+                     "running agent step, each recorded in the change "
+                     "list; only for a manuscript whose agent_edits "
+                     "setting is direct, and a step whose definition says "
+                     "changes_text = true",
+             "authorlm book land sr-0123456789ab one.md --changes-json "
+             "changes.json")
+    q.add_argument("run_id", help="the run id (sr-…)")
+    q.add_argument("file", help="the chapter file the changes are in")
+    q.add_argument("--changes-json", dest="changes_json", metavar="FILE",
+                   required=True,
+                   help='a file holding a JSON list of {"old": "…", "new": '
+                        '"…", "note": "…"}, or - to read it from standard '
+                        "input. Each old stands exactly once in the file; "
+                        "each note says why, and by what law, register "
+                        "entry or filter. All land or none")
+    q = leaf("draft", "write a whole first draft into a chapter file that "
+                      "holds only its title, under a running agent step "
+                      "(agent_edits direct); recorded as the run's "
+                      "artifact, not as a change",
+             "authorlm book draft sr-0123456789ab one.md --text-file "
+             "draft.md")
+    q.add_argument("run_id", help="the run id (sr-…)")
+    q.add_argument("file", help="the chapter file to fill")
+    q.add_argument("--text-file", dest="text_file", metavar="FILE",
+                   required=True,
+                   help="a file holding the chapter's whole text, its "
+                        "title line included, or - to read it from "
+                        "standard input")
+    q = leaf("changes", "the change list: every change agent roles landed, "
+                        "with the words before and after and the reason, "
+                        "in reading order",
+             "authorlm book changes --scope part-one.md --status applied")
+    scope(q)
+    q.add_argument("--run", help="only this run's changes (sr-…)")
+    q.add_argument("--step", help="only this step's changes")
+    q.add_argument("--file", help="only the changes in this chapter file")
+    q.add_argument("--status", choices=["applied", "reverted"],
+                   help="only changes that stand, or only those put back")
+    q.add_argument("--since", metavar="TIMESTAMP",
+                   help="only changes landed after this time (as a pack "
+                        "prints it)")
+    q = leaf("revert", "put changes back: a change is put back only while "
+                       "the words it put in still stand in the file; the "
+                       "change stays in the list, marked put back",
+             "authorlm book revert sc-0123456789ab --reason 'I say "
+             "\"practise\" on purpose'")
+    q.add_argument("change_ids", nargs="*", metavar="change-id",
+                   help="the change ids (sc-…)")
+    q.add_argument("--run", help="put back every applied change of this "
+                                 "run (sr-…)")
+    q.add_argument("--reason", required=True,
+                   help="why, kept word for word")
+    q.add_argument("--by", default="author",
+                   help="who is putting it back (default: author)")
+    q = leaf("lint", "the deterministic lint over one whole chapter: each "
+                     "finding with its law and the words quoted; no model "
+                     "call, nothing written",
+             "authorlm book lint one.md")
+    q.add_argument("file", help="the chapter file")
     q = leaf("diagram", "the workflow as a Mermaid flowchart drawn from "
                         "the definition; with --scope, each step's status "
                         "there",
@@ -10072,6 +10246,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "the database first, then gives every file its id "
                         "(on for a new manuscript, off for one that "
                         "existed before the setting)")
+    p.add_argument("--agent-edits", default=None,
+                   choices=["forms", "direct"], dest="agent_edits",
+                   help="how an agent's edit reaches a chapter in the book "
+                        "workflow: forms (the default: it waits for the "
+                        "author) or direct (a step that changes text lands "
+                        "its changes in the file, each recorded in a change "
+                        "list the author reads and can put back)")
     p.set_defaults(func=cmd_manuscript)
 
     p = sub.add_parser("unregister", help="remove a manuscript and ALL its data (clean slate)")

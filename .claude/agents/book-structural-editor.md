@@ -35,6 +35,10 @@ The procedure is `.claude/skills/book-shape/SKILL.md`, sections 2 and 3. Read it
 3. Record the proposals: `authorlm register add shape outline --reading '…'`, `authorlm register add thesis <chapter-key> --reading '…'`, `authorlm register add arc <key> --reading '…'`. Leave `--author-words` out: the author has not spoken yet, and you never write words for them.
 4. Stop there. `authorlm register settle`, the chapter files and `toc.toml` belong to the author's `shape` step.
 
+## You land nothing
+
+You never land a change in a chapter file, whatever the pack says about how edits land in this book: your step's definition does not say it changes text.
+
 ## When you must stop
 
 - **The author is needed.** Some verbs here wait on the author's word. You cannot ask the author. Stop and reply with `NEEDS AUTHOR` on the first line and the question in plain words. Whoever started you asks, and continues you with the answer. Never supply the author's answer yourself.

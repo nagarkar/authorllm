@@ -355,7 +355,8 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
                                copyright_year: int | str | None = None,
                                language: str | None = None,
                                extraction: bool | str | None = None,
-                               document_ids: bool | str | None = None) -> dict:
+                               document_ids: bool | str | None = None,
+                               agent_edits: str | None = None) -> dict:
     """Update publication identity without exposing the internal KO metadata.
 
     `extraction` and `document_ids` (on/off) are the two settings here
@@ -364,8 +365,13 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
     backs the database up first, then seeds the rows). Both live in the
     KO metadata and are written through their own doors. When
     `document_ids` is given the result carries what that door did, as
-    `document_ids`."""
+    `document_ids`. `agent_edits` (forms | direct) is how an agent's edit
+    reaches a chapter in the book workflow (`book.set_agent_edits`); the
+    result carries what changed as `agent_edits`."""
     changes = {}
+    if agent_edits is not None and str(agent_edits).strip().lower() not in (
+            "forms", "direct"):
+        raise ValueError("agent-edits is forms or direct")
     if document_ids is not None:
         if isinstance(document_ids, bool):
             ids_switch = document_ids
@@ -403,7 +409,8 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
         changes["copyright_year"] = parse_copyright_year(copyright_year)
     if language is not None:
         changes["language"] = parse_language(language)
-    if not changes and extraction is None and document_ids is None:
+    if (not changes and extraction is None and document_ids is None
+            and agent_edits is None):
         raise ValueError(
             "provide --author, --copyright-owner, --paperback-isbn, "
             "--hardcover-isbn, --trim-size, --bleed, --narrator, "
@@ -422,6 +429,11 @@ def update_manuscript_metadata(db: Database, manuscript: dict,
 
         identity["document_ids"] = docs.set_document_ids(
             db, manuscript, ids_switch)
+    if agent_edits is not None:
+        from . import book
+
+        identity["agent_edits"] = book.set_agent_edits(
+            db, manuscript, str(agent_edits))
     return identity
 
 

@@ -40,6 +40,8 @@ You may read all of the book itself, and nothing about how it was made.
 
 This is a proposal-only role. You change no chapter file and no Doc tab, and you settle nothing in the register. What you find goes in your result and your report.
 
+You never land a change in a chapter file, whatever the pack says about how edits land in this book: your step's definition does not say it changes text.
+
 ## How you do the work
 
 1. Read the produced book, the way a reader gets it: the EPUB or the PDF in `<manuscript>/_exports/`. Begin at the first page and read in order. Do not skip, skim or search ahead.

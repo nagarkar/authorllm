@@ -38,7 +38,18 @@ Then read `.claude/skills/authorlm/SKILL.md`, section "The book workflow and the
 
 ## How an edit lands
 
-How a change reaches a chapter file is the house skill's rule, not yours to choose (section "Google Docs bridge": "First draft, then forms", and the push rules).
+Read the pack's line "How edits land in this book" first. It states the manuscript's own setting (house skill, "How agent edits land"), which is the author's to choose, not yours.
+
+**If it says directly:**
+
+1. Every change you make to a chapter file, to words or to punctuation, is landed with `authorlm book land <run-id> <file> --changes-json <file> -m <manuscript>`: a JSON list of `{"old": "…", "new": "…", "note": "…"}`. `old` is the smallest span that names exactly one place in the file. `note` is required: why, and by what law, register entry or filter. Never change a chapter file any other way.
+2. Land in batches, one chapter at a time. A batch is all or none: when the verb declines, it names each item that is wrong and changes nothing; correct those items and land again. To cut words, keep a few neighbouring words in both `old` and `new`, so the change can be found again and put back.
+3. No first-draft word, Doc-tab form or author verdict is needed. Do not stage forms (`revise stage`, `filter apply`), and do not stop with `NEEDS AUTHOR` over a change that is yours to make. The author reads the change list at the part read and at approval (`authorlm book changes`) and can put any change back (`authorlm book revert`).
+4. A filter is still used for its reading and its proposals: `filter prelude`, `filter run`, the subagent's reply, then `authorlm filter record <chapter>` for each window, until no unit is left. Record never changes the file. Land the proposals you accept through `book land`, each note naming the filter. Then close the run with `authorlm filter abandon <chapter>`: it withdraws the recorded proposals and leaves no run open. Do not use `filter apply`, `filter push` or `filter resolve`.
+5. `book land` declines when the chapter's tab in the Google Doc holds edits the file does not have, or forms not yet settled. Pull the tab (`authorlm doc pull <file>`) and land again; if forms are out, stop with `NEEDS AUTHOR`. After a landing the verb prints what to run next: `authorlm doc push <file>` when the chapter has a tab.
+6. `book done` adds the count of the changes you landed to your result. Your own list of changes in the result may be short: the change list is the record.
+
+**If it says as forms for the author**, the house skill's rules hold as they always have (section "Google Docs bridge": "First draft, then forms", and the push rules), and `book land` is not open:
 
 1. `authorlm doc diff <file>` first. A tab the author has edited is pulled (`authorlm doc pull <file>`) and read before anything is changed or staged.
 2. A punctuation fix is made directly in the file, pushed (`authorlm doc push <file>`) and listed in your result. A change to words is never punctuation.
@@ -50,7 +61,7 @@ How a change reaches a chapter file is the house skill's rule, not yours to choo
 
 ## When you must stop
 
-- **The author is needed.** Some verbs here wait on the author's word. You cannot ask the author. Stop and reply with `NEEDS AUTHOR` on the first line and the question in plain words. Whoever started you asks, and continues you with the answer. Never supply the author's answer yourself.
+- **The author is needed.** Some verbs here wait on the author's word. (When the pack says edits land directly, a change that is yours to make is not one of them: land it.) You cannot ask the author. Stop and reply with `NEEDS AUTHOR` on the first line and the question in plain words. Whoever started you asks, and continues you with the answer. Never supply the author's answer yourself.
 - **Money is needed.** Do not spend it yourself. What costs money here: `authorlm filter run --native`, `authorlm audio say` and any other audio render, `authorlm summarize rebuild`, `authorlm ask`. When the work needs one of these, reply with `NEEDS APPROVAL` on the first line, naming the verb and the cost it prints or you estimate. Run it only when the pack, or whoever started you, says the author approved it.
 - **The step cannot be finished** (an input is missing, or a verb declines and you cannot do what it asks). Say why; whoever started you records it with `authorlm book fail <run-id> --reason '…'`. Never work around a verb that declines.
 
