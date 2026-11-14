@@ -71,6 +71,29 @@ Decisions:
 - Every landing, draft and revert is one row of `step_events` (through
   `book.note`), so `book history` shows it. Enforced by:
   tests/test_book_changes.py::LandTests::test_a_landing_shows_in_the_history.
+- A change that drops one of the book's protected terms (a concept name,
+  an alias or a pronunciation-dictionary term, as
+  `filtering.protected_terms` gives them for the file), or changes its
+  capitalization, still lands, and the landing warns: the result's
+  `warnings` name the term, the change and its note. The comparison is
+  `filtering.protected_loss`, the one the filter road's `filter record`
+  makes, so there is one rule for "the term is gone" (a single-word name
+  declared with a capital is matched with its capital; other names in any
+  casing). A cut of a whole passage that holds a term is warned too: the
+  author reads warnings, and nothing here judges which loss was meant.
+  The lost terms are kept on the change's row, in its `metadata` under
+  `protected_lost` (no column was added), so the change list marks it.
+  Enforced by:
+  tests/test_book_changes.py::ProtectedTermTests::test_a_dropped_term_is_warned_and_the_change_still_lands
+  and
+  tests/test_book_changes.py::ProtectedTermTests::test_a_term_that_is_kept_brings_no_warning.
+- A restart puts nothing back. Changes a superseded run landed stay in
+  the chapter files until someone puts them back; `applied_by_run` counts
+  them for `book restart` and for the rerun's pack, each with the command
+  that puts a run's changes back. Enforced by:
+  tests/test_book_changes.py::RestartTests::test_restart_reports_what_the_runs_landed_and_how_to_put_it_back
+  and
+  tests/test_book_changes.py::RestartTests::test_the_reruns_pack_says_the_earlier_changes_still_stand.
 
 Terms:
 - **change**: one replacement an agent role landed in a chapter file: the
@@ -98,6 +121,8 @@ CHANGE_PREFIX = "sc"
 STATUSES = ("applied", "reverted")
 DRAFTED_KEY = "drafted"
 LANDED_KEY = "changes_landed"
+# The key, in a change's `metadata`, of the protected terms it dropped.
+LOST_KEY = "protected_lost"
 
 
 # -------------------------------------------------------------------- checks
@@ -316,15 +341,47 @@ def _next_hint(manuscript: dict, relpath: str, state: str, run_id: str
             f"--result-json <file> -m {name}")
 
 
+def _lost_terms(db: Database, manuscript: dict, relpath: str, text: str,
+                items: list[dict]) -> list[list[str]]:
+    """For each item, the protected terms its `old` holds and its `new`
+    does not, in the casing the protection rule gives them. `text` is the
+    file as it stood before the batch. The list and the comparison are
+    the filter road's (`filtering.protected_terms`, `protected_loss`)."""
+    from . import api, filtering
+
+    protected = filtering.protected_terms(
+        db, manuscript, relpath, text, api._dictionary_text(manuscript))["all"]
+    return [filtering.protected_loss(item["old"], item["new"], protected)
+            for item in items]
+
+
+def _warning(manuscript: dict, change: dict) -> dict:
+    terms = change[LOST_KEY]
+    named = ", ".join(f"'{term}'" for term in terms)
+    return {"change": change["id"], "terms": terms, "old": change["old"],
+            "new": change["new"], "note": change["note"],
+            "message": (
+                f"{change['id']} drops or re-capitalizes {named}, "
+                + ("terms" if len(terms) > 1 else "a term")
+                + " of the book's own vocabulary (a concept name, an alias "
+                "or a pronunciation-dictionary term): "
+                f"«{change['old']}» became «{change['new']}». Its note: "
+                f"«{change['note']}». It landed all the same; if the term "
+                f"should stand: authorlm book revert {change['id']} "
+                f"--reason '<why>' -m {manuscript['name']}")}
+
+
 # --------------------------------------------------------------------- write
 
 def land(db: Database, manuscript: dict, config: dict, run_id: str,
          file: str, changes, *, workspace: str | None = None,
          tab_state=None) -> dict:
     """Land a batch of changes in one chapter file under a running agent
-    step; returns `{run, step, role, file, document_id, landed, version_no,
-    next}`. `changes` is a list of `{old, new, note}`. Declines, with
-    nothing changed, as the module docstring says."""
+    step; returns `{run, step, role, file, document_id, landed, warnings,
+    version_no, next}`. `changes` is a list of `{old, new, note}`.
+    Declines, with nothing changed, as the module docstring says.
+    `warnings` has one `{change, terms, old, new, note, message}` for each
+    landed change that dropped a protected term; it blocks nothing."""
     run, step = _open_run(db, manuscript, run_id, "land")
     relpath, document_id, path = _file_in_scope(db, manuscript, run, file)
     state = _require_writable(db, manuscript, relpath, config, workspace,
@@ -333,7 +390,9 @@ def land(db: Database, manuscript: dict, config: dict, run_id: str,
     # Snapshot what is on disk before it is written over. An edit made
     # outside this verb predates the landing and is the author's.
     _quiet_collect(db, manuscript, config, "pre-book-land")
-    items, text = _check_items(changes, path.read_text(encoding="utf-8"))
+    before = path.read_text(encoding="utf-8")
+    items, text = _check_items(changes, before)
+    lost = _lost_terms(db, manuscript, relpath, before, items)
     first = (db.one("SELECT MAX(seq) AS n FROM step_changes WHERE run_id = ?",
                     (run["id"],))["n"] or 0) + 1
     rows = [{**ko_fields(CHANGE_PREFIX), "manuscript_id": manuscript["id"],
@@ -341,6 +400,11 @@ def land(db: Database, manuscript: dict, config: dict, run_id: str,
              "document_id": document_id, "seq": first + offset,
              "old": item["old"], "new": item["new"], "note": item["note"],
              "status": "applied"} for offset, item in enumerate(items)]
+    for row, terms in zip(rows, lost):
+        if terms:
+            row["metadata"] = json.dumps(
+                {**loads(row["metadata"], {}), LOST_KEY: terms},
+                ensure_ascii=False)
     with db.transaction():
         for row in rows:
             db.insert("step_changes", row)
@@ -348,9 +412,12 @@ def land(db: Database, manuscript: dict, config: dict, run_id: str,
                   reason=f"landed {len(rows)} change(s) in {relpath}")
         book._write_atomic(path, text)
     after = _quiet_collect(db, manuscript, config, "book-land", after=True)
+    landed = [_change(db, row) for row in rows]
     return {"run": run["id"], "step": step.id, "role": step.role,
             "file": relpath, "document_id": document_id,
-            "landed": [_change(db, row) for row in rows],
+            "landed": landed,
+            "warnings": [_warning(manuscript, change) for change in landed
+                         if change[LOST_KEY]],
             "version_no": after.get("version_no"),
             "next": _next_hint(manuscript, relpath, state, run["id"])}
 
@@ -447,6 +514,7 @@ def _change(db: Database, row) -> dict:
             "file": book._label(db, row["document_id"]), "seq": row["seq"],
             "old": row["old"], "new": row["new"], "note": row["note"],
             "status": row["status"], "landed_at": row["created_at"],
+            LOST_KEY: loads(row.get("metadata"), {}).get(LOST_KEY, []),
             "reverted_at": row.get("reverted_at"),
             "reverted_by": row.get("reverted_by"),
             "reverted_reason": row.get("reverted_reason")}
@@ -514,6 +582,29 @@ def list_changes(db: Database, manuscript: dict, *, run: str | None = None,
             "next": (f"put one back: authorlm book revert <change-id> "
                      f"--reason '<why>' -m {name}" if counts["applied"]
                      else f"authorlm book status -m {name}")}
+
+
+def revert_command(manuscript: dict, run_id: str) -> str:
+    """The command that puts back every applied change of one run."""
+    return (f"authorlm book revert --run {run_id} --reason '<why>' "
+            f"-m {manuscript['name']}")
+
+
+def applied_by_run(db: Database, manuscript: dict,
+                   run_ids: list[str]) -> list[dict]:
+    """For each of `run_ids` that landed changes still applied, in the
+    order given: `{run, applied, revert}`, the count and the command that
+    puts them back. Reads only."""
+    found = []
+    for run_id in run_ids:
+        applied = db.one(
+            "SELECT COUNT(*) AS n FROM step_changes WHERE manuscript_id = ? "
+            "AND run_id = ? AND status = 'applied'",
+            (manuscript["id"], run_id))["n"]
+        if applied:
+            found.append({"run": run_id, "applied": applied,
+                          "revert": revert_command(manuscript, run_id)})
+    return found
 
 
 def _last_read(definition: book.Definition, book_layout: book.Layout,

@@ -58,6 +58,14 @@ Decisions:
   tests/test_book_workflow.py::RestartTests::test_restart_supersedes_the_step_and_its_dependents_only
   and
   tests/test_book_workflow.py::RestartTests::test_the_rerun_is_handed_the_old_result_as_reference_only.
+- A restart changes no chapter file. Changes the superseded runs landed
+  (changes.py) are still in the files; `restart` reports them, the count
+  still applied per run and the command that puts each run's changes
+  back, and the rerun's pack says the same about the earlier attempts.
+  Putting them back is a separate act, by whoever restarts. Enforced by:
+  tests/test_book_changes.py::RestartTests::test_restart_reports_what_the_runs_landed_and_how_to_put_it_back
+  and
+  tests/test_book_changes.py::RestartTests::test_the_reruns_pack_says_the_earlier_changes_still_stand.
 - A restart never supersedes a wider scope: a part or book step already
   done on the old work stays done and is flagged on the board as resting
   on a restarted step, for the author to decide. Enforced by:
@@ -1039,10 +1047,33 @@ def _handed_over(definition: Definition, book_layout: Layout, runs: dict,
     return lines
 
 
-def _reference(step: Step, earlier: list[dict]) -> list[str]:
+def _still_landed(db: Database, manuscript: dict,
+                  earlier: list[dict]) -> list[str]:
+    """What the earlier attempts landed that is still in the files."""
+    from . import changes as landed
+
+    found = landed.applied_by_run(db, manuscript,
+                                  [run["id"] for run in earlier])
+    if not found:
+        return []
+    total = sum(item["applied"] for item in found)
+    lines = [
+        f"The earlier attempt's landed changes are still in the chapter "
+        f"files unless they were put back: {total} applied change(s). A "
+        "restart puts nothing back, so the text you read already holds "
+        "them. They carry no more authority than the earlier result. To "
+        "put a run's changes back before you work:", ""]
+    lines += [f"    {item['revert']}    ({item['applied']} applied)"
+              for item in found]
+    return lines + [""]
+
+
+def _reference(db: Database, manuscript: dict, step: Step,
+               earlier: list[dict]) -> list[str]:
     """The superseded attempts at this step and scope, for a rerun."""
     if not earlier:
         return []
+    still = _still_landed(db, manuscript, earlier)
     latest = earlier[-1]
     reason = (latest["superseded_reason"] or latest["failed_reason"]
               or "no reason was recorded")
@@ -1052,7 +1083,7 @@ def _reference(step: Step, earlier: list[dict]) -> list[str]:
             "## Earlier attempt: withheld", "",
             f"This step was run before (run {latest['id']}) and {how}: "
             f"{reason}. Because this is an independent read, the earlier "
-            "result is withheld from this pack.", ""]
+            "result is withheld from this pack.", "", *still]
     return [
         "## Earlier attempt: reference only", "",
         f"This step was run before (run {latest['id']}, attempt "
@@ -1061,7 +1092,7 @@ def _reference(step: Step, earlier: list[dict]) -> list[str]:
         "What it returned is below as reference only. It has no authority "
         "over your work: it is not the standard, and you are not asked to "
         "keep, match or repair it. Use it only where it helps.", "",
-        _fenced(latest["result"]), ""]
+        *still, _fenced(latest["result"]), ""]
 
 
 def _given(manuscript: dict, book_layout: Layout, step: Step,
@@ -1134,7 +1165,7 @@ def _pack(db: Database, manuscript: dict, definition: Definition,
 
         lines += landed.pack_section(db, manuscript, definition,
                                      book_layout, runs, step, scope)
-    lines += _reference(step, earlier)
+    lines += _reference(db, manuscript, step, earlier)
     lines += [
         "## When you are done", "",
         "Write what you hand back as one JSON object (suggested keys: "
@@ -1418,10 +1449,14 @@ def restart(db: Database, manuscript: dict, step_id: str,
             dry_run: bool = False) -> dict:
     """Supersede a step's run in force and every run that followed from
     it, for the same scope and the scopes inside it; returns `{step,
-    reason, dry_run, superseded}`. Nothing is deleted: each run keeps its
-    result, and the next `start` hands it to the rerun as reference. A
-    part or chapter step with no `scope` is restarted for every scope it
-    has run for. `dry_run` lists the runs and writes nothing."""
+    reason, dry_run, superseded, landed}`. Nothing is deleted: each run
+    keeps its result, and the next `start` hands it to the rerun as
+    reference. No chapter file is changed: `landed` lists, for each of
+    those runs with changes still applied in the files, `{run, step,
+    scope_label, applied, revert}`, the count and the command that puts
+    them back. A part or chapter step with no `scope` is restarted for
+    every scope it has run for. `dry_run` lists the runs and writes
+    nothing."""
     _require_document_ids(db, manuscript)
     if not (reason or "").strip():
         raise ValueError("a restart records its reason: --reason '<what "
@@ -1466,8 +1501,16 @@ def restart(db: Database, manuscript: dict, step_id: str,
                             changes={"superseded_reason": reason.strip()})
         superseded = [show_run(db, manuscript, run["id"])["run"]
                       for run in superseded]
+    from . import changes as landed_changes
+
+    by_id = {run["id"]: run for run in superseded}
+    landed = [{"run": item["run"], "step": by_id[item["run"]]["step"],
+               "scope_label": by_id[item["run"]]["scope_label"],
+               "applied": item["applied"], "revert": item["revert"]}
+              for item in landed_changes.applied_by_run(
+                  db, manuscript, list(by_id))]
     return {"step": step.id, "reason": reason.strip(), "dry_run": dry_run,
-            "superseded": superseded,
+            "superseded": superseded, "landed": landed,
             "next": f"authorlm book next -m {manuscript['name']}"}
 
 

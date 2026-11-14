@@ -2495,7 +2495,11 @@ def _change_lines(change: dict) -> list[str]:
             f"({change['step']}, run {change['run']}){state}",
             f"  was:     «{change['old']}»",
             f"  became:  «{change['new']}»",
-            f"  why:     {change['note']}", ""]
+            f"  why:     {change['note']}",
+            *([ui.yellow("  ! drops or re-capitalizes a term of the "
+                         "book's vocabulary: " + ", ".join(
+                             f"'{term}'" for term in lost))]
+              if (lost := change.get("protected_lost")) else []), ""]
 
 
 def _read_changes_json(source: str):
@@ -2621,6 +2625,9 @@ def cmd_book(args):
                          f"{board['run']}):", ""]
                 for change in board["landed"]:
                     lines += _change_lines(change)
+                for warning in board["warnings"]:
+                    lines += [ui.yellow(f"warning: {warning['message']}"),
+                              ""]
             else:
                 text = (sys.stdin.read() if args.text_file == "-"
                         else Path(args.text_file).read_text(encoding="utf-8"))
@@ -2708,6 +2715,15 @@ def cmd_book(args):
                      "with its result:"]
             lines += [f"  {run['id']}  {run['step']} ({run['scope_label']}), "
                       f"attempt {run['attempt']}" for run in runs]
+            if board["landed"]:
+                total = sum(item["applied"] for item in board["landed"])
+                lines += ["", ui.yellow(
+                    f"{total} change(s) these runs landed are still in the "
+                    "chapter files. A restart puts nothing back; to put a "
+                    "run's changes back:")]
+                lines += [f"  {item['step']} ({item['scope_label']}), "
+                          f"{item['applied']} applied:  {item['revert']}"
+                          for item in board["landed"]]
         elif args.action == "assign":
             board = book.assign(db, manuscript, args.step, args.actor)
             board["next"] = f"authorlm book status -m {name}"

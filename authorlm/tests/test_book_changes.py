@@ -845,6 +845,185 @@ class LintTests(Book):
                           if f["code"] == "overlap"], [])
 
 
+# --------------------------------------------------------- protected terms
+
+FIELD = ("# One\n\nThe miller named the low ground the Field, and nobody "
+         "argued. The Field lay past the weir, where the road ended.\n\n"
+         "The old monk spoke of anattā to anyone who would stop. Few "
+         "stopped for long.\n")
+DICTIONARY = ("# **Pronunciations**\n\n| Term | Say it | Note |\n"
+              "| --- | --- | --- |\n| anattā | ah-nah-TAH | Pali |\n")
+
+
+class ProtectedTermTests(Book):
+    """A landing that drops a term of the book's vocabulary warns and
+    still lands. The terms: a concept, `Field`, and a pronunciation
+    dictionary term, `anattā`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.root / "one.md").write_text(FIELD, encoding="utf-8")
+        (self.root / "pronunciations.md").write_text(DICTIONARY,
+                                                     encoding="utf-8")
+        api.add_concept(self.db, self.manuscript, "Field")
+        quiet(api.collect, self.db, self.manuscript, {})
+        self.run = self.lint_run()
+
+    def test_a_dropped_term_is_warned_and_the_change_still_lands(self):
+        dropped = {"old": "named the low ground the Field",
+                   "new": "named the low ground the meadow",
+                   "note": "Plainer word, style law default:plain-words."}
+        result = self.land(self.run, "one.md", [dropped])
+        self.assertIn("named the low ground the meadow", self.text())
+        change = result["landed"][0]
+        self.assertEqual(change["protected_lost"], ["Field"])
+        self.assertEqual(len(result["warnings"]), 1)
+        warning = result["warnings"][0]
+        self.assertEqual((warning["change"], warning["terms"],
+                          warning["old"], warning["new"], warning["note"]),
+                         (change["id"], ["Field"], dropped["old"],
+                          dropped["new"], dropped["note"]))
+        for part in ("'Field'", change["id"], dropped["note"],
+                     f"authorlm book revert {change['id']}"):
+            self.assertIn(part, warning["message"])
+        # Kept on the row, in the column every row already has.
+        row = self.rows()[0]
+        self.assertEqual(row["status"], "applied")
+        self.assertEqual(json.loads(row["metadata"])["protected_lost"],
+                         ["Field"])
+        self.assertEqual(self.listed()[0]["protected_lost"], ["Field"])
+        self.assertIn("! drops or re-capitalizes a term of the book's "
+                      "vocabulary: 'Field'",
+                      self.cli("book", "changes", "-m", "book"))
+
+    def test_a_term_whose_capital_is_changed_is_warned(self):
+        result = self.land(self.run, "one.md", [{
+            "old": "The Field lay past the weir",
+            "new": "The field lay past the weir",
+            "note": "Lower case for a common noun."}])
+        self.assertIn("The field lay past the weir", self.text())
+        self.assertEqual([w["terms"] for w in result["warnings"]],
+                         [["Field"]])
+
+    def test_a_term_that_is_kept_brings_no_warning(self):
+        result = self.land(self.run, "one.md", [
+            {"old": "The Field lay past the weir, where the road ended",
+             "new": "The Field lay past the weir, at the end of the road",
+             "note": "Rhythm."},
+            {"old": "Few stopped for long", "new": "Few stayed long",
+             "note": "Shorter."}])
+        self.assertEqual(result["warnings"], [])
+        self.assertEqual([c["protected_lost"] for c in result["landed"]],
+                         [[], []])
+        self.assertIn("at the end of the road", self.text())
+        self.assertTrue(all("protected_lost" not in json.loads(
+            r["metadata"]) for r in self.rows()))
+        self.assertNotIn("! drops", self.cli("book", "changes", "-m",
+                                             "book"))
+
+    def test_a_cut_passage_that_held_a_term_is_warned_among_others(self):
+        """A dictionary term, lost in a cut; the batch's other change is
+        not warned, and both land."""
+        result = self.land(self.run, "one.md", [
+            {"old": "The old monk spoke of anattā to anyone who would "
+                    "stop. Few stopped for long.",
+             "new": "Few stopped for long.",
+             "note": "The monk is not in the outline."},
+            {"old": "and nobody argued", "new": "and no one argued",
+             "note": "The voice entry prefers 'no one'."}])
+        self.assertEqual(len(result["landed"]), 2)
+        self.assertEqual([(w["change"], w["terms"])
+                          for w in result["warnings"]],
+                         [(result["landed"][0]["id"], ["anattā"])])
+        self.assertNotIn("anattā", self.text())
+        self.assertIn("and no one argued", self.text())
+
+    def test_the_verb_prints_each_warning(self):
+        batch = self.root.parent / "batch.json"
+        batch.write_text(json.dumps([{
+            "old": "named the low ground the Field",
+            "new": "named the low ground the meadow",
+            "note": "Plainer word."}]), encoding="utf-8")
+        out = self.cli("book", "land", self.run, "one.md",
+                       "--changes-json", str(batch), "-m", "book")
+        self.assertIn("Landed 1 change(s) in one.md", out)
+        self.assertIn("warning: sc-", out)
+        self.assertIn("drops or re-capitalizes 'Field'", out)
+        self.assertIn("Its note: «Plainer word.»", out)
+        self.assertIn("named the low ground the meadow", self.text())
+
+
+# ------------------------------------------------- restart and what landed
+
+class RestartTests(Book):
+    """A restart changes no file: it says what the superseded runs landed
+    and how to put it back, and the rerun's pack says so too."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.lint = self.lint_run()
+        landed = self.land(self.lint, "one.md", [TYPO, MINDED])["landed"]
+        book.finish(self.db, self.manuscript, self.lint, NO_USES)
+        changes.revert(self.db, self.manuscript, {}, [landed[1]["id"]],
+                       reason="I say 'nobody'", tab_state=unlinked)
+        self.command = (f"authorlm book revert --run {self.lint} --reason "
+                        "'<why>' -m book")
+
+    def test_restart_reports_what_the_runs_landed_and_how_to_put_it_back(
+            self):
+        before = self.text()
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                report = book.restart(self.db, self.manuscript, "draft",
+                                      "one.md", reason="wrong brief",
+                                      dry_run=dry_run)
+                # Two runs are superseded; only the one that landed
+                # changes is listed, with those still applied.
+                self.assertEqual([r["step"] for r in report["superseded"]],
+                                 ["draft", "lint"])
+                self.assertEqual(report["landed"], [{
+                    "run": self.lint, "step": "lint",
+                    "scope_label": "one.md", "applied": 1,
+                    "revert": self.command}])
+        # It puts nothing back by itself.
+        self.assertEqual(self.text(), before)
+        self.assertEqual([r["status"] for r in self.rows()],
+                         ["applied", "reverted"])
+
+    def test_a_restart_of_runs_that_landed_nothing_reports_none(self):
+        changes.revert(self.db, self.manuscript, {}, run=self.lint,
+                       reason="start over", tab_state=unlinked)
+        report = book.restart(self.db, self.manuscript, "draft", "one.md",
+                              reason="wrong brief")
+        self.assertEqual(report["landed"], [])
+
+    def test_the_verb_prints_the_count_and_the_command(self):
+        out = self.cli("book", "restart", "draft", "--scope", "one.md",
+                       "--reason", "wrong brief", "-m", "book")
+        self.assertIn("superseded 2 run(s)", out)
+        self.assertIn("1 change(s) these runs landed are still in the "
+                      "chapter files. A restart puts nothing back", out)
+        self.assertIn(f"lint (one.md), 1 applied:  {self.command}", out)
+
+    def test_the_reruns_pack_says_the_earlier_changes_still_stand(self):
+        book.restart(self.db, self.manuscript, "draft", "one.md",
+                     reason="wrong brief")
+        draft = self.start("draft", "one.md")
+        pack = Path(draft["pack_path"]).read_text(encoding="utf-8")
+        # The draft run landed nothing, so its rerun is told nothing.
+        self.assertIn("## Earlier attempt: reference only", pack)
+        self.assertNotIn("still in the chapter files", pack)
+        book.finish(self.db, self.manuscript, draft["run"]["id"], NO_USES)
+        pack = Path(self.start("lint", "one.md")["pack_path"]).read_text(
+            encoding="utf-8")
+        section = pack[pack.index("## Earlier attempt: reference only"):
+                       pack.index("## When you are done")]
+        self.assertIn("The earlier attempt's landed changes are still in "
+                      "the chapter files unless they were put back: 1 "
+                      "applied change(s).", section)
+        self.assertIn(f"    {self.command}    (1 applied)", section)
+
+
 # --------------------------------------------------------------- role files
 
 class RoleFileTests(unittest.TestCase):
@@ -902,6 +1081,34 @@ class RoleFileTests(unittest.TestCase):
         self.assertIn("the road is the beat loop", self.text("drafter"))
         self.assertIn("Never accept a beat on your own judgment",
                       self.text("drafter"))
+
+    def test_the_ruling_on_sources_is_written_down_and_the_drafter_agrees(
+            self):
+        """The owner's question and answer, word for word, under `direct`
+        in the house skill, with the reading labelled as a reading."""
+        skill = " ".join((AGENTS.parent / "skills" / "authorlm"
+                          / "SKILL.md").read_text(encoding="utf-8").split())
+        part = skill[skill.index("**How agent edits land**"):
+                     skill.index("**Restart from any point:**")]
+        self.assertIn(
+            'the owner was asked, 2026-11-13, "In a ghostwritten book '
+            "where edits land directly, should the drafter still stop for "
+            "you to confirm each chapter's list of sources before it "
+            'writes?" and answered "No, keep going". The lead developer\'s '
+            "reading (a reading, not the owner's words): under `direct` "
+            "the drafter does not stop for the source list", part)
+        self.assertIn("Under `forms` nothing changes", part)
+        self.assertIsNone(RULED_OUT.search(part))
+        drafter = self.text("drafter")
+        direct = drafter[drafter.index("**If it says directly"):
+                         drafter.index("**If it says as forms")]
+        self.assertIn("You do not stop for the author to confirm the "
+                      "chapter's list of sources", direct)
+        self.assertIn("Name the sources you used in your result", direct)
+        # Under forms the drafter's rule stands as it was.
+        self.assertIn("The author confirms the list before the first beat.",
+                      drafter[drafter.index("**If it says as forms"):])
+        self.assertIsNone(RULED_OUT.search(drafter))
 
     def test_nothing_written_here_uses_a_word_the_owner_ruled_out(self):
         files = [Path(changes.__file__), Path(book.__file__),
