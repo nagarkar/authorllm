@@ -900,20 +900,24 @@ this book: …").
 - `forms` is the default, and what a manuscript without the setting has.
   **Every other rule in this skill about forms, the first-draft word and
   Doc tabs applies unchanged to a manuscript whose setting is `forms`.**
-  The author's own manuscripts are such manuscripts.
-- `direct`: the owner was asked, 2026-11-13, "In a ghostwritten book,
-  should agent editors' changes land directly with a change list?" and
-  answered "Yes, land directly". The lead developer's reading (a reading,
+  Every manuscript starts this way.
+- `direct`: the owner was asked, 2026-11-13, whether agent editors'
+  changes should land directly with a change list, and answered "Yes,
+  land directly". The owner, 2026-11-14: the book is written by the
+  author, and "while they have the option to have the agent accept all of
+  them automatically, the expectation is that they are actually looking
+  at the forms themselves". So `forms` is the expected way for every
+  book, and `direct` is an option the author chooses. The lead developer's reading (a reading,
   not the owner's words): this is per manuscript; under it an agent role
   whose step changes text changes the chapter file itself and records
   every change, and the author reads the change list at the part read and
   at approval and can put any change back. The author's stops stay the
   author's: the brief, the shape, the voice, each part read as a reader,
   the developmental decisions and final approval.
-- `direct`, the chapter's sources: the owner was asked, 2026-11-13, "In a
-  ghostwritten book where edits land directly, should the drafter still
-  stop for you to confirm each chapter's list of sources before it
-  writes?" and answered "No, keep going". The lead developer's reading (a
+- `direct`, the chapter's sources: the owner was asked, 2026-11-13, whether,
+  where edits land directly, the drafter should still stop for the author
+  to confirm each chapter's list of sources before it writes, and
+  answered "No, keep going". The lead developer's reading (a
   reading, not the owner's words): under `direct` the drafter does not
   stop for the source list; it names the sources it used in its result
   (`sources`, and the summary) and in the notes of its draft (the `note`

@@ -478,17 +478,17 @@ class AssignTests(Workspace):
         self.run_step("interview")
         first = self.run_step("draft", "one.md")
         report = book.assign(self.db, self.manuscript, "draft",
-                             "human:ghostwriter")
+                             "human:coauthor")
         self.assertEqual((report["was"], report["actor"]),
-                         ("agent", "human:ghostwriter"))
+                         ("agent", "human:coauthor"))
         steps = {s.id: s for s in
                  book.load_definition(self.manuscript).steps}
-        self.assertEqual(steps["draft"].actor, "human:ghostwriter")
+        self.assertEqual(steps["draft"].actor, "human:coauthor")
         self.assertEqual(steps["critic"].actor, "agent")
         second = self.start("draft", "two.md")
-        self.assertEqual(second["run"]["actor"], "human:ghostwriter")
+        self.assertEqual(second["run"]["actor"], "human:coauthor")
         self.assertEqual(second["run"]["status"], "waiting")
-        self.assertEqual(second["waiting_on"], "ghostwriter")
+        self.assertEqual(second["waiting_on"], "coauthor")
         self.assertEqual(self.run_row(first["id"])["actor"], "agent")
 
     def test_assign_changes_only_that_line_of_the_file(self):
@@ -960,7 +960,7 @@ class DefinitionVersionTests(Workspace):
                          self.run_row(self.draft["id"])["contract_hash"])
 
     def test_a_change_of_actor_is_not_a_change_of_contract(self):
-        book.assign(self.db, self.manuscript, "draft", "human:ghostwriter")
+        book.assign(self.db, self.manuscript, "draft", "human:coauthor")
         self.assertFalse(self.cell("draft", self.one)["contract_changed"])
 
     def test_a_run_of_a_step_no_longer_defined_is_named(self):
@@ -1085,11 +1085,11 @@ class DiagramTests(Workspace):
 
     def test_reassigning_an_actor_changes_the_diagram(self):
         before = self.diagram()["mermaid"]
-        book.assign(self.db, self.manuscript, "draft", "human:ghostwriter")
+        book.assign(self.db, self.manuscript, "draft", "human:coauthor")
         after = self.diagram()["mermaid"]
         self.assertNotEqual(after, before)
         self.assertIn(f'{self.node("draft")["node"]}(["', after)
-        self.assertIn("human:ghostwriter", after)
+        self.assertIn("human:coauthor", after)
 
     def test_a_node_carries_its_status_in_the_scope_asked_for(self):
         self.assertEqual(self.node("interview", "one.md")["status"], "ready")

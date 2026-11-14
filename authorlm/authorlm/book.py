@@ -134,9 +134,10 @@ Decisions:
   `agent_edits`: `forms` (the default, and what an absent setting means)
   or `direct`, kept in `manuscripts.metadata` as `{"agent_edits": {"mode":
   "direct"}}` (`agent_edits`, `set_agent_edits`; `authorlm manuscript set
-  --agent-edits direct|forms`). Owner, 2026-11-13, asked "In a ghostwritten
-  book, should agent editors' changes land directly with a change list?":
-  "Yes, land directly". The lead developer's reading: this is per
+  --agent-edits direct|forms`). Owner, 2026-11-13, asked whether agent
+  editors' changes should land directly with a change list: "Yes, land
+  directly". Owner, 2026-11-14: the author is expected to read the forms;
+  `direct` is the author's option to have them all accepted. The lead developer's reading: this is per
   manuscript. Under `forms` every house rule about forms, the first-draft
   word and Doc tabs applies as before, and nothing here lands anything.
   Under `direct` a role whose step changes text changes the chapter file

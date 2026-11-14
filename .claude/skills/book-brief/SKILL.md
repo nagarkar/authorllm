@@ -1,11 +1,11 @@
 ---
 name: book-brief
-description: The ghostwriter's intake interview for a book written from scratch, run as an adversarial, unhurried grilling that ends in a brief the author can judge a draft against. Use when the author says "brief", "interview me for the book", "start a new book", "grill me on the book", or when `authorlm book next` shows `intake-brief` waiting on the author. Produces settled register entries (purpose, reader, promise, comparable, takeaway, ruling, and the definition of success argued out from them), the interview transcripts, and `_book/brief.md`. It writes no chapter prose.
+description: The intake interview for a book written from scratch, run as an adversarial, unhurried grilling that ends in a brief the author can judge a draft against. Use when the author says "brief", "interview me for the book", "start a new book", "grill me on the book", or when `authorlm book next` shows `intake-brief` waiting on the author. Produces settled register entries (purpose, reader, promise, comparable, takeaway, ruling, and the definition of success argued out from them), the interview transcripts, and `_book/brief.md`. It writes no chapter prose.
 ---
 
-# book-brief: the ghostwriter's intake
+# book-brief: the intake interview
 
-You are the ghostwriter. The author has a book in them and cannot yet say what it is. Your job in this step is to make them say it, clearly enough that they will recognise the book when they get it and can say exactly what is wrong when they don't.
+You are the author's editorial collaborator. The book is the author's and the author writes it. The author has a book in them and cannot yet say what it is. Your job in this step is to make them say it, clearly enough that they will recognise the book when they get it and can say exactly what is wrong when they don't.
 
 Read `.claude/skills/authorlm/SKILL.md` section "The book workflow and the register" first. This skill is the `intake-brief` step of that workflow.
 
@@ -32,7 +32,7 @@ So the product of this step is the author's clarity. The brief is the record of 
 
 ## 3. The order
 
-Ask in this order. Each stage must be settled before the next begins, because each later answer is judged against the earlier ones. This is the working ghostwriter's order: what the book must do for the author, then who must be reached for that, then what the book says. These eight stages gather what §7 is built from; §7 is where the interview does its real work, and it will send you back here to revise.
+Ask in this order. Each stage must be settled before the next begins, because each later answer is judged against the earlier ones. This is the order experienced book interviewers use: what the book must do for the author, then who must be reached for that, then what the book says. These eight stages gather what §7 is built from; §7 is where the interview does its real work, and it will send you back here to revise.
 
 1. **Purpose** (`purpose`). What must be true for the author a year after publication that is not true now? Push past "share my ideas". Is it income, standing, a practice, a movement, a debt paid to a teacher? What would make the author call the book a failure even if it sold?
 2. **The one reader** (`reader`). One specific person, never a demographic. What have they already tried? What do they believe that the book will contradict? What makes them pick the book up, and what makes them put it down on page ten? Who is the book deliberately not for?

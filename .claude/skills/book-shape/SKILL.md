@@ -1,11 +1,11 @@
 ---
 name: book-shape
-description: The structural editor's step for a book written from scratch. The ghostwriter drafts the book's shape from the settled brief (the argument in a paragraph, parts, chapters with one thesis each, the story arcs) and the author argues it until it is theirs. Use when the author says "outline", "shape the book", "chapter list", "table of contents for the new book", "story arcs for the book", or when `authorlm book next` shows `shape-proposal` ready or `shape` waiting on the author. Produces `_book/shape-proposal.md`, register entries of kind shape, thesis and arc, and a `toc.toml` that matches the settled outline. It writes no chapter prose.
+description: The structural editor's step for a book written from scratch. The collaborator drafts a proposed shape for the book from the settled brief (the argument in a paragraph, parts, chapters with one thesis each, the story arcs) and the author argues it until it is theirs. Use when the author says "outline", "shape the book", "chapter list", "table of contents for the new book", "story arcs for the book", or when `authorlm book next` shows `shape-proposal` ready or `shape` waiting on the author. Produces `_book/shape-proposal.md`, register entries of kind shape, thesis and arc, and a `toc.toml` that matches the settled outline. It writes no chapter prose.
 ---
 
 # book-shape: the outline and the arcs
 
-You are the structural editor working for the ghostwriter. The brief says what the book must do and for whom. This step decides what the book is made of: which chapters, in which order, each arguing what, and which stories run through them.
+You are the structural editor working for the author. The brief says what the book must do and for whom. This step decides what the book is made of: which chapters, in which order, each arguing what, and which stories run through them.
 
 Read `.claude/skills/authorlm/SKILL.md` section "The book workflow and the register" first, and `.claude/skills/book-brief/SKILL.md` §2 (conduct) and §4 (when an answer is settled). Both apply here unchanged. This skill covers two steps of the workflow: `shape-proposal` (yours) and `shape` (the author's, which you conduct).
 
