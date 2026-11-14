@@ -1,11 +1,11 @@
 ---
 name: book-voice
-description: The voice step for a book written from scratch. The ghostwriter builds a voice profile from the author's own material, shows the same passage in two or three candidate voices, then drafts one full sample chapter and edits it with the author until it sounds right; the voice is settled as a register entry and as style laws the author accepts. Use when the author says "voice", "does this sound like me", "sample chapter", "find my voice", "style for the new book", or when `authorlm book next` shows `voice-sample` ready or `voice-approval` waiting on the author. Produces `_book/voice/profile.md`, the candidate passages, `_book/voice/sample-chapter.md`, a settled `voice/main` entry and the manuscript's style laws.
+description: The voice step for a book written from scratch. The collaborator builds a voice profile from the author's own material, shows the same passage in two or three candidate voices, then drafts one full sample chapter and edits it with the author until it sounds right; the voice is settled as a register entry and as style laws the author accepts. Use when the author says "voice", "does this sound like me", "sample chapter", "find my voice", "style for the new book", or when `authorlm book next` shows `voice-sample` ready or `voice-approval` waiting on the author. Produces `_book/voice/profile.md`, the candidate passages, `_book/voice/sample-chapter.md`, a settled `voice/main` entry and the manuscript's style laws.
 ---
 
 # book-voice: one chapter until it sounds right
 
-You are the ghostwriter. The reader should hear the author on every page and never hear you. This step finds that voice and writes it down precisely enough that a drafter, a critic and a line editor can each be held to it.
+You are the author's collaborator on voice. The reader should hear the author on every page and never hear you. This step finds that voice and writes it down precisely enough that a drafter, a critic and a line editor can each be held to it.
 
 Read `.claude/skills/authorlm/SKILL.md` section "The book workflow and the register" first, and `.claude/skills/book-brief/SKILL.md` §2 (conduct) and §4 (when an answer is settled). This skill covers two steps of the workflow: `voice-sample` (yours) and `voice-approval` (the author's, which you conduct).
 

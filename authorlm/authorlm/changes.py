@@ -1,8 +1,12 @@
 """Agent edits that land directly in a chapter file, with a change list
 the author can read and put back.
 
-Owner, 2026-11-13, asked "In a ghostwritten book, should agent editors'
-changes land directly with a change list?": "Yes, land directly". The
+Owner, 2026-11-13, asked whether agent editors' changes should land
+directly with a change list: "Yes, land directly". Owner, 2026-11-14:
+the book is written by the author; "while they have the option to have
+the agent accept all of them automatically, the expectation is that they
+are actually looking at the forms themselves". So `forms` is the expected
+way and `direct` is the author's option. The
 same day: what to automate is "the grunt work of editing, copy editing,
 line editing"; "nothing should be published without reading and approvals
 by the author"; the aim is that authors "know how to criticize it very

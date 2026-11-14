@@ -1084,17 +1084,17 @@ class RoleFileTests(unittest.TestCase):
 
     def test_the_ruling_on_sources_is_written_down_and_the_drafter_agrees(
             self):
-        """The owner's question and answer, word for word, under `direct`
+        """The owner's answer, word for word, under `direct`
         in the house skill, with the reading labelled as a reading."""
         skill = " ".join((AGENTS.parent / "skills" / "authorlm"
                           / "SKILL.md").read_text(encoding="utf-8").split())
         part = skill[skill.index("**How agent edits land**"):
                      skill.index("**Restart from any point:**")]
         self.assertIn(
-            'the owner was asked, 2026-11-13, "In a ghostwritten book '
-            "where edits land directly, should the drafter still stop for "
-            "you to confirm each chapter's list of sources before it "
-            'writes?" and answered "No, keep going". The lead developer\'s '
+            "the owner was asked, 2026-11-13, whether, where edits land "
+            "directly, the drafter should still stop for the author to "
+            "confirm each chapter's list of sources before it writes, and "
+            'answered "No, keep going". The lead developer\'s '
             "reading (a reading, not the owner's words): under `direct` "
             "the drafter does not stop for the source list", part)
         self.assertIn("Under `forms` nothing changes", part)
