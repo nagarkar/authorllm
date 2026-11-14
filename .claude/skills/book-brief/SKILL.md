@@ -101,8 +101,9 @@ The stage is finished when the author says the definition is theirs, the both-wa
 Then:
 
 1. Write `_book/brief.md` from the register, in the shape of a book proposal: overview (written last, two or three paragraphs), the one reader, the promise, comparable books with the difference from each, what the reader leaves with, what makes a chapter and the book succeed, material in hand and missing, boundaries, the team. Every statement is followed by its register entry (`reader/main`). Add nothing that is not in the register.
-2. Have the author read `_book/brief.md` whole and approve it in words.
-3. Finish the step, naming the entries:
+2. If `_profiles/synopsis.md` exists, check its reader and comparables against the settled `reader` and `comparable` entries and update it with the author's word (`authorlm profile set synopsis`). Do the same whenever either entry is revised later.
+3. Have the author read `_book/brief.md` whole and approve it in words.
+4. Finish the step, naming the entries:
 
 ```bash
 authorlm book done <run-id> --result-json - -m <manuscript>

@@ -77,8 +77,9 @@ Then:
 
 1. Settle the entries: `authorlm register settle shape/outline`, each `thesis/<key>`, each `arc/<key>`. Drop the ones the author rejected, with their reason recorded.
 2. Create the chapter files, each holding its title and nothing else, and write `toc.toml` to match the outline, parts included. Follow the house skill for registering a new file and its place in the reading order.
-3. Have the author read the final `_book/shape-proposal.md` whole and approve it in words.
-4. `authorlm book done <run-id> --result-json -` with the entries, the proposal file and the transcripts.
+3. Write or update `_profiles/synopsis.md` (`authorlm profile set synopsis`) so its structure matches `toc.toml`, its reader matches `reader/main` and its comparables match the `comparable` entries.
+4. Have the author read the final `_book/shape-proposal.md` whole and approve it in words.
+5. `authorlm book done <run-id> --result-json -` with the entries, the proposal file and the transcripts.
 
 ## 6. Changing the shape later
 
@@ -86,6 +87,7 @@ The shape will change once chapters exist. That is expected and cheap.
 
 - A renamed chapter: `authorlm doc rename <file> <new-name>`. Its records follow it.
 - A changed thesis, a moved chapter, a dropped arc: `authorlm register revise` on the entry, in the author's words. The verb returns the work that rested on the old entry; tell the author what is returned before they confirm.
+- After any of these, check `_profiles/synopsis.md` against the new `toc.toml`, and update it with the author's word (`authorlm profile set synopsis`).
 - A change large enough that the outline no longer argues the paragraph in §3.1: `authorlm book restart shape-proposal --reason '…'`. The old outline and the chapters drafted under it are handed to the rerun as reference only.
 
 ## 7. What this step leaves alone
