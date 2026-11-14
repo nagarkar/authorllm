@@ -71,7 +71,7 @@ actor = "agent"
 grain = "book"
 after = ["shape"]
 gives = ["brief", "register", "outline", "intake-sources"]
-returns = "Two or three sample passages in distinct candidate voices, drawn from the author's own material, with a proposed register entry of kind voice for each."
+returns = "A voice profile built from the author's own material, every observation with a quotation as evidence, and the same passage written in two or three distinct candidate voices, with a proposed register entry of kind voice for each."
 leaves_alone = "The outline, the arcs and the brief."
 
 [[step]]
@@ -81,7 +81,7 @@ actor = "human:author"
 grain = "book"
 after = ["voice-sample"]
 gives = ["register", "voice-sample"]
-returns = "The voice the author chooses, as a settled register entry of kind voice in the author's own words."
+returns = "One full sample chapter, not the introduction, edited with the author until it sounds right; the voice as a settled register entry of kind voice in the author's own words; and the style laws the author accepted from their own edits."
 leaves_alone = "Nothing. The voice is the author's choice."
 
 # ---- each chapter: interview, draft, then three checks

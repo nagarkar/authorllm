@@ -876,6 +876,11 @@ need `document_ids` on (`authorlm manuscript set --document-ids on`).
    step is a person's (`human:author`), `book start` marks it waiting and
    notifies them: ask them in chat, record what they say, then `book done`.
 
+**The intake steps have their own skills;** read the one for the step
+before starting it: `intake-brief` is `.claude/skills/book-brief/`,
+`shape-proposal` and `shape` are `.claude/skills/book-shape/`,
+`voice-sample` and `voice-approval` are `.claude/skills/book-voice/`.
+
 **Restart from any point:** `authorlm book restart <step> [--scope <s>]
 --reason '<what was wrong>'` (`--dry-run` lists first). The run and every
 run that followed from it, for that scope and the scopes inside it, are
