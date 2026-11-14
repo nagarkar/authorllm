@@ -11,7 +11,9 @@ edit). This module reads that file, says which step is next, hands the
 role its pack (written to `<manuscript>/_book/packs/<run-id>.md`), and
 records each attempt as one row of `step_runs` and each change of its
 status as one row of `step_events`. It is the only writer of those tables
-and of the `_book/` folder. It calls no model: an agent step is
+and of the `_book/` folder (changes.py, which lands an agent's edits in a
+chapter file, records them in its own table and logs through `note`
+here). It calls no model: an agent step is
 carried out by the conversation that drives these verbs, or by its
 subagents, exactly as a developmental edit is.
 
@@ -63,7 +65,10 @@ Decisions:
 - Every change of a run's status is one row of `step_events`, written in
   the same transaction by the one function that changes a status
   (`_transition`); the table is only ever appended to, so it is the
-  record of what happened and when (`history`). Enforced by:
+  record of what happened and when (`history`). Something that happens
+  under a run and leaves its status as it is (a landing, a first draft, a
+  change put back) is logged through the same function as a row whose
+  status before and after are the same (`note`). Enforced by:
   tests/test_book_workflow.py::HistoryTests::test_no_run_has_a_status_its_last_event_does_not_give
   and
   tests/test_book_workflow.py::HistoryTests::test_only_one_function_writes_a_runs_status.
@@ -105,6 +110,48 @@ Decisions:
   record a use, `applies` or `infers`, for each entry its work rests on.
   Enforced by:
   tests/test_book_workflow.py::PackTests::test_the_pack_carries_the_register_in_scope.
+- Each agent role may have a role file in the checkout,
+  `.claude/agents/book-<role slug>.md`: a Claude Code subagent that says
+  how that trade does its step with AuthorLM's existing verbs. When one
+  exists, an agent step's pack names it near the top, so whoever starts
+  the step knows which subagent to hand it to. The role file is advice on
+  method; the contract in the pack is the one in force. A missing role
+  file, or a package installed outside a checkout, changes nothing else.
+  Enforced by:
+  tests/test_book_role_agents.py::PackNamesTheRoleFileTests::test_an_agent_steps_pack_names_its_role_file
+  and
+  tests/test_book_role_agents.py::PackNamesTheRoleFileTests::test_a_role_without_a_file_gets_a_pack_that_names_none.
+
+- How an agent's edit reaches a chapter is the manuscript's own setting,
+  `agent_edits`: `forms` (the default, and what an absent setting means)
+  or `direct`, kept in `manuscripts.metadata` as `{"agent_edits": {"mode":
+  "direct"}}` (`agent_edits`, `set_agent_edits`; `authorlm manuscript set
+  --agent-edits direct|forms`). Owner, 2026-11-13, asked "In a ghostwritten
+  book, should agent editors' changes land directly with a change list?":
+  "Yes, land directly". The lead developer's reading: this is per
+  manuscript. Under `forms` every house rule about forms, the first-draft
+  word and Doc tabs applies as before, and nothing here lands anything.
+  Under `direct` a role whose step changes text changes the chapter file
+  itself and every change is recorded (changes.py); the author reads the
+  change list at their stops and can put any change back. Every agent
+  step's pack says which it is, and what that means for the role, near the
+  top. Enforced by:
+  tests/test_book_changes.py::SettingTests::test_the_setting_defaults_to_forms_and_round_trips
+  and
+  tests/test_book_changes.py::PackTests::test_every_agent_pack_says_how_edits_land.
+- Which steps may change text is the definition's to say, per step:
+  `changes_text = true`. A step without it reports and lands nothing,
+  whatever its role is called. In the default definition the six are
+  draft, lint, line-edit, copyedit, production and proofread. Enforced by:
+  tests/test_book_changes.py::DefinitionTests::test_the_default_definitions_text_changing_steps_are_exactly_the_six
+  and
+  tests/test_book_changes.py::LandDeclinesTests::test_a_step_without_changes_text_may_not_land.
+- The author sees what agent roles changed at their own stops through the
+  definition, not a special case: a step given `changes` (in the default,
+  part-read and approval) has a pack that counts the changes landed in its
+  scope, in all and since the author last read that scope, and gives the
+  `book changes` command for them. Enforced by:
+  tests/test_book_changes.py::PackTests::test_the_part_read_pack_names_the_count_and_the_command.
 
 Terms:
 - **workflow definition**: the book's own list of steps,
@@ -129,6 +176,13 @@ Terms:
   rerun, the superseded result as reference.
 - **independent step**: a step whose reader must judge the text cold: its
   pack withholds what earlier steps returned.
+- **role file**: a Claude Code subagent file for one agent role,
+  `.claude/agents/book-<role slug>.md`, named in that role's packs.
+- **agent edits**: the manuscript's setting for how an agent's edit
+  reaches a chapter: `forms` (it waits for the author) or `direct` (it
+  lands in the file with a change list).
+- **text-changing step**: a step whose definition says `changes_text =
+  true`; under `direct`, the only kind of step that may land a change.
 """
 
 from __future__ import annotations
@@ -151,10 +205,13 @@ DEFINITION_FILENAME = "workflow.toml"
 PACKS_DIR = "packs"
 RUN_PREFIX = "sr"
 EVENT_PREFIX = "se"
+ROLE_FILE_PREFIX = "book-"
 GRAINS = ("book", "part", "chapter")
 BOOK = "book"
 STEP_KEYS = ("id", "role", "actor", "grain", "after", "gives", "returns",
-             "artifacts", "leaves_alone", "independent")
+             "artifacts", "leaves_alone", "independent", "changes_text")
+SETTING = "agent_edits"
+AGENT_EDITS = ("forms", "direct")
 _REQUIRED_KEYS = ("id", "role", "actor", "grain", "returns", "leaves_alone")
 
 # The named inputs a step's `gives` may list, and where each one is. A step
@@ -171,6 +228,8 @@ GIVES = {
                   "{root}",
     "summaries": "the summaries of what is written so far: authorlm "
                  "summary outline -m {name}",
+    "changes": "the changes agent roles landed in this scope, counted "
+               "below: authorlm book changes{scope_flag} -m {name}",
 }
 _GIVES_GRAINS = {"chapter": ("chapter",), "part": ("part", "chapter")}
 
@@ -192,6 +251,7 @@ class Step:
     artifacts: tuple[str, ...]
     leaves_alone: str
     independent: bool
+    changes_text: bool = False   # may land changes in a chapter file
 
 
 def contract_hash(step: Step) -> str:
@@ -203,6 +263,10 @@ def contract_hash(step: Step) -> str:
                 "returns": step.returns, "artifacts": list(step.artifacts),
                 "leaves_alone": step.leaves_alone,
                 "independent": step.independent}
+    if step.changes_text:
+        # Only when set, so a step without the key keeps the fingerprint
+        # it had before the key existed.
+        contract["changes_text"] = True
     encoded = json.dumps(contract, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:12]
 
@@ -232,6 +296,40 @@ def default_definition_path() -> Path:
     a book starts from."""
     return (Path(__file__).resolve().parent.parent / "library"
             / "book-workflow.toml")
+
+
+def role_slug(role: str) -> str:
+    """A role's name as a file-name slug: "copy editor" gives
+    "copy-editor". The one place a role's name becomes a slug."""
+    return "-".join(re.findall(r"[a-z0-9]+", role.lower()))
+
+
+def role_agent_name(role: str) -> str:
+    """The name of a role's subagent, and the stem of its role file:
+    "copy editor" gives "book-copy-editor"."""
+    return ROLE_FILE_PREFIX + role_slug(role)
+
+
+def role_files_dir() -> Path:
+    """`.claude/agents/` in the checkout this package runs from: where the
+    role files are. The folder is absent when the package is installed
+    outside a checkout; `role_file` then finds nothing."""
+    return (Path(__file__).resolve().parent.parent.parent / ".claude"
+            / "agents")
+
+
+def role_file(role: str) -> Path | None:
+    """The role file for `role` (`.claude/agents/book-<slug>.md`), or None
+    when the checkout has none. A role file says how the role does its
+    work with AuthorLM's verbs; a role without one is still carried out
+    from its pack alone."""
+    if not role_slug(role):
+        return None
+    try:
+        path = role_files_dir() / f"{role_agent_name(role)}.md"
+        return path if path.is_file() else None
+    except OSError:
+        return None
 
 
 def _strings(table: dict, key: str, where: str) -> tuple[str, ...]:
@@ -293,15 +391,17 @@ def parse_definition(text: str, path: Path) -> Definition:
         if table["grain"] not in GRAINS:
             raise ValueError(f"{where}: grain '{table['grain']}' must be "
                              f"one of {', '.join(GRAINS)}")
-        if not isinstance(table.get("independent", False), bool):
-            raise ValueError(f"{where}: independent must be true or false")
+        for key in ("independent", "changes_text"):
+            if not isinstance(table.get(key, False), bool):
+                raise ValueError(f"{where}: {key} must be true or false")
         steps[table["id"]] = Step(
             id=table["id"], role=table["role"], actor=table["actor"],
             grain=table["grain"], after=_strings(table, "after", where),
             gives=_strings(table, "gives", where), returns=table["returns"],
             artifacts=_strings(table, "artifacts", where),
             leaves_alone=table["leaves_alone"],
-            independent=table.get("independent", False))
+            independent=table.get("independent", False),
+            changes_text=table.get("changes_text", False))
     for step in steps.values():
         where = f"{path}: step '{step.id}'"
         for name in step.after:
@@ -345,6 +445,61 @@ def _require_document_ids(db: Database, manuscript: dict) -> None:
             "document ids are off for this manuscript. Turn them on: "
             f"authorlm manuscript set --document-ids on -m "
             f"{manuscript['name']}")
+
+
+def agent_edits(db: Database, manuscript: dict) -> str:
+    """The manuscript's `agent_edits` setting: `forms` or `direct`. ABSENT
+    MEANS FORMS: an agent's edit waits for the author, as the house rules
+    say, until the manuscript's owner sets `direct`. Read from the row,
+    never from the caller's dict (see `docs.document_ids_enabled`)."""
+    row = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                 (manuscript["id"],))
+    meta = loads(row["metadata"] if row else None, {})
+    mode = (meta.get(SETTING) or {}).get("mode")
+    return mode if mode in AGENT_EDITS else "forms"
+
+
+def set_agent_edits(db: Database, manuscript: dict, mode: str) -> dict:
+    """Set `agent_edits` to `forms` or `direct`; returns `{mode, was,
+    changed}`. Merged into the row's current metadata and mirrored into
+    the caller's dict, as `docs.set_document_ids` does. Changes already
+    landed stay in the record and can still be put back."""
+    mode = (mode or "").strip().lower()
+    if mode not in AGENT_EDITS:
+        raise ValueError("agent-edits is forms or direct")
+    was = agent_edits(db, manuscript)
+    row = db.one("SELECT metadata FROM manuscripts WHERE id = ?",
+                 (manuscript["id"],))
+    meta = loads(row["metadata"] if row else None, {})
+    meta[SETTING] = {**(meta.get(SETTING) or {}), "mode": mode}
+    encoded = json.dumps(meta)
+    db.update("manuscripts", manuscript["id"], {"metadata": encoded})
+    manuscript["metadata"] = encoded
+    return {"mode": mode, "was": was, "changed": was != mode}
+
+
+def edits_line(mode: str, step: Step, run_id: str, name: str) -> str:
+    """The one sentence an agent step's pack carries on how edits land in
+    this book, and what that means for this step's role."""
+    if mode == "direct" and step.changes_text:
+        return ("How edits land in this book: directly. Your step changes "
+                "text, so you change the chapter file itself with `authorlm "
+                f"book land {run_id} <file> --changes-json <file> -m {name}`, "
+                "a note for every change; no first-draft word, Doc-tab form "
+                "or author verdict is needed, and the author reads the "
+                "change list at their own stops and can put any change "
+                "back.")
+    if mode == "direct":
+        return ("How edits land in this book: directly, for the steps that "
+                "change text. Yours is not one of them: you report, and you "
+                "land nothing.")
+    if step.changes_text:
+        return ("How edits land in this book: as forms for the author. A "
+                "change to words waits for the author as the house skill "
+                "says (first draft, then forms; the Doc tab); `book land` "
+                "is not open in this book.")
+    return ("How edits land in this book: as forms for the author. Your "
+            "step changes no text: you report.")
 
 
 def load_definition(manuscript: dict) -> Definition:
@@ -557,7 +712,9 @@ def _transition(db: Database, manuscript: dict, to_status: str, *,
     is the only place a run's status is written (a new run included), so
     no status changes without a row in `step_events`; that table is only
     ever appended to. `new_row` starts a run; `run` moves an existing one,
-    with any other columns that change with it in `changes`."""
+    with any other columns that change with it in `changes`. Given the
+    status the run already has, it logs something that happened under the
+    run and changes nothing else (`note`)."""
     with db.transaction():
         if new_row is not None:
             db.insert("step_runs", {**new_row, "status": to_status})
@@ -575,6 +732,20 @@ def _transition(db: Database, manuscript: dict, to_status: str, *,
             "run_id": run_id, "step": step, "scope_kind": kind,
             "scope_document_id": document_id, "from_status": before,
             "to_status": to_status, "actor": actor, "reason": reason})
+
+
+def note(db: Database, manuscript: dict, run_id: str, *, actor: str,
+         reason: str, changes: dict | None = None) -> None:
+    """Log something that happened under a run and leaves its status as it
+    is (a landing, a first draft, a change put back): one row of
+    `step_events` whose status before and after are the run's own.
+    `changes` are other columns of the run written with it, never its
+    status."""
+    if "status" in (changes or {}):
+        raise ValueError("a note never changes a run's status")
+    run = _run(db, _find_run(db, manuscript, run_id))
+    _transition(db, manuscript, run["status"], actor=actor, reason=reason,
+                run=run, changes=changes)
 
 
 def _runs(db: Database, manuscript: dict) -> dict[tuple[str, str], list[dict]]:
@@ -728,7 +899,8 @@ def status(db: Database, manuscript: dict) -> dict:
     else:
         hint = "every step is done"
     return {"manuscript": manuscript["name"],
-            "definition": str(definition.path), "steps": steps,
+            "definition": str(definition.path),
+            "agent_edits": agent_edits(db, manuscript), "steps": steps,
             "waiting_on": waiting_on, "counts": counts,
             "warnings": warnings, "next": hint}
 
@@ -902,6 +1074,8 @@ def _given(manuscript: dict, book_layout: Layout, step: Step,
                   if book_layout.part_of[chapter.key] == part_key]
     places = {"toc": str(root / structure.TOC_FILENAME), "root": str(root),
               "name": manuscript["name"],
+              "scope_flag": ("" if scope.key == BOOK
+                             else f" --scope {scope.label}"),
               "chapter": str(root / scope.label),
               "part": ", ".join(part_files)}
     lines = []
@@ -922,7 +1096,20 @@ def _pack(db: Database, manuscript: dict, definition: Definition,
         f"{run['attempt']}", "",
         f"Run {run['id']} of the book workflow for {manuscript['name']}. "
         + (f"This step is {who}'s: ask them, and record what they say in "
-           "their own words." if who else "This step is an agent's."), "",
+           "their own words." if who else "This step is an agent's."), ""]
+    role_path = None if who else role_file(step.role)
+    if role_path:
+        lines += [
+            f"Role file: {role_path}", "",
+            f"Hand this step to the subagent `{role_agent_name(step.role)}`"
+            ", giving it the path of this pack "
+            f"({pack_path(manuscript, run['id'])}). The role file says how "
+            "the role does its work; the contract below is the one in "
+            "force for this book.", ""]
+    if not who:
+        lines += [edits_line(agent_edits(db, manuscript), step, run["id"],
+                             manuscript["name"]), ""]
+    lines += [
         "## Your contract", "",
         f"- Role: {step.role}", "- You are given:",
         *_given(manuscript, book_layout, step, scope),
@@ -942,6 +1129,11 @@ def _pack(db: Database, manuscript: dict, definition: Definition,
         db, manuscript, book_layout, scope, run["id"],
         run["actor"] == "agent" and "register" in step.gives)
     lines += _handed_over(definition, book_layout, runs, step, scope)
+    if "changes" in step.gives:
+        from . import changes as landed
+
+        lines += landed.pack_section(db, manuscript, definition,
+                                     book_layout, runs, step, scope)
     lines += _reference(step, earlier)
     lines += [
         "## When you are done", "",
@@ -982,7 +1174,8 @@ def start(db: Database, manuscript: dict, step_id: str,
           scope: str | None = None, *, note: str = "",
           notify=None) -> dict:
     """Start the next attempt at a step for a scope and write its pack;
-    returns `{run, pack_path, waiting_on, notified, next}`. An agent's run
+    returns `{run, pack_path, waiting_on, notified, role_file,
+    next}`. An agent's run
     is `running`; a person's is `waiting`, and that person is notified
     (`notify(title, body)`, by default the SuperLM notifier)."""
     _require_document_ids(db, manuscript)
@@ -1040,9 +1233,14 @@ def start(db: Database, manuscript: dict, step_id: str,
             f"{name}: waiting on {who}",
             f"The book workflow step '{step.id}' ({where.label}) is "
             f"waiting on {who}. See: authorlm book status -m {name}"))
+    role_path = None if who else role_file(step.role)
+    how = (f"Hand {path} to the subagent {role_agent_name(step.role)} "
+           f"(role file {role_path}), or read it and follow it"
+           if role_path else f"Read {path} and follow it")
     return {"run": show_run(db, manuscript, row["id"])["run"],
             "pack_path": str(path), "waiting_on": who, "notified": notified,
-            "next": f"Read {path} and follow it; then: authorlm book done "
+            "role_file": str(role_path) if role_path else None,
+            "next": f"{how}; then: authorlm book done "
                     f"{row['id']} --result-json <file> -m {name}"}
 
 
@@ -1076,7 +1274,9 @@ def finish(db: Database, manuscript: dict, run_id: str,
            result: dict | None = None) -> dict:
     """Record what a run handed back and mark it done; returns the run.
     `result` is a JSON object; `artifacts` in it is a list of paths and
-    `register_entries` a list of entry ids that exist."""
+    `register_entries` a list of entry ids that exist. For a run that
+    landed changes or drafted a chapter (changes.py), the result recorded
+    also carries the count (`changes_landed`) and the files drafted."""
     _require_document_ids(db, manuscript)
     row = _find_run(db, manuscript, run_id)
     result = {} if result is None else result
@@ -1102,6 +1302,9 @@ def finish(db: Database, manuscript: dict, run_id: str,
     step = next((s for s in load_definition(manuscript).steps
                  if s.id == row["step"]), None)
     uses = _register_uses(result, row, step)
+    from . import changes as landed
+
+    result = landed.result_with_record(db, row, result)
     who = (f"agent:{step.role}" if step and row["actor"] == "agent"
            else row["actor"])
     with db.transaction():

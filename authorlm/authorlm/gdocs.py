@@ -2132,6 +2132,19 @@ def unchanged_since_push(db: Database, manuscript: dict, query: str,
     return hashlib.sha256(text.encode()).hexdigest()[:16] == entry["pushed_hash"]
 
 
+def has_pushed_tab(db: Database, manuscript: dict, relpath: str,
+                   bridge: "DocBridge | None" = None) -> bool:
+    """True when the file has a tab in the master Doc that was pushed at
+    least once: the files `doc_side_state` reads Google for. Local only;
+    a caller asks this first so a manuscript with no Doc never needs
+    Google's credentials."""
+    bridge = bridge or manuscript_bridge(manuscript)
+    links = _mapping(db, manuscript).get(bridge.meta_key, {})
+    entry = links.get(relpath) if isinstance(links.get(relpath), dict) else {}
+    return bool(links.get("_master_id") and entry.get("tab_id")
+                and entry.get("pushed_hash"))
+
+
 def doc_side_state(db: Database, manuscript: dict, query: str, service,
                    docs_service, bridge: "DocBridge | None" = None) -> dict:
     """Has the Doc side of one file moved since its last push or pull?

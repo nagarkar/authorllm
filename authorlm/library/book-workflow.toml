@@ -14,12 +14,22 @@
 #   after         the steps this one follows
 #   gives         what the role is handed up front (never a limit on what
 #                 it may read): brief, register, outline, chapter, part,
-#                 manuscript, summaries, or a step id for what it returned
+#                 manuscript, summaries, changes (the count of the changes
+#                 agent roles landed in the step's scope, in all and since
+#                 the author last read it, with the command that lists
+#                 them), or a step id for what it returned
 #   returns       what the role hands back
 #   leaves_alone  what the role does not change. A problem that belongs
 #                 to an earlier step is filed back, not fixed.
 #   independent   true: the reader is not handed what earlier steps
 #                 returned, so it judges the text cold
+#   changes_text  true: the step may change the words of a chapter file.
+#                 In a book whose agent_edits setting is direct (`authorlm
+#                 manuscript set --agent-edits direct`), only such a step
+#                 may land a change (`authorlm book land`); a step without
+#                 the key reports and lands nothing. Under forms, the
+#                 default, the key changes nothing: every edit waits for
+#                 the author.
 
 # ---- intake: what the book is for
 
@@ -105,6 +115,7 @@ after = ["chapter-interview"]
 gives = ["brief", "register", "outline", "chapter", "summaries", "chapter-interview"]
 returns = "The chapter drafted in its file, and a use recorded for every register entry the draft rests on, applies or infers."
 leaves_alone = "The outline, the thesis, the voice and every other chapter. No claim, story or term the author did not supply is invented; a gap is filed back to the chapter interview."
+changes_text = true
 
 [[step]]
 id = "lint"
@@ -115,6 +126,7 @@ after = ["draft"]
 gives = ["register", "chapter"]
 returns = "The mechanical findings on the draft (repetition, filler, broken forms, style law), each with its place in the chapter, and the fixes made."
 leaves_alone = "What the chapter claims and how it is built. Only mechanical defects are fixed."
+changes_text = true
 
 [[step]]
 id = "critic"
@@ -145,7 +157,7 @@ role = "author"
 actor = "human:author"
 grain = "part"
 after = ["consistency"]
-gives = ["register", "part", "critic", "consistency"]
+gives = ["register", "part", "changes", "critic", "consistency"]
 returns = "The author's verdict on the part: what stands, what to change, and any choice to reopen, in the author's words."
 leaves_alone = "Nothing. The author may change anything."
 
@@ -191,6 +203,7 @@ after = ["developmental-decisions"]
 gives = ["register", "manuscript"]
 returns = "The prose edited sentence by sentence for clarity, rhythm and the settled voice, with a list of the changes."
 leaves_alone = "Structure, order, and what the text claims. A structural problem is filed back to the developmental edit."
+changes_text = true
 
 [[step]]
 id = "copyedit"
@@ -201,6 +214,7 @@ after = ["line-edit"]
 gives = ["register", "manuscript"]
 returns = "Grammar, spelling, punctuation and consistency of terms corrected to the style law, with a style sheet of the choices made."
 leaves_alone = "Structure, claims and the author's voice. A sentence that needs rewriting is filed back to the line edit."
+changes_text = true
 
 [[step]]
 id = "fact-check"
@@ -221,6 +235,7 @@ after = ["fact-check"]
 gives = ["register", "manuscript"]
 returns = "The book assembled for publication: front and back matter, illustrations placed, the exports built, and a list of what each export still lacks."
 leaves_alone = "The words. Production changes how the book is laid out, never what it says."
+changes_text = true
 
 [[step]]
 id = "proofread"
@@ -231,6 +246,7 @@ after = ["production"]
 gives = ["manuscript"]
 returns = "The errors left in the produced book (typos, broken layout, wrong references), each with its place."
 leaves_alone = "Wording, style and structure. Only plain errors are corrected; anything larger is filed back."
+changes_text = true
 independent = true
 
 [[step]]
@@ -250,6 +266,6 @@ role = "author"
 actor = "human:author"
 grain = "book"
 after = ["cold-read"]
-gives = ["register", "proofread", "cold-read"]
+gives = ["register", "changes", "proofread", "cold-read"]
 returns = "The author's approval to publish, or the list of what must change first."
 leaves_alone = "Nothing. Approval is the author's alone."

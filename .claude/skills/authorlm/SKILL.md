@@ -881,6 +881,76 @@ before starting it: `intake-brief` is `.claude/skills/book-brief/`,
 `shape-proposal` and `shape` are `.claude/skills/book-shape/`,
 `voice-sample` and `voice-approval` are `.claude/skills/book-voice/`.
 
+**Role files.** Each agent role of the default workflow has a role file,
+`.claude/agents/book-<role>.md` (the copy editor's is `book-copy-editor`):
+a subagent that knows its contract and which AuthorLM verbs its trade
+uses. An agent step's pack names it near the top (`Role file: …`), and
+`book start` prints it. Hand the step to the subagent of that name, with
+the pack's path and, for an independent step, nothing else. The subagent
+may come back with `NEEDS AUTHOR` (a question only the author can answer)
+or `NEEDS APPROVAL` (a verb that spends money): ask the author, then
+continue the same subagent with the answer. A step whose pack names no
+role file is done from the pack alone.
+
+**How agent edits land** (`agent_edits`, a setting of each manuscript:
+`authorlm manuscript set --agent-edits forms|direct`; `book status` shows
+it, and every agent step's pack states it near the top, "How edits land in
+this book: …").
+
+- `forms` is the default, and what a manuscript without the setting has.
+  **Every other rule in this skill about forms, the first-draft word and
+  Doc tabs applies unchanged to a manuscript whose setting is `forms`.**
+  The author's own manuscripts are such manuscripts.
+- `direct`: the owner was asked, 2026-11-13, "In a ghostwritten book,
+  should agent editors' changes land directly with a change list?" and
+  answered "Yes, land directly". The lead developer's reading (a reading,
+  not the owner's words): this is per manuscript; under it an agent role
+  whose step changes text changes the chapter file itself and records
+  every change, and the author reads the change list at the part read and
+  at approval and can put any change back. The author's stops stay the
+  author's: the brief, the shape, the voice, each part read as a reader,
+  the developmental decisions and final approval.
+- Which steps may change text is in the book's definition: `changes_text =
+  true` (in the default: draft, lint, line-edit, copyedit, production,
+  proofread). Every other step reports and lands nothing.
+- `authorlm book land <run-id> <file> --changes-json <file or ->`: a JSON
+  list of `{"old", "new", "note"}`. Each `old` stands exactly once in the
+  file; each `note` says why, and by what law, register entry or filter.
+  The batch is all or none, and a declined batch names each item that is
+  wrong. It declines under `forms`, for a run that is not a running agent
+  step, for a step without `changes_text`, for a file outside the run's
+  scope, and when the file's Doc tab holds edits or forms the file does
+  not have (pull first). It snapshots before and after. It does not push:
+  run the `doc push <file>` it prints.
+- `authorlm book draft <run-id> <file> --text-file <file or ->`: the
+  drafter's whole first draft into a chapter file that holds only its
+  title. It is the run's artifact and a line in `book history`, not a
+  change list item. Under `direct` the drafter does not use `authorlm
+  write`: the beat loop's verdicts are the author's.
+- `authorlm book changes [--run <id>] [--step <id>] [--scope <chapter or
+  part>] [--file <f>] [--status applied|reverted] [--since <time>]`: the
+  change list, in reading order: who changed what, the words before and
+  after in full, and why. Show the author this, never a diff with line
+  numbers.
+- `authorlm book revert <change-id> … --reason '<the author's words>'
+  [--by <who>]`, or `--run <run-id>` for a whole run: puts a change back
+  while the words it put in still stand; otherwise it leaves the file
+  alone and quotes what stands there now. A change put back stays in the
+  list, with who and why. When the author objects to a change in chat,
+  this is the verb; record their reason verbatim, then `doc push`.
+- A step given `changes` (in the default: `part-read` and `approval`) has
+  a pack that counts the changes landed in its scope, in all and since
+  the author last read it, with the `book changes` command. Give the
+  author that count and offer the list at those stops.
+- A filter under `direct` is used for its reading and proposals only:
+  `filter run` and `filter record` per window, the accepted proposals
+  through `book land` with the filter named in each note, then `filter
+  abandon <chapter>` so no run is left open. The filter's own record then
+  holds no verdicts for that run: the change list is the record.
+- `authorlm book lint <file>`: the deterministic lint over one whole
+  chapter against the rest of the book, words quoted, no model call. Open
+  under either setting.
+
 **Restart from any point:** `authorlm book restart <step> [--scope <s>]
 --reason '<what was wrong>'` (`--dry-run` lists first). The run and every
 run that followed from it, for that scope and the scopes inside it, are

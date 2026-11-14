@@ -621,7 +621,9 @@ CREATE TABLE IF NOT EXISTS step_runs (
 );
 
 -- The append-only log of a book workflow (book.py): one row per change of
--- a step run's status, written in the same transaction as the change.
+-- a step run's status, written in the same transaction as the change, and
+-- one row per thing recorded under a run that leaves its status as it is
+-- (a landing, a first draft, a change put back: from_status = to_status).
 -- Rows are never updated or deleted.
 CREATE TABLE IF NOT EXISTS step_events (
     {KNOWLEDGE_OBJECT_COLUMNS},
@@ -636,6 +638,30 @@ CREATE TABLE IF NOT EXISTS step_events (
     reason TEXT NOT NULL DEFAULT ''
 );
 
+-- One change an agent role landed in a chapter file under a step run
+-- (changes.py), for a manuscript whose `agent_edits` setting is direct.
+-- Keyed by document id, so a renamed chapter keeps its change list. A
+-- change put back keeps its row: status becomes reverted, with who and
+-- why. Rows are never deleted.
+CREATE TABLE IF NOT EXISTS step_changes (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,         -- step_runs.id
+    step TEXT NOT NULL,           -- the step id, copied from the run
+    role TEXT NOT NULL,           -- the step's role when the change landed
+    document_id TEXT NOT NULL,    -- the dc- id of the chapter file
+    seq INTEGER NOT NULL,         -- 1, 2, ... per run, in the order landed
+    old TEXT NOT NULL,            -- the words that stood, verbatim
+    new TEXT NOT NULL,            -- the words that replaced them
+    note TEXT NOT NULL,           -- why, and by what law, entry or filter
+    status TEXT NOT NULL DEFAULT 'applied',  -- applied | reverted
+    reverted_at TEXT,
+    reverted_by TEXT,             -- who put it back
+    reverted_reason TEXT          -- their reason, verbatim
+);
+
+CREATE INDEX IF NOT EXISTS idx_step_changes_run
+    ON step_changes (manuscript_id, run_id, seq);
 CREATE INDEX IF NOT EXISTS idx_triage_runs_lookup
     ON triage_runs (manuscript_id, triage_type, profile_id, profile_version, created_at);
 CREATE INDEX IF NOT EXISTS idx_triage_assessments_lookup
