@@ -910,6 +910,16 @@ this book: …").
   at approval and can put any change back. The author's stops stay the
   author's: the brief, the shape, the voice, each part read as a reader,
   the developmental decisions and final approval.
+- `direct`, the chapter's sources: the owner was asked, 2026-11-13, "In a
+  ghostwritten book where edits land directly, should the drafter still
+  stop for you to confirm each chapter's list of sources before it
+  writes?" and answered "No, keep going". The lead developer's reading (a
+  reading, not the owner's words): under `direct` the drafter does not
+  stop for the source list; it names the sources it used in its result
+  (`sources`, and the summary) and in the notes of its draft (the `note`
+  of each change it lands in the chapter it drafted). Under `forms`
+  nothing changes: the author confirms the list before the first beat, as
+  "Drafting on request" says.
 - Which steps may change text is in the book's definition: `changes_text =
   true` (in the default: draft, lint, line-edit, copyedit, production,
   proofread). Every other step reports and lands nothing.
@@ -921,7 +931,13 @@ this book: …").
   step, for a step without `changes_text`, for a file outside the run's
   scope, and when the file's Doc tab holds edits or forms the file does
   not have (pull first). It snapshots before and after. It does not push:
-  run the `doc push <file>` it prints.
+  run the `doc push <file>` it prints. A change whose `old` holds one of
+  the book's protected terms (a concept name, an alias, a
+  pronunciation-dictionary term) and whose `new` drops it or changes its
+  capital still lands, with a warning that names the term, the change and
+  its note; a cut passage that held a term is warned too. Read each
+  warning: put the change back if the term should stand, and tell the
+  author of the ones you keep. `book changes` marks such a change.
 - `authorlm book draft <run-id> <file> --text-file <file or ->`: the
   drafter's whole first draft into a chapter file that holds only its
   title. It is the run's artifact and a line in `book history`, not a
@@ -958,7 +974,12 @@ kept and marked superseded. The next `book start` hands the old result to
 the rerun as reference only: it is not the standard, and you do not keep,
 match or repair it. A part or book step already done on the old work is
 flagged on `book status`; tell the author, who decides whether to restart
-it too.
+it too. A restart changes no chapter file: under `direct`, the changes
+those runs landed are still in the files. The verb counts the ones still
+applied, per run, and prints the command that puts a run's changes back
+(`authorlm book revert --run <run-id> --reason '…'`); the rerun's pack
+says the same. Putting them back is a separate act: ask the author when
+it is not plain which they want.
 
 **When a step cannot be finished** (a subagent stopped, an input is
 missing): `authorlm book fail <run-id> --reason '…'`. The steps after it
