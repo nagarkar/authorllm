@@ -896,6 +896,12 @@ A document's identity is its `dc-` id; its relpath is a display name with histor
 
 End-to-end test of every MVP use case, driven through the real CLI.
 
+## `tests.test_edits_line`
+
+`authorlm/tests/test_edits_line.py`
+
+`book.edits_line` is the one sentence every agent pack carries on how edits land in this book (#438). Wrong branch → an agent lands under forms, or reports when it should land. Pack CUJs assert substrings; these checks pin all four (mode × changes_text) branches on the helper itself.
+
 ## `tests.test_effective_style`
 
 `authorlm/tests/test_effective_style.py`
@@ -1256,6 +1262,12 @@ Pure helpers behind Veo clip generation: duration buckets, day spend, prompt com
 
 `morph.targets` decides which paragraphs `morph run` sends to the model, and so which paragraphs it may stage edits against.
 
+## `tests.test_name_history_helpers`
+
+`authorlm/tests/test_name_history_helpers.py`
+
+Document name history helpers (`docs.names_of`, `snapshot_text`, `earlier_name`): after a rename, every reader of an old snapshot must find the chapter under whichever name that snapshot held. The rename CUJ in test_document_identity exercises one path through collect and push; these checks pin the pure helpers on their own — no name, the wrong former name, or a snapshot that already uses the new name.
+
 ## `tests.test_near_duplicate`
 
 `authorlm/tests/test_near_duplicate.py`
@@ -1370,6 +1382,12 @@ Lazy-preview stamp and orphan sweep (#227).
 
 `generation.pronunciation_diff` / `param_diff` flag a stale take for re-render.
 
+## `tests.test_protected_loss`
+
+`authorlm/tests/test_protected_loss.py`
+
+`filtering.protected_loss` is the one comparison for "a protected term is gone" — used by the filter road's `filter record` and by `book land` (#439). Matching is `terms.mention_pattern`, so a single-word capital name is lost when only its lower-case form remains, and a blank entry in the protected list is skipped. These checks pin that rule hermetically outside the e2e and book-land integration paths.
+
 ## `tests.test_readings`
 
 `authorlm/tests/test_readings.py`
@@ -1471,6 +1489,12 @@ The [Signature: uri] tag: plain text in the files, a signature block (image, aut
 `authorlm/tests/test_stale_suggestions.py`
 
 `hygiene.stale_suggestions` marks pending bridge / prerequisite guidance moot when collect later realizes the concept or closes the gap.
+
+## `tests.test_stands_now`
+
+`authorlm/tests/test_stands_now.py`
+
+`changes._stands_now` is the sentence a declined `book revert` shows when the words a change put in are gone: the paragraph that shares most with them, or a clear "nothing close" when the file has moved on. Wrong match → the author is pointed at the wrong place; a false hit on short noise would invent a place that is not there.
 
 ## `tests.test_structure_find_file`
 
