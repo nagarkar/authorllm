@@ -1313,7 +1313,7 @@ def audit(db, manuscript: dict, folder: Path) -> list[str]:
     base = Path(manuscript["path"])
     files = _disk_files(manuscript)
     toc = files.get(structure.TOC_FILENAME, "")
-    problems: list[str] = []
+    problems: list[str] = list(structure.toc_problems(toc))
     for key in PROFILES:
         if not (base / "_profiles" / f"{key}.md").exists():
             problems.append(f"profile missing: _profiles/{key}.md")
@@ -1465,6 +1465,15 @@ def essay_pack(db, manuscript: dict, folder: Path, file: str,
             out += [f"## The letter for stage {stage['n']}", "",
                     re.sub(r"^(#+)", r"##\1", letter.read_text(encoding="utf-8").strip(),
                            flags=re.M), ""]
+    claim = structure.toc_summary(files.get(structure.TOC_FILENAME, ""), file)
+    out += ["## What this essay claims (toc.toml summary: hidden, the standard of drift)", "",
+            (f"> {claim}\n\nThe author's one-sentence statement of what this "
+             "essay argues. Every item must leave the essay supporting each "
+             "claim in it; an edit that weakens a claim or moves the essay "
+             "away from it is a drift to report to the author, never to fix "
+             "quietly.") if claim else
+            (f"(no summary in toc.toml for {file}: the drift check cannot "
+             "run on this essay; say so once in your report)"), ""]
     out += ["## This essay", "",
            _essay_summary(db, manuscript, file) or "(no essay summary)", ""]
     sections = sums._current_section_rows(db, manuscript["id"], file)
@@ -1777,6 +1786,14 @@ def build_queue(db, folder: Path) -> list[dict]:
         if result == "reconsider":
             item["reconsider"] = check.get("reason", "")
         item["check"] = {"result": result, "reason": check.get("reason", "")}
+        # The essay's toc summary is the standard of drift: a checker that
+        # finds the item moves the essay off one of its claims names it, and
+        # it goes to the author with the item, never fixed in the proposal.
+        drift = ((check.get("summary") or {}).get("drift") or "").strip() \
+            if isinstance(check.get("summary"), dict) else ""
+        if drift:
+            item["drift"] = drift
+            item["check"]["drift"] = drift
         out.append(item)
     mid, run = _key(db, folder)
     with db.transaction():

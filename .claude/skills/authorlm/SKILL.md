@@ -754,6 +754,19 @@ workflow over `authorlm devedit` (devedit.py owns the run folder,
   puts outside the book), plus a subagent's read of the profiles and
   style law for staleness against the author's rulings; fix it all with
   the author before locking.
+- **Essay summaries (`summary` in toc.toml):** each `[[chapter]]` entry
+  may carry `summary = "…"`, one line, one sentence: what the essay argues,
+  written from the current text (only claims it supports). It is hidden:
+  no export, Doc tab, audio or reader-facing text ever shows it (toc.toml
+  is never a tab). `devedit pack <file>` carries it as "What this essay
+  claims"; each checker quotes the words that still support every claim
+  and writes `summary.drift` in its check when an item moves the essay off
+  it; `build-queue` puts the drift on the item, and `devedit next` and the
+  review card show it to the author. A drift is a finding, never fixed
+  quietly; no agent edits a summary without the author's word. An essay
+  without one is said once. `devedit audit` names a summary that is not a
+  non-empty one-line string. The synopsis check takes its per-essay lines
+  from these summaries. Read in code by `structure.toc_summaries`.
 - **Status and resume:** `authorlm -m <ms> devedit status` and `devedit
   stage`. Coverage lists every TOC file, front and back matter included,
   all edited by default; confirm with `devedit coverage --lock` only on

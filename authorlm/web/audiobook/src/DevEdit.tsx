@@ -46,7 +46,7 @@ function useUndo(key: string, text: string, setText: (t: string) => void) {
 interface Decision { n: number; question: string; options?: string[]; recommended?: string; answer?: string; reason?: string; binding?: boolean; answered?: string; }
 interface Item {
   id: string; file: string; tier: string; original?: string | null; proposed?: string | null; move?: string;
-  reason?: string; finding?: string; links?: string[]; diff?: [string, string][];
+  reason?: string; finding?: string; drift?: string; links?: string[]; diff?: [string, string][];
   verdict?: string; final?: string | null; reason_given?: string; why?: string; decided?: string;
   // The whole paragraph(s) around the passage (devedit._paragraph_context).
   prefix?: string; suffix?: string; paragraph?: string; paragraph_proposed?: string; context_missing?: boolean;
@@ -266,6 +266,7 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
             <button className="pill" disabled={!reviewUndo.canUndo} onClick={reviewUndo.undo}>↶ Undo</button>
             <button className="pill" disabled={text === (item.paragraph_proposed ?? item.proposed)} onClick={() => setText(item.paragraph_proposed ?? item.proposed ?? "")}>Reset to proposed</button>
           </div>}
+          {item.drift && <div className="devedit-why"><b>Drift from the essay's summary:</b> {item.drift}</div>}
           {why && <div className="devedit-why">{item.reason}{item.finding ? <><br /><span className="muted">Letter finding: {item.finding}</span></> : null}</div>}
           <input id="devedit-reason" className="devedit-reason" placeholder="Reason (needed to reject)" value={reason} onChange={e => setReason(e.target.value)}
             onKeyDown={e => { if (e.key === "Enter") void decideItem("reject"); }} />

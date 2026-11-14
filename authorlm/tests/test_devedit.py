@@ -294,7 +294,10 @@ def test_gather_group_and_build_queue() -> None:
         (folder / "checks").mkdir()
         (folder / "checks" / "one-1.1.json").write_text(json.dumps(
             {"result": "fix", "proposed": "The Dharma is the ground of all things.",
-             "reason": "tighter"}))
+             "reason": "tighter",
+             "summary": {"claims": [{"claim": "The Dharma grounds all.",
+                                     "support": "the ground of all things"}],
+                         "drift": "The edit drops 'It moves all.' from the claim."}}))
         try:
             devedit.build_queue(DB, folder)
             check("an unchecked item is held back and named", False)
@@ -303,6 +306,12 @@ def test_gather_group_and_build_queue() -> None:
         check("the checked item is queued with the checker's fix",
               devedit.queue(DB, folder)[0]["proposed"]
               == "The Dharma is the ground of all things.")
+        first = devedit.queue(DB, folder)[0]
+        check("a drift the checker found reaches the author with the item",
+              first.get("drift") == "The edit drops 'It moves all.' from the claim."
+              and first["check"].get("drift") == first.get("drift"), first)
+        check("the checker's drift never changes the proposal itself",
+              first["proposed"] == "The Dharma is the ground of all things.")
         (folder / "checks" / "two-1.1.json").write_text(json.dumps(
             {"result": "drop", "reason": "answered elsewhere"}))
         devedit.build_queue(DB, folder)

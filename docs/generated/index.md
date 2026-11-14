@@ -1550,6 +1550,12 @@ Margin-thread reply law and Doc-export strike peel.
 
 toc.toml `outside`: Doc tabs that are not part of the book.
 
+## `tests.test_toc_summary`
+
+`authorlm/tests/test_toc_summary.py`
+
+toc.toml `summary`: one hidden sentence per essay stating what it argues.
+
 ## `tests.test_triage_app`
 
 `authorlm/tests/test_triage_app.py`
