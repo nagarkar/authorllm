@@ -18,6 +18,7 @@ Run: python3 tests/test_forms_page.py
 from __future__ import annotations
 
 import contextlib
+from unittest import mock
 import hashlib
 import io
 import json
@@ -247,12 +248,29 @@ def list_shows_the_doc_as_it_stands(root: Path) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
         cli_main(["--workspace", str(ws2), "init", "--name", "book",
                   "--path", str(ws2 / "book"), "--extraction", "off"])
-    audiobook.session(str(ws2), "book", inline=True)
+    sess = audiobook.session(str(ws2), "book", inline=True)
     with _no_google():
         got = forms_page.dispatch("list", {"manuscript": "book"},
                                   workspace=str(ws2))
     check("no open forms: an empty list and no Google call",
           got["files"] == [] and got["total"] == 0, got)
+    with _no_google(), mock.patch.object(
+            type(sess), "_doc_services",
+            return_value=({}, None, None)):
+        r = forms_page.dispatch("merge", {"manuscript": "book",
+                                          "file": "solo.md"},
+                                workspace=str(ws2))
+    check("merging a file with no open forms skips it, no Google call, "
+          "and the message reads as no failure",
+          r["stopped"] == "none" and "nothing to merge" in r["message"]
+          and " not " not in f" {r['message']} ", r)
+    src = (Path(__file__).resolve().parents[1] / "web" / "audiobook" / "src"
+           / "MergeForms.tsx").read_text(encoding="utf-8")
+    check("the page shows a skipped file as a neutral note, not a red "
+          "failure, and leaves it out of the not-merged count",
+          'r.stopped === "none"' in src
+          and 'forms-result note' in src
+          and "results.length - merged - nothing" in src)
 
 
 def list_sorts_gone_forms_as_invalid(root: Path) -> None:

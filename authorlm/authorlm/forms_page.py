@@ -490,7 +490,8 @@ def merge(db: Database, manuscript: dict, file: str, service, docs_service,
         return result
 
     if not threads:
-        return stop("none", f"{rel} has no open forms")
+        return stop("none", "nothing to merge: its forms were already "
+                    "resolved elsewhere")
     view = gdocs.doc_three_way(db, manuscript, rel, service, docs_service)
     if view["state"] == "conflict":
         return stop("conflict",

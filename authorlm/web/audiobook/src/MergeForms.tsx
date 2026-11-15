@@ -246,14 +246,20 @@ const resultKey = (r: MergeResult) => `${r.file}|${JSON.stringify(r)}`;
 
 // The last merge, one line: how many files merged, how many were not
 // pushed or not merged. Opened, failures come first.
+// A file with no open forms (resolved elsewhere, say from the CLI) is
+// skipped: nothing to merge is not a failure, so it shows as a neutral note.
+const skipped = (r: MergeResult) => r.stopped === "none";
+
 function ResultsSummary({ results }: { results: MergeResult[] }) {
-  const failed = (r: MergeResult) => !!r.stopped || !r.pushed;
+  const failed = (r: MergeResult) => !skipped(r) && (!!r.stopped || !r.pushed);
   const merged = results.filter(r => !r.stopped).length;
   const notPushed = results.filter(r => !r.stopped && !r.pushed).length;
-  const notMerged = results.length - merged;
+  const nothing = results.filter(skipped).length;
+  const notMerged = results.length - merged - nothing;
   const parts = [`${merged} file${merged === 1 ? "" : "s"} merged`];
   if (notPushed) parts.push(`${notPushed} not pushed`);
   if (notMerged) parts.push(`${notMerged} not merged`);
+  if (nothing) parts.push(`${nothing} had nothing to merge`);
   const sorted = [...results.filter(failed), ...results.filter(r => !failed(r))];
   return (
     <details className={`card forms-results${notPushed || notMerged ? " has-bad" : ""}`}>
@@ -460,6 +466,7 @@ function DiffBox({ diff }: { diff: Diff }) {
 
 function ResultBox({ r }: { r: MergeResult }) {
   const ok = !r.stopped;
+  if (skipped(r)) return <div className="forms-result note"><b>{r.file}:</b> {r.message}</div>;
   return (
     <div className={`forms-result${ok ? " ok" : " bad"}`}>
       {ok && r.kept
