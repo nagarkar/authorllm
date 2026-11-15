@@ -665,7 +665,13 @@ Profile registry (key → standing rule):
   matter so the payload carries it.
 
 - `synopsis` — consult for agent or publisher submissions and any
-  request for the book in brief.
+  request for the book in brief. **Keep it current:** whenever parts,
+  chapters or sections are added, removed or moved (toc.toml changes,
+  `doc add`, `doc rename`, a dev edit decision or stage close), or the
+  reader or comparable titles change, read `_profiles/synopsis.md`
+  against toc.toml, the ratified reader and the comparables; propose the
+  changed lines, and on the author's word `authorlm profile set synopsis`
+  then `authorlm profile push`. It changes many times in a dev edit.
 - `series-<series>` — a show manuscript's series charter (goal, topics
   and coverage, terms, ingredients): consult before any episode work for
   that series (podlm reads it).
