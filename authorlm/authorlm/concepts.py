@@ -188,9 +188,15 @@ def retire_concept(db: Database, manuscript_id: str, node: dict) -> int:
 
 def revive_concept(db: Database, manuscript_id: str, node: dict) -> dict:
     """The inverse of retire_concept: restore the node's prior status and
-    location, and un-retire the edges that THIS node's retirement took
-    down (edges retired for other reasons stay retired). Returns
-    {status, introduced_in, edges_revived}."""
+    location, and un-retire edges that a retirement of either endpoint
+    took down once BOTH ends are live again (edges retired for other
+    reasons stay retired). Returns {status, introduced_in, edges_revived}.
+
+    `by_node` remembers which endpoint's retire first stamped the edge.
+    When that endpoint is revived while the other is still retired, the
+    edge correctly stays down; when the other endpoint is revived later,
+    this pass must still restore it — otherwise both nodes come back
+    declared and the declared relationship is lost forever."""
     meta = loads(node.get("metadata"), {}) or {}
     prior = meta.pop("retired_from", None) or {}
     meta.pop("retired_for_good", None)  # the author's own revive reopens it
@@ -208,9 +214,15 @@ def revive_concept(db: Database, manuscript_id: str, node: dict) -> dict:
             (manuscript_id, node["id"], node["id"])):
         emeta = loads(edge["metadata"], {}) or {}
         prior_e = emeta.get("retired_from")
-        if not prior_e or prior_e.get("by_node") != node["id"]:
+        if not prior_e:
             continue
         other = edge["to_node"] if edge["from_node"] == node["id"] else edge["from_node"]
+        # Collateral of either endpoint's retire may be restored once both
+        # ends are live. Requiring by_node == this node alone drops the
+        # edge when the author retired both ends then revived the first
+        # retirer before the second (by_node still names the first).
+        if prior_e.get("by_node") not in (node["id"], other):
+            continue
         other_row = db.one("SELECT status FROM concept_nodes WHERE id = ?", (other,))
         if not other_row or other_row["status"] == "retired":
             continue  # the far end is gone; the edge stays down
