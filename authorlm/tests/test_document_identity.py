@@ -636,6 +636,46 @@ class RenameOnDiskTests(Workspace):
         self.assertNotIn("file_renamed", kinds)
         self.assertEqual(report["new_paragraphs"], 9)
 
+    def test_a_name_reuse_chain_on_disk_heals_at_the_next_collect(self):
+        """A→C, B→A in Finder: content of old.md moves to reused.md while
+        other.md takes the name old.md. Without chain pairing, collect
+        would keep each document id on its path and attach records to the
+        wrong chapter."""
+        api.define_style_guide(self.db, self.manuscript, "essays")
+        api.attach_style(self.db, self.manuscript, "old.md", "essays")
+        api.attach_style(self.db, self.manuscript, "other.md", "essays")
+        self.insert("essay_summaries", "es", file="old.md", summary="OldS",
+                    source_hash="h1", upstream_hash="u1")
+        self.insert("essay_summaries", "es", file="other.md", summary="OtherS",
+                    source_hash="h2", upstream_hash="u2")
+        id_old = docs.document_id(self.db, self.manuscript, "old.md")
+        id_other = docs.document_id(self.db, self.manuscript, "other.md")
+        (self.root / "old.md").rename(self.root / "tmp-chain.md")
+        (self.root / "other.md").rename(self.root / "old.md")
+        (self.root / "tmp-chain.md").rename(self.root / "reused.md")
+
+        report = quiet(api.collect, self.db, self.manuscript, {}, auto=True)
+
+        self.assertNotIn("staged", report)
+        self.assertEqual(sorted(report["renamed"],
+                                key=lambda r: r["from"]),
+                         [{"from": "old.md", "to": "reused.md"},
+                          {"from": "other.md", "to": "old.md"}])
+        self.assertEqual(
+            docs.document_id(self.db, self.manuscript, "reused.md"), id_old)
+        self.assertEqual(
+            docs.document_id(self.db, self.manuscript, "old.md"), id_other)
+        self.assertEqual(self.attached_guide("reused.md"), "essays")
+        self.assertEqual(self.attached_guide("old.md"), "essays")
+        old_summary = self.db.one(
+            "SELECT summary FROM essay_summaries WHERE manuscript_id = ? "
+            "AND file = 'reused.md'", (self.mid,))
+        other_summary = self.db.one(
+            "SELECT summary FROM essay_summaries WHERE manuscript_id = ? "
+            "AND file = 'old.md'", (self.mid,))
+        self.assertEqual(old_summary["summary"], "OldS")
+        self.assertEqual(other_summary["summary"], "OtherS")
+
 
 class DocumentIdsSwitchTests(Workspace):
     """Document ids are a per-manuscript setting
@@ -856,6 +896,24 @@ class PairingTests(unittest.TestCase):
         text = essay("Twin", "delta")
         self.assertEqual(revisions.pair_renames(
             {"toc.toml": text}, {"b.md": text}), {})
+
+    def test_a_name_reuse_chain_pairs_both_moves(self):
+        a = essay("One", "alpha")
+        b = essay("Two", "omega")
+        old = {"a.md": a, "b.md": b}
+        new = {"a.md": b, "c.md": a}  # A→C, B→A
+        self.assertEqual(revisions.pair_renames(old, new),
+                         {"a.md": "c.md", "b.md": "a.md"})
+        self.assertEqual(
+            revisions.ordered_renames({"a.md": "c.md", "b.md": "a.md"}),
+            [("a.md", "c.md"), ("b.md", "a.md")])
+
+    def test_a_pure_swap_of_surviving_names_is_not_paired(self):
+        a = essay("One", "alpha")
+        b = essay("Two", "omega")
+        old = {"a.md": a, "b.md": b}
+        new = {"a.md": b, "b.md": a}
+        self.assertEqual(revisions.pair_renames(old, new), {})
 
 
 class DeveloperEditRunTests(Workspace):
