@@ -322,13 +322,36 @@ def listing(db: Database, manuscript: dict, service, docs_service) -> dict:
 
 # ----------------------------------------------------------------- ruling
 
+def _span_of_passage(text: str, prefix: str, suffix: str) -> str:
+    """The form's own words out of an edit of its whole passage: `text`
+    with the passage's unchanged `prefix` and `suffix` taken off. The card
+    shows (and the edit box holds) the paragraph around the form; only the
+    form's span is its to change, so an edit that changes words before or
+    after it is turned down with a reason."""
+    head, tail = prefix.lstrip(), suffix.rstrip()
+    if not text.startswith(head):
+        raise ValueError("the edit changed words before this form's span "
+                         f"(“{clamp(head)}”); only the span is this form's "
+                         "to change, so edit those words in the Doc")
+    rest = text[len(head):]
+    if not rest.endswith(tail):
+        raise ValueError("the edit changed words after this form's span "
+                         f"(“{clamp(tail)}”); only the span is this form's "
+                         "to change, so edit those words in the Doc")
+    return rest[:len(rest) - len(tail)] if tail else rest
+
+
 def decide(db: Database, manuscript: dict, thread_id: str, verdict: str,
-           seen: str | None, text: str | None = None) -> dict:
+           seen: str | None, text: str | None = None,
+           prefix: str | None = None, suffix: str | None = None) -> dict:
     """Hold a ruling on one open form until its file is merged. `verdict`
     is accept, edit or decline, or clear to take a ruling back. `seen` is
     the green half as the page showed it; merging stops if the tab no
     longer reads so. An edit's `text` is one paragraph on one line, free
-    of the form markers. Nothing is written to the Doc or the file."""
+    of the form markers. When `prefix` and `suffix` are given, `text` is
+    the whole passage the card showed (prefix, new words, suffix), and the
+    form's new words are what lies between them. Nothing is written to the
+    Doc or the file."""
     row = db.one("SELECT * FROM doc_threads WHERE id = ? AND manuscript_id = ?",
                  (thread_id, manuscript["id"]))
     if row is None or row["origin_type"] not in PRODUCERS:
@@ -354,6 +377,11 @@ def decide(db: Database, manuscript: dict, thread_id: str, verdict: str,
                              "Decline it")
         if "\n" in text:
             raise ValueError("the new text is one paragraph on one line")
+        if prefix is not None or suffix is not None:
+            text = _span_of_passage(text, prefix or "", suffix or "")
+            if not text.strip():
+                raise ValueError("an edit needs text; to turn the form down, "
+                                 "Decline it")
         form_grammar.assert_no_pending_markers("", text)
         if text == seen:
             verdict = "accept"
@@ -1031,7 +1059,8 @@ def dispatch(method: str, params: dict[str, Any],
         if method == "decide":
             return decide(db, manuscript, str(params["id"]),
                           str(params["verdict"]), params.get("seen"),
-                          params.get("text"))
+                          params.get("text"), params.get("prefix"),
+                          params.get("suffix"))
         if method == "merge":
             config, service, docs_service = session._doc_services()
             return merge(db, manuscript, str(params["file"]), service,

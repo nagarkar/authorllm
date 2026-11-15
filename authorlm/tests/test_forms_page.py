@@ -296,6 +296,25 @@ def decide_holds_rulings(root: Path) -> None:
     again = _by_note(_call(ws, fake, "list"))["r-beta"]
     check("the list shows the held ruling",
           again["ruling"]["verdict"] == "edit", again)
+    # The edit box holds the whole passage the card shows (2026-11-15: it
+    # held only the span, so the author could not edit what was shown).
+    alpha = forms["r-alpha"]
+    check("the card shows the span inside its sentence",
+          alpha["suffix"] == " as it is.", alpha)
+    whole = alpha["prefix"] + "Alpha drifts" + alpha["suffix"]
+    r = _call(ws, fake, "decide", id=alpha["id"], verdict="edit",
+              seen=alpha["current"], text=whole,
+              prefix=alpha["prefix"], suffix=alpha["suffix"])
+    check("an edit of the whole passage holds the span's words alone",
+          r["ruling"]["text"] == "Alpha drifts", (alpha, r))
+    r = _call(ws, fake, "decide", id=alpha["id"], verdict="edit",
+              seen=alpha["current"], text="Alpha drifts as it was.",
+              prefix=alpha["prefix"], suffix=alpha["suffix"])
+    check("an edit that changes words after the span is turned down",
+          "error" in r and "after this form's span" in r["error"], r)
+    r = _call(ws, fake, "decide", id=alpha["id"], verdict="clear", seen=None)
+    r = _call(ws, fake, "decide", id=beta["id"], verdict="edit",
+              seen=beta["current"], text="Beta, in my words.")
     for label, text in (("an edit with form markers",
                          "Beta {{x}}"),
                         ("an empty edit", "  "),

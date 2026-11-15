@@ -141,9 +141,12 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
   const recheck = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(recheck.current), []);
   const decide = async (f: Form, verdict: string, text?: string): Promise<string | null> => {
+    // An edit of a replace form holds the whole passage the card shows;
+    // the server takes the form's own words from between prefix and suffix.
+    const passage = text != null && f.kind === "replace" ? {prefix: f.prefix, suffix: f.suffix} : {};
     let ruling: Ruling | null;
     try {
-      const r = await transport.request<{error?: string; ruling?: Ruling | null}>("decide", {manuscript, id: f.id, verdict, seen: f.current, ...(text != null ? {text} : {})});
+      const r = await transport.request<{error?: string; ruling?: Ruling | null}>("decide", {manuscript, id: f.id, verdict, seen: f.current, ...(text != null ? {text, ...passage} : {})});
       if (r?.error) return r.error;
       ruling = r.ruling ?? null;
     } catch (err) { return (err as Error).message; }
@@ -311,10 +314,13 @@ function FileCard({ g, merging, queued, onDecide, onLand, onSettle }: {
 
 function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: string, text?: string) => Promise<string | null> }) {
   const [editing, setEditing] = useState(false);
-  const [text, setText] = useState(f.ruling?.text ?? f.current ?? f.proposed);
+  // The edit box holds the whole passage the card shows, not the span alone.
+  const passageOf = (span: string) => f.kind === "replace" ? `${f.prefix}${span}${f.suffix}` : span;
+  const initial = passageOf(f.ruling?.text ?? f.current ?? f.proposed);
+  const [text, setText] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  useEffect(() => { setText(f.ruling?.text ?? f.current ?? f.proposed); }, [f.ruling?.text, f.current, f.proposed]);
+  useEffect(() => { setText(initial); }, [initial]);
   const go = async (verdict: string, t?: string) => {
     setBusy(true); setMsg("");
     const err = await onDecide(f, verdict, t);
@@ -335,7 +341,7 @@ function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: strin
       {f.kind === "replace"
         ? <p className={`devedit-diff${ruled !== "decline" && f.segments?.length ? " forms-diff" : ""}`}>{f.prefix}{ruled !== "decline" && f.segments?.length
             // One merged block: kept words green, removed red struck,
-            // inserted or changed words blue. Edit opens the new text alone.
+            // inserted or changed words blue. Edit opens the whole passage.
             ? f.segments.map((g, i) => g.op === "equal" ? <span key={i} className="keep">{g.text}</span>
               : g.op === "delete" ? <s key={i} className="del">{g.text}</s>
               : <span key={i} className="ins">{g.text}</span>)
