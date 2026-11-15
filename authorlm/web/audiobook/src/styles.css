@@ -241,6 +241,7 @@ footer audio{max-width:640px;display:block;margin:0 auto}
 .forms-merge{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
 .forms-result{margin:10px 0 0;padding:8px 12px;border-radius:10px;font-size:14px}
 .forms-result.ok{background:var(--good-soft);color:var(--ink)}
+.forms-result.note{background:var(--chip);color:var(--muted)}
 .forms-result.bad{background:var(--bad-soft);color:var(--ink)}
 .forms-result ul{margin:6px 0 0;padding-left:18px}
 .forms-diff pre{white-space:pre-wrap;word-break:break-word;font-size:13px;background:var(--ground);border:1px solid var(--line);border-radius:8px;padding:8px;margin:4px 0 8px;max-height:40vh;overflow:auto}
