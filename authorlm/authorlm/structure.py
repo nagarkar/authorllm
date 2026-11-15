@@ -31,6 +31,7 @@ all concept scanning — it is structure, not content.
 
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -181,6 +182,44 @@ def toc_attrs(toc_text: str) -> dict[str, dict]:
             for c in _toc_chapters(toc_text)}
 
 
+# The `summary` key of a [[chapter]] entry: one sentence, hidden from the
+# reader, stating what the essay argues. It is the developmental edit's
+# standard of drift (devedit.essay_pack carries it to every checker) and the
+# source of the synopsis's per-essay lines. Nothing that renders the book
+# reads it: exports, Doc tabs and audio take text from the essay files, and
+# toc.toml itself is never a tab.
+SUMMARY_KEY = "summary"
+
+
+def _summary_problem(file: str, value: object) -> str | None:
+    if not isinstance(value, str):
+        return f"toc.toml: {file}: summary must be a string"
+    if not value.strip():
+        return f"toc.toml: {file}: summary is empty"
+    if "\n" in value.strip() or "\r" in value:
+        return f"toc.toml: {file}: summary must be one line"
+    return None
+
+
+def toc_problems(toc_text: str) -> list[str]:
+    """What is wrong with the TOC's per-file keys that a reader would not
+    see: today, each `summary` that is not a non-empty one-line string."""
+    return [p for c in _toc_chapters(toc_text) if SUMMARY_KEY in c
+            for p in [_summary_problem(c["file"], c[SUMMARY_KEY])] if p]
+
+
+def toc_summaries(toc_text: str) -> dict[str, str]:
+    """filename -> its valid `summary` (an invalid one is left out and
+    named by `toc_problems`)."""
+    return {c["file"]: c[SUMMARY_KEY].strip() for c in _toc_chapters(toc_text)
+            if SUMMARY_KEY in c
+            and _summary_problem(c["file"], c[SUMMARY_KEY]) is None}
+
+
+def toc_summary(toc_text: str, file: str) -> str | None:
+    return toc_summaries(toc_text).get(file)
+
+
 def matter_map(files: dict[str, str]) -> dict[str, str]:
     """filename → front|main|back for the manuscript's files, from the
     TOC's `matter` attribute (default main; unknown values read as main)."""
@@ -211,7 +250,9 @@ def serialize_toc_tree(entries: list[tuple[str, int]],
             lines.append(f'parent = "{parent}"')
         for key, value in sorted(((attrs or {}).get(name) or {}).items()):
             if isinstance(value, str):
-                lines.append(f'{key} = "{value}"')
+                # A JSON string is a valid TOML basic string: quotes and
+                # backslashes in a summary survive the round trip.
+                lines.append(f"{key} = {json.dumps(value, ensure_ascii=False)}")
     return "\n".join(lines) + "\n"
 
 

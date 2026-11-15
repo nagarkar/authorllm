@@ -500,6 +500,7 @@ by hand.
 | Illustration model and size, global default today | `authorlm/config.toml:109` `[illustrations]` | Hand edit; read by `authorlm/llm.py:1306` `resolve_image_setting` |
 | Per-manuscript illustration pin (§7) | *proposed, does not exist yet*: `<manuscript>/_illustrations/settings.toml` | Written at first render; changed by an explicit verb (tool change 2) |
 | `form`, `matter`, `register`, `illustrations` per file | `<manuscript>/toc.toml` | Hand edit; parsed in `authorlm/structure.py:127` (`form` is *proposed*, tool change 3) |
+| `summary` per file: one hidden sentence stating what the essay argues; the dev edit's standard of drift, never shown to a reader | `<manuscript>/toc.toml` | Hand edit; parsed and validated by `structure.toc_summaries` / `toc_problems` |
 | Audio text rules, TTS model, credits | `<manuscript>/_audio/audiobook.toml` | Hand edit after `audio init` |
 | Market, audience, pitch | `<manuscript>/_profiles/*.md` | `authorlm profile set` |
 | Style law (verse, commentary, glossary, illustration) | `style_laws` table, `~/.authorlm/authorlm.db`, guide "DON house style" | `authorlm style add … --guide "DON house style"` |

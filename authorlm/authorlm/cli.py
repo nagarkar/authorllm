@@ -2194,6 +2194,8 @@ def cmd_devedit(args):
         else:
             print(item.get("move") or item.get("proposed") or "")
         print(ui.dim("Why: ") + devedit.why_of(item))
+        if item.get("drift"):
+            print(ui.yellow("Drift from the essay's summary: ") + item["drift"])
         return
     if args.action == "verdict":
         if len(params) != 2:
