@@ -287,6 +287,8 @@ def listing(db: Database, manuscript: dict, service, docs_service) -> dict:
         info: dict[str, Any] = {
             "file": rel, "url": gdocs.tab_url(master, tab) if master else None,
             "state": state, "count": len(rows), "forms": rows,
+            # When the author's push last landed this tab (`gdocs.pushed_at`).
+            "pushed_at": gdocs.pushed_at(db, manuscript, [rel]),
             "origins": sorted({r["origin"] for r in rows}),
             "others": others,
             "undecided": sum(1 for r in rows if r["found"] and not r["ruling"]),

@@ -245,3 +245,10 @@ footer audio{max-width:640px;display:block;margin:0 auto}
 .forms-result ul{margin:6px 0 0;padding-left:18px}
 .forms-diff pre{white-space:pre-wrap;word-break:break-word;font-size:13px;background:var(--ground);border:1px solid var(--line);border-radius:8px;padding:8px;margin:4px 0 8px;max-height:40vh;overflow:auto}
 a.pill{text-decoration:none;display:inline-flex;align-items:center}
+.forms-results>summary{cursor:pointer;font-weight:600;list-style:none;overflow-wrap:anywhere}
+.forms-results>summary::-webkit-details-marker{display:none}
+.forms-results>summary::after{content:" ▸"}
+.forms-results[open]>summary::after{content:" ▾"}
+.forms-results.has-bad>summary{color:var(--bad)}
+.forms-result{overflow-wrap:anywhere}
+.forms-pushed{font-size:13px}

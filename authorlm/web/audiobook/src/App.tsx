@@ -241,7 +241,7 @@ export function App() {
           </select>
           <button className="chip" onClick={() => act("refresh", {stem})} title="Export and preview what changed on disk">↻ Refresh</button>
         </div>}
-        <div className="doc">
+        {mode !== "forms" && <div className="doc">
           <span title="When this chapter's tab was last pushed to the Google Doc (recorded since 2026-10-26)">
             {doc.at ? `pushed ${when(doc.at)}` : "no push recorded yet"}{doc.state ? ` · ${doc.state}` : ""}
           </span>
@@ -251,7 +251,7 @@ export function App() {
             <button className="chip" onClick={() => act("push", {stem})} disabled={docBusy}
               title="Push this chapter's file to its tab of the Google Doc">{pushing ? "pushing…" : "⇧ Push"}</button>
           </span>}
-        </div>
+        </div>}
         {stale.stale && (
           <div className="stale" role="status">
             <span>Changed since the export: {stale.changed.length ? stale.changed.join(", ") : stale.reason}</span>
