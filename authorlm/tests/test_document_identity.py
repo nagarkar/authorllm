@@ -538,6 +538,40 @@ class RenameDeclinedTests(Workspace):
         self.assertEqual(result["to"], "papers/new.md")
         self.assertTrue((self.root / "papers" / "new.md").exists())
 
+    def test_a_folder_move_that_keeps_the_stem_is_not_a_leftover_collision(self):
+        """`foo.md` → `papers/foo.md` keeps the stem: this chapter's own
+        `_audio/.../foo.json` and `_drafts/foo.merged.md` are not leftovers
+        from an earlier file, so the rename must not demand --force."""
+        RenameVerbTests.seed_audio(self)
+        document_id = docs.document_id(self.db, self.manuscript, "old.md")
+
+        result = quiet(api.rename_document, self.db, self.manuscript, {},
+                       "old.md", "papers/old")
+
+        self.assertEqual((result["from"], result["to"]),
+                         ("old.md", "papers/old.md"))
+        self.assertEqual(result["left"], [])
+        self.assertTrue((self.root / "papers" / "old.md").exists())
+        self.assertFalse((self.root / "old.md").exists())
+        self.assertEqual(
+            docs.document_id(self.db, self.manuscript, "papers/old.md"),
+            document_id)
+        chapter = json.loads(
+            (self.root / "_audio" / "chapters" / "old.json").read_text())
+        self.assertEqual((chapter["file"], chapter["stem"]),
+                         ("papers/old.md", "old"))
+        self.assertTrue((self.root / "_audio" / "state" / "old.json").exists())
+        self.assertEqual(
+            (self.root / "_drafts" / "old.merged.md").read_text(), "merged")
+
+    def test_declined_when_a_different_stem_already_has_audio(self):
+        """`other.md` → `parts/old.md` would take the stem `old`, whose
+        audiobook files already belong to `old.md`: that is a real leftover
+        collision and still needs --force."""
+        RenameVerbTests.seed_audio(self)
+        self.assert_declined("_audio/chapters/old.json", new="parts/old",
+                             old="other.md")
+
 
 class RenameOnDiskTests(Workspace):
 

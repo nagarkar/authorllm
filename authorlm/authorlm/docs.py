@@ -890,9 +890,17 @@ def _new_relpath(root: Path, name: str) -> str:
     return relpath
 
 
-def _name_already_used(db: Database, manuscript: dict, new: str) -> list[str]:
+def _name_already_used(db: Database, manuscript: dict, old: str,
+                       new: str) -> list[str]:
     """What an earlier file called `new` left behind, which a rename onto
-    that name would mix with this chapter's records."""
+    that name would mix with this chapter's records.
+
+    Stem-named audiobook and draft files (`_audio/chapters/<stem>.json`,
+    `_audio/state/<stem>.json`, `_drafts/<stem>.merged.md`) belong to this
+    chapter when the stem does not change (a folder move such as
+    `foo.md` → `papers/foo.md`): they are not leftovers, and `carry_rename`
+    leaves them in place while rewriting the file field inside. Only a
+    different stem that already has those files is a collision."""
     mid = manuscript["id"]
     found = []
     for table, column in NAME_COLUMNS:
@@ -905,9 +913,12 @@ def _name_already_used(db: Database, manuscript: dict, new: str) -> list[str]:
     if new in gdocs.doc_status(db, manuscript):
         found.append("a Doc link")
     root = Path(manuscript["path"])
-    stem = Path(new).stem
-    for rel in (f"_audio/chapters/{stem}.json", f"_audio/state/{stem}.json",
-                f"_drafts/{stem}.merged.md"):
+    old_stem, new_stem = Path(old).stem, Path(new).stem
+    if old_stem == new_stem:
+        return found
+    for rel in (f"_audio/chapters/{new_stem}.json",
+                f"_audio/state/{new_stem}.json",
+                f"_drafts/{new_stem}.merged.md"):
         if (root / rel).exists():
             found.append(rel)
     return found
@@ -973,7 +984,7 @@ def check_rename(db: Database, manuscript: dict, query: str, new_name: str,
         raise ValueError(
             f"{old} carries pending <<old>>{{{{new}}}} forms. Settle them "
             "first, then rename.")
-    used = _name_already_used(db, manuscript, new)
+    used = _name_already_used(db, manuscript, old, new)
     if used and not force:
         raise ValueError(
             f"an earlier file named {new} left records behind ("
