@@ -927,8 +927,16 @@ def locate_block(root: Path, names: list[str], config: dict, spoken: str,
                 except AudioError:
                     continue
                 if inner["kind"] == "list" and one_per_item:
+                    # Item i is the i-th non-tag, non-blank line of the
+                    # raw block — not block["line"] + i. Region open/close
+                    # lines stay in `raw` (stripped only from `prose`), so
+                    # counting from the block start rewrote the tag or the
+                    # previous item when a list sat against [Only:]/[Omit:]
+                    # with no blank line (2026-11-06).
                     items = [_LIST_ITEM.sub("", ln).strip()
                              for ln in prose.split("\n") if ln.strip()]
+                    item_offsets = [offset for offset, ln in enumerate(raw)
+                                    if not is_tag(ln) and ln.strip()]
                     for i, item in enumerate(items):
                         try:
                             said, _w = speech_text(item, config)
@@ -938,7 +946,7 @@ def locate_block(root: Path, names: list[str], config: dict, spoken: str,
                                 said, voice, applicable_rules(said, rules)
                         ) == want_id:
                             # One list line is the card; rewrite only it.
-                            line = block["line"] + i
+                            line = block["line"] + item_offsets[i]
                             return {"file": name, "line": line, "lines": 1,
                                     "markdown": raw_lines[line - 1]}
                     continue
