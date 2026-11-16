@@ -1893,6 +1893,25 @@ The loop, when a filter declares a pronunciation prelude:
    block A's PRONUNCIATION DICTIONARY and the audio filter never flags
    it again — the dictionary IS the fix.
 
+**Suggest on the workbench, with a try hint (author ruling 2026-11-15).**
+The proposal loop above cannot be heard: a proposal never reaches the
+pronunciation workbench, and the author wants to listen before ruling.
+So when you suggest readings, write each term as a row in
+`pronunciations.md` with "Say it" EMPTY and the note ending
+`· try <RESPELLING>`:
+
+    | Bhṛgu |  | Sanskrit proper name, the sage of the Taittiriya · try BHRIH-goo |
+
+The workbench (`http://127.0.0.1:8792/#<manuscript>/pron`; the manuscript
+must be in the hash, or the page opens the server's own) lists the row
+with ★ "no reading" and shows the hint. The author types it in, presses
+Regenerate all voices (ElevenLabs credits, one sentence per voice),
+listens, and Save this reading settles it. An empty-reading row is not a
+settled reading, so this does not break the rule that only the author
+settles a row. The author asking for suggestions is the word to write
+these rows; then `doc push pronunciations.md`. Leave the prelude's
+proposals open rather than dismissing them (a dismissal is final, below).
+
 **Say this out loud the first time: a term you propose is a term the
 author will never be asked about again.** One proposal per term, ever, in
 any state — a dismissal is final, and the remedy if they change their
