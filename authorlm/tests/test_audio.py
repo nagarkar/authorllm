@@ -1112,6 +1112,54 @@ def check_say() -> None:
         shutil.rmtree(ws, ignore_errors=True)
 
 
+def check_reads_as_spelled() -> None:
+    """A row whose reading is the word itself ("the voice reads it fine
+    as spelled") is settled but carries no rule: no alias term -> term on
+    push, no change to any section id, and the workbench marks it."""
+    from authorlm import workbench
+    check("reads_as_spelled: the word itself, whitespace-normalized, case exact",
+          audio.reads_as_spelled("Basilides", " Basilides ")
+          and not audio.reads_as_spelled("Basilides", "basilides")
+          and not audio.reads_as_spelled("Basilides", "ba-SIL-i-deez")
+          and not audio.reads_as_spelled("Basilides", ""))
+    table = ("| term | say | note |\n|---|---|---|\n"
+             "| Basilides | Basilides | heard the default |\n"
+             "| Abraxas | uh-BRAK-suss |  |\n")
+    rules = audio.pronunciation_rules(table)
+    check("pronunciation_rules leaves a reads-as-spelled row out (section ids unchanged)",
+          [r["term"] for r in rules] == ["Abraxas"], str(rules))
+    book = _book_copy()
+    ws, _out = _workspace(book)
+    workbench.CLIENT_FACTORY = lambda: audio.ElevenLabs("k", opener=_opener([], {
+        "/text-to-speech/": (b"MP3BYTES", {"request-id": "r"}),
+    }))
+    workbench._SESSIONS.clear()
+    try:
+        call = lambda m, **p: workbench.dispatch(m, {"manuscript": "Scratch", **p},
+                                                 workspace=str(ws))
+        ctx = call("contexts", term="Basilides")["contexts"][0]
+        call("render", term="Basilides", say="", context=ctx, mode="default")
+        call("save", rows=[{"term": "Basilides", "say": "Basilides", "note": ""}])
+        row = next(t for t in call("state")["terms"] if t["term"] == "Basilides")
+        check("a same-spelling row is settled (no star), flagged as_spelled, and tested by its default clip",
+              row["say"] == "Basilides" and row["as_spelled"] and row["tested"], str(row))
+        ms, _db = _manuscript(ws)
+        desired = audio.desired_rules(ms, audio.load_config(Path(ms["path"])))
+        check("desired_rules builds no alias for a reads-as-spelled row",
+              "Basilides" not in desired and "basilides" not in desired, str(sorted(desired)))
+        other = next(t for t in call("state")["terms"] if t["say"] and t["term"] != "Basilides")
+        check("an ordinary respelling is not marked as spelled", not other["as_spelled"], str(other))
+    finally:
+        workbench.CLIENT_FACTORY = None
+        workbench._SESSIONS.clear()
+    from authorlm import audiobook as audiobook_page
+    page = audiobook_page.app_html()
+    check("the page labels the respelling mode 'read my respelling', never 'read as written'",
+          "read my respelling" in page and "read as written" not in page)
+    check("the page offers a note's '· try' hint as a one-click button, never a prefill",
+          "use try:" in page and "empty = as spelled" in page)
+
+
 def check_workbench() -> None:
     from authorlm import workbench
 
@@ -2729,6 +2777,7 @@ def main_test() -> None:
     check_dictionary_by_default()
     check_say()
     check_workbench()
+    check_reads_as_spelled()
     check_audiostation_launch()
     check_casting_filter_block()
     check_generation_plan()

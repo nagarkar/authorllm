@@ -619,7 +619,17 @@ def audio_source(name: str, raw: str) -> str:
 def pronunciation_rules(text: str) -> list[dict]:
     """`[{term, say}]` for every settled row of `pronunciations.md`."""
     rows, _warnings = pron.parse(text or "")
-    return [{"term": r["term"], "say": r["say"]} for r in rows if r["say"]]
+    return [{"term": r["term"], "say": r["say"]} for r in rows
+            if r["say"] and not reads_as_spelled(r["term"], r["say"])]
+
+
+def reads_as_spelled(term: str, say: str) -> bool:
+    """True when the row's reading is the term itself, exactly as the
+    book spells it: the author listened to the voice's default and found
+    it fine. Such a row is settled (the word is decided, no star, no
+    prelude asks again) but carries no rule: no ElevenLabs alias
+    term → term, and no change to any section id."""
+    return bool(say) and alias_for(say) == " ".join((term or "").split())
 
 
 def _term_pattern(term: str) -> re.Pattern:
@@ -1746,7 +1756,7 @@ def desired_rules(manuscript: dict, config: dict) -> dict[str, dict]:
     phoneme = config["tts"]["model"] in PHONEME_MODELS
     out: dict[str, dict] = {}
     for row in rows:
-        if not row["say"]:
+        if not row["say"] or reads_as_spelled(row["term"], row["say"]):
             continue
         variants = {row["term"], row["term"].lower()}
         for term in variants:

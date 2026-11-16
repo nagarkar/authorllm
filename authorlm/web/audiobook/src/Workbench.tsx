@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Transport } from "./transport";
 
 // Mirrors workbench.Session's replies (authorlm/workbench.py).
-interface Row { term: string; say: string; note: string; tested?: boolean; }
+interface Row { term: string; say: string; note: string; tested?: boolean; as_spelled?: boolean; }
 interface Voice { key: string; voice_id: string; voice_name: string; model: string; stability: number; similarity: number; speed: number; }
 interface Context { file: string; stem: string; cast: string; voice: Voice; sentence: string; section_id: string; }
 interface State {
@@ -14,10 +14,19 @@ type Mode = "respelling" | "default" | "dictionary";
 interface Clip { key: string; spoken: string; say: string; cast: string; voice_name: string; file: string; chars: number; alias: string; mode: Mode; sentence: string; dictionary_version?: string | null; at?: string; audio_base64?: string; }
 const norm = (s: string) => (s || "").split(/\s+/).filter(Boolean).join(" ");
 const MODE_LABEL: Record<Mode, string> = {
-  respelling: "read as written",
+  respelling: "read my respelling",
   default: "the voice's default — no rule at all",
   dictionary: "full dictionary plus current word",
 };
+
+// A row with no reading may carry a suggestion in its note,
+// `Sanskrit proper name · try BHRIH-goo`: the respelling box opens on it
+// shows as a one-click "use try:" button beside the box. The box is never
+// prefilled: an empty box means the word as spelled.
+export function tryHint(note: string): string {
+  const m = /(?:^|·)\s*try\s+([^·]+?)\s*(?:·|$)/.exec(note || "");
+  return m ? m[1] : "";
+}
 
 export function Workbench({transport, manuscript, initialTerm}: {transport: Transport; manuscript?: string; initialTerm?: string}) {
   const [state, setState] = useState<State | null>(null);
@@ -129,7 +138,7 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
   // are newest first, so a re-take of the same key wins.
   useEffect(() => {
     let cancelled = false;
-    const s = norm(say);
+    const s = norm(say) || norm(term);
     const wanted: Record<string, Clip | undefined> = {};
     for (const c of contexts) {
       const sent = norm(sentences[c.cast] ?? c.sentence);
@@ -164,7 +173,7 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
       }
     })();
     return () => { cancelled = true; };
-  }, [say, mode, sentences, records, contexts, transport, params]);
+  }, [say, term, mode, sentences, records, contexts, transport, params]);
 
   function stopPlayback() {
     queue.current = [];
@@ -197,8 +206,9 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
       for (const c of r.contexts) initial[c.cast] = recs.find((x) => x.cast === c.cast)?.sentence || c.sentence;
       setSentences(initial);
       const d = dirty[next];
+      const rowNote = state?.terms.find((t) => t.term === next)?.note || "";
       setSay(d ? d.say : r.say || "");
-      setNote(d ? d.note : state?.terms.find((t) => t.term === next)?.note || "");
+      setNote(d ? d.note : rowNote);
       setTermStatus(r.contexts.length
         ? {text: `${r.contexts.length} voice(s) say it`}
         : {text: "not spoken anywhere in the audiobook — check the spelling", kind: "bad"});
@@ -223,8 +233,8 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
   }
 
   async function regen(targets: Context[]) {
-    const s = say.trim();
-    if (mode === "respelling" && !s) { setTermStatus({text: "type a respelling first, or pick the voice's default to hear it with no rule", kind: "bad"}); return; }
+    // An empty box is the word as spelled.
+    const s = say.trim() || term;
     let chars = 0;
     stopPlayback();
     unlockPlayer();
@@ -247,7 +257,7 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
     }
     setBusy(null);
     setTermStatus({
-      text: `${chars} characters spent · ${mode === "respelling" ? `read as written: “${s}”` : MODE_LABEL[mode]}`,
+      text: `${chars} characters spent · ${mode === "respelling" ? `read my respelling: “${s}”` : MODE_LABEL[mode]}`,
       kind: "ok",
     });
     if (mode === "respelling") markDirty(s, note);
@@ -333,6 +343,16 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
     }
   }
 
+  // An empty box, or the voice's-default mode, saves the word's own
+  // spelling as its reading (`| Advaita | Advaita |`): settled, and the
+  // push builds no rule for it.
+  const saveSay = mode === "default" ? term : (say.trim() || term);
+  const canSave = !!dirty[term] || tableRow?.say !== saveSay;
+  async function saveThis() {
+    await saveRows([{term, say: saveSay, note: note.trim()}]);
+    if (saveSay === term) setSay(term);
+  }
+
   function save() { return saveRows(Object.values(dirty)); }
 
   async function push() {
@@ -354,7 +374,7 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
   // Every word in the table plus the ones staged as new, alphabetical
   // (case-insensitive), narrowed by whatever is in the find box.
   const words = useMemo(() => {
-    const rows: {term: string; say: string; tested?: boolean; isNew?: boolean}[] = [...(state?.terms || [])];
+    const rows: {term: string; say: string; tested?: boolean; isNew?: boolean; as_spelled?: boolean}[] = [...(state?.terms || [])];
     for (const t of dirtyNames) if (!rows.some((r) => r.term === t)) rows.push({term: t, say: "", isNew: true});
     rows.sort((a, b) => a.term.localeCompare(b.term, undefined, {sensitivity: "base"}));
     const q = newTerm.trim().toLowerCase();
@@ -403,14 +423,18 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
         <div className="card">
           <div className="bar">
             <strong>{term}</strong>
-            <button className="primary" disabled={!dirty[term]} onClick={() => void saveRows([dirty[term]])}>
+            <button className="primary" disabled={!canSave}
+              title={saveSay === term ? `Save “${term}” as spelled — no rule` : undefined}
+              onClick={() => void saveThis()}>
               {tableRow ? "Save this reading" : "Add to the table"}
             </button>
             {tableRow?.say && <button className="clear" disabled={!!busy} onClick={() => void clear()} title="Keep the word, drop its reading and its ElevenLabs rule">Clear reading</button>}
             {tableRow && !confirmRemove && <button className="danger" disabled={!!busy} onClick={() => setConfirmRemove(true)} title="Drop the word and its rule">Delete word</button>}
-            <input type="text" className="say" value={say} placeholder="respelling — stressed syllable in CAPS, e.g. buh-SIL-ih-deez"
+            <input type="text" className="say" value={say} placeholder="empty = as spelled; or a respelling, stressed syllable in CAPS, e.g. buh-SIL-ih-deez"
               onChange={(e) => { setSay(e.target.value); markDirty(e.target.value, note); }} />
-            {say.trim() && <span className="alias">read as written: “{say.trim()}”</span>}
+            {say.trim() && <span className="alias">read my respelling: “{say.trim()}”</span>}
+            {tryHint(note) && say.trim() !== tryHint(note) &&
+              <button onClick={() => { setSay(tryHint(note)); markDirty(tryHint(note), note); }} title="Fill the box with the note's suggestion">use try: {tryHint(note)}</button>}
             <button onClick={() => void suggest()} title="Ask the configured LLM for a respelling">Suggest</button>
             <select value={mode} onChange={(e) => setMode(e.target.value as Mode)} title="What Regenerate renders">
               {(Object.keys(MODE_LABEL) as Mode[]).map((m) => <option key={m} value={m}>{MODE_LABEL[m]}</option>)}
