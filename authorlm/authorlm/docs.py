@@ -394,9 +394,12 @@ def ensure_documents(db: Database, manuscript: dict) -> list[dict]:
     for that collect to settle, so a rename is never seeded as a second
     document. A document whose file is in neither is retired; a file
     under `_retired/` no document accounts for is seeded retired; a file
-    that comes back (revived, or added again) takes its retired row and
-    id back. toc.toml is structure, not a document. Writes nothing while
-    the manuscript's `document_ids` setting is off."""
+    that comes back at the same path, or at a new path with the same
+    basename and the same last-snapshotted bytes (a revive from
+    `_retired/`), takes its retired row and id back. A new file that
+    only reuses the basename does not. toc.toml is structure, not a
+    document. Writes nothing while the manuscript's `document_ids`
+    setting is off."""
     from .structure import TOC_FILENAME
 
     root = Path(manuscript["path"])
@@ -419,13 +422,42 @@ def ensure_documents(db: Database, manuscript: dict) -> list[dict]:
     # call) takes no write lock.
     updates: list[tuple[str, dict]] = []
     inserts: list[tuple[str, str]] = []
+    def _last_text(row: dict) -> str | None:
+        """The retired document's last snapshotted bytes, under any name
+        it has carried. Used to tell a true revive (same prose) from a
+        new file that only reuses the basename."""
+        names = [row["relpath"]]
+        for entry in reversed(_history(row)):
+            if entry.get("relpath") and entry["relpath"] not in names:
+                names.append(entry["relpath"])
+        for ver in db.all(
+                "SELECT files FROM manuscript_versions WHERE "
+                "manuscript_id = ? ORDER BY version_no DESC", (mid,)):
+            files = loads(ver["files"], {})
+            for prior in names:
+                if prior in files:
+                    return files[prior]
+        return None
+
     for name in sorted((snapshot & on_disk) - {TOC_FILENAME}):
         if name in active:
             continue
-        back = ([r for r in retired if r["relpath"] == name]
-                or [r for r in retired
-                    if Path(r["relpath"]).name == Path(name).name
-                    and Path(name).name not in in_retired])
+        exact = [r for r in retired if r["relpath"] == name]
+        # Basename revival (retire papers/foo.md → revive as foo.md) only
+        # when the on-disk bytes still match that document's last
+        # snapshot. A Finder-deleted chapter and a new file that only
+        # reuses the basename must not share a `dc-` id.
+        same_stem = []
+        if not exact and Path(name).name not in in_retired:
+            try:
+                now_text = (root / name).read_text(encoding="utf-8")
+            except OSError:
+                now_text = None
+            if now_text is not None:
+                same_stem = [r for r in retired
+                             if Path(r["relpath"]).name == Path(name).name
+                             and _last_text(r) == now_text]
+        back = exact or same_stem
         if back:
             row = back[-1]
             retired.remove(row)

@@ -629,6 +629,32 @@ class RevertTests(Book):
         self.assertEqual((last["from_status"], last["to_status"]),
                          ("done", "done"))
 
+    def test_run_revert_puts_back_a_batch_whose_earlier_new_is_a_later_old(self):
+        # Land alpha→beta and beta→gamma on "alpha beta" → "beta gamma".
+        # Walking last-landed-first would restore gamma→beta first and
+        # leave "beta beta", so the earlier change could not be put back.
+        (self.root / "one.md").write_text("# One\n\nalpha beta\n",
+                                          encoding="utf-8")
+        quiet(api.collect, self.db, self.manuscript, {})
+        book.restart(self.db, self.manuscript, "lint", "one.md",
+                     reason="retry with a renaming batch")
+        run = self.running("lint", "one.md")
+        self.land(run, "one.md", [
+            {"old": "alpha", "new": "beta",
+             "note": "Rename the first term."},
+            {"old": "beta", "new": "gamma",
+             "note": "Rename the second term."},
+        ])
+        self.assertEqual(self.text().strip(), "# One\n\nbeta gamma")
+        report = changes.revert(self.db, self.manuscript, {}, run=run,
+                                reason="undo the renaming batch",
+                                tab_state=unlinked)
+        self.assertEqual(report["declined"], [])
+        self.assertEqual(len(report["reverted"]), 2)
+        self.assertEqual(self.text().strip(), "# One\n\nalpha beta")
+        self.assertEqual({r["status"] for r in self.rows()
+                          if r["run_id"] == run}, {"reverted"})
+
     def test_revert_needs_a_reason_and_a_target(self):
         with self.assertRaisesRegex(ValueError, "records why"):
             self.revert(self.typo, reason=" ")
