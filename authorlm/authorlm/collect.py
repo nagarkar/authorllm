@@ -38,7 +38,7 @@ from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
 from .revisions import (collect_revision, detect_transitions, is_placeholder,
                         iter_manuscript_paths, massive_deletions,
-                        pair_renames, read_manuscript_files)
+                        ordered_renames, pair_renames, read_manuscript_files)
 from .sessions import NO_EPISODE
 
 
@@ -95,7 +95,7 @@ def _carry_renames_on_disk(db: Database, manuscript: dict,
         return []
     pairs = pair_renames(old_files, read_manuscript_files(root))
     return [docs.carry_rename(db, manuscript, old, new)
-            for old, new in sorted(pairs.items())]
+            for old, new in ordered_renames(pairs)]
 
 
 def collect(db: Database, manuscript: dict, config: dict,

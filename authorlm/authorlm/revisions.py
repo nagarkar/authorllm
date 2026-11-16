@@ -234,42 +234,88 @@ def pair_renames(old_files: dict[str, str],
     snapshots: a name only in `old_files` paired with a name only in
     `new_files` whose text is identical or at least
     RENAME_SIMILARITY_FLOOR similar. One to one, and the same on every
-    run: the closest pair is taken first, ties by name."""
+    run: the closest pair is taken first, ties by name.
+
+    Also pairs a name-reuse chain (A→C, B→A) when each text appears under
+    exactly one old name and exactly one new name and at least one of
+    those names left or arrived. A pure swap of two surviving names is
+    not paired: carrying through a cycle needs a temporary name, and a
+    missed swap costs a `doc rename`."""
     from .lint import closest_by_ratio
 
     removed = sorted(n for n in old_files
                      if n not in new_files and _pairable(n, old_files[n]))
     added = sorted(n for n in new_files
                    if n not in old_files and _pairable(n, new_files[n]))
-    if not removed or not added:
-        return {}
-    scored: list[tuple[float, str, str]] = []
-    for old in removed:
-        old_words = old_files[old].split()
-        for new in added:
-            if old_files[old] == new_files[new]:
-                scored.append((1.0, old, new))
-                continue
-            new_words = new_files[new].split()
-            # The ratio cannot exceed 2·shorter/(both): skip the diff
-            # when the lengths alone rule the pair out.
-            if (2 * min(len(old_words), len(new_words))
-                    < RENAME_SIMILARITY_FLOOR
-                    * (len(old_words) + len(new_words))):
-                continue
-            hit, ratio = closest_by_ratio(
-                old_files[old], [new_files[new]], str.split,
-                floor=RENAME_SIMILARITY_FLOOR)
-            if hit is not None:
-                scored.append((ratio, old, new))
     pairs: dict[str, str] = {}
     taken: set[str] = set()
-    for _ratio, old, new in sorted(scored, key=lambda s: (-s[0], s[1], s[2])):
-        if old in pairs or new in taken:
+    if removed and added:
+        scored: list[tuple[float, str, str]] = []
+        for old in removed:
+            old_words = old_files[old].split()
+            for new in added:
+                if old_files[old] == new_files[new]:
+                    scored.append((1.0, old, new))
+                    continue
+                new_words = new_files[new].split()
+                # The ratio cannot exceed 2·shorter/(both): skip the diff
+                # when the lengths alone rule the pair out.
+                if (2 * min(len(old_words), len(new_words))
+                        < RENAME_SIMILARITY_FLOOR
+                        * (len(old_words) + len(new_words))):
+                    continue
+                hit, ratio = closest_by_ratio(
+                    old_files[old], [new_files[new]], str.split,
+                    floor=RENAME_SIMILARITY_FLOOR)
+                if hit is not None:
+                    scored.append((ratio, old, new))
+        for _ratio, old, new in sorted(scored,
+                                       key=lambda s: (-s[0], s[1], s[2])):
+            if old in pairs or new in taken:
+                continue
+            pairs[old] = new
+            taken.add(new)
+    # Exact unique-content moves that reuse a surviving name (A→C, B→A).
+    by_old: dict[str, list[str]] = {}
+    by_new: dict[str, list[str]] = {}
+    for name, text in old_files.items():
+        if name in pairs or not _pairable(name, text):
+            continue
+        by_old.setdefault(text, []).append(name)
+    for name, text in new_files.items():
+        if name in taken or not _pairable(name, text):
+            continue
+        by_new.setdefault(text, []).append(name)
+    for text, olds in sorted(by_old.items(), key=lambda kv: kv[1][0]):
+        news = by_new.get(text, [])
+        if len(olds) != 1 or len(news) != 1:
+            continue
+        old, new = olds[0], news[0]
+        if old == new or old in pairs or new in taken:
+            continue
+        # Both names survived: a swap (or coincidence). Leave it alone.
+        if old in new_files and new in old_files:
             continue
         pairs[old] = new
         taken.add(new)
     return pairs
+
+
+def ordered_renames(pairs: dict[str, str]) -> list[tuple[str, str]]:
+    """`(old, new)` in an order safe for `docs.carry_rename`: a rename
+    whose target is still a source waits until that source has moved.
+    `pair_renames` does not emit cycles; if one appears, one edge is
+    broken arbitrarily so the caller still makes progress."""
+    remaining = dict(pairs)
+    ordered: list[tuple[str, str]] = []
+    while remaining:
+        ready = sorted(old for old, new in remaining.items()
+                       if new not in remaining)
+        if not ready:
+            ready = [sorted(remaining)[0]]
+        for old in ready:
+            ordered.append((old, remaining.pop(old)))
+    return ordered
 
 
 def massive_deletions(db: Database, manuscript: dict,
@@ -349,25 +395,28 @@ def detect_transitions(
         transitions.append(row)
 
     renamed = pair_renames(old_files, new_files) if renames else {}
+    # Emit every rename up front. A name-reuse chain (A→C, B→A) makes one
+    # name both a source and a target; recording only while walking
+    # targets would skip the hop whose target is also a source.
+    for was, name in ordered_renames(renamed):
+        record(
+            "file_renamed", name,
+            f"File renamed: {was} → {name}",
+            {"from": was, "to": name},
+        )
     renamed_from = {new: old for old, new in renamed.items()}
     for name in sorted(set(old_files) | set(new_files)):
         if name in renamed:
-            continue  # recorded under its new name, below
+            continue  # rename source; content lands under its new name
         was = renamed_from.get(name, name)
-        if name in renamed_from:
-            record(
-                "file_renamed", name,
-                f"File renamed: {was} → {name}",
-                {"from": was, "to": name},
-            )
-        elif name not in old_files:
+        if name not in old_files and name not in renamed_from:
             record(
                 "file_added", name,
                 f"New file: {name}",
                 {"paragraphs": len(_paragraphs(new_files[name]))},
             )
             continue
-        elif name not in new_files:
+        if name not in new_files:
             record("file_removed", name, f"File removed: {name}", {})
             continue
         if old_files[was] == new_files[name]:
