@@ -764,6 +764,18 @@ A book as a workflow of roles (book.py): each step is done by a person or an age
 
 Every served page wears the AuthorLM icon (metalm guidelines/ui.md#brand).
 
+## `tests.test_change_warning`
+
+`authorlm/tests/test_change_warning.py`
+
+`changes._short` truncates the words quoted in land/revert errors; `changes._warning` is the payload `book land` returns when a landed change drops a protected term. Wrong truncation → unreadable errors; wrong warning text → the author is not told which term fell, or that the change still landed and how to put it back.
+
+## `tests.test_check_items`
+
+`authorlm/tests/test_check_items.py`
+
+`changes._check_items` is the all-or-none gate on every `book land` batch: each item must name one place, carry a note, and leave a `new` that can be found again to put back. Integration tests cover land's happy path; these pins hit the helper's own refusal edges without a workspace.
+
 ## `tests.test_clamped_delta`
 
 `authorlm/tests/test_clamped_delta.py`
@@ -998,6 +1010,12 @@ The shared filter library: `authorlm/library/filters/` is read in place by every
 
 `gdocs._flat_prose` matches Doc comment anchors across emphasis.
 
+## `tests.test_follows_and_current`
+
+`authorlm/tests/test_follows_and_current.py`
+
+`book._follows` and `book._current` decide which earlier steps a run waits on, and which attempt of a step/scope is still in force. A broken transitive after-list lets a step start too soon; treating a superseded latest attempt as current hides that the step is open again.
+
 ## `tests.test_footnote_prefixes_nested`
 
 `authorlm/tests/test_footnote_prefixes_nested.py`
@@ -1099,6 +1117,12 @@ Interlocutor tests (docs/interlocutor-design.md).
 `authorlm/tests/test_is_heading.py`
 
 `filtering.is_heading` labels markdown heading units in the filter prompt so the model can leave titles alone.
+
+## `tests.test_is_protected`
+
+`authorlm/tests/test_is_protected.py`
+
+`filtering._is_protected` / `_names_of` are the kind+status gate and the name/alias expansion behind `protected_terms` (and so behind `book land`'s protected-loss warnings). Wrong kind → ordinary English from an objection label is guarded as vocabulary; a missing alias → a landed change that drops the author's own synonym is never warned.
 
 ## `tests.test_is_tag_line`
 
@@ -1292,6 +1316,12 @@ Regression: spaced CommonMark thematic breaks must survive normalize.
 
 Pure Omni helpers: model gate, duration clamp, billed USD from token usage, and the edit request body.
 
+## `tests.test_only_a_title`
+
+`authorlm/tests/test_only_a_title.py`
+
+`changes._only_a_title` is the draft gate: a chapter that holds only heading lines (or nothing) may receive a first draft; a file with any prose line may not. Wrong true → `book draft` overwrites the author's words; wrong false → a blank chapter cannot be filled under `direct`.
+
 ## `tests.test_own_line_form`
 
 `authorlm/tests/test_own_line_form.py`
@@ -1393,6 +1423,12 @@ Shared readings: one reading per essay per filter family (readings.py, issue #41
 `authorlm/tests/test_register.py`
 
 The register of settled choices (register.py): every choice the author settles is an entry holding the author's words verbatim and the machine's reading of them, and every piece of work that rests on an entry records a use labelled applies or infers. These tests enforce the rules the module docstring states: no entry is settled without both words and reading; a settled entry is never edited in place (a change makes a new entry that supersedes the old one and returns the work that rested on it); an entry can be reopened; a key is unique among the live entries of its kind.
+
+## `tests.test_related_scopes`
+
+`authorlm/tests/test_related_scopes.py`
+
+`book._related_scopes` is the grain-crossing map every wait and restart walks: which chapter/part/book scopes a step rests on. Wrong mapping → a chapter step starts before its part is done, or a restart leaves the wrong dependents flagged. Pure over a constructed Layout.
 
 ## `tests.test_reply_records`
 
