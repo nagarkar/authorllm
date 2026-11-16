@@ -764,13 +764,20 @@ def resolve(db, manuscript: dict, config: dict, kind: str, file: str,
     path = Path(manuscript["path"]) / file
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source=f"pre-{kind}-resolve")
+    # Write before record (critique resolve's order): crash after
+    # verdicts with markers still on disk made unmark restore OLD.
+    # Suggestion standalone tags need the cleaned rows to know which
+    # tag lines to drop, so write the form-resolved text first, record,
+    # then strip tags and rewrite — markers are already gone after the
+    # first write.
+    gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
     diffs = passes.record_resolution(db, mid, file, forms, origin_type=kind,
                                      evidence_type=f"{kind}_edit",
                                      final_text=final, threads=to_resolve)
     n_forms = len(forms) + settled
     if kind == "suggestion":
         final = _consume_standalone_tags(db, final, written)
-    gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
+        gdocs._write_resolved_text(path, Path(manuscript["path"]), final)
     with contextlib.redirect_stdout(io.StringIO()):
         after = collect(db, manuscript, config, source=f"{kind}-resolve",
                         episode=NO_EPISODE)

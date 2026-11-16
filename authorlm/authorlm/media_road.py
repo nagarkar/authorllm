@@ -169,10 +169,11 @@ def resolve_specs(db, manuscript: dict, config: dict, file: str,
     root = Path(manuscript["path"])
     with contextlib.redirect_stdout(io.StringIO()):
         collect(db, manuscript, config, source="pre-clip-resolve")
-    passes.record_resolution(db, mid, file, forms, origin_type=ORIGIN,
-                             evidence_type="clip_spec_edit", final_text=final)
+    # Write before record — same crash window as filter finalize.
     final, landed = media.absorb_specs(root, final, keys)
     gdocs._write_resolved_text(root / file, root, final)
+    passes.record_resolution(db, mid, file, forms, origin_type=ORIGIN,
+                             evidence_type="clip_spec_edit", final_text=final)
     with contextlib.redirect_stdout(io.StringIO()):
         after = collect(db, manuscript, config, source="clip-resolve",
                         episode=NO_EPISODE)
