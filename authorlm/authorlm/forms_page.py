@@ -1254,6 +1254,32 @@ def warm(workspace: str | None, name: str | None) -> None:
                 lambda: api.open_db(workspace))
 
 
+def warm_all(workspace: str | None) -> list[str]:
+    """Start the background reader for every manuscript with forms open
+    in its Doc (a `written` thread), not only the server's own, so whichever
+    manuscript the author opens on the page is already read. Returns the
+    names started."""
+    db = api.open_db(workspace)
+    try:
+        names = [r["name"] for r in db.all(
+            "SELECT DISTINCT m.name FROM manuscripts m "
+            "JOIN doc_threads t ON t.manuscript_id = m.id "
+            "WHERE t.state = 'written' ORDER BY m.name")]
+    finally:
+        try:
+            db.close()
+        except Exception:  # noqa: BLE001
+            pass
+    started = []
+    for name in names:
+        try:
+            warm(workspace, name)
+            started.append(name)
+        except Exception as err:  # noqa: BLE001 — that one reads on demand
+            print(f"  merge forms: background reading for {name} not started ({err})")
+    return started
+
+
 def dispatch(method: str, params: dict[str, Any],
              workspace: str | None = None) -> dict:
     """The page's API (`/api/forms`): list, decide, merge (at once),
