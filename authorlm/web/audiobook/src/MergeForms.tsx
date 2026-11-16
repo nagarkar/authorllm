@@ -36,7 +36,14 @@ interface FileGroup {
   pushed_at?: string | null;
   conflict?: Conflict;
 }
-interface Listing { doc_url: string | null; files: FileGroup[]; total: number; conflicts: number; }
+// The server keeps the last listing and reads the Doc again in the
+// background (about once a minute, and after a push or a merge); `age` is
+// how old the copy is, `refreshing` that a read is under way.
+interface Listing {
+  doc_url: string | null; files: FileGroup[]; total: number; conflicts: number;
+  cached_at?: string | null; age?: number; refreshing?: boolean; refresh_error?: string | null;
+}
+const REFRESH_MS = 60000;
 interface Queue { pending: string[]; running: string | null; results: Record<string, MergeResult>; }
 interface MergeResult {
   file: string; stopped: string | null; message: string; accepted: number; modified: number;
@@ -112,15 +119,30 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
     }
   }, [queue.results]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // `refresh` asks the server to read the Doc again in the background (the
+  // answer is the cached copy, at once); `now` reads it before answering
+  // (after a conflict choice, which the cached copy does not show).
+  const load = useCallback(async (opts: {refresh?: boolean; now?: boolean} = {refresh: true}) => {
+    if (opts.now) setLoading(true);
     try {
-      const r = await transport.request<Listing & {error?: string}>("list", {manuscript});
+      const r = await transport.request<Listing & {error?: string}>("list", {manuscript, cached: true, ...opts});
       if (r.error) setError(r.error); else { setData(r); setError(""); }
     } catch (err) { setError((err as Error).message); }
-    finally { setLoading(false); }
+    finally { if (opts.now) setLoading(false); }
   }, [transport, manuscript]);
   useEffect(() => { void load(); }, [load]);
+  // While the server reads, ask again every two seconds for its result.
+  const refreshing = !!data?.refreshing;
+  useEffect(() => {
+    if (!refreshing) return;
+    const t = window.setTimeout(() => void load({}), 2000);
+    return () => window.clearTimeout(t);
+  }, [refreshing, data, load]);
+  // While the page is open, read again about once a minute.
+  useEffect(() => {
+    const t = window.setInterval(() => { if (document.visibilityState === "visible") void load(); }, REFRESH_MS);
+    return () => window.clearInterval(t);
+  }, [load]);
   // Coming back to the page (from the Doc, where the author may have edited
   // a form) reloads it, as the Dev edit does.
   useEffect(() => {
@@ -150,14 +172,33 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
       if (r?.error) return r.error;
       ruling = r.ruling ?? null;
     } catch (err) { return (err as Error).message; }
+    showRulings({[f.id]: ruling});
+    return null;
+  };
+  // Rulings shown in place, then the quiet re-read 20s after the last one.
+  const showRulings = (rulings: Record<string, Ruling | null>) => {
     setData(d => d && {...d, files: d.files.map(g => {
-      if (!g.forms.some(x => x.id === f.id)) return g;
-      const forms = g.forms.map(x => x.id === f.id ? {...x, ruling, ruling_stale: null} : x);
+      if (!g.forms.some(x => x.id in rulings)) return g;
+      const forms = g.forms.map(x => x.id in rulings ? {...x, ruling: rulings[x.id], ruling_stale: null} : x);
       return {...g, forms, undecided: forms.filter(x => x.found && !x.ruling).length};
     })});
     window.clearTimeout(recheck.current);
     recheck.current = window.setTimeout(() => void load(), 20000);
-    return null;
+  };
+  // Accept all: every form of the file still To rule, each through the same
+  // ruling a single Accept holds. Nothing is merged.
+  const acceptAll = async (g: FileGroup): Promise<string | null> => {
+    const open = g.forms.filter(f => f.found && !f.ruling);
+    if (!open.length) return null;
+    if (!window.confirm(`Accept all ${open.length} form${open.length === 1 ? "" : "s"} in ${g.file}?`)) return null;
+    try {
+      const r = await transport.request<{error?: string; rulings?: Record<string, Ruling>; errors?: Record<string, string>}>(
+        "accept_all", {manuscript, file: g.file, forms: open.map(f => ({id: f.id, seen: f.current}))});
+      if (r?.error) return r.error;
+      showRulings(r.rulings ?? {});
+      const errs = Object.values(r.errors ?? {});
+      return errs.length ? `${errs.length} form${errs.length === 1 ? "" : "s"} not accepted: ${errs.join("; ")}` : null;
+    } catch (err) { return (err as Error).message; }
   };
 
   const settle = async (file: string, c: Card, verdict: string, text?: string): Promise<string | null> => {
@@ -165,7 +206,7 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
       const r = await transport.request<{error?: string}>("settle", {manuscript, file, region: c.id, verdict, ...(text != null ? {text} : {})});
       if (r?.error) return r.error;
     } catch (err) { return (err as Error).message; }
-    await load();
+    await load({now: true});
     return null;
   };
 
@@ -220,10 +261,12 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
   return (
     <div className="forms">
       {error && <div className="status bad">{error}</div>}
+      {data?.refresh_error && <div className="status bad">The last read of the Doc failed ({data.refresh_error}); showing the copy read {ago(data.age ?? 0)}.</div>}
       <div className="card forms-head">
         <div className="devedit-actions">
           <b>{data ? `${data.total} open form${data.total === 1 ? "" : "s"} in ${data.files.length} file${data.files.length === 1 ? "" : "s"}${data.conflicts ? `, ${data.conflicts} changed on both sides` : ""}` : "Open forms"}</b>
-          <button className="pill" disabled={loading} onClick={() => void load()}>{loading ? "reading…" : "⟳ Refresh"}</button>
+          <button className="pill" disabled={loading || refreshing} onClick={() => void load()}>{loading || refreshing ? "reading…" : "⟳ Refresh"}</button>
+          {data?.age != null && <span className="muted" title={data.cached_at ? `Read from the Doc at ${data.cached_at}` : undefined}>read {ago(data.age)}</span>}
           {data?.doc_url && <a className="pill" href={data.doc_url} target="_blank" rel="noreferrer">Open the Doc ↗</a>}
         </div>
         {active && <div className="muted forms-queue">{queue.running ? <><span className="spin" /> Merging {queue.running}</> : "Starting the queue"}{queue.pending.length ? `; queued: ${queue.pending.join(", ")}` : ""}. You can keep ruling meanwhile.</div>}
@@ -233,13 +276,17 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
       {data?.files.filter(g => g.file === (data.files.some(x => x.file === tab) ? tab : data.files[0]?.file)).map(g => (
         <FileCard key={g.file} g={g} merging={queue.running === g.file}
           queued={queue.pending.indexOf(g.file)}
-          onDecide={decide}
+          onDecide={decide} onAcceptAll={() => acceptAll(g)}
           onLand={() => void merge(g.file, g.conflict?.key ?? undefined)}
           onSettle={(c, verdict, text) => settle(g.file, c, verdict, text)} />
       ))}
       {shown.length > 0 && <ResultsSummary results={shown} />}
     </div>
   );
+}
+
+function ago(seconds: number): string {
+  return seconds < 10 ? "just now" : seconds < 90 ? `${Math.round(seconds)}s ago` : `${Math.round(seconds / 60)} min ago`;
 }
 
 const resultKey = (r: MergeResult) => `${r.file}|${JSON.stringify(r)}`;
@@ -274,9 +321,10 @@ function pushedWhen(at: string): string {
   return isNaN(d.getTime()) ? at : d.toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
 }
 
-function FileCard({ g, merging, queued, onDecide, onLand, onSettle }: {
+function FileCard({ g, merging, queued, onDecide, onAcceptAll, onLand, onSettle }: {
   g: FileGroup; merging: boolean; queued: number;
   onDecide: (f: Form, verdict: string, text?: string) => Promise<string | null>;
+  onAcceptAll: () => Promise<string | null>;
   onLand: () => void; onSettle: (c: Card, verdict: string, text?: string) => Promise<string | null>;
 }) {
   // As on the Dev edit page: a ruled form moves to Decided, where its
@@ -289,6 +337,14 @@ function FileCard({ g, merging, queued, onDecide, onLand, onSettle }: {
   const open = g.forms.filter(f => f.found && !f.ruling);
   const invalid = g.forms.filter(f => !f.found);
   const blockedBy = blockerOf(g);
+  const [accepting, setAccepting] = useState(false);
+  const [acceptMsg, setAcceptMsg] = useState("");
+  const acceptAll = async () => {
+    setAccepting(true); setAcceptMsg("");
+    const err = await onAcceptAll();
+    setAccepting(false);
+    if (err) setAcceptMsg(err);
+  };
   return (
     <section className="card forms-file">
       <div className="forms-file-head">
@@ -296,8 +352,11 @@ function FileCard({ g, merging, queued, onDecide, onLand, onSettle }: {
         {g.count > 0 && <span className="badge">{g.count} not merged</span>}
         <span className={`state${conflict ? " forms-conflict" : ""}`}>{STATE_WORDS[g.state] ?? g.state}</span>
         <span className="muted forms-pushed" title="When this tab was last pushed to the Google Doc">{g.pushed_at ? `pushed ${pushedWhen(g.pushed_at)}` : "no push recorded yet"}</span>
+        {open.length > 0 && <button className="pill" disabled={accepting} onClick={() => void acceptAll()}
+          title="Accept every form still to rule in this tab; Merge stays its own step">{accepting ? "accepting…" : `Accept all · ${open.length}`}</button>}
         {g.url && <a className="pill" href={g.url} target="_blank" rel="noreferrer">Open tab ↗</a>}
       </div>
+      {acceptMsg && <div className="status bad">{acceptMsg}</div>}
       {(g.origins.length > 0 || g.blocking) && <div className="muted">{g.origins.length ? `From ${g.origins.join(", ")}. ` : ""}{g.blocking}</div>}
       {Object.keys(g.others).length > 0 && <div className="moved">Other forms in this tab are not ruled here: {Object.entries(g.others).map(([o, n]) => `${n} ${o}`).join(", ")}.</div>}
       {(merging || queued >= 0 || blockedBy) && <div className="muted">

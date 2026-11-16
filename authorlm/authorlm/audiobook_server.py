@@ -232,6 +232,13 @@ def run(workspace: str | None, manuscript: str | None, host: str = "127.0.0.1",
     # not the one that pays for the database open. Previews render when
     # first played, so nothing is rendered ahead.
     s = audiobook.session(workspace, manuscript)
+    # The Merge forms page's listing is read in the background from now
+    # on (about once a minute), so it is ready when the author arrives.
+    try:
+        from . import forms_page
+        forms_page.warm(workspace, s.manuscript["name"])
+    except Exception as err:  # noqa: BLE001 — the page reads on demand then
+        print(f"  merge forms: background reading not started ({err})")
     print(f"audiobook page for {s.manuscript['name']}: {url}")
     print("  phone: tailscale serve --bg "
           f"{server.server_port}   (then https://<mac>.<tailnet>.ts.net)")
