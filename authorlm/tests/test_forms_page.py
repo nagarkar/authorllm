@@ -777,6 +777,147 @@ def word_diff_segments(_root: Path) -> None:
           == {"op": "delete", "text": "bold"})
 
 
+# ------------------------------------------------------------ accept all
+
+def accept_all_rules_every_open_form(root: Path) -> None:
+    """Accept all on a file's card: every form To rule takes an accept
+    ruling through `decide`, as a single Accept does; nothing merges."""
+    print("accept all:")
+    ws, db, manuscript, ms, fake = _staged(root, "accept-all-ws")
+    forms = _by_note(_call(ws, fake, "list"))
+    _call(ws, fake, "decide", id=forms["r-beta"]["id"], verdict="decline",
+          seen=forms["r-beta"]["current"])
+    todo = [f for n, f in forms.items() if n != "r-beta"]
+    r = _call(ws, fake, "accept_all", file="solo.md",
+              forms=[{"id": f["id"], "seen": f["current"]} for f in todo]
+              + [{"id": "no-such-form", "seen": "x"}])
+    check("each form still to rule is accepted, as the page showed it",
+          r["accepted"] == 3 and all(
+              r["rulings"][f["id"]]["verdict"] == "accept"
+              and r["rulings"][f["id"]]["seen"] == f["current"]
+              for f in todo), r)
+    check("a form not open in this file is named, the rest still ruled",
+          list(r["errors"]) == ["no-such-form"], r["errors"])
+    after = _by_note(_call(ws, fake, "list"))
+    check("the list shows them Decided; the earlier decline stands",
+          all(after[n]["ruling"]["verdict"] == "accept"
+              for n in ("r-alpha", "r-gamma", "r-add"))
+          and after["r-beta"]["ruling"]["verdict"] == "decline", after)
+    check("nothing merged: the file and the open forms are as they were",
+          (ms / "solo.md").read_text() == ESSAY and _open(db, manuscript) == 4)
+    src = (Path(__file__).resolve().parents[1] / "web" / "audiobook" / "src"
+           / "MergeForms.tsx").read_text(encoding="utf-8")
+    check("the page asks before accepting all and uses accept_all",
+          "window.confirm(`Accept all ${open.length} form" in src
+          and '"accept_all"' in src and "Open tab ↗" in src)
+
+
+# -------------------------------------------------------- cached listing
+
+def cached_listing_answers_at_once(root: Path) -> None:
+    """The page's list is the server's cached copy, with rulings laid
+    over it; the Doc is read again in the background."""
+    print("cached listing:")
+    ws, db, manuscript, ms, fake = _staged(root, "cache-ws")
+    key = (str(ws), "book")
+    forms_page._CACHE.pop(key, None)
+    reads = []
+
+    def read(tdb):
+        reads.append(1)
+        with _google(fake), contextlib.redirect_stdout(io.StringIO()):
+            return forms_page.listing(tdb, manuscript, fake, fake)
+
+    first = forms_page.cached_listing(key, db, manuscript, read, watch=False)
+    check("with no copy yet, the first list reads the Doc",
+          len(reads) == 1 and first["total"] == 4
+          and first["refreshing"] is False and first["cached_at"], first)
+    fake.edit("tab-2", "{{Gamma, as proposed.}}", "{{Gamma, my words.}}")
+    again = forms_page.cached_listing(key, db, manuscript, read,
+                                      refresh=True, watch=False)
+    check("the next list answers from the copy, with its age, no read",
+          len(reads) == 1 and isinstance(again["age"], float)
+          and _by_note(again)["r-gamma"]["current"] == "Gamma, as proposed.",
+          again)
+    check("asking for a refresh says a read is under way",
+          again["refreshing"] is True)
+    alpha = _by_note(again)["r-alpha"]
+    forms_page.decide(db, manuscript, alpha["id"], "accept", alpha["current"])
+    ruled = forms_page.cached_listing(key, db, manuscript, read, watch=False)
+    check("a ruling made since the read shows at once on the copy",
+          _by_note(ruled)["r-alpha"]["ruling"]["verdict"] == "accept"
+          and ruled["files"][0]["undecided"] == 3 and len(reads) == 1, ruled)
+    fp = forms_page._fingerprint(db, manuscript)
+    beta = _by_note(ruled)["r-beta"]
+    db.update("doc_threads", beta["id"], {"state": "resolved"})
+    check("a form settled elsewhere changes the database's fingerprint",
+          forms_page._fingerprint(db, manuscript) != fp)
+    gone = forms_page.cached_listing(key, db, manuscript, read, watch=False)
+    check("and drops off the copy before the next read",
+          "r-beta" not in _by_note(gone) and gone["total"] == 3, gone)
+    forms_page.refresh_cache(key, db, manuscript, read)
+    fresh = forms_page.cached_listing(key, db, manuscript, read, watch=False)
+    check("a read brings in the Doc's edit",
+          len(reads) == 2
+          and _by_note(fresh)["r-gamma"]["current"] == "Gamma, my words.",
+          fresh)
+
+    def broken(_tdb):
+        raise RuntimeError("quota")
+    forms_page.refresh_cache(key, db, manuscript, broken)
+    kept = forms_page.cached_listing(key, db, manuscript, read, watch=False)
+    check("a failed read keeps the last copy and says why",
+          kept["total"] == 3 and "quota" in kept["refresh_error"], kept)
+    src = (Path(__file__).resolve().parents[1] / "web" / "audiobook" / "src"
+           / "MergeForms.tsx").read_text(encoding="utf-8")
+    check("the page asks for the cached copy and reads about once a minute",
+          "cached: true" in src and "REFRESH_MS = 60000" in src)
+    forms_page._CACHE.pop(key, None)
+
+
+def background_reader_follows_kicks_and_the_database(root: Path) -> None:
+    print("background reader:")
+    ws, db, manuscript, ms, fake = _staged(root, "watch-ws")
+    key = (str(ws), "watch")
+    forms_page._CACHE.pop(key, None)
+    reads = []
+
+    def read(_tdb):
+        reads.append(1)
+        return {"doc_url": None, "files": [], "total": 0, "conflicts": 0}
+
+    import time
+    saved = forms_page.WATCH_EVERY, forms_page.REFRESH_EVERY
+    forms_page.WATCH_EVERY, forms_page.REFRESH_EVERY = 0.05, 3600.0
+
+    def settle_until(n):
+        end = time.monotonic() + 5
+        while len(reads) < n and time.monotonic() < end:
+            time.sleep(0.02)
+        time.sleep(0.15)
+    try:
+        forms_page.start_watch(key, manuscript, read,
+                               lambda: api.open_db(str(ws)))
+        settle_until(1)
+        check("it reads once when started", len(reads) == 1, reads)
+        time.sleep(0.2)
+        check("then waits: nothing changed, the minute is not up",
+              len(reads) == 1, reads)
+        forms_page.kick(key)
+        settle_until(2)
+        check("a kick (a merge, the page) reads at once", len(reads) == 2)
+        tid = db.one("SELECT id FROM doc_threads WHERE state = 'written'")["id"]
+        db.update("doc_threads", tid, {"state": "resolved"})
+        settle_until(3)
+        check("forms pushed or settled by another process read within "
+              "seconds", len(reads) == 3, reads)
+        forms_page.REFRESH_EVERY = 0.1
+        settle_until(5)
+        check("and it reads again once the interval is up", len(reads) >= 4)
+    finally:
+        forms_page.WATCH_EVERY, forms_page.REFRESH_EVERY = saved
+
+
 def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="forms-page-"))
     for fn in (word_diff_segments, rulings_on_marked_text, list_shows_the_doc_as_it_stands,
@@ -788,7 +929,10 @@ def main() -> None:
                queue_runs_one_merge_at_a_time,
                filter_forms_are_cards_and_merge,
                lens_forms_are_cards_and_merge,
-               lens_resolve_reads_an_emptied_half_as_decline):
+               lens_resolve_reads_an_emptied_half_as_decline,
+               accept_all_rules_every_open_form,
+               cached_listing_answers_at_once,
+               background_reader_follows_kicks_and_the_database):
         fn(root)
     print(f"OK — {PASSED} Merge forms checks")
 

@@ -49,6 +49,7 @@ import io
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -222,6 +223,14 @@ def _form_row(thread: dict, form: dict | None, marked: str | None,
             local, at, at + len(old))
     row["edited_in_doc"] = (row["current"] is not None
                             and row["current"] != row["proposed"])
+    return _apply_ruling(row, ruling_of(thread))
+
+
+def _apply_ruling(row: dict, ruling: dict | None) -> dict:
+    """Set `row`'s ruling (and its staleness and diff) from `ruling`, the
+    one held on its thread now. The cached listing (below) runs this again
+    on every read, so a ruling made since the Doc was read shows at once."""
+    row["ruling"] = ruling
     # A ruling made on a green half the tab no longer reads (the Doc was
     # edited after it) does not count: the form goes back to To rule,
     # flagged, and merging waits for a new ruling. The held ruling stays
@@ -235,7 +244,7 @@ def _form_row(thread: dict, form: dict | None, marked: str | None,
     ruling = row["ruling"] or {}
     shown = (ruling.get("text") if ruling.get("verdict") == "edit"
              else None) or row["current"] or row["proposed"]
-    row["segments"] = word_diff(old, shown) if old else []
+    row["segments"] = word_diff(row["old"], shown) if row["old"] else []
     return row
 
 
@@ -1037,6 +1046,214 @@ def enqueue(key: tuple, file: str, run_one, start: bool = True) -> dict:
     return queue_status(key)
 
 
+# --------------------------------------------------------------- accept all
+
+def accept_all(db: Database, manuscript: dict, file: str,
+               forms: list[dict]) -> dict:
+    """Accept every form the page showed under To rule in `file`, each
+    through `decide` as a single Accept is: `forms` is [{id, seen}], `seen`
+    the green half as the page showed it. Nothing is merged. A form that
+    no longer takes a ruling (merged meanwhile, not in the tab) is named
+    under `errors`; the rest are still ruled."""
+    ruled: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+    for f in forms:
+        tid = str(f.get("id") or "")
+        row = db.one("SELECT file FROM doc_threads WHERE id = ? AND "
+                     "manuscript_id = ?", (tid, manuscript["id"]))
+        if row is None or row["file"] != file:
+            errors[tid] = f"no open form {tid} in {file}"
+            continue
+        try:
+            ruled[tid] = decide(db, manuscript, tid, "accept",
+                                f.get("seen"))["ruling"]
+        except (LookupError, ValueError) as err:
+            errors[tid] = str(err)
+    return {"file": file, "accepted": len(ruled), "rulings": ruled,
+            "errors": errors}
+
+
+# ------------------------------------------------------- cached listing
+# Reading the forms means exporting the whole master Doc: seconds. So the
+# server keeps the last listing per manuscript and a background thread
+# reads it again about once a minute, at once when kicked (after a merge
+# here, or when asked by the page), and within seconds when the database
+# shows forms pushed or settled by another process (`filter push`,
+# `revise stage`, a CLI resolve): `_fingerprint` is a local query, no
+# Google call. The page gets the cache at once with its age. A ruling
+# made since the read is laid over the cache on every read
+# (`_overlay`), so rulings never wait for Google.
+
+REFRESH_EVERY = 60.0   # seconds between background reads of the Doc
+WATCH_EVERY = 5.0      # seconds between the database's cheap checks
+_CACHE: dict[tuple, dict] = {}
+_CLOCK = threading.Lock()
+
+
+def _entry(key: tuple) -> dict:
+    with _CLOCK:
+        return _CACHE.setdefault(key, {
+            "data": None, "at": None, "mono": 0.0, "fp": None,
+            "error": None, "refreshing": False, "thread": None,
+            "kick": threading.Event()})
+
+
+def _fingerprint(db: Database, manuscript: dict) -> str:
+    """What the listing depends on locally: the threads' states and
+    files, and the tabs' push stamps. Rulings are left out (laid over)."""
+    rows = db.all("SELECT state, file, COUNT(*) AS n, MAX(created_at) AS c "
+                  "FROM doc_threads WHERE manuscript_id = ? "
+                  "GROUP BY state, file ORDER BY state, file",
+                  (manuscript["id"],))
+    stamps = {k: v.get("pushed_at") for k, v in
+              gdocs.doc_status(db, manuscript).items() if isinstance(v, dict)}
+    return json.dumps([[tuple(r) for r in rows], stamps], sort_keys=True,
+                      default=str)
+
+
+def _read_listing(session, db: Database, manuscript: dict) -> dict:
+    if not gdocs.doc_status(db, manuscript).get("_master_id"):
+        return listing(db, manuscript, None, None)
+    _config, service, docs_service = session._doc_services()
+    return listing(db, manuscript, service, docs_service)
+
+
+def _store(key: tuple, data: dict, db: Database, manuscript: dict) -> dict:
+    e = _entry(key)
+    fp = _fingerprint(db, manuscript)
+    with _CLOCK:
+        e.update(data=data, at=now_iso(), mono=time.monotonic(), fp=fp,
+                 error=None)
+    return data
+
+
+def _overlay(db: Database, manuscript: dict, data: dict) -> dict:
+    """The cached listing with each form's ruling as held now; a form
+    merged or withdrawn since the read is left out."""
+    out = json.loads(json.dumps(data))
+    ids = [f["id"] for g in out["files"] for f in g["forms"]]
+    now: dict[str, dict] = {}
+    for i in range(0, len(ids), 500):
+        part = ids[i:i + 500]
+        for r in db.all("SELECT id, state, metadata FROM doc_threads WHERE "
+                        f"id IN ({', '.join('?' for _ in part)})",
+                        tuple(part)):
+            now[r["id"]] = dict(r)
+    files = []
+    for g in out["files"]:
+        g["forms"] = [_apply_ruling(f, ruling_of(now[f["id"]]))
+                      for f in g["forms"]
+                      if now.get(f["id"], {}).get("state") == "written"]
+        g["count"] = len(g["forms"])
+        g["undecided"] = sum(1 for f in g["forms"]
+                             if f["found"] and not f["ruling"])
+        g["invalid"] = sum(1 for f in g["forms"] if not f["found"])
+        if g["forms"] or g.get("state") == "conflict":
+            files.append(g)
+    out["files"] = files
+    out["total"] = sum(g["count"] for g in files)
+    return out
+
+
+def refresh_cache(key: tuple, db: Database, manuscript: dict, read) -> None:
+    """Read the listing again (`read(db)`) into the cache; an error is
+    kept beside the last good listing, never over it."""
+    e = _entry(key)
+    with _CLOCK:
+        e["refreshing"] = True
+    try:
+        _store(key, read(db), db, manuscript)
+    except Exception as err:  # noqa: BLE001 — shown on the page
+        with _CLOCK:
+            e["error"] = f"{type(err).__name__}: {err}"
+            e["mono"] = time.monotonic()
+    finally:
+        with _CLOCK:
+            e["refreshing"] = False
+
+
+def kick(key: tuple) -> None:
+    """Ask the background thread (if running) to read the Doc now."""
+    with _CLOCK:
+        e = _CACHE.get(key)
+    if e is not None:
+        e["kick"].set()
+
+
+def _watch(key: tuple, manuscript: dict, read, open_db) -> None:
+    e = _entry(key)
+    db = open_db()
+    while True:
+        kicked = e["kick"].wait(WATCH_EVERY)
+        with _CLOCK:
+            if kicked:
+                # Say a read is under way before the kick is cleared, so
+                # the page never sees neither.
+                e["refreshing"] = True
+            e["kick"].clear()
+        try:
+            due = (kicked or e["data"] is None
+                   or time.monotonic() - e["mono"] >= REFRESH_EVERY
+                   or _fingerprint(db, manuscript) != e["fp"])
+        except Exception:  # noqa: BLE001 — try again on the next tick
+            due = False
+        if due:
+            refresh_cache(key, db, manuscript, read)
+
+
+def start_watch(key: tuple, manuscript: dict, read, open_db) -> None:
+    """Start the manuscript's background reader once (a daemon thread with
+    its own database connection)."""
+    e = _entry(key)
+    with _CLOCK:
+        if e["thread"] is not None:
+            return
+        e["thread"] = threading.Thread(
+            target=_watch, args=(key, manuscript, read, open_db),
+            daemon=True, name=f"forms-cache-{key[1]}")
+        e["thread"].start()
+
+
+def cached_listing(key: tuple, db: Database, manuscript: dict, read, *,
+                   refresh: bool = False, now: bool = False,
+                   watch: bool = True, open_db=None) -> dict:
+    """The page's read: the cached listing with rulings laid over it,
+    `cached_at` and `age` (seconds), and `refreshing`. With no cache yet
+    it reads at once. `refresh` asks the background thread to read
+    again; `now` reads at once (after a conflict choice, which the
+    cache does not lay over). `watch` starts that thread when it is not running."""
+    e = _entry(key)
+    if watch:
+        start_watch(key, manuscript, read,
+                    open_db or (lambda: api.open_db(key[0])))
+    if now or e["data"] is None:
+        refresh_cache(key, db, manuscript, read)
+        if e["data"] is None:
+            raise ValueError(e["error"] or "the forms could not be read")
+    elif refresh:
+        e["kick"].set()
+    with _CLOCK:
+        data, at, mono = e["data"], e["at"], e["mono"]
+        refreshing = e["refreshing"] or e["kick"].is_set()
+        error = e["error"]
+    out = _overlay(db, manuscript, data)
+    out.update(cached_at=at, age=round(time.monotonic() - mono, 1),
+               refreshing=refreshing, refresh_error=error)
+    return out
+
+
+def warm(workspace: str | None, name: str | None) -> None:
+    """Start the background reader for the server's manuscript when the
+    server starts, so the forms are ready before the page is opened."""
+    from . import audiobook
+
+    session = audiobook.session(workspace, name)
+    m = session.manuscript
+    start_watch((workspace, m["name"]), m,
+                lambda tdb: _read_listing(session, tdb, m),
+                lambda: api.open_db(workspace))
+
+
 def dispatch(method: str, params: dict[str, Any],
              workspace: str | None = None) -> dict:
     """The page's API (`/api/forms`): list, decide, merge (at once),
@@ -1053,28 +1270,44 @@ def dispatch(method: str, params: dict[str, Any],
     db = session._thread_db()
     try:
         if method == "list":
-            if not gdocs.doc_status(db, manuscript).get("_master_id"):
-                return listing(db, manuscript, None, None)
-            _config, service, docs_service = session._doc_services()
-            return listing(db, manuscript, service, docs_service)
+            if params.get("cached"):
+                # The page: the cached listing at once, its age, and (with
+                # `refresh`) a background re-read it polls for.
+                return cached_listing(
+                    (workspace, manuscript["name"]), db, manuscript,
+                    lambda tdb: _read_listing(session, tdb, manuscript),
+                    refresh=bool(params.get("refresh")),
+                    now=bool(params.get("now")))
+            return _store((workspace, manuscript["name"]),
+                          _read_listing(session, db, manuscript), db,
+                          manuscript)
         if method == "decide":
             return decide(db, manuscript, str(params["id"]),
                           str(params["verdict"]), params.get("seen"),
                           params.get("text"), params.get("prefix"),
                           params.get("suffix"))
+        if method == "accept_all":
+            return accept_all(db, manuscript, str(params["file"]),
+                              params.get("forms") or [])
         if method == "merge":
             config, service, docs_service = session._doc_services()
-            return merge(db, manuscript, str(params["file"]), service,
-                         docs_service, config)
+            try:
+                return merge(db, manuscript, str(params["file"]), service,
+                             docs_service, config)
+            finally:
+                kick((workspace, manuscript["name"]))
         if method == "settle":
             return settle(db, manuscript, str(params["file"]),
                           str(params["region"]), str(params["verdict"]),
                           params.get("text"))
         if method == "land":
             config, service, docs_service = session._doc_services()
-            return land_conflict(db, manuscript, str(params["file"]),
-                                 params.get("key"), service, docs_service,
-                                 config)
+            try:
+                return land_conflict(db, manuscript, str(params["file"]),
+                                     params.get("key"), service,
+                                     docs_service, config)
+            finally:
+                kick((workspace, manuscript["name"]))
         key = (workspace, manuscript["name"])
         if method == "enqueue":
             seen_key = params.get("key")
@@ -1084,11 +1317,15 @@ def dispatch(method: str, params: dict[str, Any],
                 # The worker's own thread: its own database connection.
                 tdb = session._thread_db()
                 config, service, docs_service = session._doc_services()
-                if conflict:
-                    return land_conflict(tdb, manuscript, file, seen_key,
-                                         service, docs_service, config)
-                return merge(tdb, manuscript, file, service, docs_service,
-                             config)
+                try:
+                    if conflict:
+                        return land_conflict(tdb, manuscript, file, seen_key,
+                                             service, docs_service, config)
+                    return merge(tdb, manuscript, file, service,
+                                 docs_service, config)
+                finally:
+                    # A merge changes the tab and the forms: read again.
+                    kick(key)
             return enqueue(key, str(params["file"]), run_one)
         if method == "queue":
             return queue_status(key)
