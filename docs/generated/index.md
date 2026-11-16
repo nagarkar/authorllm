@@ -968,6 +968,12 @@ The migration verbs (docs/extraction-redesign.md §5, §9 phase 5): backup, migr
 
 The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, §9 phase 1): `extraction.assemble` and `authorlm extract <file>`.
 
+## `tests.test_fenced`
+
+`authorlm/tests/test_fenced.py`
+
+`book._fenced` is the JSON fence every pack embeds for structured payloads. Wrong fencing breaks the role's parse of what it was handed.
+
 ## `tests.test_filter_library`
 
 `authorlm/tests/test_filter_library.py`
@@ -1574,6 +1580,12 @@ _No docstring._
 
 `gdocs.unchanged_since_push` is the audiobook page's Push skip door.
 
+## `tests.test_unmet_and_restarted`
+
+`authorlm/tests/test_unmet_and_restarted.py`
+
+`book._unmet` and `book._rests_on_restarted` are the wait / flag gates on the status board: which earlier scopes a step still needs, and when a done wider step rests on work that was restarted underneath it.
+
 ## `tests.test_usage_four`
 
 `authorlm/tests/test_usage_four.py`
@@ -1597,6 +1609,18 @@ _No docstring._
 `authorlm/tests/test_verse_poem_level.py`
 
 `verse.poem_level` and `verse.heading_levels` decide where poems sit in a verse file and what the collect report warns about.
+
+## `tests.test_warm_all`
+
+`authorlm/tests/test_warm_all.py`
+
+`forms_page.warm_all` starts the background reader for every manuscript that still has open (`written`) forms, not only the page server's own.
+
+## `tests.test_workflow_strings`
+
+`authorlm/tests/test_workflow_strings.py`
+
+`book._strings` is the TOML gate on every list-of-strings field in a workflow step (`after`, `gives`, `artifacts`). A non-list or a non-string member must refuse with the step's `where` — otherwise a typing mistake silently empties a dependency list and a step starts too soon.
 
 ## `tests.test_write_accept_idempotent`
 
