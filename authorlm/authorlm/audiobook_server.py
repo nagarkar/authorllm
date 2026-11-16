@@ -237,6 +237,9 @@ def run(workspace: str | None, manuscript: str | None, host: str = "127.0.0.1",
     try:
         from . import forms_page
         forms_page.warm(workspace, s.manuscript["name"])
+        for name in forms_page.warm_all(workspace):
+            if name != s.manuscript["name"]:
+                print(f"  merge forms: reading {name} in the background")
     except Exception as err:  # noqa: BLE001 — the page reads on demand then
         print(f"  merge forms: background reading not started ({err})")
     print(f"audiobook page for {s.manuscript['name']}: {url}")
