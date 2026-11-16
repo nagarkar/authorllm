@@ -1412,6 +1412,12 @@ Doc export can wrap a struck old half in emphasis (`<<*term*>>` for a staged `te
 
 `lenses.resolve_pointers` decides which other chapters a lens INPUTS payload may pull in as pointed-to essays.
 
+## `tests.test_resolve_write_before_record`
+
+`authorlm/tests/test_resolve_write_before_record.py`
+
+Settle must write final bytes before flipping threads off `written`.
+
 ## `tests.test_run_all`
 
 `authorlm/tests/test_run_all.py`
