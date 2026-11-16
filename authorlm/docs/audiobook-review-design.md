@@ -442,11 +442,53 @@ stamps `pushed_at` on the tab's entry, which the line reads back. This
 narrows the 2026-09-26 ruling: the page still never *pulls* or
 reconciles — that stays in chat — but it may push what is on disk.
 
+**2026-11-03. Try text.** `/try-text` on the same `audio serve` host
+pastes arbitrary Markdown and plays it through the Mac preview voice.
+`POST /api/try-text` returns the MP3 directly and keeps the bytes
+outside the manuscript (no take, no state entry). Same-origin /
+`X-AuthorLM: 1` only; body capped at 64 KiB. Use it to hear a passage
+before it is filed, not as a substitute for paragraph previews keyed
+by section id.
+
+**2026-11-06. Dev edit mode.** The developmental-edit review surface
+is another mode of this page (`#<ms>/devedit`, `POST /api/devedit` →
+`devedit.dispatch`): letter and argument map, letter decisions, and
+one review item at a time with accept / reject / defer. Push/pull for
+accepted files reuse the page's Doc session (push still guarded). The
+run folder and chat verbs stay in `devedit.py` / `authorlm devedit`;
+this mode does not start a run.
+
+**2026-11-03. `--live` / `--dry-run` only on spend verbs.** Paid or
+send audio actions (`audition`, `dictionary`, `generate`, `retake`,
+`say`) preview unless `--live`; `--dry-run` is the same preview.
+Passing either flag on a free audio action is a usage error.
+
+**2026-11-14…16. Merge forms mode.** Outside revisions (`revise
+stage`), filter-pass forms (`filter push`) and lens forms (`lens
+push`) are ruled on one page (`#<ms>/forms`, `POST /api/forms` →
+`forms_page.dispatch`). A ruling is held on the thread
+(`metadata.page_ruling`) until Merge for that file runs the resolve /
+guarded push path; nothing touches the Doc before Merge. Accept all
+accepts every open form under To rule without merging. A two-sided
+conflict stops Merge and is settled under Conflicts (`land_conflict`)
+instead. Edit keeps the whole passage the card shows (prefix / green /
+suffix). A file with no open forms is a neutral note, not a failure.
+The server background-warms every manuscript that still has open forms
+(`forms_page.warm_all`) so the listing is cached when the page opens;
+cheap local fingerprints kick a re-read when another process stages or
+settles forms.
+
+**2026-11-16. Workbench: empty box = as spelled.** On the pronunciation
+workbench (standalone `authorlm workbench` or this page's workbench
+mode), an empty respelling box means the word as spelled; Save writes
+that as a decision (`as_spelled`). Collaborator suggestions arrive as
+try-hint rows the workbench shows; the author still saves.
+
 ## 11. Open questions
 
-- Whether the served page should also host the pronunciation workbench
-  and the Triage App ("authorstation", filed 2026-09-04). This design
-  makes the three pages siblings on the same server pattern; folding
-  them is a separate grilling.
+- Whether the served page should also fold in the Triage App
+  ("authorstation", filed 2026-09-04). The pronunciation workbench and
+  Merge forms / Dev edit modes already share this server; Triage
+  remains a sibling (`triage-app`).
 - The `say` rate mapping (175 × speed) is a first guess; tune once
   after the first whole-chapter listen.
