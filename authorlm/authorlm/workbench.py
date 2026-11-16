@@ -184,9 +184,15 @@ class Session:
         # "brahman", so nothing ever read as tested).
         tried = {(pron.key(r.get("term") or ""), " ".join((r.get("say") or "").split()))
                  for r in self._clips().values() if r.get("mode") == "respelling"}
+        heard = {pron.key(r.get("term") or "") for r in self._clips().values()
+                 if r.get("mode") == "default"}
         for row in rows:
-            row["tested"] = bool(row["say"]) and \
-                (pron.key(row["term"]), " ".join(row["say"].split())) in tried
+            # "Reads as spelled": the reading is the word itself, saved
+            # after hearing the voice's default. Tested by a default clip.
+            row["as_spelled"] = audio.reads_as_spelled(row["term"], row["say"])
+            row["tested"] = bool(row["say"]) and (
+                pron.key(row["term"]) in heard if row["as_spelled"] else
+                (pron.key(row["term"]), " ".join(row["say"].split())) in tried)
         # The locator the LAST EXPORT wrote — what audiostation is using —
         # comes from audiobook.json on disk; the in-memory build carries
         # none (it never looks the dictionary up).
