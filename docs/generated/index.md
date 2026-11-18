@@ -704,6 +704,12 @@ API-layer tests + CLI/MCP parity checklist (P11).
 
 `staging.apply_accepted` is the local-road compose that turns accepted filter/critique threads into finished essay bytes.
 
+## `tests.test_apply_ruling`
+
+`authorlm/tests/test_apply_ruling.py`
+
+`forms_page._apply_ruling` is the Merge-forms card's live ruling gate: a ruling whose `seen` half no longer matches the Doc is stale, cleared for merge, and the card's word-diff is rebuilt from what would land now.
+
 ## `tests.test_audio`
 
 `authorlm/tests/test_audio.py`
@@ -835,6 +841,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 `authorlm/tests/test_devedit.py`
 
 The developmental edit's run folder: coverage from the TOC, step staleness, letter decisions, and verdicts that apply only to unchanged text.
+
+## `tests.test_diagram_scope`
+
+`authorlm/tests/test_diagram_scope.py`
+
+`book._scope_key` and `book._diagram_scope` fix which grain's steps carry a state mark when the diagram is drawn for one scope. Wrong key → the wrong chapter/part cell is painted, or a filename never resolves.
 
 ## `tests.test_doc_add_toc`
 
@@ -979,6 +991,12 @@ The migration verbs (docs/extraction-redesign.md §5, §9 phase 5): backup, migr
 `authorlm/tests/test_extraction_payload.py`
 
 The redesigned extraction's payload (docs/extraction-redesign.md §4.2, §4.3, §9 phase 1): `extraction.assemble` and `authorlm extract <file>`.
+
+## `tests.test_file_in_scope`
+
+`authorlm/tests/test_file_in_scope.py`
+
+`changes._scope_documents` and `changes._file_in_scope` are the land gate: an agent edit must name a file inside the run's scope. Wrong allow list → a chapter run rewrites another chapter; a missed refusal lets cross-scope land through. Hermetic — Layout in memory, docs helpers stubbed; no workspace, no Google, no model.
 
 ## `tests.test_filter_library`
 
@@ -1489,6 +1507,12 @@ The [Signature: uri] tag: plain text in the files, a signature block (image, aut
 `authorlm/tests/test_stale_suggestions.py`
 
 `hygiene.stale_suggestions` marks pending bridge / prerequisite guidance moot when collect later realizes the concept or closes the gap.
+
+## `tests.test_still_landed_and_entry_lines`
+
+`authorlm/tests/test_still_landed_and_entry_lines.py`
+
+`book._still_landed` warns a restarted pack that earlier applied edits are still in the chapter files; `_entry_lines` is the register block every pack embeds for one settled choice.
 
 ## `tests.test_structure_find_file`
 
