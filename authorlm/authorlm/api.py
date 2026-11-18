@@ -6102,11 +6102,27 @@ def _clear_door_forms(db: Database, manuscript: dict, rel: str,
                          else "{{" + (r.get("proposed_new") or "") + "}}")
         return at if at >= 0 else len(marked)
 
-    outcomes = [{"old": r.get("proposed_old") or "",
-                 "new": r.get("proposed_new") or "",
-                 "keep": "new" if r["state"] == "cleaned" else "old"}
-                for r in sorted(rows, key=where)
-                if r["state"] in ("cleaned", "declined")]
+    outcomes = []
+    for r in sorted(rows, key=where):
+        if r["state"] not in ("cleaned", "declined"):
+            continue
+        old = r.get("proposed_old") or ""
+        proposed = r.get("proposed_new") or ""
+        meta = loads(r.get("metadata"), {}) or {}
+        if old:
+            news = [proposed] if proposed else []
+        else:
+            # Insertion still marked by its staged half after a Merge-forms
+            # edit rewrote proposed_new; also try the rewritten half when
+            # the author reworded the green half in the tab itself.
+            staged = meta.get("original_new") or proposed
+            news = []
+            for n in (staged, proposed):
+                if n and n not in news:
+                    news.append(n)
+        outcomes.append({
+            "old": old, "new": news[0] if news else "", "news": news,
+            "keep": "new" if r["state"] == "cleaned" else "old"})
     try:
         faults = gdocs.settle_forms_in_tab(
             db, manuscript, rel, outcomes, docs_service,
@@ -7132,10 +7148,25 @@ def resolve_revisions(db: Database, manuscript: dict, file: str,
         else:
             row["verdict"] = "accepted"
         result[row["verdict"]] += 1
+        # settle_forms_in_tab locates insertions by {{new}} still in the
+        # LIVE tab. A Merge-forms ruling edits only the local marked
+        # text, so the Doc still shows the staged half; blanking new on
+        # decline (or passing a rewritten proposed_new after a modified
+        # accept) made find_form miss and left the markers in place while
+        # reporting the tab clean. Door settle passes the staged new —
+        # match that, and also try the rewritten half for a Doc edit.
+        if row["old"]:
+            locate_news = [fresh["proposed_new"] or ""]
+        else:
+            staged = meta.get("original_new") or row["new"] or ""
+            locate_news = []
+            for n in (staged, fresh["proposed_new"] or ""):
+                if n and n not in locate_news:
+                    locate_news.append(n)
         outcomes.append({
             "old": row["old"],
-            "new": ("" if row["verdict"] == "declined" and not row["old"]
-                    else fresh["proposed_new"]),
+            "new": locate_news[0] if locate_news else "",
+            "news": locate_news,
             "keep": "old" if row["verdict"] == "declined" else "new"})
 
     # The tab. A rebuild push clears every marker at once, and is held
