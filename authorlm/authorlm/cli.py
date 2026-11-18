@@ -6440,7 +6440,9 @@ def cmd_export(args):
                                      print_ready=args.print_ready,
                                      profile=args.profile,
                                      file=args.file,
-                                     notice=args.notice)
+                                     notice=args.notice,
+                                     watermark=args.watermark,
+                                     docx_format=args.format)
     except (RuntimeError, LookupError, ValueError) as err:
         raise SystemExit(ui.yellow(f"export failed: {err}"))
     print(f"Wrote {result['markdown']} (variant: {result['variant']}).")
@@ -10961,6 +10963,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "confidentiality line, shown on the notice page "
                         "and in every page footer beside the standard "
                         "wording")
+    p.add_argument("--watermark", metavar="TEXT",
+                   help="docx or review PDF: draw TEXT faint and diagonal "
+                        "behind every page and repeat it in the footer "
+                        "beside the page number (e.g. 'Review copy for "
+                        "Emma Tyler')")
+    p.add_argument("--format", metavar="STRING",
+                   help="docx only: manuscript formatting, e.g. "
+                        "'font=Times New Roman; size=12; line-spacing=2' "
+                        "(keys: font, size in pt, line-spacing as in Google "
+                        "Docs); chapters then start on a new page and body "
+                        "paragraphs take a first-line indent")
     p.add_argument("--print-ready", action="store_true",
                    help="PDF only: omit the default confidential-review "
                         "notice page, footer, and watermark")

@@ -737,7 +737,9 @@ def export_published(db: Database, manuscript: dict, fmt: str,
                      print_ready: bool = False,
                      profile: str | None = None,
                      file: str | None = None,
-                     notice: str | None = None) -> dict:
+                     notice: str | None = None,
+                     watermark: str | None = None,
+                     docx_format: str | None = None) -> dict:
     """Publishing export: write the publishable markdown to _exports/
     and, for docx/epub/pdf, convert it locally with pandoc — images
     embed from _illustrations/, no Doc or Drive involved.
@@ -756,6 +758,12 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     `notice` adds a recipient-specific line to a review PDF ("provided to
     X solely for ...") on the notice page and in every page footer,
     beside the standard confidential wording.
+
+    `watermark` (docx, or a review PDF) draws that text faint and
+    diagonal behind every page and repeats it in the page footer.
+    `docx_format` ("font=...; size=...; line-spacing=...", docx only)
+    restyles the Word file (`docx_style`). Neither given: the docx is
+    pandoc's output, untouched (nagarkar/authorllm#469).
 
     PDF profiles: `review` (default — notice page, footer, watermark),
     `print` (the same page, review marks off; `print_ready=True`), and
@@ -776,6 +784,17 @@ def export_published(db: Database, manuscript: dict, fmt: str,
     if notice and (fmt != "pdf" or print_ready or profile == "book"):
         raise ValueError("--notice is only valid for a review PDF "
                          "(not with --print-ready or --profile book)")
+    watermark = (watermark or "").strip()
+    if watermark and not (fmt == "docx" or (
+            fmt == "pdf" and not print_ready and profile in (None, "review"))):
+        raise ValueError("--watermark is only valid for docx or a review "
+                         "PDF (not with --print-ready or --profile book)")
+    parsed_format = None
+    if docx_format is not None:
+        if fmt != "docx":
+            raise ValueError("--format is only valid for docx exports")
+        from . import docx_style
+        parsed_format = docx_style.parse_format(docx_format)
     if file:
         file = file.strip().lstrip("./")
         if not file.endswith(".md"):
@@ -892,6 +911,9 @@ def export_published(db: Database, manuscript: dict, fmt: str,
                         "--metadata", f"copyright-year={date.today().year}"]
             if notice:
                 command += ["--metadata", f"authorlm-review-notice={notice}"]
+            if watermark:
+                command += ["--metadata",
+                            f"authorlm-review-watermark={watermark}"]
         if book:
             running = _latex_escape(settings["title"] or manuscript["name"])
             command += ["-V", "header-includes=\\providecommand{"
@@ -915,6 +937,9 @@ def export_published(db: Database, manuscript: dict, fmt: str,
 
     if not book:
         run_pandoc([])
+        if fmt == "docx" and (watermark or parsed_format):
+            from . import docx_style
+            docx_style.apply(out_path, watermark or None, parsed_format)
         result[fmt] = str(out_path)
         return result
 
