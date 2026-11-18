@@ -5293,6 +5293,65 @@ def _an_outside_caller_resolves_one_tab(root: Path) -> None:
           not held["written"] and "takes no new ones" in held["failed"][0][1],
           str(held))
 
+    # --- Merge-forms rulings on insertions while settle is surgical -----
+    # Rebuild push is held by a foreign form; outcomes must locate the
+    # insertion by the half still in the LIVE tab (not new="" on decline,
+    # not a rewritten proposed_new on edit).
+    def with_foreign_insert(subdir: str, new: str):
+        db, manuscript, ms, fake = _outside_fixture(root, subdir)
+        mid = manuscript["id"]
+        api.stage_revisions(db, manuscript, "solo.md", [
+            {"old": "", "new": new, "anchor_paragraph": 2, "note": "ins"},
+        ], "ytlm", fake, fake)
+        # Another origin's form holds the rebuild push so settle is
+        # surgical — the path Merge forms takes when forms remain out.
+        fake.edit("tab-2", "Omega closes.",
+                  "<<Omega closes.>>{{Omega, foreign.}}")
+        row = _ko("dt")
+        row.update(
+            manuscript_id=mid, origin_type="critique",
+            origin_id="foreign:critique:insert-settle", file="solo.md",
+            anchor_quote=None, proposed_old="Omega closes.",
+            proposed_new="Omega, foreign.", note="theirs", state="written",
+            our_reply_ids="[]", last_author_reply_id=None,
+            scope_kind="file", scope_ref="solo.md",
+            metadata=json.dumps({"kind": "replace", "anchor_paragraph": 6,
+                                 "original_new": "Omega, foreign."}))
+        db.insert("doc_threads", row)
+        ins = db.one("SELECT id FROM doc_threads WHERE note = 'ins'")
+        return db, manuscript, ms, fake, ins["id"]
+
+    db, manuscript, ms, fake, ins_id = with_foreign_insert(
+        "outside-decline-insert-ws", "An added aside.")
+    res = api.resolve_revisions(db, manuscript, "solo.md", "ytlm",
+                                fake, fake, rulings={ins_id: ""})
+    tab = fake.tab_text("solo.md")
+    local = (ms / "solo.md").read_text()
+    check("a Merge-forms decline of an insertion takes the form out of "
+          "the tab when settle is surgical (push held by another origin)",
+          res["landed"] and res["declined"] == 1
+          and not res["tab_still_marked"]
+          and "{{An added aside.}}" not in tab
+          and "An added aside." not in local
+          and "<<Omega closes.>>{{Omega, foreign.}}" in tab,
+          tab + local + str(res))
+
+    db, manuscript, ms, fake, ins_id = with_foreign_insert(
+        "outside-edit-insert-ws", "An added aside.")
+    res = api.resolve_revisions(
+        db, manuscript, "solo.md", "ytlm", fake, fake,
+        rulings={ins_id: "An added aside, reworded on the page."})
+    tab = fake.tab_text("solo.md")
+    local = (ms / "solo.md").read_text()
+    check("a Merge-forms edit of an insertion unwraps the staged form "
+          "in the tab (markers gone) while the local file holds the edit",
+          res["landed"] and res["modified"] == 1
+          and not res["tab_still_marked"]
+          and "{{An added aside.}}" not in tab
+          and "An added aside, reworded on the page." in local
+          and "<<Omega closes.>>{{Omega, foreign.}}" in tab,
+          tab + local + str(res))
+
     # --- a two-sided edit lands nothing ---------------------------------
     db, manuscript, ms, fake = _outside_fixture(root, "outside-conflict-ws")
     api.stage_revisions(db, manuscript, "solo.md", [
