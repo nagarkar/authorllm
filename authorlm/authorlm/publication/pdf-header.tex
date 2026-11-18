@@ -22,6 +22,8 @@
 
 % The review filter invokes this only for the default PDF profile. A
 % --print-ready export never emits the invocation, leaving a clean PDF.
+% \AuthorLMWatermark is the diagonal text; export --watermark renews it.
+\providecommand{\AuthorLMWatermark}{Confidential\\Review}
 % #3 is the recipient line from export --notice (empty: standard footer).
 \providecommand{\AuthorLMReviewMode}[3]{%
   \AuthorLMEnableReviewPageStyle{}
@@ -31,7 +33,7 @@
         \rotatebox{45}{%
           \parbox{0.72\paperwidth}{%
             \centering\fontsize{64}{66}\selectfont\color[gray]{0.92}%
-            Confidential\\Review%
+            \AuthorLMWatermark%
           }%
         }%
       }%

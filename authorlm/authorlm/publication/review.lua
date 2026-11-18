@@ -86,11 +86,24 @@ function Pandoc(doc)
   })
   notice.attr = pandoc.Attr("", {"authorlm-review-notice"})
 
+  -- export --watermark: the diagonal text, and the footer line when no
+  -- --notice is given.
+  local mark = meta_text(doc.meta, "authorlm-review-watermark")
+  local footer = custom
+  if mark ~= "" and footer == "" then
+    footer = mark
+  end
   table.insert(doc.blocks, 1,
     pandoc.RawBlock("latex", "\\AuthorLMReviewMode{" .. latex_escape(owner)
-      .. "}{" .. latex_escape(year) .. "}{" .. latex_escape(custom) .. "}"))
-  table.insert(doc.blocks, 2, notice)
-  table.insert(doc.blocks, 3,
+      .. "}{" .. latex_escape(year) .. "}{" .. latex_escape(footer) .. "}"))
+  local at = 2
+  if mark ~= "" then
+    table.insert(doc.blocks, 1, pandoc.RawBlock("latex",
+      "\\renewcommand{\\AuthorLMWatermark}{" .. latex_escape(mark) .. "}"))
+    at = 3
+  end
+  table.insert(doc.blocks, at, notice)
+  table.insert(doc.blocks, at + 1,
     pandoc.RawBlock("latex", "\\AuthorLMReviewNoticeBreak{}"))
   return doc
 end

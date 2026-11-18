@@ -254,6 +254,12 @@ Inline directives: `[Footnote: …]`, `[Explain: …]` and `[Suggestion: …]` �
 
 Chapter files as documents: a document's identity is its `dc-` id (the `documents` table), and its relpath is a display name with history. This module owns that identity, the rename that carries a document's records to a new name, and the mechanical edits (add, retire, revive; RFC §16.1 Level 3).
 
+## `authorlm.docx_style`
+
+`authorlm/authorlm/docx_style.py`
+
+Post-processing for a pandoc .docx: a review watermark and manuscript formatting (nagarkar/authorllm#469).
+
 ## `authorlm.drive_upload`
 
 `authorlm/authorlm/drive_upload.py`
@@ -913,6 +919,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 `authorlm/tests/test_essay_summaries.py`
 
 Summary hierarchy, step 4 (docs/summary-hierarchy-design.md §3.4, §4.5, §6.6, §11.4): the essay-summary pass. The essay is composed from its section summaries (never the text) and the prior essay summaries; the model writes FLOW, MOVES, MOTIFS, DOES NOT and code derives INTRODUCES, ASSUMES, PROMISES, DEBTS from the paragraph records and renders them under those labels; `sections_hash` tells "my sections changed"; `ensure(level="essay")` rebuilds the two lower levels first and prints one cost line per level; the structural coverage check replaces the paragraph citation parser. Fake LLMs throughout; the live recording is tests/test_live_llm.py's `essay-summary` section.
+
+## `tests.test_export_docx_format`
+
+`authorlm/tests/test_export_docx_format.py`
+
+`export docx --watermark TEXT --format "font=…; size=…; line-spacing=…"` (nagarkar/authorllm#469): the watermark header and footer parts, the restyled styles.xml, and that a plain export is pandoc's output untouched.
 
 ## `tests.test_export_escapes`
 

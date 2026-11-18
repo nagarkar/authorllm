@@ -2205,6 +2205,17 @@ standard confidential wording; review PDFs only. `--file` also builds a one-off
 markdown file under the manuscript root that is not part of the book (an
 excerpt in `_drafts/`).
 
+**Named review copies in Word (2026-11-17, #469).** `export docx --watermark
+"Review copy for X"` draws the text faint and diagonal behind every page (a
+Word header watermark) and repeats it in a small footer beside the page
+number; `export pdf --watermark "…"` puts the same text on a review PDF's
+diagonal (and in its footer when no `--notice`). `export docx --format
+"font=Times New Roman; size=12; line-spacing=2"` (keys `font`, `size` in pt,
+`line-spacing` as in Google Docs; footnotes stay single) also starts each
+chapter on a new page and indents body paragraphs. Without either flag the
+docx is pandoc's output, untouched. `[Illustration: …]` slot notes still
+appear with the images variant.
+
 **Print geometry (2026-09-02).** Trim size and bleed are manuscript
 properties beside the ISBNs — `authorlm manuscript set --trim-size 6x9
 --bleed no` (inches; MCP `set_manuscript_metadata(trim_size=, bleed=)`).
