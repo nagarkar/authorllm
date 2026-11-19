@@ -1597,12 +1597,27 @@ def decide_and_apply(db, folder: Path, manuscript: dict, n: int, answer: str,
 
 def _apply_decision(db, folder: Path, manuscript: dict, row: dict,
                     stage: int | None) -> list[dict]:
-    edits = (row.get("edits") or {}).get(row["answer"]) or []
-    if not edits:
-        return []
     s = stage if stage is not None else int(stage_dir(folder).name)
     mid, run = _key(db, folder)
-    out = []
+    # Update decision: undo whatever an earlier answer for this decision
+    # already applied. Without that, both options' prose stay in the file
+    # and the reused item id (stageN-dK.m) forgets the first apply, so
+    # revise cannot restore it.
+    prefix = f"stage{s}-d{row['n']}."
+    out: list[dict] = []
+    for item in list(queue(db, folder)):
+        if not str(item.get("id", "")).startswith(prefix) or not item.get("verdict"):
+            continue
+        try:
+            revise(db, folder, manuscript, item["id"], "reject",
+                   reason="decision updated", actor="decision")
+        except RuntimeError as err:
+            out.append({"id": item["id"], "file": item.get("file"),
+                        "error": str(err)})
+            return out
+    edits = (row.get("edits") or {}).get(row["answer"]) or []
+    if not edits:
+        return out
     for k, e in enumerate(edits, 1):
         item = {"id": f"stage{s}-d{row['n']}.{k}", "file": e["file"],
                 "tier": "must", "original": e["original"],
@@ -1620,6 +1635,7 @@ def _apply_decision(db, folder: Path, manuscript: dict, row: dict,
             item.update(verdict="accept", final=e["proposed"], decided=now,
                         applied=now, pushed=None, reverted=None,
                         reason_given=row.get("reason", ""))
+            item.pop("revised", None)
             row_id = _put(db, mid, run, item, queued=True)
             _store(db, row_id, item)
             _event(db, mid, run, item, "verdict", "decision")
@@ -1891,6 +1907,14 @@ def _verdict(db, mid: str, run: str, row_id: str, item: dict,
              manuscript: dict, verdict_: str, *, text, reason, paragraph,
              actor) -> dict:
     item_id = item["id"]
+    # A second verdict on a decided item would flip status without undoing
+    # an accept (revise is the door that swaps the file). Refuse so a stale
+    # Review card or a second client cannot leave applied prose while the
+    # row says reject/defer.
+    if item.get("verdict"):
+        raise ValueError(
+            f"item {item_id} already has verdict {item['verdict']}; "
+            "use revise to change it")
     was_applied = item.get("applied")
     if verdict_ == "reject" and not reason.strip():
         raise ValueError("a rejection needs the author's reason")
