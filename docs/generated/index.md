@@ -1064,6 +1064,12 @@ docs/generated/ matches the code: layer 3 of metalm guidelines/design.md#generat
 
 Retake must not destroy a good paragraph take when the write fails mid-flight.
 
+## `tests.test_given`
+
+`authorlm/tests/test_given.py`
+
+`book._given` formats every named `gives` path into the pack contract (`chapter` / `part` / `toc` / `scope_flag` / unknown step ids).
+
 ## `tests.test_grounding_strength`
 
 `authorlm/tests/test_grounding_strength.py`
@@ -1394,6 +1400,12 @@ Lazy-preview stamp and orphan sweep (#227).
 
 Shared readings: one reading per essay per filter family (readings.py, issue #412).
 
+## `tests.test_reference`
+
+`authorlm/tests/test_reference.py`
+
+`book._reference` builds the restart pack's "earlier attempt" block: independent steps withhold the prior result; others get it as reference only, with failed vs restarted reason.
+
 ## `tests.test_refuse_sidecar`
 
 `authorlm/tests/test_refuse_sidecar.py`
@@ -1406,11 +1418,23 @@ Shared readings: one reading per essay per filter family (readings.py, issue #41
 
 The register of settled choices (register.py): every choice the author settles is an entry holding the author's words verbatim and the machine's reading of them, and every piece of work that rests on an entry records a use labelled applies or infers. These tests enforce the rules the module docstring states: no entry is settled without both words and reading; a settled entry is never edited in place (a change makes a new entry that supersedes the old one and returns the work that rested on it); an entry can be reopened; a key is unique among the live entries of its kind.
 
+## `tests.test_register_section`
+
+`authorlm/tests/test_register_section.py`
+
+`book._register_section` is the pack block that lists every register entry in the run's scope and says whether `register_uses` is required.
+
 ## `tests.test_reply_records`
 
 `authorlm/tests/test_reply_records.py`
 
 Paragraph-record reply unwrap (`_reply_records`) and JSON schema shape.
+
+## `tests.test_require_open`
+
+`authorlm/tests/test_require_open.py`
+
+`book._require_open` is the gate on finish and fail: a superseded or failed run is closed and must not take a new result.
 
 ## `tests.test_resolve_emphasized_old`
 
