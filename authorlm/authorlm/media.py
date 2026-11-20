@@ -47,7 +47,6 @@ from .revisions import is_placeholder, read_manuscript_files
 
 DRAFT_WORDS = 150          # §8e: a generation spec under this is a draft
 WORDS_PER_MINUTE = 150     # estimated_seconds is a generation hint only
-MAX_CAST = 3
 
 _TIMESTAMP = re.compile(r"^(?:(?P<h>\d+):)?(?P<m>\d{1,2}):(?P<s>\d{2})$")
 _SENTENCE_END = re.compile(r"(?<=[.!?…])[\"”’)\]]*\s+")
@@ -255,18 +254,23 @@ def _check(item: dict, root: Path, known: dict) -> None:
         elif value not in known["illustrations"] and value not in known["cast"]:
             errors.append(f"{name}: '{value}' is neither an illustration key "
                           "nor a cast id in this manuscript")
+    # A clip's cast ids are checked by the code that checks an
+    # illustration's: llmlm's shared cast module (nagarkar/llmlm#20), with
+    # the manuscript's characters and their picked plates. A library id
+    # (`studio:hero`) is not a manuscript character and is set aside.
+    from llmlm import cast as shared_cast
+
+    from .illus import CAST_SETTINGS
+
     cast = f.get("cast") or []
-    if len(cast) > MAX_CAST:
-        errors.append(f"cast: names {len(cast)} ids; at most {MAX_CAST}")
     for cid in cast:
         if ":" in cid:
             warnings.append(f"cast: {cid} is in a library — not checked until "
                             "the Studio library is built")
-        elif cid not in known["cast"]:
-            errors.append(f"cast: '{cid}' is not defined — no tag carries "
-                          f"'cast-id: {cid}'")
-        elif not known["cast"][cid]:
-            errors.append(f"cast: plate '{cid}' has no pick")
+    errors += shared_cast.resolve_references(
+        known["characters"],
+        shared_cast.Request("", cast=tuple(c for c in cast if ":" not in c)),
+        CAST_SETTINGS).errors
     if "look" in f:
         warnings.append(f"look: {f['look']} not checked — looks are not "
                         "built yet")
@@ -495,7 +499,7 @@ def list_media(root: Path, files: list[str] | None = None,
     """`media list`: every clip, collage, montage and illustration in reading
     order, each with everything this slice knows (§8f), plus the
     file-level problems. Paths only, never bytes."""
-    from .illus import cast_index, load_prompts
+    from .illus import cast_characters, cast_index, load_prompts
     from .structure import TOC_FILENAME, reading_order, toc_attrs
 
     from .revisions import iter_manuscript_paths
@@ -517,6 +521,7 @@ def list_media(root: Path, files: list[str] | None = None,
                 illus_keys.add(slot["key"])
     known = {"specs": load_specs(root),
              "cast": {cid: c.get("plate") for cid, c in index.items()},
+             "characters": cast_characters(root, index),
              "illustrations": illus_keys, "prompts": prompts,
              "illustrations_on": {n: attrs.get(n, {}).get("illustrations")
                                   != "none" for n in names}}

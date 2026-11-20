@@ -439,6 +439,9 @@ by hand.
    picked plates. "of this book" and the `authorlm:` field prefix are
    settings authorlm passes (`illus.CAST_SETTINGS`). Proof that nothing
    a manuscript holds changed: `tests/test_illus_shared_cast.py`.
+   A clip's `cast:` ids are checked by the same call
+   (`authorlm/media.py` `_check`), so a clip and an illustration get the
+   same sentences for an undefined or unpicked cast member.
 3. **Verse export profile and the poetry sweep.** `form = "verse"`; the
    spread layout in the book profile with plates inside the type area;
    the 2x export upscale and the pixels-per-inch check (§8a); the EPUB
