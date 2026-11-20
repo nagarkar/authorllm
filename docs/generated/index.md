@@ -1100,6 +1100,12 @@ Retake must not destroy a good paragraph take when the write fails mid-flight.
 
 `illus render` with no fragment renders every unrendered slot, one after another, exactly as single-slot renders would.
 
+## `tests.test_illus_shared_cast`
+
+`authorlm/tests/test_illus_shared_cast.py`
+
+The illustration renderer runs on llmlm's shared cast module (`llmlm.cast`, nagarkar/llmlm#20) and nothing a manuscript holds changed with the move.
+
 ## `tests.test_interlocutor`
 
 `authorlm/tests/test_interlocutor.py`

@@ -2574,6 +2574,15 @@ on pull). An explicit `illus pick <fragment> <N>` is the author's
 approval and PINS the candidate — renders never move a pinned embed.
 `--from N` evolves an approved image under new style law instead of
 starting fresh.
+**Where the code lives**: the manuscript-free half (plate lookup and
+its "no pick" sentences, the reference text, the render with plates
+attached, candidate names and hashes, the `authorlm:` fields stored in
+each image, the pin file) is llmlm's `llmlm.cast`, shared with musiclm
+(nagarkar/llmlm#20). `authorlm/authorlm/illus.py` keeps what needs a
+manuscript (tag scan and `cast_index`, style law, description files
+and their snapshots, the embed line, the Doc round trip) and calls
+llmlm with plain data. A change to the shared half is a change in the
+llmlm checkout, tested there and by its `tools/check-consumers.sh`.
 
 Image style law is the `illustration` aspect of the style system —
 inheritance, file overrides, and ratification work exactly like prose
