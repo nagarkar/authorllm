@@ -554,7 +554,11 @@ class MediaTests(unittest.TestCase):
         def http(method, url, k, body=None, raw=False, timeout=120):
             calls.append(url)
             return {"name": "models/veo/operations/op1"}
+        # `_guard` writes its trace line to `_WORKSPACE`, and with none set
+        # that is the author's live ~/.authorlm: pin it to the test's own
+        # folder (every run of this test had been adding two lines there).
         with mock.patch.object(mcp_server, "_db", return_value=self._DB()), \
+                mock.patch.object(mcp_server, "_WORKSPACE", str(self.root)), \
                 mock.patch.object(mcp_server, "_manuscript", return_value=ms), \
                 mock.patch.object(media_gen, "_http", http):
             stopped = mcp_server.clip_ensure(key, generate=True, dry_run=False)
