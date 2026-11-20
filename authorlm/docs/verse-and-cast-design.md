@@ -427,6 +427,18 @@ by hand.
    DON pinned `openai/gpt-image-2` at `1024x1536`; SMSTTD stamped at its
    current `1536x1024`. `illustration_cast.md` drafted (8 cast, 9 stages)
    under Omit, in the toc as back matter, awaiting the cast sitting.
+   MOVED 2026-11-20 (nagarkar/llmlm#20): the manuscript-free half now
+   lives in llmlm, `llmlm.cast`, so musiclm's stills share it:
+   `resolve_references`, `reference_block`, `compose` (DEPICT,
+   REFERENCES, STYLE), `render`, `candidate_name`, `desc_hash`,
+   `style_hash`, `image_with_metadata`, `read_metadata`, and the pin
+   file (`load_pin`, `write_pin`, `ensure_pin`, `resolve_pin`).
+   `authorlm/illus.py` keeps the tag grammar, `cast_index`,
+   `illustration_law`, the description files, the embed line and
+   `slot_status`, and hands llmlm a plain list of characters with their
+   picked plates. "of this book" and the `authorlm:` field prefix are
+   settings authorlm passes (`illus.CAST_SETTINGS`). Proof that nothing
+   a manuscript holds changed: `tests/test_illus_shared_cast.py`.
 3. **Verse export profile and the poetry sweep.** `form = "verse"`; the
    spread layout in the book profile with plates inside the type area;
    the 2x export upscale and the pixels-per-inch check (§8a); the EPUB

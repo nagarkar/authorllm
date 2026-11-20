@@ -1,0 +1,215 @@
+{
+ "bare_composed": "an empty road under rain",
+ "bare_written": [
+  "an-empty-road-under-07fe7c16-0000-01.png"
+ ],
+ "composed": "DEPICT (content commands — costume, era, objects, and composition here override anything the style implies):\nthe pilgrim climbs toward the tower at dusk, the hat pulled low\n\nREFERENCES (the attached images, in this order — likeness only, never subject):\nImage 1: the Pilgrim of this book. Draw the same figure again.\nImage 2: the Tower of Light of this book. Draw the same figure again.\nImage 3: the previous plate in this series; keep its stage and composition.\n\nSTYLE (technique and rendering only):\nILLUSTRATION STYLE (ratified by the author — follow strictly):\n- Woodcut, high-contrast linework only. (no colour wash)\n- Figures small against wide ground.",
+ "declined": "cast unresolved — 01-road.md:10: cast plate 'ferryman' has no pick — render and pick it first (illustration_cast.md:14); 01-road.md:10: cast 'ghost' is not defined — no tag carries 'cast-id: ghost'",
+ "desc_hash": "61591143",
+ "errors": [
+  "01-road.md:10: cast plate 'ferryman' has no pick — render and pick it first (illustration_cast.md:14)",
+  "01-road.md:10: cast 'ghost' is not defined — no tag carries 'cast-id: ghost'"
+ ],
+ "ferry_file_untouched": true,
+ "field_offsets_ascend": true,
+ "field_order": [
+  "prompt",
+  "caption",
+  "style",
+  "model",
+  "size",
+  "cast",
+  "prior",
+  "date"
+ ],
+ "metadata": [
+  {
+   "authorlm:caption": "The climb",
+   "authorlm:cast": "pilgrim=a-lone-pilgrim-with-61bf041c-b309-01.png;tower-of-light=a-tower-of-pale-93c7eb20-b309-01.png",
+   "authorlm:model": "gemini/test-image",
+   "authorlm:prior": "chapel-stage=a-ruined-chapel-on-f3da5c19-b309-01.png",
+   "authorlm:prompt": "the pilgrim climbs toward the tower at dusk, the hat pulled low",
+   "authorlm:size": "1024x1536",
+   "authorlm:style": "ILLUSTRATION STYLE (ratified by the author — follow strictly):\n- Woodcut, high-contrast linework only. (no colour wash)\n- Figures small against wide ground."
+  },
+  {
+   "authorlm:caption": "The climb",
+   "authorlm:cast": "pilgrim=a-lone-pilgrim-with-61bf041c-b309-01.png;tower-of-light=a-tower-of-pale-93c7eb20-b309-01.png",
+   "authorlm:model": "gemini/test-image",
+   "authorlm:prior": "chapel-stage=a-ruined-chapel-on-f3da5c19-b309-01.png",
+   "authorlm:prompt": "the pilgrim climbs toward the tower at dusk, the hat pulled low",
+   "authorlm:size": "1024x1536",
+   "authorlm:style": "ILLUSTRATION STYLE (ratified by the author — follow strictly):\n- Woodcut, high-contrast linework only. (no colour wash)\n- Figures small against wide ground."
+  },
+  {
+   "authorlm:caption": "The climb",
+   "authorlm:cast": "pilgrim=a-lone-pilgrim-with-61bf041c-b309-01.png;tower-of-light=a-tower-of-pale-93c7eb20-b309-01.png",
+   "authorlm:from": "01",
+   "authorlm:model": "gemini/other",
+   "authorlm:off-model": "true",
+   "authorlm:prior": "chapel-stage=a-ruined-chapel-on-f3da5c19-b309-01.png",
+   "authorlm:prompt": "the pilgrim climbs toward the tower at dusk, the hat pulled low",
+   "authorlm:size": "1024x1536",
+   "authorlm:style": "ILLUSTRATION STYLE (ratified by the author — follow strictly):\n- Woodcut, high-contrast linework only. (no colour wash)\n- Figures small against wide ground."
+  }
+ ],
+ "off_model_result": {
+  "embedded": "the-pilgrim-climbs-toward-61591143-b309-02.png",
+  "had_embed": true,
+  "model": "gemini/other",
+  "off_model": true,
+  "pinned_model": "gemini/test-image",
+  "references": [
+   "cast pilgrim",
+   "cast tower-of-light",
+   "prior chapel-stage"
+  ],
+  "style_hash": "b309",
+  "written": [
+   "the-pilgrim-climbs-toward-61591143-b309-03.png"
+  ]
+ },
+ "pin_text": "# _illustrations/settings.toml — this manuscript's illustration pin.\n# Stamped once from config.toml [illustrations] and owned here from then on:\n# the global setting no longer reaches this book. Change with\n# 'authorlm illus pin --model … --size …'. A render on any other model or\n# size stops unless named with --model, and is then marked off-model.\n# (docs/verse-and-cast-design.md §7, §15)\n\nmodel = \"gemini/test-image\"\nimage_size = \"1024x1536\"\n",
+ "plates": {
+  "lone pilgrim": [
+   "a-lone-pilgrim-with-61bf041c-b309-01.png"
+  ],
+  "ruined chapel": [
+   "a-ruined-chapel-on-f3da5c19-b309-01.png"
+  ],
+  "tower of pale": [
+   "a-tower-of-pale-93c7eb20-b309-01.png"
+  ]
+ },
+ "references": [
+  {
+   "name": "a-lone-pilgrim-with-61bf041c-b309-01.png",
+   "path": "a-lone-pilgrim-with-61bf041c-b309-01.png",
+   "role": "cast",
+   "slug": "pilgrim"
+  },
+  {
+   "name": "a-tower-of-pale-93c7eb20-b309-01.png",
+   "path": "a-tower-of-pale-93c7eb20-b309-01.png",
+   "role": "cast",
+   "slug": "tower-of-light"
+  },
+  {
+   "name": "a-ruined-chapel-on-f3da5c19-b309-01.png",
+   "path": "a-ruined-chapel-on-f3da5c19-b309-01.png",
+   "role": "prior",
+   "slug": "chapel-stage"
+  }
+ ],
+ "result": {
+  "embedded": "the-pilgrim-climbs-toward-61591143-b309-02.png",
+  "had_embed": false,
+  "model": "gemini/test-image",
+  "off_model": false,
+  "pinned_model": "gemini/test-image",
+  "references": [
+   "cast pilgrim",
+   "cast tower-of-light",
+   "prior chapel-stage"
+  ],
+  "style_hash": "b309",
+  "written": [
+   "the-pilgrim-climbs-toward-61591143-b309-01.png",
+   "the-pilgrim-climbs-toward-61591143-b309-02.png"
+  ]
+ },
+ "sent": [
+  {
+   "input": false,
+   "prompt": "DEPICT (content commands — costume, era, objects, and composition here override anything the style implies):\nthe pilgrim climbs toward the tower at dusk, the hat pulled low\n\nREFERENCES (the attached images, in this order — likeness only, never subject):\nImage 1: the Pilgrim of this book. Draw the same figure again.\nImage 2: the Tower of Light of this book. Draw the same figure again.\nImage 3: the previous plate in this series; keep its stage and composition.\n\nSTYLE (technique and rendering only):\nILLUSTRATION STYLE (ratified by the author — follow strictly):\n- Woodcut, high-contrast linework only. (no colour wash)\n- Figures small against wide ground.",
+   "references": 3
+  },
+  {
+   "input": false,
+   "prompt": "DEPICT (content commands — costume, era, objects, and composition here override anything the style implies):\nthe pilgrim climbs toward the tower at dusk, the hat pulled low\n\nREFERENCES (the attached images, in this order — likeness only, never subject):\nImage 1: the Pilgrim of this book. Draw the same figure again.\nImage 2: the Tower of Light of this book. Draw the same figure again.\nImage 3: the previous plate in this series; keep its stage and composition.\n\nSTYLE (technique and rendering only):\nILLUSTRATION STYLE (ratified by the author — follow strictly):\n- Woodcut, high-contrast linework only. (no colour wash)\n- Figures small against wide ground.",
+   "references": 3
+  },
+  {
+   "input": true,
+   "prompt": "DEPICT (content commands — costume, era, objects, and composition here override anything the style implies):\nthe pilgrim climbs toward the tower at dusk, the hat pulled low\n\nREFERENCES (the attached images, in this order — likeness only, never subject):\nImage 1: the Pilgrim of this book. Draw the same figure again.\nImage 2: the Tower of Light of this book. Draw the same figure again.\nImage 3: the previous plate in this series; keep its stage and composition.\n\nSTYLE (technique and rendering only):\nILLUSTRATION STYLE (ratified by the author — follow strictly):\n- Woodcut, high-contrast linework only. (no colour wash)\n- Figures small against wide ground.",
+   "references": 3
+  }
+ ],
+ "status": [
+  {
+   "candidates": 3,
+   "cast": [
+    "pilgrim",
+    "tower-of-light"
+   ],
+   "embedded": "the-pilgrim-climbs-toward-61591143-b309-02.png",
+   "off_model": false,
+   "prior": "chapel-stage",
+   "prompt": "the pilgrim climbs toward the tower at dusk, the hat pulled low",
+   "state": "rendered"
+  },
+  {
+   "candidates": 0,
+   "cast": [
+    "ferryman",
+    "ghost"
+   ],
+   "embedded": null,
+   "off_model": false,
+   "prior": null,
+   "prompt": "the ferryman waits at the ford",
+   "state": "unrendered"
+  },
+  {
+   "candidates": 1,
+   "cast": [],
+   "embedded": "an-empty-road-under-07fe7c16-0000-01.png",
+   "off_model": false,
+   "prior": null,
+   "prompt": "an empty road under rain",
+   "state": "stale-style"
+  },
+  {
+   "candidates": 1,
+   "cast": [],
+   "embedded": "a-lone-pilgrim-with-61bf041c-b309-01.png",
+   "off_model": false,
+   "prior": null,
+   "prompt": "a lone pilgrim with a wide hat",
+   "state": "rendered"
+  },
+  {
+   "candidates": 1,
+   "cast": [],
+   "embedded": "a-tower-of-pale-93c7eb20-b309-01.png",
+   "off_model": false,
+   "prior": null,
+   "prompt": "a tower of pale stone lit from within",
+   "state": "rendered"
+  },
+  {
+   "candidates": 1,
+   "cast": [],
+   "embedded": "a-ruined-chapel-on-f3da5c19-b309-01.png",
+   "off_model": false,
+   "prior": null,
+   "prompt": "a ruined chapel on a bare hill at dawn",
+   "state": "rendered"
+  },
+  {
+   "candidates": 0,
+   "cast": [],
+   "embedded": null,
+   "off_model": false,
+   "prior": null,
+   "prompt": "a ferryman nobody has drawn yet",
+   "state": "unrendered"
+  }
+ ],
+ "style_hash": "b309",
+ "written": [
+  "the-pilgrim-climbs-toward-61591143-b309-01.png",
+  "the-pilgrim-climbs-toward-61591143-b309-02.png",
+  "the-pilgrim-climbs-toward-61591143-b309-03.png"
+ ]
+}
