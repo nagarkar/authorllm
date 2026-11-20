@@ -169,6 +169,26 @@ class MediaTests(unittest.TestCase):
         self.assertError(f"[Clip: {LONG} | cast: nobody]\nx\n[/Clip]\n",
                          "'nobody' is not defined")
 
+    def test_cast_sentences_are_the_shared_cast_modules(self):
+        """A clip's cast ids are checked by `llmlm.cast`, the code that
+        checks an illustration's (nagarkar/llmlm#20)."""
+        self.assertError(f"[Clip: {LONG} | cast: nobody]\nx\n[/Clip]\n",
+                         "cast 'nobody' is not defined — no tag carries "
+                         "'cast-id: nobody'")
+        unpicked = ("[Illustration: a tired man in a grey coat "
+                    "| cast-id: ecce-man]\n\n")
+        self.assertError(
+            unpicked + f"[Clip: {LONG} | cast: ecce-man]\nx\n[/Clip]\n",
+            "cast plate 'ecce-man' has no pick — render and pick it first (")
+        self.assertError(
+            f"[Clip: {LONG} | cast: a, b, c, d]\nx\n[/Clip]\n",
+            "cast names 4 ids; at most 3")
+        clip = self.one(f"[Clip: {LONG} | cast: studio:hero]\nx\n[/Clip]\n")
+        self.assertTrue(any("is in a library" in w for w in clip["warnings"]),
+                        clip)
+        self.assertFalse(any("studio:hero" in e for e in clip["errors"]),
+                         clip["errors"])
+
     def test_cast_on_pointer_clip(self):
         self.assertError("[Clip: | use: _assets/temple.mp4 | cast: x]\nx\n"
                          "[/Clip]\n", "applies only to a generated clip")

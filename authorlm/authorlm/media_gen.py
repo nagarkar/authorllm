@@ -250,17 +250,12 @@ def attach(root: Path, key: str, source: Path, desc: str = "0" * 8,
 
 # ------------------------------------------------------------------ plan
 
-def _image_ref(root: Path, value: str, known_cast: dict) -> Path | None:
-    """A frame or reference value → an image file: a path, an illustration
-    key's chosen image, or a cast id's plate."""
-    from .illus import ILLUS_DIR
-
+def _image_ref(root: Path, value: str, plates: dict) -> Path | None:
+    """A frame or reference value → an image file: a path, or a cast id's
+    picked plate (`plates`: cast id → plate file, None while unpicked)."""
     if media._is_path(value):
         return Path(root) / value
-    plate = known_cast.get(value)
-    if plate:
-        return Path(root) / ILLUS_DIR / plate
-    return None
+    return plates.get(value)
 
 
 def _duration(entry: dict, forced_eight: bool, omni: bool = False) -> int:
@@ -346,10 +341,10 @@ def plan(db, manuscript: dict, key: str, model: str | None = None) -> dict:
     spec = (spec_path.read_text(encoding="utf-8").strip()
             if spec_path and spec_path.exists() else entry["description"])
     law = clip_law(db, manuscript["id"], entry["file"])
-    from .illus import cast_index
+    from .illus import cast_characters, cast_index
 
     index, _ = cast_index(root)
-    known = {cid: c.get("plate") for cid, c in index.items()}
+    known = {c.slug: c.plate for c in cast_characters(root, index)}
     first = _image_ref(root, fields["start"], known) if "start" in fields else None
     last = _image_ref(root, fields["end"], known) if "end" in fields else None
     refs = [p for p in (_image_ref(root, c, known) for c in fields.get("cast", []))

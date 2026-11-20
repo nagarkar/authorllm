@@ -849,9 +849,10 @@ def cast_index(root) -> tuple[dict[str, dict], list[str]]:
     return index, problems
 
 
-def _characters(root: Path, index: dict[str, dict]) -> list:
+def cast_characters(root: Path, index: dict[str, dict]) -> list:
     """The cast as the plain list llmlm takes: each id with its picked
-    plate file (None while unpicked) and where its tag stands."""
+    plate file (None while unpicked) and where its tag stands. Clips
+    hand the same list to llmlm (`media.py`, `media_gen.py`)."""
     return [shared_cast.Character(
                 cid, (Path(root) / ILLUS_DIR / entry["plate"])
                 if entry.get("plate") else None,
@@ -877,7 +878,7 @@ def _resolve(root, slot: dict, index: dict[str, dict] | None = None):
     if index is None:
         index, _ = cast_index(root)
     return shared_cast.resolve_references(
-        _characters(root, index), _request(slot), CAST_SETTINGS)
+        cast_characters(root, index), _request(slot), CAST_SETTINGS)
 
 
 def _reference_dict(ref) -> dict:
@@ -991,7 +992,7 @@ def render_slot(db, manuscript: dict, slot: dict, config: dict,
     slot = relocate_slot(root, slot)
     law = illustration_law(db, manuscript["id"], slot["file"])
     index, _ = cast_index(root)
-    characters = _characters(root, index)
+    characters = cast_characters(root, index)
     # Before anything is written: a slot that names a cast member with
     # no plate stops here (llmlm's CastError, a LookupError), so its tag
     # is not externalized for a render that will not happen.
