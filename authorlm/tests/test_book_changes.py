@@ -617,6 +617,36 @@ class RevertTests(Book):
         self.assertEqual(statuses, {self.typo: "reverted",
                                     self.minded: "applied"})
 
+    def test_revert_declines_when_a_later_land_encloses_this_new(self):
+        # Sequential lands: a short fix, then a larger rewrite that keeps
+        # the short fix's `new` inside its own `new`. Reverting the short
+        # id alone would splice through the later rewrite.
+        changes.revert(self.db, self.manuscript, {}, run=self.run,
+                       reason="clear the setUp lands", tab_state=unlinked)
+        (self.root / "one.md").write_text("alpha beta\n", encoding="utf-8")
+        quiet(api.collect, self.db, self.manuscript, {})
+        first = self.land(self.run, "one.md", [{
+            "old": "alpha", "new": "gamma",
+            "note": "A short fix."}])["landed"][0]
+        second = self.land(self.run, "one.md", [{
+            "old": "gamma beta", "new": "gamma beta now",
+            "note": "A larger rewrite that keeps the short fix."}]
+                           )["landed"][0]
+        self.assertEqual(self.text(), "gamma beta now\n")
+        report = self.revert(first["id"], reason="undo the short fix")
+        self.assertEqual(report["reverted"], [])
+        self.assertEqual(len(report["declined"]), 1)
+        self.assertIn(second["id"], report["declined"][0]["why"])
+        self.assertIn("unable to be found again", report["declined"][0]["why"])
+        self.assertEqual(self.text(), "gamma beta now\n")
+        # Later first, then earlier: the file returns to the start.
+        self.assertEqual(len(self.revert(second["id"], reason="undo rewrite")
+                             ["reverted"]), 1)
+        self.assertEqual(self.text(), "gamma beta\n")
+        self.assertEqual(len(self.revert(first["id"], reason="undo short")
+                             ["reverted"]), 1)
+        self.assertEqual(self.text(), "alpha beta\n")
+
     def test_a_whole_run_is_put_back_and_a_done_run_stays_done(self):
         book.finish(self.db, self.manuscript, self.run, NO_USES)
         report = changes.revert(self.db, self.manuscript, {}, run=self.run,
@@ -775,12 +805,14 @@ class DraftTests(Book):
         self.assertEqual(latest["source"], "book-draft")
         self.assertEqual(json.loads(latest["files"])["one.md"], self.DRAFT)
         # A correction in the same run is a change; the drafter may also
-        # write its own draft over, whole.
+        # write its own draft over, whole. The earlier land is marked put
+        # back so a later revert cannot splice it into a new draft.
         self.land(self.run, "one.md", [{
             "old": "took its time", "new": "took its own time",
             "note": "The voice entry: plain emphasis."}])
         self.assertTrue(self.draft(self.run, "one.md",
                                    self.DRAFT)["replaced"])
+        self.assertEqual([r["status"] for r in self.rows()], ["reverted"])
         done = book.finish(self.db, self.manuscript, self.run,
                            {**NO_USES, "artifacts": ["notes.md"]})
         self.assertEqual(done["result"]["artifacts"],
@@ -811,6 +843,31 @@ class DraftTests(Book):
         kept = [json.loads(r["files"])["one.md"] for r in self.db.all(
             "SELECT files FROM manuscript_versions")]
         self.assertIn(self.DRAFT, kept)
+
+    def test_a_draft_over_marks_earlier_lands_put_back(self):
+        # A land, then a whole new draft that happens to hold the land's
+        # `new` once elsewhere: without clearing the row, revert would
+        # splice the old typo into the new prose.
+        self.draft(self.run, "one.md", self.DRAFT)
+        landed = self.land(self.run, "one.md", [{
+            "old": "took the long way", "new": "took the short way",
+            "note": "A fix kept in the next draft by chance."}])["landed"][0]
+        self.assertIn("took the short way", self.text())
+        again = ("# One\n\nThe miller took the short way home, and the "
+                 "village slept.\n")
+        self.assertEqual(again.count("took the short way"), 1)
+        self.assertTrue(self.draft(self.run, "one.md", again)["replaced"])
+        self.assertEqual(self.text(), again)
+        row = next(r for r in self.rows() if r["id"] == landed["id"])
+        self.assertEqual(row["status"], "reverted")
+        self.assertEqual(row["reverted_reason"],
+                         "written over by a new draft")
+        report = changes.revert(
+            self.db, self.manuscript, {}, [landed["id"]],
+            reason="should already be clear", tab_state=unlinked)
+        self.assertEqual(report["reverted"], [])
+        self.assertIn("already put back", report["declined"][0]["why"])
+        self.assertEqual(self.text(), again)
 
     def test_draft_declines_under_forms(self):
         book.set_agent_edits(self.db, self.manuscript, "forms")
