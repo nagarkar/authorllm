@@ -28,6 +28,10 @@ export function tryHint(note: string): string {
   return m ? m[1] : "";
 }
 
+// What the page says when no narrated passage carries the word: the
+// audiobook reads no footnotes, so a footnote-only word has no voice.
+const NO_CONTEXTS = "No narrated passage contains this word (footnotes are not narrated), so there is nothing to play.";
+
 export function Workbench({transport, manuscript, initialTerm}: {transport: Transport; manuscript?: string; initialTerm?: string}) {
   const [state, setState] = useState<State | null>(null);
   const [term, setTerm] = useState<string>("");
@@ -211,10 +215,10 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
       setNote(d ? d.note : rowNote);
       setTermStatus(r.contexts.length
         ? {text: `${r.contexts.length} voice(s) say it`}
-        : {text: "not spoken anywhere in the audiobook — check the spelling", kind: "bad"});
+        : {text: NO_CONTEXTS, kind: "bad"});
     } catch (e) {
       if (seq !== selectSeq.current) return;
-      setTermStatus({text: String((e as Error).message), kind: "bad"});
+      setTermStatus({text: String((e as Error)?.message || e), kind: "bad"});
     }
   }
 
@@ -309,7 +313,7 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
     if (!t) return;
     try {
       const r = await transport.request<{contexts: Context[]}>("contexts", params({term: t}));
-      if (!r.contexts.length) { setGlobalStatus({text: `“${t}” is not spoken anywhere in the audiobook`, kind: "bad"}); return; }
+      if (!r.contexts.length) { setGlobalStatus({text: `“${t}”: ${NO_CONTEXTS}`, kind: "bad"}); return; }
       setDirty((d) => ({...d, [t]: {term: t, say: "", note: ""}}));
       setNewTerm("");
       await selectTerm(t);
@@ -382,10 +386,12 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
     if (onlyUntested || onlyEmpty) {
       out = out.filter((r) => (onlyUntested && !!r.say && !r.tested) || (onlyEmpty && !r.say));
     }
-    // The word on screen stays pickable even when a filter would hide it.
+    // The word on screen stays pickable even when a filter would hide it,
+    // and before the word list has loaded (a word opened from the hash
+    // would otherwise show "pick a word (0)").
     if (term && !out.some((r) => r.term === term)) {
-      const cur = rows.find((r) => r.term === term);
-      if (cur) out = [cur, ...out];
+      const cur = rows.find((r) => r.term === term) || {term, say: ""};
+      out = [cur, ...out];
     }
     return out;
   }, [state, dirtyNames, newTerm, onlyUntested, onlyEmpty, term]);
@@ -406,7 +412,7 @@ export function Workbench({transport, manuscript, initialTerm}: {transport: Tran
           <label className="wb-check"><input type="checkbox" checked={onlyEmpty} onChange={(e) => setOnlyEmpty(e.target.checked)} /> ★ no reading</label>
         </span>
         <select className="wordpick" value={term} onChange={(e) => void selectTerm(e.target.value)} title="Every row of pronunciations.md, A to Z; ★ = no reading yet">
-          <option value="">— pick a word ({words.length}) —</option>
+          <option value="">{state ? `— pick a word (${words.length}) —` : "— loading the word list… —"}</option>
           {words.map((w) => (
             <option key={w.term} value={w.term}>{!w.say ? "★ " : ""}{w.term}{w.isNew ? " (new)" : (w.say && !w.tested) ? " (untested)" : ""}</option>
           ))}

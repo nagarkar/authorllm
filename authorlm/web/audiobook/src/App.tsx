@@ -43,7 +43,11 @@ type PageMode = "chapters" | "pron" | "devedit" | "forms";
 // #<manuscript>/<stem>, #<manuscript>/pron:<term>, #<manuscript>/devedit or #<manuscript>/forms; a bare #<stem> opens
 // on the server's -m manuscript.
 const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string} => {
-  let h = decodeURIComponent(location.hash.replace(/^#/, ""));
+  // NFC: a pasted or typed non-ASCII word (Bhṛgu) may arrive decomposed,
+  // and the table's rows are composed; a bad escape leaves the raw hash.
+  let h = location.hash.replace(/^#/, "");
+  try { h = decodeURIComponent(h); } catch { /* keep it raw */ }
+  h = h.normalize("NFC");
   let ms = "";
   const slash = h.indexOf("/");
   if (slash >= 0) { ms = h.slice(0, slash); h = h.slice(slash + 1); }
