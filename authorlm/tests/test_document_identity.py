@@ -196,6 +196,61 @@ class SeedingTests(Workspace):
                 for d in docs.list_documents(self.db, self.manuscript)}
         self.assertEqual(rows["ancient.md"]["status"], "retired")
 
+    def test_a_new_file_reusing_a_deleted_basename_gets_its_own_id(self):
+        # Finder-delete of a nested chapter leaves no `_retired/` file; a
+        # later chapter at the root that only reuses the basename must
+        # not inherit the old `dc-` id (same-path re-add still does).
+        (self.root / "papers").mkdir()
+        nested = self.root / "papers" / "piece.md"
+        nested.write_text(essay("Nested Piece", "nested"), encoding="utf-8")
+        toc = (self.root / "toc.toml").read_text(encoding="utf-8")
+        (self.root / "toc.toml").write_text(
+            toc + '[[chapter]]\nfile = "papers/piece.md"\n',
+            encoding="utf-8")
+        quiet(api.collect, self.db, self.manuscript, {})
+        before = docs.document_id(self.db, self.manuscript, "papers/piece.md")
+        nested.unlink()
+        quiet(api.collect, self.db, self.manuscript, {})  # not auto: drops
+        retired = {d["relpath"]: d
+                   for d in docs.list_documents(self.db, self.manuscript)}
+        self.assertEqual(retired["papers/piece.md"]["status"], "retired")
+        self.assertEqual(retired["papers/piece.md"]["id"], before)
+        (self.root / "piece.md").write_text(
+            essay("Brand New Piece", "brandnew"), encoding="utf-8")
+        toc = (self.root / "toc.toml").read_text(encoding="utf-8")
+        (self.root / "toc.toml").write_text(
+            toc + '[[chapter]]\nfile = "piece.md"\n', encoding="utf-8")
+        quiet(api.collect, self.db, self.manuscript, {})
+        rows = {d["relpath"]: d
+                for d in docs.list_documents(self.db, self.manuscript)}
+        self.assertEqual(rows["piece.md"]["status"], "active")
+        self.assertNotEqual(rows["piece.md"]["id"], before)
+        still = [d for d in docs.list_documents(self.db, self.manuscript)
+                 if d["id"] == before][0]
+        self.assertEqual(still["status"], "retired")
+
+    def test_revive_keeps_the_id_when_the_bytes_still_match(self):
+        # retire_doc nests under `_retired/` by basename; revive restores
+        # at the manuscript root. Same prose → same document id.
+        (self.root / "papers").mkdir()
+        nested = self.root / "papers" / "piece.md"
+        nested.write_text("# Piece\n\nThe nested essay.\n", encoding="utf-8")
+        toc = (self.root / "toc.toml").read_text(encoding="utf-8")
+        (self.root / "toc.toml").write_text(
+            toc + '[[chapter]]\nfile = "papers/piece.md"\n',
+            encoding="utf-8")
+        quiet(api.collect, self.db, self.manuscript, {})
+        before = docs.document_id(self.db, self.manuscript, "papers/piece.md")
+        docs.retire_doc(self.manuscript, "papers/piece.md")
+        quiet(api.collect, self.db, self.manuscript, {})
+        docs.revive_doc(self.manuscript, "piece.md")
+        quiet(api.collect, self.db, self.manuscript, {})
+        rows = {d["relpath"]: d
+                for d in docs.list_documents(self.db, self.manuscript)}
+        self.assertIn("piece.md", rows)
+        self.assertEqual(rows["piece.md"]["id"], before)
+        self.assertEqual(rows["piece.md"]["status"], "active")
+
 
 class RenameVerbTests(Workspace):
 
