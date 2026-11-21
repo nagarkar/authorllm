@@ -8,9 +8,9 @@ Where it would go if accepted: most likely the essay Which Nothing (parts 1 and 
 
 Each part is followed by a short list headed "Rests on", which separates what the book already says from what was inferred from the dictation.
 
-## Before reading: three things that need the author's word
+## Before reading: one point ruled, two that need the author's word
 
-1. **The name.** The dictation says "Universal Nothingness." The ratified style law says the word *nothingness* is never capitalized, and that the Field of Dissolution is never called Nothingness (renamed 2026-10-25, because readers could not keep the Field apart from Nothing). So the draft below says Nothing, and treats "Universal Nothingness" as a working title only. If the author means a third thing, different from both Nothing and Dissolution, the draft needs to change.
+1. **The name (ruled 2026-11-20).** The dictation says "Universal Nothingness." Asked whether that is Nothing itself or a third thing apart from Nothing and Dissolution, the author answered: "It means Nothing." So the draft says Nothing throughout, in keeping with the style law that *nothingness* is never capitalized and that the Field of Dissolution is never called Nothingness. "Universal Nothingness" is a working title only and does not enter the text.
 2. **Manifestation and Separation are not settled terms.** The Concept Graph has no concept named Manifestation or Separation. The book uses "manifestation" only in phrases such as "action is the outward manifestation of the Field of Choice." "Separation of qualities" is an alias of Division. The draft reads Separation as the act of Choice, and Manifestation as one whole beat: a cleaving together with the collapse that answers it (the Heartbeat). Both readings are inferences.
 3. **Point or locus.** The register holds a proposed, unsettled entry, term/point, in which the author considers *point* in place of *locus*. The dictation says "point," so the draft says point. The book's current text says locus.
 
