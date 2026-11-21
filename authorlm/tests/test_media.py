@@ -188,6 +188,22 @@ class MediaTests(unittest.TestCase):
                         clip)
         self.assertFalse(any("studio:hero" in e for e in clip["errors"]),
                          clip["errors"])
+        # A library id is warned about and does not count toward the
+        # shared cast module's limit of three (nagarkar/authorllm#478).
+        four_libs = self.one(
+            f"[Clip: {LONG} | cast: studio:a, studio:b, studio:c, "
+            f"studio:d]\nx\n[/Clip]\n")
+        self.assertFalse(any("at most 3" in e for e in four_libs["errors"]),
+                         four_libs["errors"])
+        self.assertEqual(
+            sum(1 for w in four_libs["warnings"] if "is in a library" in w),
+            4, four_libs["warnings"])
+        mixed = self.one(
+            f"[Clip: {LONG} | cast: a, b, c, studio:hero]\nx\n[/Clip]\n")
+        self.assertFalse(any("at most 3" in e for e in mixed["errors"]),
+                         mixed["errors"])
+        self.assertTrue(any("is in a library" in w for w in mixed["warnings"]),
+                        mixed)
 
     def test_cast_on_pointer_clip(self):
         self.assertError("[Clip: | use: _assets/temple.mp4 | cast: x]\nx\n"
