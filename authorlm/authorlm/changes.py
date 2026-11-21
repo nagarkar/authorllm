@@ -98,6 +98,14 @@ Decisions:
   tests/test_book_changes.py::RestartTests::test_restart_reports_what_the_runs_landed_and_how_to_put_it_back
   and
   tests/test_book_changes.py::RestartTests::test_the_reruns_pack_says_the_earlier_changes_still_stand.
+- Two landings (or a landing and a draft or revert) of the same chapter
+  cannot both plan against one snapshot and drop each other's edit: an
+  exclusive lock (`book._chapter_lock`, sibling
+  `<file>.authorlm-edit.lock`) covers the read-check-write. Without it,
+  two overlapping `book land`s both report success, both leave
+  `applied` rows, and only the later write remains — the earlier `new`
+  is gone so revert declines it. Enforced by:
+  tests/test_book_changes.py::ConcurrentLandTests::test_two_lands_on_one_file_both_apply.
 
 Terms:
 - **change**: one replacement an agent role landed in a chapter file: the
@@ -394,27 +402,32 @@ def land(db: Database, manuscript: dict, config: dict, run_id: str,
     # Snapshot what is on disk before it is written over. An edit made
     # outside this verb predates the landing and is the author's.
     _quiet_collect(db, manuscript, config, "pre-book-land")
-    before = path.read_text(encoding="utf-8")
-    items, text = _check_items(changes, before)
-    lost = _lost_terms(db, manuscript, relpath, before, items)
-    first = (db.one("SELECT MAX(seq) AS n FROM step_changes WHERE run_id = ?",
-                    (run["id"],))["n"] or 0) + 1
-    rows = [{**ko_fields(CHANGE_PREFIX), "manuscript_id": manuscript["id"],
-             "run_id": run["id"], "step": step.id, "role": step.role,
-             "document_id": document_id, "seq": first + offset,
-             "old": item["old"], "new": item["new"], "note": item["note"],
-             "status": "applied"} for offset, item in enumerate(items)]
-    for row, terms in zip(rows, lost):
-        if terms:
-            row["metadata"] = json.dumps(
-                {**loads(row["metadata"], {}), LOST_KEY: terms},
-                ensure_ascii=False)
-    with db.transaction():
-        for row in rows:
-            db.insert("step_changes", row)
-        book.note(db, manuscript, run["id"], actor=run["actor"],
-                  reason=f"landed {len(rows)} change(s) in {relpath}")
-        book._write_atomic(path, text)
+    # Lock the chapter for the plan-and-write: two overlapping lands that
+    # each read one snapshot, check, and write would both report success
+    # while only the later text remained (and both rows stayed applied).
+    with book._chapter_lock(path):
+        before = path.read_text(encoding="utf-8")
+        items, text = _check_items(changes, before)
+        lost = _lost_terms(db, manuscript, relpath, before, items)
+        first = (db.one(
+            "SELECT MAX(seq) AS n FROM step_changes WHERE run_id = ?",
+            (run["id"],))["n"] or 0) + 1
+        rows = [{**ko_fields(CHANGE_PREFIX), "manuscript_id": manuscript["id"],
+                 "run_id": run["id"], "step": step.id, "role": step.role,
+                 "document_id": document_id, "seq": first + offset,
+                 "old": item["old"], "new": item["new"], "note": item["note"],
+                 "status": "applied"} for offset, item in enumerate(items)]
+        for row, terms in zip(rows, lost):
+            if terms:
+                row["metadata"] = json.dumps(
+                    {**loads(row["metadata"], {}), LOST_KEY: terms},
+                    ensure_ascii=False)
+        with db.transaction():
+            for row in rows:
+                db.insert("step_changes", row)
+            book.note(db, manuscript, run["id"], actor=run["actor"],
+                      reason=f"landed {len(rows)} change(s) in {relpath}")
+            book._write_atomic(path, text)
     after = _quiet_collect(db, manuscript, config, "book-land", after=True)
     landed = [_change(db, row) for row in rows]
     return {"run": run["id"], "step": step.id, "role": step.role,
@@ -449,36 +462,38 @@ def draft(db: Database, manuscript: dict, config: dict, run_id: str,
                          "text, its title line included")
     state = _require_writable(db, manuscript, relpath, config, workspace,
                               tab_state)
-    current = path.read_text(encoding="utf-8")
-    if is_placeholder(current):
-        raise ValueError(
-            f"{relpath} is being rewritten by an active writeup (`authorlm "
-            "write`), so nothing was changed. Finish or abandon the "
-            "writeup first.")
-    row = book._find_run(db, manuscript, run["id"])
-    drafted = loads(row["result"], {}).get(DRAFTED_KEY, [])
-    replaced = not _only_a_title(current)
-    if replaced and relpath not in drafted and run["attempt"] == 1:
-        raise ValueError(
-            f"{relpath} already holds prose, and this run did not draft "
-            "it, so nothing was changed. A first draft goes into a file "
-            "that holds only its title. Change what is there with: "
-            f"authorlm book land {run['id']} {relpath} --changes-json "
-            f"<file> -m {manuscript['name']}")
     _quiet_collect(db, manuscript, config, "pre-book-draft")
     body = text if text.endswith("\n") else text + "\n"
     words = len(body.split())
-    if relpath not in drafted:
-        drafted = [*drafted, relpath]
-    with db.transaction():
-        book.note(
-            db, manuscript, run["id"], actor=run["actor"],
-            reason=f"drafted {relpath}: {words} words"
-                   + (", written over the earlier draft" if replaced else ""),
-            changes={"result": json.dumps(
-                {**loads(row["result"], {}), DRAFTED_KEY: drafted},
-                ensure_ascii=False)})
-        book._write_atomic(path, body)
+    with book._chapter_lock(path):
+        current = path.read_text(encoding="utf-8")
+        if is_placeholder(current):
+            raise ValueError(
+                f"{relpath} is being rewritten by an active writeup "
+                "(`authorlm write`), so nothing was changed. Finish or "
+                "abandon the writeup first.")
+        row = book._find_run(db, manuscript, run["id"])
+        drafted = loads(row["result"], {}).get(DRAFTED_KEY, [])
+        replaced = not _only_a_title(current)
+        if replaced and relpath not in drafted and run["attempt"] == 1:
+            raise ValueError(
+                f"{relpath} already holds prose, and this run did not draft "
+                "it, so nothing was changed. A first draft goes into a file "
+                "that holds only its title. Change what is there with: "
+                f"authorlm book land {run['id']} {relpath} --changes-json "
+                f"<file> -m {manuscript['name']}")
+        if relpath not in drafted:
+            drafted = [*drafted, relpath]
+        with db.transaction():
+            book.note(
+                db, manuscript, run["id"], actor=run["actor"],
+                reason=f"drafted {relpath}: {words} words"
+                       + (", written over the earlier draft"
+                          if replaced else ""),
+                changes={"result": json.dumps(
+                    {**loads(row["result"], {}), DRAFTED_KEY: drafted},
+                    ensure_ascii=False)})
+            book._write_atomic(path, body)
     after = _quiet_collect(db, manuscript, config, "book-draft", after=True)
     return {"run": run["id"], "step": step.id, "file": relpath,
             "words": words, "version_no": after.get("version_no"),
@@ -761,29 +776,31 @@ def revert(db: Database, manuscript: dict, config: dict,
         except ValueError as err:
             decline(str(err))
             continue
-        count = path.read_text(encoding="utf-8").count(row["new"])
-        if count == 1:
+        if path.read_text(encoding="utf-8").count(row["new"]) == 1:
             _quiet_collect(db, manuscript, config, "pre-book-revert")
-        text = path.read_text(encoding="utf-8")
-        count = text.count(row["new"])
-        if count != 1:
-            decline(
-                ("the text has moved on: the words this change put in are "
-                 "no longer in the file. " + _stands_now(text, row["new"]))
-                if count == 0 else
-                f"the words this change put in now stand {count} times in "
-                "the file, so the place cannot be told.")
-            continue
-        at = now_iso()
-        with db.transaction():
-            db.update("step_changes", row["id"], {
-                "status": "reverted", "reverted_at": at,
-                "reverted_by": by.strip(),
-                "reverted_reason": reason.strip()})
-            book.note(db, manuscript, row["run_id"], actor=by.strip(),
-                      reason=f"put back {row['id']} in {relpath}: "
-                             f"{reason.strip()}")
-            book._write_atomic(path, text.replace(row["new"], row["old"]))
+        with book._chapter_lock(path):
+            text = path.read_text(encoding="utf-8")
+            count = text.count(row["new"])
+            if count != 1:
+                decline(
+                    ("the text has moved on: the words this change put in "
+                     "are no longer in the file. "
+                     + _stands_now(text, row["new"]))
+                    if count == 0 else
+                    f"the words this change put in now stand {count} times "
+                    "in the file, so the place cannot be told.")
+                continue
+            at = now_iso()
+            with db.transaction():
+                db.update("step_changes", row["id"], {
+                    "status": "reverted", "reverted_at": at,
+                    "reverted_by": by.strip(),
+                    "reverted_reason": reason.strip()})
+                book.note(db, manuscript, row["run_id"], actor=by.strip(),
+                          reason=f"put back {row['id']} in {relpath}: "
+                                 f"{reason.strip()}")
+                book._write_atomic(
+                    path, text.replace(row["new"], row["old"], 1))
         _quiet_collect(db, manuscript, config, "book-revert", after=True)
         reverted.append(_change(db, _find_change(db, manuscript, row["id"])))
         if state != "unlinked" and relpath not in pushes:
