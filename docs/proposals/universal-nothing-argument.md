@@ -8,10 +8,10 @@ Where it would go if accepted: most likely the essay Which Nothing (parts 1 and 
 
 Each part is followed by a short list headed "Rests on", which separates what the book already says from what was inferred from the dictation.
 
-## Before reading: one point ruled, two that need the author's word
+## Before reading: two points ruled, one that needs the author's word
 
 1. **The name (ruled 2026-11-20).** The dictation says "Universal Nothingness." Asked whether that is Nothing itself or a third thing apart from Nothing and Dissolution, the author answered: "It means Nothing." So the draft says Nothing throughout, in keeping with the style law that *nothingness* is never capitalized and that the Field of Dissolution is never called Nothingness. "Universal Nothingness" is a working title only and does not enter the text.
-2. **Manifestation and Separation are not settled terms.** The Concept Graph has no concept named Manifestation or Separation. The book uses "manifestation" only in phrases such as "action is the outward manifestation of the Field of Choice." "Separation of qualities" is an alias of Division. The draft reads Separation as the act of Choice, and Manifestation as one whole beat: a cleaving together with the collapse that answers it (the Heartbeat). Both readings are inferences.
+2. **Manifestation and Separation (ruled 2026-11-20).** Asked whether Separation is the act of Choice, and Manifestation one whole beat of cleaving and collapse, the author answered: "Yes, both." So Separation names what the Field of Choice does when it divides a quality into opposites and holds them apart, and Manifestation names one whole beat: a cleaving together with the collapse that answers it (the Heartbeat). The Concept Graph does not yet carry either word in this sense. It has no concept named Manifestation or Separation, "Separation of qualities" is an alias of Division, and the book's present text uses "manifestation" in a narrower way ("action is the outward manifestation of the Field of Choice"). Adding the two terms to the graph, and squaring the narrower use with the new one, waits for the author's word.
 3. **Point or locus.** The register holds a proposed, unsettled entry, term/point, in which the author considers *point* in place of *locus*. The dictation says "point," so the draft says point. The book's current text says locus.
 
 ## 1. What we mean by nothing
@@ -44,6 +44,7 @@ Life, death and evolution can be read from this. A living thing keeps certain op
 Rests on:
 
 - Applies: "Nothing cannot be cleaved except into pairs" (the older essay on the metaphysic, moved in part to Qualities); Choice "cleaves a Quality into opposites and holds them apart," Dissolution "joins a Quality with its opposite and unmakes both" (Qualities); the Heartbeat as one cleaving with its answering collapse; Jung's shadow as defined in the essay on Jung.
+- Applies the ruling of 2026-11-20: separation is the act of Choice, and a thing is manifest through one whole beat of cleaving and collapse.
 - Infers: that the unacknowledged opposite of a choice is what Jung calls the shadow. The essay on Jung does not make this identification.
 - Infers: the readings of life, death and evolution. The Two Fields plans to sort choices into Persistence, Evolution and Loss; the three sentences here are a guess at how that sorting meets this argument.
 - Changed from the dictation: the plan speaks of "the effort to do both." The book holds that Dissolution has no will and no agency, so the draft says both are at work in every beat and does not attribute effort to Dissolution. If the author means the effort of a living thing to do both, the paragraph should say so.
