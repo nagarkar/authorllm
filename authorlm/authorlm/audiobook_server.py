@@ -169,13 +169,19 @@ def make_handler(workspace: str | None, manuscript: str | None):
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict) or not isinstance(body.get("markdown"), str):
                     raise ValueError("Paste some text to listen to.")
-                s = audiobook.session(workspace, manuscript)
+                named = body.get("manuscript")
+                if named is not None and not isinstance(named, str):
+                    raise ValueError("manuscript is a name")
+                # The page's open manuscript, so its preview voice and
+                # offered voices apply (2026-11-21: the server's default
+                # manuscript read SMSTTD's Listen in another voice).
+                s = audiobook.session(workspace, named or manuscript)
                 voice = body.get("voice")
                 if voice is not None and not isinstance(voice, str):
                     raise ValueError("voice is a name")
                 payload = audiobook.render_pasted_preview(s.manuscript, body["markdown"],
                                                           voice or None)
-            except (ValueError, RuntimeError) as err:
+            except (ValueError, RuntimeError, LookupError) as err:
                 self._json(400, {"error": str(err)})
                 return
             except Exception as err:  # noqa: BLE001 — the local server stays up

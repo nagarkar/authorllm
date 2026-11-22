@@ -10,6 +10,11 @@ export function listenVoice(): string {
   try { return localStorage.getItem(KEY) || ""; } catch { return ""; }
 }
 
+// The manuscript the page has open: the first part of its hash (#SMSTTD/forms).
+export function pageManuscript(): string {
+  try { return decodeURIComponent(location.hash.replace(/^#/, "").split("/")[0] || ""); } catch { return ""; }
+}
+
 function setListenVoice(voice: string) {
   try { if (voice) localStorage.setItem(KEY, voice); else localStorage.removeItem(KEY); } catch { /* private window */ }
   window.dispatchEvent(new Event(EVENT));
