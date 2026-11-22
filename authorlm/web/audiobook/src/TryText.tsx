@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { VolumeSlider } from "./audioGain";
 
 export function TryText() {
   const [markdown, setMarkdown] = useState("");
@@ -45,6 +46,7 @@ export function TryText() {
         <nav className="modes" aria-label="Audiobook navigation">
           <a className="chip" href={`/${location.hash}`}>Back to audiobook</a>
         </nav>
+        <VolumeSlider />
       </header>
       <form className="card try-text" onSubmit={listen}>
         <label htmlFor="try-markdown">Paste Markdown or plain text</label>

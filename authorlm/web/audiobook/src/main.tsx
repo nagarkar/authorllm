@@ -5,9 +5,11 @@ import { App } from "./App";
 import { TryText } from "./TryText";
 import { installTypingFocus } from "./typingFocus";
 import { mixWithOtherAudio } from "./audioMix";
+import { installPageVolume } from "./audioGain";
 
 installTypingFocus();
 mixWithOtherAudio();
+installPageVolume();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>{location.pathname === "/try-text" ? <TryText /> : <App />}</StrictMode>

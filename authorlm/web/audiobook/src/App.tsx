@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { VolumeSlider } from "./audioGain";
 import { deveditTransport, formsTransport, request, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
 import { DevEdit } from "./DevEdit";
@@ -224,6 +225,7 @@ export function App() {
           <h1 className="display"><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />{book.title}</h1>
           <span className="count">{account ? `${fmt(account.remaining)} chars left` : book.quality}</span>
         </div>
+        <VolumeSlider />
         {mode === "chapters" && <div className="bar">
           <label className="count" htmlFor="preview-voice">Preview voice</label>
           <select id="preview-voice" value={status.previewVoice.current} aria-label="Preview voice"

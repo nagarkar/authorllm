@@ -256,3 +256,4 @@ a.pill{text-decoration:none;display:inline-flex;align-items:center}
 .listen-voice{display:block;margin:0 0 10px;font-size:14px}.listen-voice select{margin-left:6px;padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:var(--ground);color:var(--ink);font:inherit}
 html.typing header{display:none}
 html.typing textarea:focus{resize:none;scroll-margin-top:0}
+.page-volume{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:14px}.page-volume input{flex:1 1 auto;accent-color:var(--band-ink)}
