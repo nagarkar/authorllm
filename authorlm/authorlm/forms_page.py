@@ -245,6 +245,13 @@ def _apply_ruling(row: dict, ruling: dict | None) -> dict:
     shown = (ruling.get("text") if ruling.get("verdict") == "edit"
              else None) or row["current"] or row["proposed"]
     row["segments"] = word_diff(row["old"], shown) if row["old"] else []
+    # A widened edit (it changed words around the span too) is the whole
+    # passage: its diff runs over the whole old passage, and the card shows
+    # no separate prefix or suffix.
+    row["widened"] = bool(ruling.get("verdict") == "edit" and ruling.get("context"))
+    if row["widened"]:
+        ctx = ruling["context"]
+        row["segments"] = word_diff(ctx["head"] + row["old"] + ctx["tail"], shown)
     return row
 
 
@@ -331,23 +338,35 @@ def listing(db: Database, manuscript: dict, service, docs_service) -> dict:
 
 # ----------------------------------------------------------------- ruling
 
-def _span_of_passage(text: str, prefix: str, suffix: str) -> str:
+def _span_of_passage(text: str, prefix: str, suffix: str
+                     ) -> tuple[str, dict | None]:
     """The form's own words out of an edit of its whole passage: `text`
-    with the passage's unchanged `prefix` and `suffix` taken off. The card
-    shows (and the edit box holds) the paragraph around the form; only the
-    form's span is its to change, so an edit that changes words before or
-    after it is turned down with a reason."""
+    with the passage's unchanged `prefix` and `suffix` taken off, and None.
+    An edit that also changes words before or after the span (author's ask
+    2026-11-21) widens the form to the whole passage: the words are the
+    whole new passage, and the context {head, tail} it replaces besides the
+    span is returned, for the merge to take out once the form has landed."""
     head, tail = prefix.lstrip(), suffix.rstrip()
-    if not text.startswith(head):
-        raise ValueError("the edit changed words before this form's span "
-                         f"(“{clamp(head)}”); only the span is this form's "
-                         "to change, so edit those words in the Doc")
-    rest = text[len(head):]
-    if not rest.endswith(tail):
-        raise ValueError("the edit changed words after this form's span "
-                         f"(“{clamp(tail)}”); only the span is this form's "
-                         "to change, so edit those words in the Doc")
-    return rest[:len(rest) - len(tail)] if tail else rest
+    if text.startswith(head):
+        rest = text[len(head):]
+        if rest.endswith(tail):
+            return (rest[:len(rest) - len(tail)] if tail else rest), None
+    return text, {"head": head, "tail": tail}
+
+
+def _overlapping_form(db: Database, thread: dict, context: dict) -> str | None:
+    """The old words of another open form of the same file that lie in the
+    passage a widened edit rewrites, or None. Such an edit is turned down:
+    its words would overwrite that form's span."""
+    rows = db.all("SELECT id, proposed_old FROM doc_threads WHERE "
+                  "manuscript_id = ? AND file = ? AND state = 'written' "
+                  "AND id != ?", (thread["manuscript_id"], thread["file"],
+                                  thread["id"]))
+    for row in rows:
+        old = row["proposed_old"] or ""
+        if old and (old in context["head"] or old in context["tail"]):
+            return old
+    return None
 
 
 def decide(db: Database, manuscript: dict, thread_id: str, verdict: str,
@@ -379,6 +398,7 @@ def decide(db: Database, manuscript: dict, thread_id: str, verdict: str,
     if seen is None:
         raise ValueError("this form is not in the tab, so the tab decides it "
                          "at merge; it takes no ruling here")
+    context = None
     if verdict == "edit":
         text = (text or "").strip()
         if not text:
@@ -387,10 +407,17 @@ def decide(db: Database, manuscript: dict, thread_id: str, verdict: str,
         if "\n" in text:
             raise ValueError("the new text is one paragraph on one line")
         if prefix is not None or suffix is not None:
-            text = _span_of_passage(text, prefix or "", suffix or "")
+            text, context = _span_of_passage(text, prefix or "", suffix or "")
             if not text.strip():
                 raise ValueError("an edit needs text; to turn the form down, "
                                  "Decline it")
+            if context:
+                other = _overlapping_form(db, thread, context)
+                if other:
+                    raise ValueError(
+                        "the edit changes words of another open form in this "
+                        f"paragraph (“{clamp(other)}”); rule on that form "
+                        "first, or keep this edit to this form's own words")
         form_grammar.assert_no_pending_markers("", text)
         if text == seen:
             verdict = "accept"
@@ -401,6 +428,8 @@ def decide(db: Database, manuscript: dict, thread_id: str, verdict: str,
                              "write your own")
     ruling = {"verdict": verdict, "seen": seen, "at": now_iso(),
               "text": text if verdict == "edit" else None}
+    if verdict == "edit" and context:
+        ruling["context"] = context
     meta[RULING_KEY] = ruling
     db.update("doc_threads", thread_id, {"metadata": json.dumps(meta)})
     return {"id": thread_id, "ruling": ruling}
@@ -582,6 +611,16 @@ def merge(db: Database, manuscript: dict, file: str, service, docs_service,
         for k in ("accepted", "modified", "declined"):
             result[k] += done.get(k) or 0
 
+    unwidened = _take_out_widened_context(path, threads, pairs)
+    if unwidened:
+        result["warnings"].append(
+            f"{len(unwidened)} edit(s) that changed words around their form "
+            f"landed, but the old surrounding words could not be found to "
+            f"take out, so nothing was pushed; fix the passage by hand: "
+            + "; ".join("«" + clamp(t) + "»" for t in unwidened))
+        result["message"] = f"{rel}: landed, but a widened edit needs a hand fix"
+        return result
+
     after = path.read_text(encoding="utf-8") if path.exists() else ""
     kept, put_back, missing = keep_embeds(before, after,
                                           Path(manuscript["path"]))
@@ -618,6 +657,29 @@ def merge(db: Database, manuscript: dict, file: str, service, docs_service,
                          + ("" if result["pushed"] else "; the tab was not "
                             "brought up to the file"))
     return result
+
+
+def _take_out_widened_context(path: Path, threads: list[dict],
+                              pairs: dict) -> list[str]:
+    """A widened edit lands as the whole new passage in place of the span,
+    so the file reads head + passage + tail; leave the passage alone.
+    Returns the passages whose old surroundings were not found."""
+    widened = [ruling_of(t) for t in threads if t["id"] in pairs
+               and ruling_of(t) and (ruling_of(t).get("context"))
+               and ruling_of(t)["verdict"] == "edit"]
+    if not widened or not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    lost = []
+    for ruling in widened:
+        ctx, passage = ruling["context"], ruling["text"]
+        needle = ctx["head"] + passage + ctx["tail"]
+        if needle in text:
+            text = text.replace(needle, passage, 1)
+        else:
+            lost.append(passage)
+    path.write_text(text, encoding="utf-8")
+    return lost
 
 
 def _land_filter(db: Database, manuscript: dict, rel: str, name: str,

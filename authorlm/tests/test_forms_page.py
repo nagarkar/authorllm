@@ -328,8 +328,16 @@ def decide_holds_rulings(root: Path) -> None:
     r = _call(ws, fake, "decide", id=alpha["id"], verdict="edit",
               seen=alpha["current"], text="Alpha drifts as it was.",
               prefix=alpha["prefix"], suffix=alpha["suffix"])
-    check("an edit that changes words after the span is turned down",
-          "error" in r and "after this form's span" in r["error"], r)
+    check("an edit that changes words after the span widens the form to "
+          "the whole passage",
+          r["ruling"]["text"] == "Alpha drifts as it was."
+          and r["ruling"]["context"] == {"head": "", "tail": " as it is."}, r)
+    shown = _by_note(_call(ws, fake, "list"))["r-alpha"]
+    check("a widened card diffs the whole old passage and drops its "
+          "prefix and suffix",
+          shown["widened"] and "".join(g["text"] for g in shown["segments"]
+                                       if g["op"] != "insert")
+          == "Alpha stays as it is.", shown)
     r = _call(ws, fake, "decide", id=alpha["id"], verdict="clear", seen=None)
     r = _call(ws, fake, "decide", id=beta["id"], verdict="edit",
               seen=beta["current"], text="Beta, in my words.")
@@ -358,6 +366,55 @@ def decide_holds_rulings(root: Path) -> None:
 
 
 # ----------------------------------------------------------------- merge
+
+def widened_edit_lands(root: Path) -> None:
+    print("merge, widened edit:")
+    ws, db, manuscript, ms, fake = _staged(root, "widened-ws")
+    forms = _by_note(_call(ws, fake, "list"))
+    alpha = forms["r-alpha"]
+    r = _call(ws, fake, "decide", id=alpha["id"], verdict="edit",
+              seen=alpha["current"], text="Alpha drifts, as it was.",
+              prefix=alpha["prefix"], suffix=alpha["suffix"])
+    assert "error" not in r, r
+    _rule_all(ws, fake, {"r-beta": ("accept", None),
+                         "r-gamma": ("decline", None),
+                         "r-add": ("decline", None)})
+    r = _call(ws, fake, "merge", file="solo.md")
+    text = (ms / "solo.md").read_text()
+    check("a widened edit lands as the whole new passage, once, and pushes",
+          r["stopped"] is None and r["pushed"] is True
+          and "Alpha drifts, as it was.\n" in text
+          and "as it is." not in text and text.count("Alpha") == 1, (r, text))
+    check("the tab reads the widened passage after the push",
+          "Alpha drifts, as it was." in fake.tab_text("solo.md")
+          and "as it is." not in fake.tab_text("solo.md"),
+          fake.tab_text("solo.md"))
+
+
+def widened_edit_over_another_form(root: Path) -> None:
+    print("decide, widened edit over another form:")
+    essay = ("# Topic\n\nAlpha stays and Omega waits as it is.\n\n"
+             "Beta is to be replaced.\n\nGamma is to be reworded.\n\n"
+             "Delta closes the essay.\n")
+    ws, db, manuscript, ms, fake = _staged(root, "overlap-ws", essay)
+    forms = _by_note(_call(ws, fake, "list"))
+    alpha = forms["r-alpha"]
+    # A second open form in the same paragraph (a tab takes one producer's
+    # batch at a time, so it is written straight into the record here).
+    cols = [r["name"] for r in db.all("PRAGMA table_info(doc_threads)")]
+    db.conn.execute(
+        f"INSERT INTO doc_threads ({', '.join(cols)}) SELECT "
+        + ", ".join("'dt-omega'" if c == "id" else "'Omega waits'"
+                    if c == "proposed_old" else "origin_id || '-omega'"
+                    if c == "origin_id" else c for c in cols)
+        + " FROM doc_threads WHERE id = ?", (alpha["id"],))
+    db.conn.commit()
+    r = _call(ws, fake, "decide", id=alpha["id"], verdict="edit",
+              seen=alpha["current"], text="Alpha moves and Omega sleeps here.",
+              prefix=alpha["prefix"], suffix=alpha["suffix"])
+    check("a widened edit over another open form's words is turned down",
+          "error" in r and "another open form" in r["error"], r)
+
 
 def merge_lands_the_rulings(root: Path) -> None:
     print("merge:")
@@ -922,7 +979,8 @@ def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="forms-page-"))
     for fn in (word_diff_segments, rulings_on_marked_text, list_shows_the_doc_as_it_stands,
                list_sorts_gone_forms_as_invalid, decide_holds_rulings,
-               merge_lands_the_rulings, merge_declines_everything,
+               merge_lands_the_rulings, widened_edit_lands,
+               widened_edit_over_another_form, merge_declines_everything,
                merge_stops_on_a_doc_edit_after_ruling,
                merge_stops_on_conflict, merge_never_pulls_a_stale_tab,
                merge_keeps_illustration_lines, unknown_method,
