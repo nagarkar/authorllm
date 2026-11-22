@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { VoicePicker, listenVoice } from "./ListenVoice";
+import { VoicePicker, listenVoice, pageManuscript } from "./ListenVoice";
 import type { ReactNode } from "react";
 import type { Transport } from "./transport";
 import { MarkdownBox } from "./MarkdownBox";
@@ -438,7 +438,7 @@ export function Listen({ markdown, label = "▶ Listen to the letter", wait = "P
       const response = await fetch("/api/try-text", {
         method: "POST",
         headers: {"Content-Type": "application/json", "X-AuthorLM": "1"},
-        body: JSON.stringify({markdown, voice: listenVoice() || undefined}),
+        body: JSON.stringify({markdown, voice: listenVoice() || undefined, manuscript: pageManuscript() || undefined}),
       });
       if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "Could not read the letter aloud.");
       setUrl(URL.createObjectURL(await response.blob()));
