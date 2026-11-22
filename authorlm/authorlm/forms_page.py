@@ -226,6 +226,32 @@ def _form_row(thread: dict, form: dict | None, marked: str | None,
     return _apply_ruling(row, ruling_of(thread))
 
 
+def _ruled_neighbours(forms: list[dict]) -> list[dict]:
+    """Each card's prefix and suffix with the other forms of its file that
+    are already accepted or edited read as what they will land as, not as
+    their old words (author's ask 2026-11-21: after accepting one form in a
+    paragraph, an edit of the other must build on it). The old-half text
+    stays in prefix_old / suffix_old so this can run again on every read."""
+    landing = {}
+    for f in forms:
+        r = f.get("ruling") or {}
+        if f.get("old") and r.get("verdict") in ("accept", "edit") \
+                and not r.get("context"):
+            landing[f["id"]] = (f["old"], r["text"] if r["verdict"] == "edit"
+                                else r["seen"])
+    for f in forms:
+        f.setdefault("prefix_old", f.get("prefix", ""))
+        f.setdefault("suffix_old", f.get("suffix", ""))
+        pre, suf = f["prefix_old"], f["suffix_old"]
+        for fid, (old, new) in landing.items():
+            if fid == f["id"]:
+                continue
+            pre, suf = pre.replace(old, new, 1) if old in pre else pre, \
+                suf.replace(old, new, 1) if old in suf else suf
+        f["prefix"], f["suffix"] = pre, suf
+    return forms
+
+
 def _apply_ruling(row: dict, ruling: dict | None) -> dict:
     """Set `row`'s ruling (and its staleness and diff) from `ruling`, the
     one held on its thread now. The cached listing (below) runs this again
@@ -294,8 +320,8 @@ def listing(db: Database, manuscript: dict, service, docs_service) -> dict:
         pairs = api.pair_external_forms(marked, threads) if marked else {}
         path = root / rel
         local = path.read_text(encoding="utf-8") if path.exists() else ""
-        rows = [_form_row(t, pairs.get(t["id"]), marked, local)
-                for t in threads]
+        rows = _ruled_neighbours([_form_row(t, pairs.get(t["id"]), marked, local)
+                                  for t in threads])
         tab = (links.get(rel) or {}).get("tab_id") if isinstance(
             links.get(rel), dict) else None
         others = _other_forms(db, manuscript, rel)
@@ -1203,9 +1229,10 @@ def _overlay(db: Database, manuscript: dict, data: dict) -> dict:
             now[r["id"]] = dict(r)
     files = []
     for g in out["files"]:
-        g["forms"] = [_apply_ruling(f, ruling_of(now[f["id"]]))
-                      for f in g["forms"]
-                      if now.get(f["id"], {}).get("state") == "written"]
+        g["forms"] = _ruled_neighbours(
+            [_apply_ruling(f, ruling_of(now[f["id"]]))
+             for f in g["forms"]
+             if now.get(f["id"], {}).get("state") == "written"])
         g["count"] = len(g["forms"])
         g["undecided"] = sum(1 for f in g["forms"]
                              if f["found"] and not f["ruling"])
