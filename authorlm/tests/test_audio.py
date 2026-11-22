@@ -10,6 +10,7 @@ Run: python3 tests/test_audio.py
 """
 
 from __future__ import annotations
+from urllib.parse import quote
 
 import os
 
@@ -2194,7 +2195,7 @@ def check_audiobook_page() -> None:
               ch["total"] == 4 and ch["sections"][1]["text"].startswith("The Dharmic")
               and ch["sections"][1]["preview"] is None and ch["sections"][1]["takeUrl"] is None
               and ch["sections"][1]["previewUrl"]
-              == f"/preview/kindness/{ch['sections'][1]['id']}.mp3?m=Scratch"
+              == f"/preview/kindness/{ch['sections'][1]['id']}.mp3?m=Scratch&v={quote(st['previewVoice']['current'])}"
               and ch["sections"][3]["moved"]["detail"] == ["speed", "removed Dharmic"], str(ch)[:400])
         job = s.enqueue("preview", stem="kindness")
         check("a preview job runs inline in tests and reports",
@@ -2205,7 +2206,7 @@ def check_audiobook_page() -> None:
               job["state"] == "done" and "4 preview(s) rendered" in job["message"], str(job))
         check("preview urls name their chapter and manuscript",
               st["chapter"]["sections"][0]["previewUrl"]
-              == f"/preview/kindness/{st['chapter']['sections'][0]['id']}.mp3?m=Scratch")
+              == f"/preview/kindness/{st['chapter']['sections'][0]['id']}.mp3?m=Scratch&v={quote(st['previewVoice']['current'])}")
         # The lazy listen: a missing preview renders when it is asked for.
         lazy = ch["sections"][2]["id"]
         gen.preview_path(s.root, lazy).unlink()
@@ -2579,13 +2580,42 @@ def check_audiobook_page() -> None:
         finally:
             server.shutdown()
             server.server_close()
+        # The preview-voice drop-down: the current voice and Alex are offered;
+        # choosing one rewrites only [preview] voice and clears old previews.
+        audiobook.INSTALLED_VOICES = lambda: {"Jamie (Premium)", "Alex", "Daniel"}
+        pv = s.status("kindness")["previewVoice"]
+        check("the preview voice drop-down offers the current voice and Alex",
+              pv["choices"][0] == pv["current"] and "Alex" in pv["choices"], str(pv))
+        toml_before = (s.root / audio.CONFIG_FILENAME).read_text(encoding="utf-8")
+        got_pv = s.set_preview_voice("Alex")
+        toml_after = (s.root / audio.CONFIG_FILENAME).read_text(encoding="utf-8")
+        check("choosing Alex writes it to [preview] and clears the old previews",
+              got_pv["current"] == "Alex" and got_pv["cleared"] >= 1
+              and gen.preview_settings(s.manuscript)[0] == "Alex"
+              and toml_after.startswith(toml_before.rstrip("\n")[:20]), str(got_pv))
+        try:
+            s.set_preview_voice("Bad News")
+            offered_only = False
+        except ValueError:
+            offered_only = True
+        check("a voice the drop-down does not offer is declined", offered_only)
+        s.set_preview_voice("Jamie (Premium)")
+        audiobook.INSTALLED_VOICES = lambda: {"Jamie (Premium)", "Daniel"}
+        check("a voice missing from the Mac is shown as missing",
+              s.preview_voice()["missing"] == ["Alex"], str(s.preview_voice()))
+        try:
+            s.set_preview_voice("Alex")
+            declined = False
+        except ValueError as err:
+            declined = "not installed" in str(err)
+        check("choosing a voice missing from the Mac is declined, naming where to add it", declined)
+        audiobook.INSTALLED_VOICES = audiobook.installed_say_voices
     finally:
         audiobook.CLIENT_FACTORY = None
         audiobook.PREVIEW_RENDERER = None
         audiobook._SESSIONS.clear()
         shutil.rmtree(ws, ignore_errors=True)
         shutil.rmtree(book, ignore_errors=True)
-
 
 def check_audiobook_continuation_edit() -> None:
     """Editing a continuation file's paragraph on the page (2026-10-26, the

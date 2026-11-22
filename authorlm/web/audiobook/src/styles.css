@@ -253,3 +253,4 @@ a.pill{text-decoration:none;display:inline-flex;align-items:center}
 .forms-results.has-bad>summary{color:var(--bad)}
 .forms-result{overflow-wrap:anywhere}
 .forms-pushed{font-size:13px}
+.listen-voice{display:block;margin:0 0 10px;font-size:14px}.listen-voice select{margin-left:6px;padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:var(--ground);color:var(--ink);font:inherit}

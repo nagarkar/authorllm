@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { VoicePicker, listenVoice } from "./ListenVoice";
 import type { ReactNode } from "react";
 import type { Transport } from "./transport";
 import { MarkdownBox } from "./MarkdownBox";
@@ -221,6 +222,7 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
   if (!status && !error) return <div className="boot">Loading the developmental edit…</div>;
   return (
     <div className="devedit">
+      <VoicePicker manuscript={manuscript} />
       {error && <div className="status bad">{error}</div>}
       {status && <div className="card devedit-head">
         <div className="devedit-tabs">
@@ -418,7 +420,7 @@ function DecisionCard({ d, onDecide }: { d: Decision & {why?: string}; onDecide:
 
 // Reads the letter aloud with the Mac preview voice, through the same road as
 // the Try text page (/api/try-text); nothing is saved.
-function Listen({ markdown, label = "▶ Listen to the letter", wait = "Preparing audio… (a minute or two for the whole letter)" }: { markdown: string; label?: string; wait?: string }) {
+export function Listen({ markdown, label = "▶ Listen to the letter", wait = "Preparing audio… (a minute or two for the whole letter)" }: { markdown: string; label?: string; wait?: string }) {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -429,13 +431,14 @@ function Listen({ markdown, label = "▶ Listen to the letter", wait = "Preparin
     return () => URL.revokeObjectURL(url);
   }, [url]);
   useEffect(() => { setUrl(""); }, [markdown]);
+  useEffect(() => { const on = () => setUrl(""); window.addEventListener("authorlm-listen-voice", on); return () => window.removeEventListener("authorlm-listen-voice", on); }, []);
   const listen = async () => {
     setBusy(true); setError("");
     try {
       const response = await fetch("/api/try-text", {
         method: "POST",
         headers: {"Content-Type": "application/json", "X-AuthorLM": "1"},
-        body: JSON.stringify({markdown}),
+        body: JSON.stringify({markdown, voice: listenVoice() || undefined}),
       });
       if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "Could not read the letter aloud.");
       setUrl(URL.createObjectURL(await response.blob()));
