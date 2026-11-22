@@ -443,6 +443,24 @@ def widened_edit_after_accepting_a_neighbour(root: Path) -> None:
           and text.count("Omega") == 1 and "as it is." not in text, (r, text))
 
 
+def summary_counts_open_and_ruled(root: Path) -> None:
+    print("summary:")
+    ws, db, manuscript, ms, fake = _staged(root, "summary-ws")
+    r = _call(ws, fake, "summary")
+    check("summary counts every open form, none ruled",
+          r["open"] == 4 and r["ruled"] == 0
+          and r["tabs"] == {"solo.md": {"open": 4, "ruled": 0}}, r)
+    _rule_all(ws, fake, {"r-beta": ("accept", None)})
+    r = _call(ws, fake, "summary")
+    check("a ruling shows in the summary at once", r["ruled"] == 1, r)
+    _rule_all(ws, fake, {"r-alpha": ("decline", None), "r-gamma": ("accept", None),
+                         "r-add": ("accept", None)})
+    _call(ws, fake, "merge", file="solo.md")
+    r = _call(ws, fake, "summary")
+    check("after a merge the tab has no open forms",
+          r["open"] == 0 and r["tabs"] == {}, r)
+
+
 def merge_lands_the_rulings(root: Path) -> None:
     print("merge:")
     ws, db, manuscript, ms, fake = _staged(root, "merge-ws")
@@ -1008,7 +1026,8 @@ def main() -> None:
                list_sorts_gone_forms_as_invalid, decide_holds_rulings,
                merge_lands_the_rulings, widened_edit_lands,
                widened_edit_over_another_form,
-               widened_edit_after_accepting_a_neighbour, merge_declines_everything,
+               widened_edit_after_accepting_a_neighbour,
+               summary_counts_open_and_ruled, merge_declines_everything,
                merge_stops_on_a_doc_edit_after_ruling,
                merge_stops_on_conflict, merge_never_pulls_a_stale_tab,
                merge_keeps_illustration_lines, unknown_method,
