@@ -835,6 +835,7 @@ workflow over `authorlm devedit` (devedit.py owns the run folder,
   runs once at the end, over the notebook, for drift. The author ratifies
   arcs worth keeping into `examples.md`; several passes are normal.
 - **Between agents:** `devedit terms` (finished essays only), `gather`, `group`, `build-queue`.
+- **Stale or blocking forms: withdraw and restage, never ask the author to rule first** (author ruling 2026-11-21). A tab takes no new forms while any are open, and staged forms cannot be edited in place. So when open forms are stale (a later discussion changed them), or when new forms must go into a tab that already holds unruled ones, do it yourself: list the tab's forms (`/api/forms` `list`), decline each one you are replacing (`decide`, verdict `decline`, `seen` = its `current`), `merge` the file, then `revise stage` the full set again, corrected and with the new ones added (carry each kept form's `old`, `proposed` and `note`). Moving paragraphs or sections cannot be a form (a form is one paragraph): withdraw the tab's forms, make the move in the file with a word count before and after that shows nothing lost, `doc push`, then restage. Keep the round's JSON in the scratchpad so the next restage starts from it. Tell the author the page will be empty for that tab for a minute or two while the run lasts.
 - **Watch the page while the author works it** (author ruling 2026-11-09):
   start a Monitor running `python3 -u authorlm/tools/author_watch.py --run <run folder>`
   over the run folder (decisions.json under `stages/`) and the database
