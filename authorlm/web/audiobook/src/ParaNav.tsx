@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { recall, remember } from "./remember";
 
 // Paragraph stepping in the audiobook view (author's ask 2026-11-21): ▲ and
 // ▼ move one paragraph, and a numbered picker jumps to any. The card at the
@@ -25,8 +26,18 @@ function goTo(list: HTMLElement[], i: number): number {
   return at;
 }
 
-export function ParaNav({ count }: { count: number }) {
+export function ParaNav({ count, storeKey }: { count: number; storeKey: string }) {
   const [at, setAt] = useState(0);
+  // The paragraph you were at comes back after a reload (author's rule
+  // 2026-11-21): the view returns to it once the chapter's cards are drawn.
+  const restored = useRef("");
+  useEffect(() => {
+    if (!count || restored.current === storeKey) return;
+    restored.current = storeKey;
+    const saved = parseInt(recall(storeKey), 10);
+    if (saved > 0) window.setTimeout(() => setAt(goTo(cards(), saved)), 50);
+  }, [count, storeKey]);
+  useEffect(() => { if (restored.current === storeKey) remember(storeKey, String(at)); }, [at, storeKey]);
   useEffect(() => {
     let timer = 0;
     const on = () => { window.clearTimeout(timer); timer = window.setTimeout(() => setAt(currentIndex(cards())), 60); };
