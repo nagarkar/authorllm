@@ -418,7 +418,7 @@ function DecisionCard({ d, onDecide }: { d: Decision & {why?: string}; onDecide:
 
 // Reads the letter aloud with the Mac preview voice, through the same road as
 // the Try text page (/api/try-text); nothing is saved.
-function Listen({ markdown, label = "▶ Listen to the letter", wait = "Preparing audio… (a minute or two for the whole letter)" }: { markdown: string; label?: string; wait?: string }) {
+export function Listen({ markdown, label = "▶ Listen to the letter", wait = "Preparing audio… (a minute or two for the whole letter)" }: { markdown: string; label?: string; wait?: string }) {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
