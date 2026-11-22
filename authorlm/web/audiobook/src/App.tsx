@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VolumeSlider } from "./audioGain";
 import { ParaNav } from "./ParaNav";
+import { recall, remember } from "./remember";
 import { VoicePicker } from "./ListenVoice";
 import { deveditTransport, formsTransport, request, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
@@ -46,14 +47,14 @@ const mmss = (s: number | null | undefined) => s == null ? "" : `${Math.floor(s 
 type PageMode = "chapters" | "pron" | "devedit" | "forms";
 // #<manuscript>/<stem>, #<manuscript>/pron:<term>, #<manuscript>/devedit or #<manuscript>/forms; a bare #<stem> opens
 // on the server's -m manuscript.
-const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string} => {
+const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string; tab?: string} => {
   let h = decodeURIComponent(location.hash.replace(/^#/, ""));
   let ms = "";
   const slash = h.indexOf("/");
   if (slash >= 0) { ms = h.slice(0, slash); h = h.slice(slash + 1); }
   if (h.startsWith("pron")) return {ms, mode: "pron", stem: "", term: h.slice(5)};
   if (h === "devedit") return {ms, mode: "devedit", stem: "", term: ""};
-  if (h === "forms") return {ms, mode: "forms", stem: "", term: ""};
+  if (h === "forms" || h.startsWith("forms:")) return {ms, mode: "forms", stem: "", term: "", tab: h.slice(6)};
   return {ms, mode: "chapters", stem: h, term: ""};
 };
 
@@ -92,7 +93,7 @@ export function App() {
     document.addEventListener("visibilitychange", onVisible);
     return () => { live = false; window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
   }, [ms, mode]);
-  const [formsTab, setFormsTab] = useState<string>("");
+  const [formsTab, setFormsTab] = useState<string>(parseHash().tab || "");
   const [formsActions, setFormsActions] = useState<FormsActions | null>(null);
   const onFormsTabs = useCallback((tabs: FormsTab[], actions: FormsActions) => {
     setFormsTabs(tabs); setFormsActions(actions);
@@ -120,7 +121,9 @@ export function App() {
       setError("");
       if (!s && st.book.chapters.length) {
         // Open where the work is: the first chapter with something left, else the first.
-        const first = st.book.chapters.find(c => c.remaining > 0) || st.book.chapters[0];
+        const last = recall(`authorlm.lastStem.${m}`);
+        const first = st.book.chapters.find(c => c.stem === last)
+          || st.book.chapters.find(c => c.remaining > 0) || st.book.chapters[0];
         setStem(first.stem);
       }
     } catch (err) { if (s === latestStem.current && m === latestMs.current) setError((err as Error).message); }
@@ -129,9 +132,13 @@ export function App() {
   useEffect(() => { latestStem.current = stem; latestMs.current = ms; load(stem); }, [ms, stem, load]);
   useEffect(() => {
     if (!ms) return;
-    const rest = mode === "pron" ? (term ? `pron:${term}` : "pron") : mode === "devedit" || mode === "forms" ? mode : stem;
-    location.hash = `${encodeURIComponent(ms)}/${rest}`;
-  }, [ms, stem, mode, term]);
+    // Choices that survive a reload (author's rule 2026-11-21): the view and
+    // its tab live in the URL; the last chapter per manuscript in storage.
+    const rest = mode === "pron" ? (term ? `pron:${term}` : "pron") : mode === "devedit" ? mode
+      : mode === "forms" ? (formsTab ? `forms:${formsTab}` : "forms") : stem;
+    history.replaceState(null, "", `#${encodeURIComponent(ms)}/${rest}`);
+    if (mode === "chapters" && stem) remember(`authorlm.lastStem.${ms}`, stem);
+  }, [ms, stem, mode, term, formsTab]);
   const switchManuscript = useCallback((name: string) => {
     audioRef.current?.pause();
     setNow(null);
@@ -276,7 +283,7 @@ export function App() {
         })()}
         {mode === "chapters" && <div className="bar hrow actions">
           <button className="chip" onClick={() => act("refresh", {stem})} title="Export and preview what changed on disk" aria-label="Refresh">↻</button>
-          {chapter && <ParaNav count={chapter.sections.length} />}
+          {chapter && <ParaNav count={chapter.sections.length} storeKey={`authorlm.para.${ms}.${stem}`} />}
           {stem && <>
             <button className="chip" onClick={() => act("pull", {stem})} disabled={docBusy} aria-label="Pull from the Doc"
               title="Bring this chapter's tab down from the Google Doc">{pulling ? "…" : "⬇"}</button>
