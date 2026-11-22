@@ -1188,6 +1188,12 @@ def check_workbench() -> None:
         check("contexts give one sentence per voice that says the word",
               [c["cast"] for c in ctx["contexts"]] == ["herdsman"]
               and ctx["say"] == "buh-SIL-ih-deez", str(ctx)[:300])
+        # A word only a footnote carries is in no narrated passage: the
+        # reply is an empty list (the page then says nothing will play),
+        # never an error and never a hang.
+        foot = call("contexts", term="citation")
+        check("a word only in a footnote has no contexts (footnotes are not narrated)",
+              foot["contexts"] == [] and foot["term"] == "citation", str(foot)[:300])
         clip = call("render", term="Basilides", say="ba-SIL-i-deez",
                     context=ctx["contexts"][0], mode="respelling")
         check("render substitutes the respelling as written in that voice and returns the audio",
