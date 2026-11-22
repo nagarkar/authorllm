@@ -222,13 +222,13 @@ export function App() {
     <div className="page">
       <header>
         <nav className="modes top-nav" aria-label="Pages">
-          <button className={`chip${mode === "chapters" ? " on" : ""}`} aria-pressed={mode === "chapters"} onClick={() => setMode("chapters")}>Audiobook</button>
-          <button className={`chip${mode === "pron" ? " on" : ""}`} aria-pressed={mode === "pron"} onClick={() => setMode("pron")}>Pronunciations</button>
+          <button className={`chip${mode === "chapters" ? " on" : ""}`} aria-pressed={mode === "chapters"} onClick={() => setMode("chapters")}>Browse</button>
+          <button className={`chip${mode === "pron" ? " on" : ""}`} aria-pressed={mode === "pron"} onClick={() => setMode("pron")} title="Audio settings: pronunciations">Audio</button>
           <button className={`chip${mode === "devedit" ? " on" : ""}`} aria-pressed={mode === "devedit"} onClick={() => setMode("devedit")}>Dev edit</button>
           <button className={`chip${mode === "forms" ? " on" : ""}`} aria-pressed={mode === "forms"} onClick={() => setMode("forms")}
             title={formsSummary ? Object.entries(formsSummary.tabs).map(([f, t]) => `${f.replace(/\.md$/, "")}: ${t.open} open, ${t.ruled} ruled`).join("\n") || "No open forms" : undefined}>
-            Merge forms{formsSummary ? ` · ${formsSummary.open - formsSummary.ruled} to rule` : ""}</button>
-          <a className="chip" href={`/try-text${location.hash}`}>Try text</a>
+            Merge{formsSummary ? ` · ${formsSummary.open - formsSummary.ruled}` : ""}</button>
+          <a className="chip" href={`/try-text${location.hash}`} title="Try things out: read pasted text aloud">Audition</a>
         </nav>
         <div className="title-row">
           <h1 className="display"><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />{book.title}</h1>

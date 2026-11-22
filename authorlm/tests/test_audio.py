@@ -2533,7 +2533,7 @@ def check_audiobook_page() -> None:
             # of chapter takes, previews, or manuscript edits.
             try:
                 with urllib.request.urlopen(f"{base}/try-text") as resp:
-                    check("Try text opens its own view", "Try text" in resp.read().decode())
+                    check("Try text opens its own view (the Audition page)", "Audition" in resp.read().decode())
             except urllib.error.HTTPError as err:
                 check("Try text opens its own view", False, str(err))
             original_files = {p.relative_to(book): p.read_bytes()
