@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VolumeSlider } from "./audioGain";
+import { ParaNav } from "./ParaNav";
 import { deveditTransport, formsTransport, request, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
 import { DevEdit } from "./DevEdit";
@@ -273,7 +274,8 @@ export function App() {
               </option>
             ))}
           </select>
-          <button className="chip" onClick={() => act("refresh", {stem})} title="Export and preview what changed on disk">↻ Refresh</button>
+          <button className="chip" onClick={() => act("refresh", {stem})} title="Export and preview what changed on disk" aria-label="Refresh">↻</button>
+          {chapter && <ParaNav count={chapter.sections.length} />}
         </div>}
         {mode !== "forms" && <div className="doc">
           <span title="When this chapter's tab was last pushed to the Google Doc (recorded since 2026-10-26)">
