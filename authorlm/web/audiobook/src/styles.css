@@ -254,3 +254,5 @@ a.pill{text-decoration:none;display:inline-flex;align-items:center}
 .forms-result{overflow-wrap:anywhere}
 .forms-pushed{font-size:13px}
 .listen-voice{display:block;margin:0 0 10px;font-size:14px}.listen-voice select{margin-left:6px;padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:var(--ground);color:var(--ink);font:inherit}
+html.typing header{display:none}
+html.typing textarea:focus{resize:none;scroll-margin-top:0}

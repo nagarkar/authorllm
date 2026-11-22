@@ -423,7 +423,7 @@ function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: strin
       {!f.found && <div className="moved">This form is no longer in the tab (taken out by hand?). Merge reads what the tab holds for it; it takes no ruling here.</div>}
       {msg && <div className="status bad">{msg}</div>}
       {f.found && editing && <>
-        <textarea className="devedit-edit" value={text} onChange={e => setText(e.target.value)}
+        <textarea className="devedit-edit" autoFocus value={text} onChange={e => setText(e.target.value)}
           rows={Math.min(10, Math.max(2, Math.ceil(text.length / 70)))} aria-label="New text for this form" />
         <div className="devedit-actions">
           <button className="pill on" disabled={busy} onClick={() => void go("edit", text)}>{busy ? "…" : "Save edit"}</button>
@@ -498,7 +498,7 @@ function ConflictCard({ n, card, onSettle }: { n: number; card: Card; onSettle: 
       {card.illustration && <div className="moved">This card touches a picture's [Illustration: ...] tag. Changing the description marks its picked picture stale.</div>}
       {msg && <div className="status bad">{msg}</div>}
       {editing && <>
-        <textarea className="devedit-edit" value={text} onChange={e => setText(e.target.value)}
+        <textarea className="devedit-edit" autoFocus value={text} onChange={e => setText(e.target.value)}
           rows={Math.min(14, Math.max(3, Math.ceil(text.length / 70) + text.split("\n").length))} aria-label="The text this card should read" />
         <div className="devedit-actions">
           <button className="pill on" disabled={busy} onClick={() => void go("edit", text)}>{busy ? "…" : "Save edit"}</button>
