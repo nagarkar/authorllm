@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Transport } from "./transport";
+import { Listen } from "./DevEdit";
 
 // Mirrors forms_page.dispatch (authorlm/forms_page.py): every open outside
 // revision, Doc-road filter edit or lens edit ("form") of the manuscript, by file, as
@@ -426,6 +427,7 @@ function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: strin
           <button className="pill on" disabled={busy} onClick={() => void go("edit", text)}>{busy ? "…" : "Save edit"}</button>
           <button className="pill" onClick={() => setEditing(false)}>Cancel</button>
         </div>
+        <Listen markdown={text} label="▶ Listen to my edit" wait="Preparing audio…" />
       </>}
       {f.found && !editing && <div className="devedit-actions">
         <button className={`pill${ruled === "accept" ? " on" : ""}`} disabled={busy} onClick={() => void go("accept")}>Accept</button>
@@ -433,6 +435,7 @@ function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: strin
         <button className={`pill${ruled === "decline" ? " on" : ""}`} disabled={busy} onClick={() => void go("decline")}>Decline</button>
         {ruled && <button className="pill" disabled={busy} onClick={() => void go("clear")}>Undo</button>}
       </div>}
+      {f.found && !editing && <Listen markdown={ruled === "decline" ? passageOf(f.old) : passageOf(shown)} label="▶ Listen" wait="Preparing audio…" />}
     </div>
   );
 }
