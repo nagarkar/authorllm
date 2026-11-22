@@ -25,6 +25,7 @@ interface Status {
   account: { remaining: number; used: number; limit: number; at: string } | null;
   jobs: { running: Job | null; queued: Job[]; recent: Job[] };
   held?: Held[]; formsLink?: string;
+  previewVoice: { current: string; choices: string[]; missing: string[] };
 }
 type Source = "preview" | "take";
 
@@ -207,6 +208,21 @@ export function App() {
           <h1 className="display"><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />{book.title}</h1>
           <span className="count">{account ? `${fmt(account.remaining)} chars left` : book.quality}</span>
         </div>
+        {mode === "chapters" && <div className="bar">
+          <label className="count" htmlFor="preview-voice">Preview voice</label>
+          <select id="preview-voice" value={status.previewVoice.current} aria-label="Preview voice"
+            onChange={async e => {
+              audioRef.current?.pause();
+              setNow(null);
+              try { await request("previewVoice", {voice: e.target.value}); setError(""); await load(stem); }
+              catch (err) { setError((err as Error).message); }
+            }}>
+            {status.previewVoice.choices.map(v => {
+              const missing = status.previewVoice.missing.includes(v);
+              return <option key={v} value={v} disabled={missing}>{missing ? `${v} (not installed on this Mac)` : v}</option>;
+            })}
+          </select>
+        </div>}
         {manuscripts.length > 1 && <div className="bar">
           <select value={ms} onChange={e => switchManuscript(e.target.value)} aria-label="Manuscript">
             {manuscripts.map(name => <option key={name} value={name}>{name}</option>)}

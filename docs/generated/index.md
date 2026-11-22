@@ -1160,6 +1160,12 @@ Individual `lint.check_*` helpers encode ratified style laws that `write propose
 
 Lint word-normalization, syllable count, and n-gram shingles.
 
+## `tests.test_listen_voice`
+
+`authorlm/tests/test_listen_voice.py`
+
+A Listen button's voice: /api/try-text takes an optional `voice`, one of the offered voices, for that listen only; audiobook.toml is untouched.
+
 ## `tests.test_live_llm`
 
 `authorlm/tests/test_live_llm.py`

@@ -104,6 +104,14 @@ def make_handler(workspace: str | None, manuscript: str | None):
                 if not head:
                     self.wfile.write(payload)
                 return
+            if path == "/api/voices":
+                named = (parse_qs(query).get("m") or [None])[0]
+                try:
+                    s = audiobook.session(workspace, named or manuscript)
+                    self._json(200, audiobook.listen_voices(s.manuscript))
+                except Exception as err:  # noqa: BLE001
+                    self._json(500, {"error": str(err)})
+                return
             if path == "/health":
                 self._json(200, {"ok": True})
                 return
@@ -162,7 +170,11 @@ def make_handler(workspace: str | None, manuscript: str | None):
                 if not isinstance(body, dict) or not isinstance(body.get("markdown"), str):
                     raise ValueError("Paste some text to listen to.")
                 s = audiobook.session(workspace, manuscript)
-                payload = audiobook.render_pasted_preview(s.manuscript, body["markdown"])
+                voice = body.get("voice")
+                if voice is not None and not isinstance(voice, str):
+                    raise ValueError("voice is a name")
+                payload = audiobook.render_pasted_preview(s.manuscript, body["markdown"],
+                                                          voice or None)
             except (ValueError, RuntimeError) as err:
                 self._json(400, {"error": str(err)})
                 return

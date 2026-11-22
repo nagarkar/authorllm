@@ -29,7 +29,9 @@ generate or retake job runs, and each one is the author's tap.
 
 from __future__ import annotations
 
+import json
 import queue
+import re
 import tempfile
 import threading
 import time
@@ -47,7 +49,27 @@ CLIENT_FACTORY: Callable[[], audio.ElevenLabs] | None = None
 PREVIEW_RENDERER: Callable[[Path, dict, str, int], Path] | None = None
 
 METHODS = ("manuscripts", "status", "refresh", "preview", "generate", "retake",
-           "stitch", "jobs", "source", "edit", "push", "pull")
+           "stitch", "jobs", "source", "edit", "push", "pull", "previewVoice")
+# The page's preview-voice drop-down offers these beside whatever
+# audiobook.toml names (2026-11-16: "the current voice and the Alex voice").
+PREVIEW_VOICE_CHOICES = ("Jamie (Premium)", "Alex")
+
+
+def installed_say_voices() -> set[str] | None:
+    """The voices `say -v '?'` lists, or None where there is no `say`."""
+    import shutil
+    import subprocess
+    if not shutil.which("say"):
+        return None
+    try:
+        out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True,
+                             timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {m.group(1).strip() for m in re.finditer(r"^(.+?)\s{2,}\w\w[_-]\w+", out, re.M)}
+
+
+INSTALLED_VOICES: Callable[[], set[str] | None] = installed_say_voices
 _SESSIONS: dict[tuple, "Session"] = {}
 RECENT_JOBS = 20
 
@@ -60,12 +82,33 @@ def app_html() -> str:
     return path.read_text(encoding="utf-8")
 
 
-def render_pasted_preview(manuscript: dict, markdown: str) -> bytes:
-    """Render a free preview without saving a source, a chapter preview or a take."""
+def listen_voices(manuscript: dict) -> dict:
+    """The voices a Listen button may read in: the manuscript's preview
+    voice first, then the page's other offered voices; `missing` names
+    those not installed on this Mac."""
+    current, _rate = gen.preview_settings(manuscript)
+    choices = [current] + [v for v in PREVIEW_VOICE_CHOICES if v != current]
+    have = INSTALLED_VOICES()
+    return {"current": current, "choices": choices,
+            "missing": [v for v in choices if have is not None and v not in have]}
+
+
+def render_pasted_preview(manuscript: dict, markdown: str,
+                          voice: str | None = None) -> bytes:
+    """Render a free preview without saving a source, a chapter preview or a
+    take. `voice` picks one of `listen_voices` for this listen only; the
+    manuscript's preview voice in audiobook.toml is left as it is."""
     spoken = audio.pasted_speech(markdown)
     if not spoken:
         raise ValueError("Paste some text to listen to.")
-    voice, rate = gen.preview_settings(manuscript)
+    default, rate = gen.preview_settings(manuscript)
+    if voice and voice != default:
+        offered = listen_voices(manuscript)
+        if voice not in offered["choices"]:
+            raise ValueError(f"not an offered voice: {voice}")
+        if voice in offered["missing"]:
+            raise ValueError(f"{voice} is not installed on this Mac")
+    voice = voice or default
     with tempfile.TemporaryDirectory(prefix="authorlm-try-text-") as directory:
         renderer = PREVIEW_RENDERER or gen.render_preview
         return renderer(Path(directory), {"id": "paste", "text": spoken},
@@ -130,6 +173,30 @@ class Session:
         except (audio.AudioError, OSError):
             self.account = None
 
+    # ---------------------------------------------------------- preview voice
+
+    def preview_voice(self) -> dict:
+        return listen_voices(self.manuscript)
+
+    def set_preview_voice(self, voice: str) -> dict:
+        """Write the chosen voice into [preview] voice in audiobook.toml,
+        changing that one line and keeping the author's comments, then
+        clear the previews made with the old voice."""
+        if voice not in self.preview_voice()["choices"]:
+            raise ValueError(f"not an offered preview voice: {voice!r}")
+        if voice in self.preview_voice()["missing"]:
+            # `say -v` with a voice not on the Mac reads in the system
+            # voice without a word of warning (2026-11-16, Alex).
+            raise ValueError(f"{voice} is not installed on this Mac: add it in System "
+                             "Settings > Accessibility > Spoken Content > System voice "
+                             "> Manage Voices, then choose it again")
+        path = self.root / audio.CONFIG_FILENAME
+        path.write_text(_with_preview_voice(path.read_text(encoding="utf-8"),
+                                            voice), encoding="utf-8")
+        _voice, rate = gen.preview_settings(self.manuscript)
+        cleared = gen.check_preview_voice(self.root, voice, rate)
+        return {**self.preview_voice(), "cleared": cleared}
+
     # ---------------------------------------------------------- reads
 
     def status(self, stem: str | None = None) -> dict:
@@ -155,11 +222,13 @@ class Session:
             "chapter": None, "doc": self._doc_state(stem), "account": self.account,
             "export": gen.export_staleness(self.manuscript),
             "jobs": self.jobs(),
+            "previewVoice": self.preview_voice(),
         }
         if stem:
             chapter = gen.load_chapter(root, book, stem)
             full = gen.chapter_status(root, book, chapter)
             texts = {s["id"]: s for s in gen.speech_of(chapter)}
+            voice = out["previewVoice"]["current"]
             for sec in full["sections"]:
                 sp = texts[sec["id"]]
                 sec.update({
@@ -168,7 +237,7 @@ class Session:
                     "pronunciations": sp.get("pronunciations", []),
                     # Every paragraph can be heard: a missing preview
                     # renders when it is asked for (gen.ensure_preview).
-                    "previewUrl": f"/preview/{stem}/{sec['id']}.mp3{m}",
+                    "previewUrl": f"/preview/{stem}/{sec['id']}.mp3{m}&v={quote(voice)}",
                     "takeUrl": f"/take/{stem}/{sec['id']}.mp3{m}" if sec["take"] else None,
                 })
             full["stitchedUrl"] = f"/stitched/{stem}.mp3{m}" if full["stitched"] else None
@@ -645,6 +714,29 @@ class Session:
             self._set(job, secs=round(time.monotonic() - started, 3))
 
 
+def _with_preview_voice(text: str, voice: str) -> str:
+    """audiobook.toml with [preview] voice set, every other line as it was.
+    A file without the line gets one (under [preview], or a new table)."""
+    lines = text.splitlines(keepends=True)
+    table = None
+    for i, line in enumerate(lines):
+        head = re.match(r"\s*\[([^\]]+)\]", line)
+        if head:
+            if table == "preview":
+                lines.insert(i, f"voice = {json.dumps(voice)}\n")
+                return "".join(lines)
+            table = head.group(1).strip()
+            continue
+        if table == "preview" and re.match(r"\s*voice\s*=", line):
+            lines[i] = re.sub(r'(=\s*)"[^"\n]*"', lambda m: m.group(1) + json.dumps(voice),
+                              line, count=1)
+            return "".join(lines)
+    if table == "preview":
+        return "".join(lines) + f"voice = {json.dumps(voice)}\n"
+    sep = "" if not text or text.endswith("\n") else "\n"
+    return text + sep + f"\n[preview]\nvoice = {json.dumps(voice)}\n"
+
+
 def _moved_message(name: str) -> str:
     return (f"did not push {name}: its tab in the Doc was edited since the "
             "last push. Your edit is saved in the file. Settle the two "
@@ -708,6 +800,8 @@ def dispatch(method: str, params: dict[str, Any],
         return s.status(params.get("stem"))
     if method == "jobs":
         return s.jobs()
+    if method == "previewVoice":
+        return s.set_preview_voice(str(params.get("voice") or ""))
     if method == "source":
         return s.source(params["stem"], params["id"])
     if method == "edit":
