@@ -394,6 +394,32 @@ class MediaTests(unittest.TestCase):
         bad = self.one("[Clip: | use: _assets/temple.mp4 | audio: loud]\nW.\n[/Clip]\n")
         self.assertTrue(any("not one of" in e for e in bad["errors"]))
 
+    def test_voice_field(self):
+        # voice: is only a Collage cutaway the author speaks on camera;
+        # under narration it must refuse, and an unknown value must refuse.
+        collage = self.one(
+            "[Collage: c]\n\n[Clip: | use: _assets/temple.mp4 | voice: author]"
+            "\n\n[/Collage]\n")
+        self.assertEqual(collage["shape"], "point")
+        self.assertFalse(any("voice:" in e for e in collage["errors"]),
+                         collage["errors"])
+        under = self.one(
+            "[Clip: | use: _assets/temple.mp4 | voice: author]\nWords.\n"
+            "[/Clip]\n")
+        self.assertTrue(any("only a Collage holds" in e for e in under["errors"]),
+                        under["errors"])
+        montage = self.listing(
+            "[Montage: m]\n\n[Clip: | use: _assets/temple.mp4 | voice: author]"
+            "\n\nProse.\n\n[/Montage]\n")["media"]
+        clip = [e for e in montage if e["kind"] == "clip"][0]
+        self.assertTrue(any("only a Collage holds" in e for e in clip["errors"]),
+                        clip["errors"])
+        unknown = self.one(
+            "[Collage: c]\n\n[Clip: | use: _assets/temple.mp4 | voice: guest]"
+            "\n\n[/Collage]\n")
+        self.assertTrue(any("not one of" in e for e in unknown["errors"]),
+                        unknown["errors"])
+
     def test_key_names_what_the_clip_shows(self):
         (self.root / "ecce.md").write_text(
             "[Collage: c]\n\n[Clip: source: The Matrix Reloaded moment: Neo "
