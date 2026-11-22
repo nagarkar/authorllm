@@ -11,6 +11,8 @@ const MAX = 4;
 let ctx: AudioContext | null = null;
 let gain: GainNode | null = null;
 const routed = new WeakSet<HTMLMediaElement>();
+const live = new Set<HTMLMediaElement>();      // routed elements, for pause/resume
+let heldForBackground: HTMLMediaElement[] = [];
 
 export function pageVolume(): number {
   try { const v = parseFloat(localStorage.getItem(KEY) || ""); return isFinite(v) ? Math.min(MAX, Math.max(0, v)) : 1; } catch { return 1; }
@@ -35,14 +37,41 @@ function route(el: HTMLMediaElement) {
     }
     ctx.createMediaElementSource(el).connect(gain!);
     routed.add(el);
+    live.add(el);
     void ctx.resume();
   } catch { /* leave the element playing on its own */ }
+}
+
+// Leaving the page (bug 2026-11-21): iPhone Safari stops a page's Web Audio
+// when the page goes to the background, but the <audio> elements kept
+// "playing" into it in silence, so the walk moved on paragraph by paragraph
+// with no sound and stayed silent on return. Now what is playing is paused
+// when the page is hidden and played again, from where it stopped, when the
+// page comes back; if Safari will not restart it there, it stays paused.
+function holdForBackground() {
+  heldForBackground = [...live].filter(el => el.isConnected && !el.paused && !el.ended);
+  heldForBackground.forEach(el => el.pause());
+}
+
+async function resumeFromBackground() {
+  const held = heldForBackground;
+  heldForBackground = [];
+  try { await ctx?.resume(); } catch { /* resumes on the next tap */ }
+  for (const el of held) {
+    if (el.isConnected) { try { await el.play(); } catch { /* stays paused */ } }
+  }
 }
 
 export function installPageVolume() {
   document.addEventListener("play", e => {
     if (e.target instanceof HTMLMediaElement) route(e.target);
   }, true);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") holdForBackground();
+    else void resumeFromBackground();
+  });
+  window.addEventListener("pagehide", holdForBackground);
+  window.addEventListener("pageshow", () => void resumeFromBackground());
 }
 
 export function VolumeSlider() {
