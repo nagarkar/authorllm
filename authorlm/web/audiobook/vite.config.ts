@@ -10,6 +10,9 @@ export default defineConfig({
   // Python server at the site root; the dev server serves them from here too,
   // and the build leaves them out of the dist (the page links them by url).
   publicDir: "../../authorlm/brand",
+  // A stamp per build: the open page compares it with the served page's and
+  // offers a reload when they differ (2026-11-21: a phone kept an old copy).
+  define: { __BUILD__: JSON.stringify(`build-${Date.now()}`) },
   plugins: [react(), viteSingleFile()],
   build: {
     outDir: "../../authorlm/audiobook_dist",
