@@ -4,8 +4,10 @@ import "./styles.css";
 import { App } from "./App";
 import { TryText } from "./TryText";
 import { installTypingFocus } from "./typingFocus";
+import { mixWithOtherAudio } from "./audioMix";
 
 installTypingFocus();
+mixWithOtherAudio();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>{location.pathname === "/try-text" ? <TryText /> : <App />}</StrictMode>
