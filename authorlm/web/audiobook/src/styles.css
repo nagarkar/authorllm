@@ -257,3 +257,14 @@ a.pill{text-decoration:none;display:inline-flex;align-items:center}
 html.typing header{display:none}
 html.typing textarea:focus{resize:none;scroll-margin-top:0}
 .page-volume{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:14px}.page-volume input{flex:1 1 auto;accent-color:var(--band-ink)}
+/* Header drop-downs keep a modest width and cut long names short; the
+   phone's own picker shows the whole name when opened (2026-11-21). */
+header select{flex:0 1 auto;width:auto;max-width:min(15rem,58vw);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
+header .bar{flex-wrap:wrap}
+.para-nav{display:inline-flex;align-items:center;gap:4px;margin-left:auto}
+.para-nav .chip{min-width:36px;padding:6px 8px}
+header select.para-pick{flex:0 0 auto;max-width:5.5rem;min-height:36px;padding:4px 6px}
+header .bar:has(.para-nav) select[aria-label="Chapter"]{max-width:40vw}
+header .bar:has(.para-nav){flex-wrap:nowrap}
+.para-nav .chip{min-width:32px;padding:4px 6px}
+header select.para-pick{max-width:4.6rem}
