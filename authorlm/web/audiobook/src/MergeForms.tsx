@@ -17,7 +17,7 @@ interface Form {
   id: string; origin: string; producer: "external" | "filter" | "lens"; note: string; kind: "replace" | "insert";
   old: string; proposed: string; current: string | null;
   segments?: { op: "equal" | "delete" | "insert"; text: string }[]; found: boolean; edited_in_doc: boolean;
-  prefix: string; suffix: string; anchor: string; ruling: Ruling | null;
+  prefix: string; suffix: string; anchor: string; ruling: Ruling | null; widened?: boolean;
   // A ruling the Doc overtook (the green half changed after it): the form
   // is back under To rule, and this says what the ruling was.
   ruling_stale: Ruling | null;
@@ -383,7 +383,7 @@ function FileCard({ g, merging, queued, onDecide, onAcceptAll, onLand, onSettle 
 function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: string, text?: string) => Promise<string | null> }) {
   const [editing, setEditing] = useState(false);
   // The edit box holds the whole passage the card shows, not the span alone.
-  const passageOf = (span: string) => f.kind === "replace" ? `${f.prefix}${span}${f.suffix}` : span;
+  const passageOf = (span: string) => f.kind === "replace" && !f.widened ? `${f.prefix}${span}${f.suffix}` : span;
   const initial = passageOf(f.ruling?.text ?? f.current ?? f.proposed);
   const [text, setText] = useState(initial);
   const [busy, setBusy] = useState(false);
@@ -407,13 +407,13 @@ function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: strin
         {ruled && <span className={`state ${ruled === "decline" ? "" : "done"}`}>{ruled === "accept" ? "accepted" : ruled === "edit" ? "edited" : "declined"}</span>}
       </div>
       {f.kind === "replace"
-        ? <p className={`devedit-diff${ruled !== "decline" && f.segments?.length ? " forms-diff" : ""}`}>{f.prefix}{ruled !== "decline" && f.segments?.length
+        ? <p className={`devedit-diff${ruled !== "decline" && f.segments?.length ? " forms-diff" : ""}`}>{f.widened ? null : f.prefix}{ruled !== "decline" && f.segments?.length
             // One merged block: kept words green, removed red struck,
             // inserted or changed words blue. Edit opens the whole passage.
             ? f.segments.map((g, i) => g.op === "equal" ? <span key={i} className="keep">{g.text}</span>
               : g.op === "delete" ? <s key={i} className="del">{g.text}</s>
               : <span key={i} className="ins">{g.text}</span>)
-            : <><s className="del">{f.old}</s>{newPart && <> {newPart}</>}</>}{f.suffix}</p>
+            : <><s className="del">{f.old}</s>{newPart && <> {newPart}</>}</>}{f.widened ? null : f.suffix}</p>
         : <>
           {f.anchor && <p className="devedit-diff muted forms-anchor">{f.anchor}</p>}
           <p className="devedit-diff">{ruled === "decline" ? <s className="del">{shown}</s> : <>New paragraph: {newPart}</>}</p>
