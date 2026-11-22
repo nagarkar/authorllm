@@ -226,6 +226,20 @@ def _form_row(thread: dict, form: dict | None, marked: str | None,
     return _apply_ruling(row, ruling_of(thread))
 
 
+def summary(db: Database, manuscript: dict) -> dict:
+    """The manuscript's forms at a glance, for every page's header (author's
+    ask 2026-11-21: one count the whole app shares): open forms, how many of
+    them already carry a ruling, and the same per tab. Read from the
+    database alone, so it is cheap to poll."""
+    tabs = {}
+    for rel, threads in open_threads(db, manuscript).items():
+        ruled = sum(1 for t in threads if ruling_of(t))
+        tabs[rel] = {"open": len(threads), "ruled": ruled}
+    return {"open": sum(t["open"] for t in tabs.values()),
+            "ruled": sum(t["ruled"] for t in tabs.values()),
+            "tabs": tabs}
+
+
 def _ruled_neighbours(forms: list[dict]) -> list[dict]:
     """Each card's prefix and suffix with the other forms of its file that
     are already accepted or edited read as what they will land as, not as
@@ -1396,6 +1410,8 @@ def dispatch(method: str, params: dict[str, Any],
             return _store((workspace, manuscript["name"]),
                           _read_listing(session, db, manuscript), db,
                           manuscript)
+        if method == "summary":
+            return summary(db, manuscript)
         if method == "decide":
             return decide(db, manuscript, str(params["id"]),
                           str(params["verdict"]), params.get("seen"),

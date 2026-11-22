@@ -75,6 +75,20 @@ export function App() {
   const [mode, setMode] = useState<PageMode>(parseHash().mode);
   const [term, setTerm] = useState<string>(parseHash().term);
   const [formsTabs, setFormsTabs] = useState<FormsTab[]>([]);
+  // The manuscript's open forms, shared by every page (author's ask
+  // 2026-11-21): polled from the database, cheap, and refreshed when the
+  // page comes back to the front.
+  const [formsSummary, setFormsSummary] = useState<{ open: number; ruled: number; tabs: Record<string, { open: number; ruled: number }> } | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => formsTransport.request<{ open: number; ruled: number; tabs: Record<string, { open: number; ruled: number }> }>("summary", {})
+      .then(v => { if (live) setFormsSummary(v); }).catch(() => {});
+    void load();
+    const timer = window.setInterval(load, 15000);
+    const onVisible = () => { if (document.visibilityState === "visible") void load(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { live = false; window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [ms, mode]);
   const [formsTab, setFormsTab] = useState<string>("");
   const [formsActions, setFormsActions] = useState<FormsActions | null>(null);
   const onFormsTabs = useCallback((tabs: FormsTab[], actions: FormsActions) => {
@@ -201,7 +215,9 @@ export function App() {
           <button className={`chip${mode === "chapters" ? " on" : ""}`} aria-pressed={mode === "chapters"} onClick={() => setMode("chapters")}>Audiobook</button>
           <button className={`chip${mode === "pron" ? " on" : ""}`} aria-pressed={mode === "pron"} onClick={() => setMode("pron")}>Pronunciations</button>
           <button className={`chip${mode === "devedit" ? " on" : ""}`} aria-pressed={mode === "devedit"} onClick={() => setMode("devedit")}>Dev edit</button>
-          <button className={`chip${mode === "forms" ? " on" : ""}`} aria-pressed={mode === "forms"} onClick={() => setMode("forms")}>Merge forms</button>
+          <button className={`chip${mode === "forms" ? " on" : ""}`} aria-pressed={mode === "forms"} onClick={() => setMode("forms")}
+            title={formsSummary ? Object.entries(formsSummary.tabs).map(([f, t]) => `${f.replace(/\.md$/, "")}: ${t.open} open, ${t.ruled} ruled`).join("\n") || "No open forms" : undefined}>
+            Merge forms{formsSummary ? ` · ${formsSummary.open - formsSummary.ruled} to rule` : ""}</button>
           <a className="chip" href={`/try-text${location.hash}`}>Try text</a>
         </nav>
         <div className="title-row">
@@ -251,7 +267,7 @@ export function App() {
           <select value={stem} onChange={e => { setNow(null); setStem(e.target.value); }} aria-label="Chapter">
             {book.chapters.map(c => (
               <option key={c.stem} value={c.stem}>
-                {c.title} — {c.generated}/{c.total}{c.stitched ? " ✓" : ""}
+                {c.title} — {c.generated}/{c.total} recorded{c.stitched ? " ✓" : ""}
               </option>
             ))}
           </select>
