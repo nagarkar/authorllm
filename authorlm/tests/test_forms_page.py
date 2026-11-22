@@ -94,7 +94,7 @@ REVISIONS = [
 ]
 
 
-def _staged(root: Path, name: str, essay: str = ESSAY):
+def _staged(root: Path, name: str, essay: str = ESSAY, revisions=None):
     """A manuscript whose solo.md was pushed as ESSAY (collected, so the
     base is a version snapshot) and has REVISIONS staged in its tab by
     the outside caller 'harvest'."""
@@ -121,9 +121,9 @@ def _staged(root: Path, name: str, essay: str = ESSAY):
                         "pushed_hash": _h(normalize_markdown(tab))}
     gdocs._save_mapping(db, manuscript, meta)
     with _google(fake), contextlib.redirect_stdout(io.StringIO()):
-        out = api.stage_revisions(db, manuscript, "solo.md", REVISIONS,
-                                  "harvest", fake, fake)
-    assert len(out["written"]) == 4, out
+        out = api.stage_revisions(db, manuscript, "solo.md",
+                                  revisions or REVISIONS, "harvest", fake, fake)
+    assert len(out["written"]) == len(revisions or REVISIONS), out
     # The page's session, without its worker threads.
     audiobook._SESSIONS.pop((str(ws), "book"), None)
     audiobook.session(str(ws), "book", inline=True)
@@ -414,6 +414,33 @@ def widened_edit_over_another_form(root: Path) -> None:
               prefix=alpha["prefix"], suffix=alpha["suffix"])
     check("a widened edit over another open form's words is turned down",
           "error" in r and "another open form" in r["error"], r)
+
+
+def widened_edit_after_accepting_a_neighbour(root: Path) -> None:
+    print("merge, widened edit beside an accepted form:")
+    essay = ("# Topic\n\nAlpha stays and Omega waits as it is.\n\n"
+             "Delta closes the essay.\n")
+    revs = [{"old": "Alpha stays", "new": "Alpha moves", "note": "r-alpha"},
+            {"old": "Omega waits", "new": "Omega leaves", "note": "r-omega"}]
+    ws, db, manuscript, ms, fake = _staged(root, "neighbour-ws", essay, revs)
+    forms = _by_note(_call(ws, fake, "list"))
+    r = _call(ws, fake, "decide", id=forms["r-omega"]["id"], verdict="accept",
+              seen=forms["r-omega"]["current"])
+    assert "error" not in r, r
+    alpha = _by_note(_call(ws, fake, "list"))["r-alpha"]
+    check("after the neighbour is accepted, the card reads it as landed",
+          "Omega leaves" in alpha["suffix"] and "Omega waits" not in alpha["suffix"],
+          alpha)
+    r = _call(ws, fake, "decide", id=alpha["id"], verdict="edit",
+              seen=alpha["current"], text="Alpha drifts and Omega leaves at last.",
+              prefix=alpha["prefix"], suffix=alpha["suffix"])
+    check("a widened edit beside an accepted neighbour is held", "error" not in r, r)
+    r = _call(ws, fake, "merge", file="solo.md")
+    text = (ms / "solo.md").read_text()
+    check("it lands as the whole new passage, once, and pushes",
+          r["stopped"] is None and r["pushed"] is True
+          and "Alpha drifts and Omega leaves at last.\n" in text
+          and text.count("Omega") == 1 and "as it is." not in text, (r, text))
 
 
 def merge_lands_the_rulings(root: Path) -> None:
@@ -980,7 +1007,8 @@ def main() -> None:
     for fn in (word_diff_segments, rulings_on_marked_text, list_shows_the_doc_as_it_stands,
                list_sorts_gone_forms_as_invalid, decide_holds_rulings,
                merge_lands_the_rulings, widened_edit_lands,
-               widened_edit_over_another_form, merge_declines_everything,
+               widened_edit_over_another_form,
+               widened_edit_after_accepting_a_neighbour, merge_declines_everything,
                merge_stops_on_a_doc_edit_after_ruling,
                merge_stops_on_conflict, merge_never_pulls_a_stale_tab,
                merge_keeps_illustration_lines, unknown_method,
