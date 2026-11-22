@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Transport } from "./transport";
 import { Listen } from "./DevEdit";
-import { VoicePicker } from "./ListenVoice";
 
 // Mirrors forms_page.dispatch (authorlm/forms_page.py): every open outside
 // revision, Doc-road filter edit or lens edit ("form") of the manuscript, by file, as
@@ -262,7 +261,6 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
   const shown = Object.values(results).filter(r => !hidden.has(resultKey(r)));
   return (
     <div className="forms">
-      <VoicePicker manuscript={manuscript} />
       {error && <div className="status bad">{error}</div>}
       {data?.refresh_error && <div className="status bad">The last read of the Doc failed ({data.refresh_error}); showing the copy read {ago(data.age ?? 0)}.</div>}
       <div className="card forms-head">

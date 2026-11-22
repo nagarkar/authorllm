@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { VoicePicker, listenVoice, pageManuscript } from "./ListenVoice";
+import { listenVoice, pageManuscript } from "./ListenVoice";
 import type { ReactNode } from "react";
 import type { Transport } from "./transport";
 import { MarkdownBox } from "./MarkdownBox";
@@ -222,7 +222,6 @@ export function DevEdit({ transport, manuscript }: { transport: Transport; manus
   if (!status && !error) return <div className="boot">Loading the developmental edit…</div>;
   return (
     <div className="devedit">
-      <VoicePicker manuscript={manuscript} />
       {error && <div className="status bad">{error}</div>}
       {status && <div className="card devedit-head">
         <div className="devedit-tabs">

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VolumeSlider } from "./audioGain";
 import { ParaNav } from "./ParaNav";
+import { VoicePicker } from "./ListenVoice";
 import { deveditTransport, formsTransport, request, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
 import { DevEdit } from "./DevEdit";
@@ -226,10 +227,26 @@ export function App() {
           <h1 className="display"><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />{book.title}</h1>
           <span className="count">{account ? `${fmt(account.remaining)} chars left` : book.quality}</span>
         </div>
-        <VolumeSlider />
-        {mode === "chapters" && <div className="bar">
-          <label className="count" htmlFor="preview-voice">Preview voice</label>
-          <select id="preview-voice" value={status.previewVoice.current} aria-label="Preview voice"
+        {/* Row 1: manuscript and its tab; row 2: voice and volume; row 3:
+            icons and actions. No labels (author's layout, 2026-11-21). */}
+        {(manuscripts.length > 1 || mode === "chapters" || (mode === "forms" && formsTabs.length > 0)) && <div className="bar hrow">
+          {manuscripts.length > 1 && <select value={ms} onChange={e => switchManuscript(e.target.value)} aria-label="Manuscript">
+            {manuscripts.map(name => <option key={name} value={name}>{name}</option>)}
+          </select>}
+          {mode === "chapters" && <select value={stem} onChange={e => { setNow(null); setStem(e.target.value); }} aria-label="Chapter">
+            {book.chapters.map(c => (
+              <option key={c.stem} value={c.stem}>
+                {c.title} — {c.generated}/{c.total} recorded{c.stitched ? " ✓" : ""}
+              </option>
+            ))}
+          </select>}
+          {mode === "forms" && formsTabs.length > 0 && <select value={formsTabs.some(t => t.file === formsTab) ? formsTab : formsTabs[0].file}
+            onChange={e => setFormsTab(e.target.value)} aria-label="Tab">
+            {formsTabs.map(t => <option key={t.file} value={t.file}>{t.file.replace(/\.md$/, "")} — {formsTabLabel(t)}</option>)}
+          </select>}
+        </div>}
+        <div className="bar hrow">
+          {mode === "chapters" && <select className="voice-pick" value={status.previewVoice.current} aria-label="Preview voice"
             onChange={async e => {
               audioRef.current?.pause();
               setNow(null);
@@ -240,24 +257,15 @@ export function App() {
               const missing = status.previewVoice.missing.includes(v);
               return <option key={v} value={v} disabled={missing}>{missing ? `${v} (not installed on this Mac)` : v}</option>;
             })}
-          </select>
-        </div>}
-        {manuscripts.length > 1 && <div className="bar">
-          <select value={ms} onChange={e => switchManuscript(e.target.value)} aria-label="Manuscript">
-            {manuscripts.map(name => <option key={name} value={name}>{name}</option>)}
-          </select>
-        </div>}
-        {mode === "forms" && formsTabs.length > 0 && <div className="bar">
-          <select value={formsTabs.some(t => t.file === formsTab) ? formsTab : formsTabs[0].file}
-            onChange={e => setFormsTab(e.target.value)} aria-label="Tab">
-            {formsTabs.map(t => <option key={t.file} value={t.file}>{t.file.replace(/\.md$/, "")} — {formsTabLabel(t)}</option>)}
-          </select>
-        </div>}
+          </select>}
+          {(mode === "forms" || mode === "devedit") && <VoicePicker manuscript={ms} />}
+          <VolumeSlider />
+        </div>
         {mode === "forms" && formsTabs.length > 0 && (() => {
           const cur = formsTabs.find(t => t.file === formsTab) ?? formsTabs[0];
           const waiting = cur.merging || cur.queued >= 0;
           const all = formsTabs.filter(t => t.ready && !t.merging && t.queued < 0);
-          return <div className="bar">
+          return <div className="bar hrow">
             <button className="btn take" disabled={!cur.ready || waiting} onClick={() => formsActions?.mergeTab(cur.file)}>
               {cur.merging ? "Merging…" : cur.queued >= 0 ? "In the queue" : "Merge this tab"}
             </button>
@@ -266,27 +274,15 @@ export function App() {
             </button>
           </div>;
         })()}
-        {mode === "chapters" && <div className="bar">
-          <select value={stem} onChange={e => { setNow(null); setStem(e.target.value); }} aria-label="Chapter">
-            {book.chapters.map(c => (
-              <option key={c.stem} value={c.stem}>
-                {c.title} — {c.generated}/{c.total} recorded{c.stitched ? " ✓" : ""}
-              </option>
-            ))}
-          </select>
+        {mode === "chapters" && <div className="bar hrow actions">
           <button className="chip" onClick={() => act("refresh", {stem})} title="Export and preview what changed on disk" aria-label="Refresh">↻</button>
           {chapter && <ParaNav count={chapter.sections.length} />}
-        </div>}
-        {mode !== "forms" && <div className="doc">
-          <span title="When this chapter's tab was last pushed to the Google Doc (recorded since 2026-10-26)">
-            {doc.at ? `pushed ${when(doc.at)}` : "no push recorded yet"}{doc.state ? ` · ${doc.state}` : ""}
-          </span>
-          {mode === "chapters" && stem && <span className="doc-actions">
-            <button className="chip" onClick={() => act("pull", {stem})} disabled={docBusy}
-              title="Bring this chapter's tab down from the Google Doc">{pulling ? "pulling…" : "⇩ Pull"}</button>
-            <button className="chip" onClick={() => act("push", {stem})} disabled={docBusy}
-              title="Push this chapter's file to its tab of the Google Doc">{pushing ? "pushing…" : "⇧ Push"}</button>
-          </span>}
+          {stem && <>
+            <button className="chip" onClick={() => act("pull", {stem})} disabled={docBusy} aria-label="Pull from the Doc"
+              title="Bring this chapter's tab down from the Google Doc">{pulling ? "…" : "⬇"}</button>
+            <button className="chip" onClick={() => act("push", {stem})} disabled={docBusy} aria-label="Push to the Doc"
+              title={`Push this chapter's file to its tab of the Google Doc. ${doc.at ? `Last pushed ${when(doc.at)}.` : "No push recorded yet."}${doc.state ? ` ${doc.state}` : ""}`}>{pushing ? "…" : "⬆"}</button>
+          </>}
         </div>}
         {stale.stale && (
           <div className="stale" role="status">

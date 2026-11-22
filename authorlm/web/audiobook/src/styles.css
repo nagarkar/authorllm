@@ -269,3 +269,11 @@ header .bar:has(.para-nav){flex-wrap:nowrap}
 .para-nav .chip{min-width:32px;padding:4px 6px}
 header select.para-pick{max-width:4.6rem}
 #new-build{position:fixed;left:12px;right:12px;top:calc(8px + env(safe-area-inset-top));z-index:60;padding:12px 14px;border:0;border-radius:12px;background:var(--yellow);color:#222;font:inherit;font-weight:700;box-shadow:0 6px 18px rgba(0,0,0,.25)}
+/* Header rows (2026-11-21): selects share their row, truncating. */
+header .bar.hrow{flex-wrap:nowrap}
+header .hrow select{flex:1 1 0;min-width:0;max-width:none}
+header .hrow select.voice-pick{flex:0 1 38%}
+header .hrow .page-volume{flex:1 1 0;margin:0;min-width:0}
+header .hrow.actions{justify-content:space-between}
+header .hrow.actions .para-nav{margin:0}
+header .bar:has(.para-nav) select[aria-label="Chapter"]{max-width:none}

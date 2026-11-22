@@ -36,13 +36,11 @@ export function VoicePicker({ manuscript }: { manuscript: string }) {
   if (!voices) return null;
   const value = chosen && voices.choices.includes(chosen) ? chosen : voices.current;
   return (
-    <label className="listen-voice muted">Listen voice{" "}
-      <select value={value} aria-label="Voice for Listen" onChange={e => setListenVoice(e.target.value === voices.current ? "" : e.target.value)}>
+    <select className="voice-pick" value={value} aria-label="Voice for Listen" onChange={e => setListenVoice(e.target.value === voices.current ? "" : e.target.value)}>
         {voices.choices.map(v => {
           const missing = voices.missing.includes(v);
           return <option key={v} value={v} disabled={missing}>{v}{v === voices.current ? " (preview voice)" : ""}{missing ? " — not installed" : ""}</option>;
         })}
       </select>
-    </label>
   );
 }
