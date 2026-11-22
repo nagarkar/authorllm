@@ -11,7 +11,12 @@ import { Listen } from "./DevEdit";
 // A file changed on both sides is settled under Conflicts: each region both
 // sides changed is a card (Keep mine, Keep the Doc's, Keep both, Edit), held
 // on the server like a ruling; Merge lands them all and pushes.
-interface Ruling { verdict: "accept" | "edit" | "decline"; text: string | null; seen: string; at: string; }
+interface Ruling {
+  verdict: "accept" | "edit" | "decline"; text: string | null; seen: string; at: string;
+  // Present when the edit changed words around the form's span: the whole
+  // new passage lands, and these old surroundings are taken out after.
+  context?: { head: string; tail: string };
+}
 interface Form {
   id: string; origin: string; producer: "external" | "filter" | "lens"; note: string; kind: "replace" | "insert";
   old: string; proposed: string; current: string | null;
@@ -180,7 +185,12 @@ export function MergeForms({ transport, manuscript, tab, onTabs }: {
   const showRulings = (rulings: Record<string, Ruling | null>) => {
     setData(d => d && {...d, files: d.files.map(g => {
       if (!g.forms.some(x => x.id in rulings)) return g;
-      const forms = g.forms.map(x => x.id in rulings ? {...x, ruling: rulings[x.id], ruling_stale: null} : x);
+      const forms = g.forms.map(x => {
+        if (!(x.id in rulings)) return x;
+        const ruling = rulings[x.id];
+        const widened = !!(ruling?.verdict === "edit" && ruling.context);
+        return {...x, ruling, ruling_stale: null, widened};
+      });
       return {...g, forms, undecided: forms.filter(x => x.found && !x.ruling).length};
     })});
     window.clearTimeout(recheck.current);
@@ -381,7 +391,10 @@ function FileCard({ g, merging, queued, onDecide, onAcceptAll, onLand, onSettle 
 function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: string, text?: string) => Promise<string | null> }) {
   const [editing, setEditing] = useState(false);
   // The edit box holds the whole passage the card shows, not the span alone.
-  const passageOf = (span: string) => f.kind === "replace" && !f.widened ? `${f.prefix}${span}${f.suffix}` : span;
+  // A widened ruling (context set) is already the whole passage — do not
+  // wrap it again with prefix/suffix before the listing refresh flags it.
+  const widened = !!(f.widened || (f.ruling?.verdict === "edit" && f.ruling.context));
+  const passageOf = (span: string) => f.kind === "replace" && !widened ? `${f.prefix}${span}${f.suffix}` : span;
   const initial = passageOf(f.ruling?.text ?? f.current ?? f.proposed);
   const [text, setText] = useState(initial);
   const [busy, setBusy] = useState(false);
@@ -405,13 +418,13 @@ function FormCard({ f, onDecide }: { f: Form; onDecide: (f: Form, verdict: strin
         {ruled && <span className={`state ${ruled === "decline" ? "" : "done"}`}>{ruled === "accept" ? "accepted" : ruled === "edit" ? "edited" : "declined"}</span>}
       </div>
       {f.kind === "replace"
-        ? <p className={`devedit-diff${ruled !== "decline" && f.segments?.length ? " forms-diff" : ""}`}>{f.widened ? null : f.prefix}{ruled !== "decline" && f.segments?.length
+        ? <p className={`devedit-diff${ruled !== "decline" && f.segments?.length ? " forms-diff" : ""}`}>{widened ? null : f.prefix}{ruled !== "decline" && f.segments?.length
             // One merged block: kept words green, removed red struck,
             // inserted or changed words blue. Edit opens the whole passage.
             ? f.segments.map((g, i) => g.op === "equal" ? <span key={i} className="keep">{g.text}</span>
               : g.op === "delete" ? <s key={i} className="del">{g.text}</s>
               : <span key={i} className="ins">{g.text}</span>)
-            : <><s className="del">{f.old}</s>{newPart && <> {newPart}</>}</>}{f.widened ? null : f.suffix}</p>
+            : <><s className="del">{f.old}</s>{newPart && <> {newPart}</>}</>}{widened ? null : f.suffix}</p>
         : <>
           {f.anchor && <p className="devedit-diff muted forms-anchor">{f.anchor}</p>}
           <p className="devedit-diff">{ruled === "decline" ? <s className="del">{shown}</s> : <>New paragraph: {newPart}</>}</p>
