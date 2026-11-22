@@ -277,3 +277,7 @@ header .hrow .page-volume{flex:1 1 0;margin:0;min-width:0}
 header .hrow.actions{justify-content:space-between}
 header .hrow.actions .para-nav{margin:0}
 header .bar:has(.para-nav) select[aria-label="Chapter"]{max-width:none}
+header .top-nav{flex-wrap:nowrap;gap:6px;overflow-x:auto;scrollbar-width:none}
+header .top-nav .chip{padding:5px 10px;font-size:13px;min-height:32px}
+header .top-nav{gap:4px;justify-content:space-between}
+header .top-nav .chip{padding:4px 8px;font-size:12.5px;min-height:30px}

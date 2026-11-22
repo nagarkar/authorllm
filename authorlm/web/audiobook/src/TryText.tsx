@@ -42,9 +42,9 @@ export function TryText() {
   return (
     <main className="page">
       <header>
-        <h1 className="display"><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />Try text</h1>
+        <h1 className="display"><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />Audition</h1>
         <nav className="modes" aria-label="Audiobook navigation">
-          <a className="chip" href={`/${location.hash}`}>Back to audiobook</a>
+          <a className="chip" href={`/${location.hash}`}>Back to Browse</a>
         </nav>
         <VolumeSlider />
       </header>
