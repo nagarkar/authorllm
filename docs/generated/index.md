@@ -890,6 +890,12 @@ Doc-road verbs from the 2026-10-17 tool harvest (session 220066de): `doc diff`, 
 
 A document's identity is its `dc-` id; its relpath is a display name with history (docs.py). These tests enforce the owner's ruling that a chapter can be renamed cheaply: every record keyed by the file's name follows it, whether the rename is the `doc rename` verb or a rename in Finder or Obsidian that the next collect detects.
 
+## `tests.test_docx_style_helpers`
+
+`authorlm/tests/test_docx_style_helpers.py`
+
+`docx_style._ppr_insert` / `_fonts` / `format_styles` mutate styles.xml for `export docx --format` (#469).
+
 ## `tests.test_drive_doc_gone`
 
 `authorlm/tests/test_drive_doc_gone.py`
@@ -1435,6 +1441,12 @@ Doc export can wrap a struck old half in emphasis (`<<*term*>>` for a staged `te
 `authorlm/tests/test_resolve_pointers.py`
 
 `lenses.resolve_pointers` decides which other chapters a lens INPUTS payload may pull in as pointed-to essays.
+
+## `tests.test_ruled_neighbours`
+
+`authorlm/tests/test_ruled_neighbours.py`
+
+`forms_page._ruled_neighbours` rewrites each card's prefix/suffix so an edit beside an already-accepted (or edited) form builds on what that form will land as, not on its old words (#487).
 
 ## `tests.test_run_all`
 
