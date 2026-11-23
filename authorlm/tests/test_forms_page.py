@@ -443,6 +443,43 @@ def widened_edit_after_accepting_a_neighbour(root: Path) -> None:
           and text.count("Omega") == 1 and "as it is." not in text, (r, text))
 
 
+def neighbour_overlay_skips_substring_words(root: Path) -> None:
+    """Accepting `cause`→`reason` must not rewrite `because` in a neighbour's
+    suffix. A bare replace did; the card showed `bereason`, and fixing that
+    in Edit widened the form so Merge stacked the passage on the real
+    surroundings (2026-11-23)."""
+    print("list/merge, accepted neighbour whose old is inside a longer word:")
+    essay = ("# Topic\n\nThe cause is plain because it follows.\n\n"
+             "Delta closes the essay.\n")
+    revs = [{"old": "cause", "new": "reason", "note": "r-cause"},
+            {"old": "plain", "new": "clear", "note": "r-plain"}]
+    ws, db, manuscript, ms, fake = _staged(root, "substr-ws", essay, revs)
+    forms = _by_note(_call(ws, fake, "list"))
+    r = _call(ws, fake, "decide", id=forms["r-cause"]["id"], verdict="accept",
+              seen=forms["r-cause"]["current"])
+    assert "error" not in r, r
+    plain = _by_note(_call(ws, fake, "list"))["r-plain"]
+    check("the neighbour card keeps `because` and shows `cause` as landed",
+          plain["prefix"] == "The reason is "
+          and plain["suffix"] == " because it follows."
+          and "bereason" not in plain["suffix"], plain)
+    r = _call(ws, fake, "decide", id=plain["id"], verdict="edit",
+              seen=plain["current"],
+              text="The reason is evident because it follows.",
+              prefix=plain["prefix"], suffix=plain["suffix"])
+    check("an edit of the span alone does not widen",
+          "error" not in r and r["ruling"]["verdict"] == "edit"
+          and r["ruling"]["text"] == "evident"
+          and not r["ruling"].get("context"), r)
+    r = _call(ws, fake, "merge", file="solo.md")
+    text = (ms / "solo.md").read_text()
+    check("Merge lands each ruling once, with because intact",
+          r["stopped"] is None and r["pushed"] is True
+          and "The reason is evident because it follows.\n" in text
+          and text.count("The reason is") == 1
+          and "bereason" not in text, (r, text))
+
+
 def summary_counts_open_and_ruled(root: Path) -> None:
     print("summary:")
     ws, db, manuscript, ms, fake = _staged(root, "summary-ws")
@@ -1024,9 +1061,10 @@ def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="forms-page-"))
     for fn in (word_diff_segments, rulings_on_marked_text, list_shows_the_doc_as_it_stands,
                list_sorts_gone_forms_as_invalid, decide_holds_rulings,
-               merge_lands_the_rulings, widened_edit_lands,
+               merge_lands_the_rulings,                widened_edit_lands,
                widened_edit_over_another_form,
                widened_edit_after_accepting_a_neighbour,
+               neighbour_overlay_skips_substring_words,
                summary_counts_open_and_ruled, merge_declines_everything,
                merge_stops_on_a_doc_edit_after_ruling,
                merge_stops_on_conflict, merge_never_pulls_a_stale_tab,
