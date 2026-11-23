@@ -196,15 +196,21 @@ outstanding questions.
 | `export-obsidian` | Export the Concept Graph as wikilinked stub notes for Obsidian's graph view (`--dir` to override `_concepts/`) |
 | `setup [--workspace DIR] [--no-questions]` | Point this checkout at a workspace (recorded as `AUTHORLM_WORKSPACE` in `.env`) and create its database; asks where when `--workspace` is omitted |
 | `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`. Never mines the Concept Graph; run `extract --native` when you want a fresh one. `--extraction off` registers a machine-kept manuscript with extraction switched off for good (`manuscript set --extraction on` later) |
-| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, ISBN-13 fields, `--extraction on\|off`); the CLI and MCP tools share this record |
-| `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
+| `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, ISBN-13 fields, `--extraction on\|off`, `--agent-edits forms\|direct`); the CLI and MCP tools share this record |
+| `export pdf [--print-ready] [--notice TEXT] [--watermark TEXT]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three. `--notice` adds a recipient line on the notice page and footers; `--watermark TEXT` puts that text on the diagonal (and in the footer when there is no `--notice`) |
+| `export docx [--watermark TEXT] [--format STRING]` | Export a DOCX. Without either flag the file is pandoc's output untouched. `--watermark TEXT` draws a Word header watermark (faint, diagonal) and repeats the text in a footer beside the page number. `--format "font=…; size=…; line-spacing=…"` (keys `font`, `size` in pt, `line-spacing` as in Google Docs; footnotes stay single) also starts each chapter on a new page and indents body paragraphs (`docx_style.py`) |
 | `export <fmt> … --upload [--as-doc] [--drive-id ID]` | Also put the written file on Google Drive (the manuscript's folder); re-exporting replaces the same Drive file in place. `--as-doc` converts a DOCX to a Google Doc; `--drive-id` adopts a file already on Drive |
 | `export teleprompter --file F` | The passages the author reads on camera (clips marked `voice: author`) as a large-type `_exports/<stem>.teleprompter.docx` and `.txt`, labelled Intro / Outro |
 | `audio init/export/check` | The audiobook (docs/audiobook-pipeline-design.md): seed `_audio/audiobook.toml` and `cast.md` once; compile `audiobook.json` and `chapters/*.json` for the audiostation app (only what changed is rewritten; section ids hash text, voice and pronunciations so a change regenerates exactly what it touched); the readiness report from sources to generated state |
 | `audio voices/audition/cast set` | Free voice discovery with preview clips into an audition gallery (`--library` for the shared library); paid auditions on the book's own words (`--file F --paragraphs N-M`; states the cost, and `--live` spends it); write one row of `cast.md` |
 | `audio dictionary push [--dry-run \| --live]` | Shows the plan from `pronunciations.md` to the ElevenLabs dictionary named in `audiobook.toml`; `--live` applies it, append-only with replacement |
 | `audio say <term> [--say S,S] [--cast K] [--dictionary] [--settle] [--dry-run \| --live]` | The fast pronunciation loop from the terminal: the word's own sentence, in the voice that says it, with each respelling substituted inline as the alias rule would (no push); states the cost, and `--live` renders and plays the clips; `--settle --live` writes the row |
-| `workbench [--port N] [--no-open]` | Serve the pronunciation workbench on a local port and open it, like `triage-app`: every word in the table (or a new one from the book), every voice that says it, a respelling box, Regenerate and listen per voice (the respelling, the voice's default with no rule, or via the pushed dictionary), Save to `pronunciations.md`, Remove a row (and its one remote rule) when the default sounds better, Push to ElevenLabs, Export. Built from `web/workbench/` into `authorlm/workbench_dist/` |
+| `audio preview/generate/retake/stitch/status` | Free Mac `say` previews by paragraph id; paid ElevenLabs takes (`generate` / `retake`) print cost and spend only with `--live` (docs/audiobook-review-design.md); `stitch` builds the chapter mp3; `status [--find words]` is the board |
+| `audio serve [--port N] [--no-open]` | Local audiobook review page (`web/audiobook/` → `authorlm/audiobook_dist/`): tabs **Browse \| Audio \| Dev edit \| Merge \| Audition**. Browse is chapter review (previews, takes, stitch, Push); Audio is the pronunciation workbench; Dev edit is `#<ms>/devedit`; Merge is `#<ms>/forms` (forms still to rule show on the Merge chip); Audition is `/try-text` (pasted Markdown → Mac preview MP3, kept outside the manuscript). Phone reaches it over Tailscale. See [Audiobook review page](#audiobook-review-page) |
+| `devedit new/coverage/status/…` | Whole-book developmental edit run under `<manuscript>/_devedit/<run-id>/` (driven by the `developmental-editing` skill): lock coverage from `toc.toml`, mark steps, term index, agent packs, letter decisions, review queue (`next` / `verdict`). Review surface: audio page Dev edit mode. See [Developmental edit](#developmental-edit) |
+| `book init/status/next/start/done/…` | A book as a workflow of roles (`_book/workflow.toml`, packs under `_book/packs/`): what is next, start a step, land or draft under `agent_edits=direct`, the change list (`book changes` / `book revert`), restart, diagram. See [Book workflow](#book-workflow) |
+| `register add/settle/reopen/revise/list/show/use/…` | Settled choices for a book (`register_entries` / `register_uses`): the author's words and the machine's reading side by side. Brief, shape, thesis, voice, arc, term, claim, ruling. Work may rest only on a settled entry; a revise supersedes and lists the uses that need a look. See [Book workflow](#book-workflow) |
+| `workbench [--port N] [--no-open]` | Serve the pronunciation workbench on a local port and open it, like `triage-app`: every word in the table (or a new one from the book), every voice that says it, a respelling box (empty = as spelled — save that as a decision), try-hint rows from the collaborator, Regenerate and listen per voice, Save to `pronunciations.md`, Remove a row when the default sounds better, Push to ElevenLabs, Export. Built from `web/workbench/` into `authorlm/workbench_dist/` (also a mode of `audio serve`) |
 | `audiostation [--dry-run]` | Open the audiostation studio on the manuscript's `_audio/` folder: a built `.app` bundle if there is one, else the dev server (`AUDIOSTATION_APP` overrides) |
 | `unregister <name>` | **Delete** a manuscript and all its data — clean slate for prototyping and hermetic tests (files on disk untouched) |
 | `extract [file…] [--native\|--full\|--section]` | Concept/edge extraction (docs/extraction-redesign.md): prints per-section payloads; `--native` makes the model calls. Incremental by default (sections changed since the last run). Subcommands: `screened`, `calibrate`, `backup`, `migrate`, `runs`. Lazy — `init` / `collect` / `write complete` never mine |
@@ -237,11 +243,138 @@ outstanding questions.
 | `sweep hygiene [--apply]` | Deterministic hygiene (zero tokens): ungrounded extracted concepts/edges, moot pending suggestions; `--apply` retires/rejects them |
 | `sweep readiness` | Pre-publication checklist (pure auditor, zero tokens): unrendered slots, open proposals, active intents, toc coverage, checkouts, export settings, pandoc |
 | `sweep ontology [file]` | Narrowing auditor: changed (or one file's) paragraphs vs. settled Concept Graph claims — deterministic narrowing, one cheap-model judgment, findings arrive as `incongruence` proposals (see docs/sweep-framework.md) |
-| `lens add/list/run/register/review` | Author-ratified lenses (`_lenses/*.md` prompts): `run` executes natively on the configured model; `register` is the door for findings produced by an external agent (JSON on stdin); `review <n>` records verdicts as evidence |
+| `lens add/list/show/promote/run/register/review` | Author-ratified lenses (`_lenses/*.md` prompts) plus the shared library (`authorlm/library/lenses/`, marked `(library)` in `list`/`show`): `run` executes natively; `promote <name>` moves a book's lens into the library; a library lens joins `lens sweep` only when `--only` names it (docs/lenses.md § The lens library). `register` is the door for findings from an external agent (JSON on stdin); `review <n>` records verdicts as evidence |
 | `interlocutor add/list/show/draft/run/import` | A tradition reads the whole book (`_interlocutors/*.md`, TOML front matter + prose; design `docs/interlocutor-design.md`): `run` scans for the ratified terms and writes a payload for a clean-context subagent (no model call); `import` verifies the report against the manuscript, lands it in `_critiques/`, and imports its improvements as proposed intents with critic provenance |
 | `guide` | Generate explained suggestions, or abstain |
 | `review N --accept/--reject/--modify/--defer [--explain]` | Review a suggestion; explanations seed candidate beliefs |
 | `status`, `log`, `history` | Inspect state, transitions, versions |
+
+**Audio spend flags.** Only the paid/send verbs take `--live` or
+`--dry-run`: `audition`, `dictionary`, `generate`, `retake`, `say`. On
+those verbs, omit both to preview the plan; `--live` spends or sends;
+`--dry-run` is the same preview. Passing either flag on a free audio
+action (`init`, `export`, `check`, `preview`, `stitch`, `status`,
+`serve`, …) is a usage error. Clip spend caps surface as `over_cap` and
+need `--force` to proceed (design: docs/video-clips-design.md).
+
+## Developmental edit
+
+A whole-book developmental edit is one run folder,
+`<manuscript>/_devedit/<run-id>/`, owned by `devedit.py`. The
+`developmental-editing` skill drives the agents; `authorlm devedit` is
+the chat surface; the audiobook page's Dev edit mode is the review
+surface. Steps recorded in `state.json`: **coverage** → **stages**
+(front matter, then one stage per TOC part: essay findings/checks/review
+per file, then the stage letter and decisions) → **integrate** (once,
+after the last stage).
+
+```bash
+authorlm -m <ms> devedit new                 # propose coverage from toc.toml
+authorlm -m <ms> devedit coverage            # show edit vs reference lists
+authorlm -m <ms> devedit coverage --lock     # only after the author confirms
+authorlm -m <ms> summarize rebuild …         # covered files, before terms
+authorlm -m <ms> devedit status              # each step; stale when a covered file moved
+authorlm -m <ms> devedit pack --book         # cross-book / letter context
+authorlm -m <ms> devedit pack kindness.md    # one essay agent's pack
+authorlm -m <ms> devedit next                # next review item (diff in chat)
+authorlm -m <ms> devedit verdict <id> accept|reject|defer [--reason R] [--text …]
+```
+
+Constraints operators hit:
+
+- **Coverage before any step.** Only TOC-listed files are covered;
+  `outside` never is. Front matter starts as reference; move a Preface
+  into edit with `coverage --edit <file>` before `--lock`.
+- **Nothing stored is authoritative.** Summaries are rebuilt for the
+  run; the term index is computed from the text (`terms.Terms.index`)
+  and snapshotted to `terms.json`.
+- **Stale apply refuses.** Accepting an item rewrites the manuscript
+  only when the original passage still occurs exactly once; otherwise
+  the item is stale and must be checked again.
+- **Publish after accept.** Accepted items stay local until Push on the
+  Dev edit page or `doc push <file>`; a tab with pending suggested
+  edits is settled first.
+- **Models.** `[devedit]` in `config.toml` sets `session_model` /
+  `model` / `effort` per agent step; `devedit models` prints them.
+
+Agent protocol: `.claude/skills/authorlm/SKILL.md` (Developmental edit).
+
+## Book workflow
+
+A book written from scratch (or run through editorial roles) is a
+workflow of steps in `_book/workflow.toml` (default from
+`authorlm/library/book-workflow.toml`). AuthorLM records who runs each
+step, writes the pack, and keeps the history; a person or a role
+subagent (`.claude/agents/book-*.md`, named in the pack) does the work.
+Register entries hold the settled brief, shape and voice the steps rest
+on (`register.py`; kinds include `purpose`, `reader`, `promise`,
+`comparable`, `takeaway`, `success`, `shape`, `thesis`, `voice`, `arc`,
+`term`, `claim`, `ruling`).
+
+```bash
+authorlm -m <ms> book init                   # write _book/workflow.toml
+authorlm -m <ms> book status                 # every step per scope
+authorlm -m <ms> book next                   # what can start now
+authorlm -m <ms> book start draft --scope one.md
+authorlm -m <ms> book done sr-… --result-json result.json
+authorlm -m <ms> book restart draft --scope one.md --reason '…'
+authorlm -m <ms> book diagram --scope one.md # Mermaid from the definition
+
+authorlm -m <ms> register add reader newcomer --author-words '…' --reading '…'
+authorlm -m <ms> register settle reader/newcomer
+authorlm -m <ms> register list --kind thesis
+authorlm -m <ms> register show reader/newcomer
+```
+
+**How agent edits land** — per manuscript, `manuscript set --agent-edits`:
+
+- `forms` (default): an agent's edit waits for the author as a Doc-tab
+  `<<old>>{{new}}` form (Merge forms page or the tab itself).
+- `direct`: a running step whose definition has `changes_text = true`
+  may `book land` a batch of `{old, new, note}` into the chapter file
+  (all or none; each `old`/`new` must stand exactly once so the author
+  can put it back). `book draft` fills a title-only chapter as a run
+  artifact, not a change-list row. After landing, push with
+  `doc push <file>`. Read and undo with `book changes` / `book revert`.
+  A landing that would drop a protected term warns; a tab the author
+  edited since the last push/pull is left alone until pulled.
+
+Constraints:
+
+- A restart supersedes runs and keeps their results as reference; it
+  puts nothing back — use `book revert --run sr-…` for that.
+- Scope is enforced: a chapter run lands only in its chapter.
+- Register: an entry needs both the author's words and a reading before
+  `settle`; work records a `use` as `applies` or `infers`; `revise`
+  supersedes (never edits in place) and returns the uses that need a look.
+- Skills: `book-brief`, `book-shape`, `book-voice`, plus the authorlm
+  skill's book section.
+
+## Audiobook review page
+
+`authorlm audio serve` is the phone/Mac surface for listening, ruling
+forms, and reviewing a developmental edit (design:
+`docs/audiobook-review-design.md`). Operator facts that drift:
+
+- **Tabs.** One row: Browse (chapter cards; previews, takes, stitch,
+  Push/Pull), Audio (pronunciation workbench, hash `#<ms>/pron`), Dev
+  edit, Merge (open forms; the chip shows how many still need a ruling
+  via `forms_page.summary`), Audition (`/try-text`).
+- **Header.** Three unlabeled rows: manuscript + tab; voice + page
+  volume (Web Audio gain up to 4×, remembered in this browser — Browse
+  uses the chapter preview-voice drop-down; Merge/Dev edit use the
+  Listen voice picker); icons and actions. Chapter and paragraph
+  choices survive a reload (`remember.ts`, per origin — localhost and
+  the Tailscale name are separate).
+- **Listen.** Merge forms and Dev edit can read a passage aloud through
+  `/api/try-text` using the page's Listen voice picker (`/api/voices`
+  lists the manuscript's preview voices). Audition is the same path for
+  pasted text.
+- **Audio mix.** The page sets the Audio Session to ambient so other
+  apps keep playing; when the page goes to the background it pauses its
+  own players and resumes them on return.
+- **New build.** When a newer `audiobook_dist` is served, a banner
+  offers a reload; it never reloads by itself.
 
 ## Triage App analyzer profiles
 
@@ -318,15 +451,36 @@ untouched.
   an open comment; address the comment, then push again. While a
   proposal is pending in that paragraph, a push that would change it
   stops with "settle the thread first".
-- **Missing tab.** `doc pull` exits non-zero when a mapped tab is absent
-  from the Doc export (not "clean / nothing changed"). Tab titles must
-  stay exact filenames; Google's markdown export may omit titles — the
-  split then falls back to each tab's first paragraph.
+- **Missing tab / opening-heading anchors.** `doc pull` exits non-zero
+  when a mapped tab is absent from the Doc export (not "clean / nothing
+  changed"). Tab titles must stay exact filenames. Google's markdown
+  export omits tab-title headings, so the whole-Doc split anchors each
+  tab on its **opening heading** (level + text from the Docs API),
+  backing up over any epigraph paragraphs before that heading. An
+  opener must be unique and must not recur as any heading in an earlier
+  tab (the forward search would stop there); a chapter tab that opens
+  with plain text stops the pull and names the tab. A short dialogue
+  line is never an anchor (that used to steal the prior chapter's
+  tail).
+- **API retries.** Every Docs/Drive `.execute()` retries HTTP 429 and
+  5xx with exponential backoff and jitter (`Retry-After` wins when
+  Google sends it); other errors raise at once.
 - **Broken / unterminated forms.** A tab form that lost a marker
   (`<<` / `>>` / `{{` / `}}`) is **not pulled**: the file is left alone
   and named under `unterminated` until the form is mended or removed in
   the Doc. Pulling a broken form would write marker debris into the
   manuscript.
+- **Merge forms page.** Outside revisions (`revise stage`), filter and
+  lens forms share one review surface on `audio serve` (`#<ms>/forms`,
+  `/api/forms` → `forms_page.dispatch`). Rulings are held on the thread
+  until Merge for that file; Accept all rules every open form under To
+  rule without merging. A two-sided conflict stops Merge and settles
+  under Conflicts instead. The server background-warms every manuscript
+  that still has open forms so the listing is ready when the page opens.
+  An edit that changes words around the form widens to the whole
+  passage; a neighbour form already accepted or edited is shown as it
+  will land, so the next edit builds on it. A widened edit that would
+  overwrite another open form's span is turned down.
 - **Mid-settle / sidecar.** A local file still carrying staged
   `<<old>>{{new}}` forms is not overwritten by pull (`marked`). A
   pronunciation-dictionary sidecar that would come back with zero rows
@@ -411,15 +565,18 @@ matter = "front"     # optional: front | main (default) | back
 
 [[chapter]]
 file = "chapter1.md"
+summary = "One sentence the author keeps current; hidden from the reader."
 
 [[chapter]]
 file = "section1a.md"
 parent = "chapter1.md"   # optional: nests this file under chapter1.md
 ```
 
-Files not listed fall to the end in alphabetical order and are flagged in
-the briefing. Without a parseable `toc.toml`, the whole reading order is
-alphabetical. A `toc.md` is not read as a TOC.
+Optional `summary` is one line, never rendered in the book: the
+developmental edit's standard of drift and the synopsis's per-essay
+source. Files not listed fall to the end in alphabetical order and are
+flagged in the briefing. Without a parseable `toc.toml`, the whole
+reading order is alphabetical. A `toc.md` is not read as a TOC.
 Concepts whose text vanishes entirely become proposals: adopt retires
 them, dismiss keeps them as declared placeholders. Oversized extract
 scopes split into bounded passes rather than truncating; see
