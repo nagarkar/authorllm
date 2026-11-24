@@ -1172,6 +1172,12 @@ A Listen button's voice: /api/try-text takes an optional `voice`, one of the off
 
 Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 
+## `tests.test_local_settle_emptied`
+
+`authorlm/tests/test_local_settle_emptied.py`
+
+Local filter settle: an emptied green half is a decline, not a delete.
+
 ## `tests.test_locate_block_voice`
 
 `authorlm/tests/test_locate_block_voice.py`
