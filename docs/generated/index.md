@@ -1034,6 +1034,12 @@ The Merge forms page's Conflicts (`forms_page.settle`, `forms_page.land_conflict
 
 The Merge forms page (`forms_page.dispatch`, `/api/forms`): every open outside revision listed as the Doc holds it, ruled on the page, and merged one file at a time.
 
+## `tests.test_forms_summary`
+
+`authorlm/tests/test_forms_summary.py`
+
+`forms_page.summary` is every page's header badge (#489): open forms and how many already carry a ruling, plus the same per tab.
+
 ## `tests.test_gallery`
 
 `authorlm/tests/test_gallery.py`
@@ -1081,6 +1087,12 @@ Retake must not destroy a good paragraph take when the write fails mid-flight.
 `authorlm/tests/test_has_broken_forms.py`
 
 `threads.has_broken_forms` is the pull/skip gate for marker corruption.
+
+## `tests.test_held_clear_rulings`
+
+`authorlm/tests/test_held_clear_rulings.py`
+
+`forms_page._held_rulings` / `_clear_rulings` keep a Conflicts settlement in manuscript metadata until the file lands (or the author clears it).
 
 ## `tests.test_hold_commented`
 
@@ -1555,6 +1567,12 @@ Summary hierarchy, step 1 (docs/summary-hierarchy-design.md §4, §7, §11.1): p
 `authorlm/tests/test_tab_is_empty.py`
 
 `gdocs._tab_is_empty` chooses full rewrite vs surgical Doc push.
+
+## `tests.test_take_out_widened_context`
+
+`authorlm/tests/test_take_out_widened_context.py`
+
+`forms_page._take_out_widened_context` peels a widened Edit's surroundings back out of the local file after Merge lands the whole passage (#485 / #501).
 
 ## `tests.test_threads_reply_unstrike`
 
