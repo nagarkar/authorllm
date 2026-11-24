@@ -5405,6 +5405,10 @@ def filter_resolve(db: Database, manuscript: dict, config: dict, file: str,
             # A run paused before the transport existed: its forms are in
             # the bytes on disk, so the road it took was the local one.
             run = _freeze_run_mode(db, run, "local")
+        # Local road: `staging.resolve_local` restores emptied green halves
+        # before it settles (same rule as `restore_emptied_forms` just above
+        # on the Doc road), so `<<old>>{{}}` declines instead of deleting
+        # the paragraph.
         return _filter_finalize(db, manuscript, config, run, rel, path,
                                 warnings)
 

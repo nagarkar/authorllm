@@ -213,10 +213,12 @@ def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
     """Read the marked local file back and finalize it.
 
     Byte for byte the critique resolve's second half, with
-    `gdocs.tab_marked_markdown` replaced by `path.read_text`:
-    `form_grammar.pending_forms` → `passes.final_text_from_marked` →
-    `passes.record_resolution`, all three unchanged. The author's
-    post-edits to the `{{new}}` halves win, as always.
+    `gdocs.tab_marked_markdown` replaced by `path.read_text`, after the
+    same emptied-green restore the Doc road applies
+    (`api.restore_emptied_forms`): `form_grammar.pending_forms` →
+    `passes.final_text_from_marked` → `passes.record_resolution`. The
+    author's post-edits to the `{{new}}` halves win, as always; an
+    emptied green half is a decline, not a delete.
 
     Returns `(final_text, forms, diffs)`. It does NOT write the file:
     the caller snapshots first (an uncollected local edit must never be
@@ -228,6 +230,14 @@ def resolve_local(db: Database, manuscript_id: str, file: str, path: Path,
             f"nothing is written into {file} — there is no pause to "
             "finalize.")
     marked = path.read_text(encoding="utf-8")
+    # An emptied green half (`<<old>>{{}}`, whitespace-only braces, or a
+    # bare `<<old>>`) is a decline — the same standing rule the Doc
+    # road applies in `api.restore_emptied_forms` before it settles. Without
+    # this, `final_text_from_marked` keeps the empty new half for a matched
+    # replace and DELETES the paragraph; a bare strike is left as literal
+    # markers in the essay. Lazy import: api imports this module.
+    from .api import restore_emptied_forms
+    marked = restore_emptied_forms(marked, written)
     # REPLACE forms only, for the third time and for the same reason: an
     # unmatched insertion form collapses to its old half, which for an
     # insertion is the empty string — so a resolve that looked at bare
