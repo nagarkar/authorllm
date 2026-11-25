@@ -1504,17 +1504,11 @@ def accept(db: Database, manuscript: dict, fixes: list[dict], doc_road: _Road,
 
 
 def _owner_only(manuscript: dict, rel: str) -> str | None:
-    """Why no automated pass may write `rel` (a file only the owner
-    edits), or None: the one check every automated write road makes."""
-    check = getattr(structure, "owner_edits_reason", None)
-    if check is None:
-        return None
-    try:
-        toc = (Path(manuscript["path"]) / structure.TOC_FILENAME).read_text(
-            encoding="utf-8")
-    except OSError:
-        return None
-    return check(toc, rel)
+    """Why no automated pass may write `rel` (toc.toml's `edits =
+    "owner"`, structure.owner_edits_reason: the one check every automated
+    write road makes), or None. Asked at the click and again before the
+    background sync."""
+    return structure.owner_edits_reason(_toc(manuscript), rel)
 
 
 # ------------------------------------------------------------ the log

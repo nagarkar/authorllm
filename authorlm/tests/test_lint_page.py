@@ -700,30 +700,26 @@ def a_stopped_sync_is_shown_and_kept(root: Path) -> None:
     # stage. All further edits there will be by me manually."): the
     # click and the road both make the one check.
     before = (ms / "two.md").read_text()
-    why = "two.md is the owner's alone"
-    with mock.patch.object(lint_page.structure, "owner_edits_reason",
-                           lambda _toc, f: why if f.endswith("two.md")
-                           else None, create=True), \
-            mock.patch.object(lint_page.structure, "TOC_FILENAME",
-                              "two.md", create=True):
-        out = _lint(ws, "apply", fake,
-                    fixes=[_word("p", "two.md", "Psi", "Psy")])
-    check("a file only the owner edits gets no fix: nothing written",
-          out["applied"] == 0 and _why(out, "p") == why
+    toc = ms / "toc.toml"
+    plain = ('[[chapter]]\nfile = "solo.md"\n\n'
+             '[[chapter]]\nfile = "two.md"\n')
+    toc.write_text(plain + 'edits = "owner"\n')
+    out = _lint(ws, "apply", fake,
+                fixes=[_word("p", "two.md", "Psi", "Psy")])
+    check("a file only the owner edits (toc edits = \"owner\") gets no "
+          "fix: nothing written",
+          out["applied"] == 0 and 'edits = "owner"' in _why(out, "p")
           and (ms / "two.md").read_text() == before, out)
+    toc.write_text(plain)
     lint_page.SYNC_WINDOW = 60.0
     try:
         with _google(fake):
             _lint(ws, "apply", fake, settle=False,
                   fixes=[_word("p", "two.md", "Psi", "Psy")])
-            with mock.patch.object(lint_page.structure,
-                                   "owner_edits_reason",
-                                   lambda _toc, f: why, create=True), \
-                    mock.patch.object(lint_page.structure, "TOC_FILENAME",
-                                      "two.md", create=True):
-                lint_page.road(audiobook.session(str(ws), "book")).flush()
-                assert lint_page.settle()
-                status = _lint(ws, "status", fake)
+            toc.write_text(plain + 'edits = "owner"\n')
+            lint_page.road(audiobook.session(str(ws), "book")).flush()
+            assert lint_page.settle()
+            status = _lint(ws, "status", fake)
     finally:
         lint_page.SYNC_WINDOW = 0.0
     check("marked after the click: the road puts the file back and sends "
@@ -731,7 +727,8 @@ def a_stopped_sync_is_shown_and_kept(root: Path) -> None:
           (ms / "two.md").read_text() == before
           and "Psy" not in fake.tab_text("two.md")
           and status["tabs"]["two.md"]["state"] == "withdrawn"
-          and status["tabs"]["two.md"]["reason"] == why, status)
+          and 'edits = "owner"' in status["tabs"]["two.md"]["reason"],
+          status)
 
 
 def main() -> None:
