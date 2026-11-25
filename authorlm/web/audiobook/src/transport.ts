@@ -1,6 +1,7 @@
 // POST /api/audiobook → audiobook.dispatch, POST /api/workbench →
 // workbench.dispatch, POST /api/devedit → devedit.dispatch, POST /api/forms →
-// forms_page.dispatch, POST /api/runs → runs_page.dispatch
+// forms_page.dispatch, POST /api/runs → runs_page.dispatch, POST /api/style →
+// style_page.dispatch
 // (authorlm/audiobook_server.py). Every request names the manuscript chosen
 // in the page's dropdown (setManuscript); before one is chosen the server
 // falls back to its -m flag.
@@ -42,4 +43,5 @@ export const workbenchTransport = road("/api/workbench");
 export const deveditTransport = road("/api/devedit");
 export const formsTransport = road("/api/forms");
 export const runsTransport = road("/api/runs");
+export const styleTransport = road("/api/style");
 export const request = audiobookTransport.request;
