@@ -1670,6 +1670,32 @@ occasion for this rule: on 2026-09-06 a merged hierarchy.md was
 introduced-but-undeployed distinctions the checklist repairs had left
 behind.
 
+### The Filters page and run requests (`authorlm requests`)
+The audiobook page's **Filters** view (`#<manuscript>/runs`, `runs_page.py`,
+`/api/runs`) lists every filter and lens the manuscript sees, with where
+each lives and its last run; opens one to edit its text (the save parses it
+first, never writes outside `_filters/`, `_lenses/` or the two library
+folders, and copies the replaced text to `<workspace>/prompt-backups/`); and
+lets the author tick filters, lenses and tabs and **ask for runs**. The page
+calls no model and stages nothing: each (filter or lens, tab) becomes a
+`run_requests` row. A tab with forms out, a protected register (lenses), an
+artifact that does not parse, and a filter that already ran on the same text
+are left out with the reason shown.
+
+`authorlm requests [-m <ms>]` lists the requests waiting for a session, each
+with its verbs in order; `requests list --all` adds the ones further on;
+`requests cancel <id>` takes one off the list. When the author says "run the
+requests" (or a session starts with requests waiting and the author agrees),
+carry them out oldest first by the roads above: a filter request is one
+filter beat (`filter prelude` first for a global filter, `filter run`, the
+empty-context drafter, `filter apply`); a lens request is the lens road
+(`lens run --out`, the drafter, `lens register`). A tab checked out to the
+Doc is pulled first (`doc pull`), which the request's verbs say. Several
+requests on one tab are beats: each waits for the earlier one's forms to be
+settled. Nothing marks a request done: its state is read from the run's own
+rows (queued, drafting, staged, in the tab, settled), so finish the run and
+the page follows.
+
 ### Morph — paragraph-defect detection (design: docs/morph-design.md)
 When the author asks to "run a morph" (or names one of its four checks —
 claim-before-evidence, discontinuity, specificity, concept-invalidation —

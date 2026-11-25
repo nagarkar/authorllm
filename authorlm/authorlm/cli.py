@@ -9654,6 +9654,47 @@ def cmd_status(args):
         print(ui.dim(f"Improvement tasks: {open_tasks} open (authorlm improve list)"))
 
 
+def cmd_requests(args):
+    """`authorlm requests`: the runs asked for on the Filters and lenses
+    page (runs_page.py). `list` prints each one a session has yet to carry
+    out with the verbs that do it; `cancel` takes one off the list. Makes
+    no model call and starts no run."""
+    from . import runs_page
+
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    try:
+        if args.action == "cancel":
+            if not args.id:
+                sys.exit("error: requests cancel needs a request id. "
+                         "authorlm requests list")
+            out = runs_page.cancel(db, manuscript, args.id)
+            print(f"Request {out['cancelled']} taken off the list. A run "
+                  "already begun is left as it is.")
+            return
+        rows = runs_page.requests(db, manuscript)
+    except (LookupError, ValueError) as err:
+        sys.exit(f"error: {err}")
+    waiting = [r for r in rows if r["state"] in runs_page.WAITING]
+    shown = rows if args.all else waiting
+    print(ui.bold(f"{manuscript['name']}: {len(waiting)} run request(s) "
+                  f"waiting for a session") + ui.dim(
+                      f" ({len(rows) - len(waiting)} further on)"))
+    for r in shown:
+        print(f"  [{r['id'][:11]}] {r['kind']} {r['name']} on {r['file']}: "
+              f"{r['state']}; {r['detail']}")
+        if r["state"] in runs_page.WAITING:
+            for line in r["commands"]:
+                print(ui.dim(f"      {line}"))
+    if waiting:
+        print(ui.dim("next: carry them out oldest first, one tab's runs one "
+                     "after another (each waits for the earlier one's forms "
+                     "to be settled)."))
+    elif not shown:
+        print(ui.dim("next: nothing to do; ask for runs on the page's "
+                     "Filters & lenses view."))
+
+
 def cmd_improve(args):
     """Self-improvement tasks: confirmed tool defects with a structured
     repro. Tool-knowledge only — never surfaces in briefings/guidance."""
@@ -11593,6 +11634,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--note", help="fix summary + test name (propose), confirmation "
                                   "note (close), or reason (dismiss)")
     p.set_defaults(func=cmd_improve)
+
+    p = sub.add_parser(
+        "requests",
+        help="runs asked for on the Filters & lenses page, for a session "
+             "to carry out (no model call)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="example:\n"
+               "  requests list -m SMSTTD      what waits, with its verbs\n"
+               "  requests list --all          every request and its state\n"
+               "  requests cancel rq-abc123    take one off the list",
+    )
+    p.add_argument("action", nargs="?", default="list",
+                   choices=["list", "cancel"])
+    p.add_argument("id", nargs="?", help="request id prefix (cancel)")
+    p.add_argument("--all", action="store_true",
+                   help="list: also the requests already carried out")
+    p.set_defaults(func=cmd_requests)
 
     p = sub.add_parser("shell", help="interactive authoring session (briefing + auto-collect)")
     p.add_argument("--no-watch", action="store_true", help="disable the file watcher")

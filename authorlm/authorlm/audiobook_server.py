@@ -6,7 +6,8 @@ on a loopback port and opens it in the browser; the page posts to
 which is `workbench.dispatch` — the pronunciation workbench is a mode of
 the same page — and `/api/devedit`, `devedit.dispatch`, the developmental
 edit's review mode, and `/api/forms`, `forms_page.dispatch`, the Merge
-forms mode), and streams audio from
+forms mode, and `/api/runs`, `runs_page.dispatch`, the Filters and lenses
+mode), and streams audio from
 `/preview/<stem>/<id>.mp3` (rendered on the request when missing — the
 lazy listen), `/take/<stem>/<id>.mp3` and `/stitched/<stem>.mp3`
 with HTTP ranges honoured so a phone can seek, and the brand icons
@@ -202,7 +203,7 @@ def make_handler(workspace: str | None, manuscript: str | None):
             # ruling 2026-09-26: "all in one place"); its transport is
             # unchanged, so the standalone `authorlm workbench` still works.
             if self.path not in ("/api/audiobook", "/api/workbench", "/api/devedit",
-                                 "/api/forms"):
+                                 "/api/forms", "/api/runs"):
                 self.send_error(404)
                 return
             try:
@@ -227,6 +228,12 @@ def make_handler(workspace: str | None, manuscript: str | None):
                     from . import forms_page
                     result = forms_page.dispatch(body.get("method", ""), params,
                                                  workspace=workspace)
+                elif self.path == "/api/runs":
+                    # Filters and lenses: browse, edit, and ask for runs
+                    # (runs_page.py). No model call, no Google call.
+                    from . import runs_page
+                    result = runs_page.dispatch(body.get("method", ""), params,
+                                                workspace=workspace)
                 else:
                     result = audiobook.dispatch(body.get("method", ""), params,
                                                 workspace=workspace)

@@ -505,6 +505,22 @@ CREATE TABLE IF NOT EXISTS filter_runs (
                                          -- active | settled | abandoned
 );
 
+-- One asked-for run of a filter or a lens on one chapter file, written by
+-- the Filters and lenses page (runs_page.py) for a session to carry out
+-- (`authorlm requests`). The row holds only the ask: what the run has done
+-- is read from filter_runs, doc_threads and the lens findings each time,
+-- never stored here. Rows are never deleted; one taken off the list is
+-- `cancelled`.
+CREATE TABLE IF NOT EXISTS run_requests (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id   TEXT NOT NULL,
+    kind            TEXT NOT NULL,   -- filter | lens
+    name            TEXT NOT NULL,   -- the artifact's name
+    file            TEXT NOT NULL,   -- relpath; one file per request
+    status          TEXT NOT NULL DEFAULT 'queued',  -- queued | cancelled
+    cancelled_at    TEXT
+);
+
 -- One shared whole-essay reading per (filter family, file), issue #412
 -- (readings.py). A run COPIES it into filter_runs.registry at prelude time
 -- and never reads it again, so a later reading cannot touch a live run.
