@@ -1264,6 +1264,12 @@ Proposal learning loop — firewall, screen, distillation, retraction.
 
 Manuscript identity parsers for catalog / audiobook / export doors.
 
+## `tests.test_manuscript_show_json`
+
+`authorlm/tests/test_manuscript_show_json.py`
+
+`manuscript show --json`: the manuscript's id, identity, and export title in one JSON line, for other tools (publishinglm keys its books on the id). Hermetic: a scratch workspace. Run: python3 tests/test_manuscript_show_json.py
+
 ## `tests.test_margin`
 
 `authorlm/tests/test_margin.py`
