@@ -28,6 +28,16 @@ passage quoted inside an essay is copied byte for byte.
 2. **The registry** comes next: the reading of what this essay actually does.
 3. **The rules below** come last. Only the numbered rules here are enforced.
 
+Three subjects are generic and belong to STYLE LAW, not to this filter: em
+dashes, wordiness, and aphorisms (where one may stand in its explanation, and
+what makes one bare). The rules below that touch them (V1, S1, S5, S6) defer to
+the law and state only what to do in a unit. Where STYLE LAW is silent on one
+of these subjects, leave dashes and aphorism placement alone, and on wordiness
+or a bare aphorism ask rather than guess.
+*By the owner's ruling of 2026-11-25: "Lets have things in style laws that are
+generic - like em dash, wordiness (line 9) and 'explanation from simple terms'
+(line 10). Not in individual filters."*
+
 ## The registry: the prelude
 
 Read THE ESSAY whole, with the summaries of the essays before and after it, and
@@ -74,7 +84,7 @@ return these lines. Record what the essay does, never what it should do.
 ## Ask, do not guess
 
 Some faults have an answer only the author holds: a gap in the argument, a story
-that must move or go, a key line buried in the middle of its explanation, a term
+that must move or go, a key line standing where STYLE LAW does not allow, a term
 with two definitions. Rules marked (ask) are never rewritten. Return `replace`
 with the unit unchanged except for one tag planted straight after the sentence:
 `[Suggestion: Query: <the question in one line, naming the fault and a concrete fix>]`.
@@ -93,16 +103,10 @@ text between units. Every rule below whose fix would do one of those is (ask).
 ### Voice
 
 - **V1 Authoritative, declarative, non-defensive.** The voice is authoritative,
-  declarative and non-defensive. Sections close on declarative lines. Em dashes
-  are welcome as long as they are used to explain something inline and the
-  explanation is expendable. Never stack multiple em-dash pairs in one sentence.
-  (STYLE LAW still outranks this where it rules on dashes.) Fix a defensive or apologetic sentence, and a
-  section whose last line trails off in a qualification or a question it does
-  not mean to leave open.
-  *Departs from the source skill ("Em dashes are welcome.") by the owner's
-  ruling of 2026-11-25: "Em dashes are welcome as long as they are used to
-  explain something inline and the explanation is expendable. Never stack
-  multiple em-dash pairs in one sentence."*
+  declarative and non-defensive. Sections close on declarative lines. On em dashes
+  this filter states no rule of its own: STYLE LAW on em dashes governs. Fix a
+  defensive or apologetic sentence, and a section whose last line trails off in
+  a qualification or a question it does not mean to leave open.
 - **V2 No hedges and no meta-commentary in the body.** Cut a hedge (`perhaps`,
   `it may be that`, `in some sense`, `one might say`) and cut commentary on the
   essay itself (`as we shall see`, `it is worth noting`, `this essay argues`,
@@ -116,8 +120,10 @@ text between units. Every rule below whose fix would do one of those is (ask).
 
 ### Sentences
 
-- **S1 Avoid wordy sentences.** Shorten wherever meaning is unchanged ("another
-  puts herself first," not "another puts her own needs first").
+- **S1 Avoid wordy sentences.** What counts as wordy, and what a cut must
+  keep, is STYLE LAW on wordiness; this filter states no rule of its own. Make
+  the cut the law calls for inside the unit and name the law in `ref`
+  ("another puts herself first," not "another puts her own needs first").
 - **S2 Every verb that needs an object gets one** ("to seek new experiences,"
   not "to seek more").
 - **S3 Vary repeated nouns.** When the same subject recurs ("the child" five
@@ -131,28 +137,20 @@ text between units. Every rule below whose fix would do one of those is (ask).
   statement. Where the registry's definitions line shows a second definition in
   another unit, and this unit holds the second one, cut the restatement if the
   sentence around it survives; otherwise ask.
-- **S5 Elevate key lines.** Give a central sentence (e.g. "Every question is an
-  experiment, and every answer an experience.") its own line at the start or at the
-  end of its explanation, and delete the weaker restatements elsewhere. Both
-  places are right: a key line or aphorism that opens its explanation or closes
-  it is never queried or moved for its position. In the unit that holds the key
-  line, a blank line may set the line apart. In a unit the registry lists as a
-  weaker restatement, cut the restating sentence. Where the key line is buried
-  in the middle of its explanation, or stands in place of the explanation
-  (ask), plant the query on the key line.
-  *Departs from the source skill ("its own line near the front of its
-  section") by the owner's ruling of 2026-11-25: "Build an explanation from
-  simple terms and examples; it may end on an aphorism that lifts it and makes
-  it memorable. An aphorism either closes an explanation or starts one, but
-  never replaces one." And: "Elevating key lines is not aphoristic
-  compression. We can have aphorisms and they are elevation."*
-- **S6 Earn bare aphorisms.** A claim like "The horizon is eternal" needs
-  either a preceding sentence that leads to it or an explanation after it. Only
-  an aphorism with neither is a fault. Where the essay's own argument supplies
-  that sentence's content, write it; where it does not, ask.
-  *Departs from the source skill ("needs a preceding sentence that leads to
-  it") by the owner's ruling of 2026-11-25: "An aphorism either closes an
-  explanation or starts one, but never replaces one."*
+- **S5 Elevate key lines.** A central sentence (e.g. "Every question is an
+  experiment, and every answer an experience.") is the section's key line.
+  Where a key line or aphorism may stand is STYLE LAW on aphorisms; this filter
+  states no rule of its own. Never query or move a key line for standing at the
+  start or at the end of its explanation. In the unit that holds the key line,
+  a blank line may set the line apart. Delete the weaker restatements
+  elsewhere: in a unit the registry lists as a weaker restatement, cut the
+  restating sentence. Where the registry's key-lines record shows a key line
+  standing where STYLE LAW on aphorisms does not allow (ask), plant the query
+  on the key line.
+- **S6 Earn bare aphorisms.** What makes an aphorism bare (a claim like "The
+  horizon is eternal") is STYLE LAW on aphorisms; this filter states no rule of
+  its own. Where the law finds one bare and the essay's own argument supplies
+  the missing sentence's content, write it; where it does not, ask.
 - **S7 Use the book's own vocabulary over generic synonyms** ("whether a better
   choice exists," not "a better alternative"). The book's vocabulary is
   PROTECTED TERMS, CONCEPT NOTES and the `[lexicon]` elements of STYLE LAW.
@@ -313,4 +311,4 @@ All examples are from the source skill unless marked (original).
 - **A6** Fault: an ordinary use of `time` in an essay where time is the counting of choices -> `clock time`.
 - **A8** Fault: `Criminals always get caught.` -> the same sentence with `[Suggestion: Query: A8: a reader can name criminals who were never caught; narrow the claim to what the argument needs, or cut it?]` (query original).
 - **R5** Fault: `the Hindu tradition` -> a geographic phrasing such as `the land the Sindhu waters` (fault sentence original).
-- **S6** Fault: `The horizon is eternal.` standing with nothing leading to it and no explanation after it -> the same sentence with `[Suggestion: Query: S6: this aphorism stands bare; which sentence should lead to it, or what explanation should follow?]` when the essay's argument supplies neither (query original).
+- **S6** Fault: `The horizon is eternal.` standing bare -> the same sentence with `[Suggestion: Query: S6: this aphorism stands bare; which sentence should lead to it, or what explanation should follow?]` when STYLE LAW on aphorisms finds it bare and the essay's argument does not supply what is missing (query original).

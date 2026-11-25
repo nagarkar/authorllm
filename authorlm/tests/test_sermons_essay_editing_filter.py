@@ -33,10 +33,10 @@ NAME = "sermons-essay-editing"
 PASSED = 0
 
 # One phrase per rule of the source skill, copied from it: a rule that is
-# reworded away or dropped from the filter fails here by name.
+# reworded away or dropped from the filter fails here by name. The skill's
+# dash sentence is not here: that subject is STYLE LAW's (DEFERRALS below).
 SKILL_RULES = {
     "voice: declarative": "Authoritative, declarative, non-defensive",
-    "voice: em dashes": "Em dashes\n  are welcome",
     "voice: no hedges": "No hedges and no meta-commentary in the body",
     "voice: concrete image": "Prefer the concrete image to the abstract "
                              "formulation",
@@ -87,36 +87,49 @@ SKILL_RULES = {
     "scope: sermons elsewhere": "kjv-bunyan-style",
 }
 
-# The owner's rulings of 2026-11-25 (SMSTTD style laws se-ef3dbcd6d7bf and
-# se-29c4a9a82d22), where the filter departs from the source skill: his
-# words, and the reading of each rule that follows from them.
-RULINGS = {
-    "V1 carries the em-dash ruling": "Em dashes are welcome as long as they "
-        "are used to explain something inline and the explanation is "
-        "expendable. Never stack multiple em-dash pairs in one sentence.",
-    "S5 quotes the aphorism ruling": "An aphorism either closes an "
-        "explanation or starts one, but never replaces one.",
-    "S5 quotes the elevation ruling": "Elevating key lines is not aphoristic "
-        "compression. We can have aphorisms and they are elevation.",
-    "S5: start or end are both right": "its own line at the start or at the "
-        "end of its explanation",
-    "S5: position alone is never queried": "is never queried or moved for "
-        "its position",
-    "S5: only the buried or replacing line is asked about": "buried in the "
-        "middle of its explanation, or stands in place of the explanation "
-        "(ask)",
-    "S5 keeps the restatement cut": "delete the weaker restatements "
+# The owner's ruling of 2026-11-25: generic subjects (em dashes, wordiness,
+# aphorisms) are STYLE LAW's, not a filter's. The filter defers by subject
+# and keeps only what to do in a unit.
+DEFERRALS = {
+    "the ruling is quoted": "Lets have things in style laws that are generic "
+        "- like em dash, wordiness (line 9) and 'explanation from simple "
+        "terms' (line 10). Not in individual filters.",
+    "V1 defers on em dashes": "On em dashes this filter states no rule of "
+        "its own: STYLE LAW on em dashes governs.",
+    "S1 defers on wordiness": "is STYLE LAW on wordiness; this filter states "
+        "no rule of its own",
+    "S5 defers on where an aphorism may stand": "Where a key line or "
+        "aphorism may stand is STYLE LAW on aphorisms; this filter states no "
+        "rule of its own.",
+    "S5 never queries a key line at the start or the end": "Never query or "
+        "move a key line for standing at the start or at the end of its "
+        "explanation.",
+    "S5 keeps the restatement cut": "Delete the weaker restatements "
                                     "elsewhere",
-    "S6: a lead-up or an explanation after": "either a preceding sentence "
-        "that leads to it or an explanation after it",
-    "S6: only neither is a fault": "Only an aphorism with neither is a fault",
+    "S5 asks only where the law does not allow the place": "standing where "
+        "STYLE LAW on aphorisms does not allow (ask)",
+    "S6 defers on what makes an aphorism bare": "What makes an aphorism bare "
+        "(a claim like \"The horizon is eternal\") is STYLE LAW on "
+        "aphorisms; this filter states no rule of its own.",
+    "a silent STYLE LAW: leave alone, or ask": "Where STYLE LAW is silent on "
+        "one of these subjects, leave dashes and aphorism placement alone, "
+        "and on wordiness or a bare aphorism ask rather than guess.",
 }
 
-# The wording these rulings replaced; none of it may come back as a rule.
-SUPERSEDED = ("never remove one for being a dash",
-              "at the end of its section and would have to move",
-              "The horizon is eternal\" needs a preceding sentence that "
-              "leads to it.")
+# The laws' own text, and the source skill's wording they replaced: a copy
+# in the filter goes stale, so none of it may appear.
+COPIED = ("Em dashes are welcome",
+          "explain something inline",
+          "Never stack",
+          "closes an explanation or starts one",
+          "never replaces one",
+          "Build an explanation from simple terms",
+          "Shorten wherever",
+          "keeping the meaning intact",
+          "links of reasoning",
+          "near the front of its section",
+          "needs a preceding sentence",
+          "either a preceding sentence")
 
 # What the skill asks for that a unit-by-unit filter cannot do; each is
 # named in the filter's Boundaries section so the gap is stated, not silent.
@@ -182,13 +195,10 @@ def check_artifact() -> None:
     for label, phrase in SKILL_RULES.items():
         check(f"carries the skill's rule, {label}", _flat(phrase) in flat,
               phrase)
-    for label, phrase in RULINGS.items():
-        check(f"owner's ruling, {label}", _flat(phrase) in flat, phrase)
-    check("each changed rule says it departs from the source skill",
-          flat.count("Departs from the source skill") == 3
-          and flat.count("the owner's ruling of 2026-11-25") == 3)
-    for phrase in SUPERSEDED:
-        check(f"superseded wording is gone: {phrase[:40]}",
+    for label, phrase in DEFERRALS.items():
+        check(f"defers to STYLE LAW, {label}", _flat(phrase) in flat, phrase)
+    for phrase in COPIED:
+        check(f"no copy of a law or of superseded wording: {phrase}",
               phrase not in flat, phrase)
     for rule in RULE_IDS:
         check(f"rule {rule} is defined", f"**{rule} " in body, rule)
