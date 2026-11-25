@@ -884,6 +884,42 @@ def _finding_row(f) -> dict:
     return row
 
 
+def _dash_rows(text: str, found: list) -> dict[int, int]:
+    """{index in `found`: line in the file} for the em-dash findings,
+    which lint.py places by paragraph only: the line of the paragraph
+    that holds the sentence's opening words. The session that judges
+    the dash needs the place."""
+    starts, line = [], 1
+    for block in re.split(r"(\n\s*\n)", text):
+        if block.strip():
+            lead = len(block) - len(block.lstrip())
+            starts.append((line + block[:lead].count("\n"), block.strip()))
+        line += block.count("\n")
+    out: dict[int, int] = {}
+    for k, f in enumerate(found):
+        if f.code not in ("em-dash", "em-dash-stack") or f.unit > len(starts):
+            continue
+        first, unit = starts[f.unit - 1]
+        opening = " ".join(f.quote.split())[:24]
+        out[k] = first + next(
+            (n for n, row in enumerate(unit.splitlines())
+             if opening in " ".join(row.split())), 0)
+    return out
+
+
+def _rows(text: str, found: list, rules: list[str]) -> list[dict]:
+    lines = _dash_rows(text, found)
+    rows = []
+    for k, f in enumerate(found):
+        if f.code not in rules:
+            continue
+        row = _finding_row(f)
+        if k in lines:
+            row["line"] = lines[k]
+        rows.append(row)
+    return rows
+
+
 def _rule_counts(findings: list[dict]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for finding in findings:
@@ -897,7 +933,8 @@ def lint_chapter(db: Database, manuscript: dict, file: str,
     """The deterministic lint over one whole chapter as it is on disk,
     against the rest of the book: `{file, findings, counts, rules,
     next}`, each finding with its law, its severity and the words quoted;
-    a proof finding (proof.py) also has its line. `only` and `skip` name
+    a proof finding (proof.py) and an em-dash finding also have their
+    line. `only` and `skip` name
     rules. No model call, nothing written, open under either
     `agent_edits` value. The chapter itself is left out of the overlap
     check, so a chapter is not reported as repeating itself."""
@@ -912,7 +949,7 @@ def lint_chapter(db: Database, manuscript: dict, file: str,
                                    include_self=False).findings
     found += _proof_findings(db, manuscript, relpath, text, rules,
                              proof_lexicon(db, manuscript))
-    findings = [_finding_row(f) for f in found if f.code in rules]
+    findings = _rows(text, found, rules)
     counts: dict[str, int] = {}
     for finding in findings:
         counts[finding["severity"]] = counts.get(finding["severity"], 0) + 1
@@ -949,8 +986,7 @@ def lint_book(db: Database, manuscript: dict,
             found += critic.lint_draft(db, manuscript, name, text,
                                        include_self=False).findings
         found += _proof_findings(db, manuscript, name, text, rules, lexicon)
-        rows = [{"file": name, **_finding_row(f)} for f in found
-                if f.code in rules]
+        rows = [{"file": name, **row} for row in _rows(text, found, rules)]
         findings += rows
         if rows:
             by_file[name] = len(rows)

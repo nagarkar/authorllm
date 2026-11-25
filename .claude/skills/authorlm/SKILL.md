@@ -477,8 +477,9 @@ not re-ask at each beat.
    ratified laws (no "What" openers, no term in its own definition, no
    stacked em-dashes, nothing verbatim from the book). Its warnings
    ("not X but Y", a definitional sentence about a concept another essay
-   introduced, a sentence over 40 words, a reading grade above 13) are
-   for the critic to weigh. An override is evidence and needs a reason.
+   introduced, a sentence over 40 words, a reading grade above 13, an
+   em-dash) are for the critic to weigh; the em-dash warning is yours to
+   judge by the law, as "Em-dash warnings" under the book workflow says. An override is evidence and needs a reason.
 
    **The billed verb is the exception, not the default.** `authorlm write draft`
    without `--dry-run` sends the payload to the pinned `[writing]` model, self-checks
@@ -1002,6 +1003,25 @@ this book: …").
   language (`authorlm manuscript set --language en-GB` for British; unset is
   American). Banned words and the quote style are read from the style
   laws that govern each file.
+- **Em-dash warnings are yours to interpret** (author ruling
+  2026-11-25). The law, in the author's words: "Em dashes are welcome as
+  long as they are used to explain something inline and the explanation
+  is expendable. Never stack multiple em-dash pairs in one sentence."
+  Lint reports every sentence with an em-dash as a warning (`em-dash`),
+  with its line, the sentence, and the words the dash sets off; a
+  warning stops nothing. For each one, judge two things: does the dash
+  explain something inline, and could that explanation be cut without
+  loss to the sentence? Where both hold, leave it. Where either fails,
+  stage a form that rewrites it, as its own sentence or as a clause,
+  through `authorlm revise stage <file> --origin <name>`; if a pending
+  form already covers that span, replace that form instead of adding a
+  second one (withdraw and restage, as "Stale forms" above). Never
+  rewrite a dash silently, and never treat the warning as a fault to
+  clear. More than one pair in a sentence is a separate finding,
+  `em-dash-stack`, an error: `write propose` stops on it. To see a
+  chapter's dashes: `authorlm book lint <file> --only
+  em-dash,em-dash-stack`; for the whole book add `--all` in place of the
+  file.
 - `authorlm book lint-accept <word>…`: the author accepts words for the
   spell check. They are appended to `_lint/accepted-words.txt` in the
   manuscript folder; nothing else is written (`--dry-run` writes

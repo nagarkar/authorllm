@@ -139,6 +139,49 @@ class ChapterTests(ProofBook):
         self.assertEqual(self.snapshot(), before)
 
 
+class EmDashTests(ProofBook):
+    """An em-dash is a warning for the session to judge, with the place
+    and the words the dash sets off; only a stack is an error."""
+
+    TEXT = ("# Two\n\nThe mill stood idle. The miller — a patient man — "
+            "waited for the thaw.\n\nHe walked — slowly — to market — "
+            "alone — that spring.\n")
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.root / "two.md").write_text(self.TEXT, encoding="utf-8")
+
+    def test_a_dash_is_a_warning_with_line_sentence_and_aside(self):
+        board = self.proof("two.md", only=["em-dash", "em-dash-stack"])
+        self.assertEqual(
+            [(f["code"], f["severity"], f["line"], f["ref"])
+             for f in board["findings"]],
+            [("em-dash", "warning", 3, "a patient man"),
+             ("em-dash-stack", "error", 5, "slowly | alone")])
+        warning = board["findings"][0]
+        self.assertEqual(warning["quote"], "The miller — a patient man — "
+                                           "waited for the thaw.")
+        self.assertIn("Em dashes are welcome as long as they are used to "
+                      "explain something inline and the explanation is "
+                      "expendable. Never stack multiple em-dash pairs in "
+                      "one sentence.", warning["message"])
+        self.assertIn("Never stack multiple em-dash pairs in one sentence.",
+                      board["findings"][1]["message"])
+        out = self.cli("book", "lint", "two.md", "--only", "em-dash",
+                       "-m", "book")
+        self.assertIn("[warning] em-dash: em-dash sets off «a patient man»",
+                      out)
+        self.assertIn("line 3 «The miller — a patient man — waited", out)
+
+    def test_the_whole_book_run_lists_dashes_when_asked(self):
+        board = changes.lint_book(self.db, self.manuscript,
+                                  only=["em-dash"])
+        self.assertEqual([(f["file"], f["line"]) for f in board["findings"]],
+                         [("two.md", 3)])
+        self.assertNotIn("em-dash", changes.lint_book(
+            self.db, self.manuscript)["rules"])
+
+
 class OwnWordsTests(ProofBook):
     """What the spell check accepts beyond the dictionary, each read
     from where the manuscript keeps it."""
