@@ -1379,6 +1379,19 @@ place, so an edit in the repo reaches every book. A manuscript's own
 only (`filter add` of a library name writes that override). Never copy a
 library filter into a manuscript unless the author wants that book to differ.
 
+`sermons-essay-editing` (library, global, `summaries = true`; added
+2026-11-25 from the author's chat skill of the same name) is the house-style
+pass for the modern-English essays and commentary of Seven More Sermons to the
+Dead: voice, sentences, how stories carry the argument, terms and references,
+footnotes, soundness. It is that book's filter and is not offered on another
+book; on a sermon it keeps every unit (the sermons' register belongs to the
+kjv-bunyan-style skill). Its registry prelude runs first (`filter prelude
+sermons-essay-editing <essay>`), then the usual run. What the chat skill did
+that a filter cannot (the colour redline, old-content triage, moving a key
+line or a story between units, new headings) is listed under the artifact's
+"Boundaries" heading; the moves arrive as `[Suggestion: Query: ...]` tags for
+the author.
+
 **The lens library.** `authorlm/library/lenses/` holds lenses written for any
 manuscript (`plain-reader`, promoted from SMSTTD 2026-11-13). Every book sees
 them in `lens list` and `lens show`, marked `(library)`, and runs them by name

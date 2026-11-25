@@ -95,6 +95,8 @@ def test_real_library_parses() -> None:
         check("the repo library holds the strunk-and-white filters",
               {"strunk-and-white-concision", "strunk-and-white-grammar",
                "strunk-and-white-mechanics"} <= set(names), names)
+        check("the repo library holds sermons-essay-editing",
+              "sermons-essay-editing" in names, names)
         for path in sorted(lib.glob("*.md")):
             meta, _body = flt.parse_front_matter(path.read_text("utf-8"))
             check(f"{path.name} parses", meta["class"] in flt.CLASSES)

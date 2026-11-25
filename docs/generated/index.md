@@ -1466,6 +1466,12 @@ Summary hierarchy, step 3 (docs/summary-hierarchy-design.md §3.3, §3.5, §4.5,
 
 `gdocs.separate_tag_lines` blanks between consecutive `[…]` tag lines in the bytes handed to a markdown import.
 
+## `tests.test_sermons_essay_editing_filter`
+
+`authorlm/tests/test_sermons_essay_editing_filter.py`
+
+The library filter `sermons-essay-editing` carries the house rules of the sermons-essay-editing skill (Seven More Sermons to the Dead, the modern-English essays), and runs through the ordinary global-filter flow.
+
 ## `tests.test_setup_web_build`
 
 `authorlm/tests/test_setup_web_build.py`
