@@ -488,6 +488,14 @@ Registry of every LLM prompt AuthorLM sends, and where each lives.
 
 `pronunciations.md` — the manuscript's pronunciation dictionary (docs/autoregressive-writing-design.md §15.22).
 
+## `authorlm.proof`
+
+`authorlm/authorlm/proof.py`
+
+The proof checks: seven deterministic checks a proofreader makes by eye, run by `book lint` beside the nine checks of `lint.py`.
+
+Never imports: api, cli, db, changes.
+
 ## `authorlm.proposals`
 
 `authorlm/authorlm/proposals.py`
@@ -757,6 +765,12 @@ Beat-by-beat repetition: the drafter is shown what earlier essays already say ab
 `authorlm/tests/test_book_changes.py`
 
 Agent edits that land directly, with a change list (changes.py, and the `agent_edits` setting and `changes_text` step key in book.py). These tests enforce what the two module docstrings say: the setting is per manuscript and absent means forms; only a running agent step whose definition says `changes_text = true` lands a change, inside its scope, all or none; every change is a row keyed by document id that the author can list and put back; a first draft is an artifact and an event, not a change; the author's packs count the changes; and each role file says the same.
+
+## `tests.test_book_lint_proof`
+
+`authorlm/tests/test_book_lint_proof.py`
+
+`book lint` with the proof checks (proof.py through changes.py and the command line): the chapter report carries them beside the nine checks, `--only` and `--skip` choose rules, `--all` reads the whole book, the manuscript's own words and laws are read from where they are stored, and `book lint-accept` is the only verb here that writes, and only its file.
 
 ## `tests.test_book_role_agents`
 
@@ -1159,6 +1173,12 @@ The lens library: a lens promoted from one book is seen, listed and run on anoth
 `authorlm/tests/test_lint_checks.py`
 
 Individual `lint.check_*` helpers encode ratified style laws that `write propose` can refuse as errors.
+
+## `tests.test_lint_proof`
+
+`authorlm/tests/test_lint_proof.py`
+
+The proof checks of `proof.py`, one rule at a time: spelling against the shipped word lists, doubled words, the spelling variant, quote marks, footnotes, tracking tags on links, and the style law's banned words.
 
 ## `tests.test_lint_shingles`
 
@@ -1657,6 +1677,12 @@ One watcher for the author's two review pages: Dev edit and Merge forms.
 `authorlm/tools/bootstrap_beliefs.py`
 
 Distil beliefs from the author's decisions already on record.
+
+## `tools.build_spelling_wordlists`
+
+`authorlm/tools/build_spelling_wordlists.py`
+
+Build the spell check's word lists (authorlm/authorlm/spelling/) from two Hunspell dictionaries, one American and one British.
 
 ## `tools.convert_llm_cache`
 

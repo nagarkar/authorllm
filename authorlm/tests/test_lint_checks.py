@@ -62,19 +62,52 @@ def test_term_in_definition() -> None:
           all(f.unit != 3 for f in hits), _codes(hits))
 
 
+LAW = ("Em dashes are welcome as long as they are used to explain "
+       "something inline and the explanation is expendable. Never stack "
+       "multiple em-dash pairs in one sentence.")
+
+
 def test_em_dashes() -> None:
-    one = lint.check_em_dashes([
-        "A claim — with one aside — stays info."])
-    check("one em-dash pair is info, not error",
-          len(one) == 1 and one[0].code == "em-dash"
-          and one[0].severity == "info",
-          [(f.code, f.severity) for f in one])
+    hits = lint.check_em_dashes([
+        "A claim — with one aside — stands.",
+        "A claim with a single dash — and its explanation.",
+        "No dash here."])
+    check("every sentence with an em-dash is a warning, one per sentence",
+          [(f.unit, f.code, f.severity) for f in hits]
+          == [(1, "em-dash", "warning"), (2, "em-dash", "warning")],
+          [(f.unit, f.code, f.severity) for f in hits])
+    check("the warning quotes the law in the owner's words",
+          all(LAW in f.message for f in hits), hits[0].message)
+    check("a pair: the words between the dashes are named",
+          hits[0].ref == "with one aside" and
+          "«with one aside»" in hits[0].message, hits[0].ref)
+    check("a single dash: the words after it are named",
+          hits[1].ref == "and its explanation", hits[1].ref)
+    check("the sentence is quoted whole",
+          hits[0].quote == "A claim — with one aside — stands.")
+    second = lint.check_em_dashes([
+        "A claim — with one aside — and a second — begun."])
+    check("a pair and a further dash is a stack: one finding, an error",
+          [(f.code, f.severity) for f in second]
+          == [("em-dash-stack", "error")],
+          [(f.code, f.severity) for f in second])
     stacked = lint.check_em_dashes([
         "A — one — B — two — C — three — D."])
-    check("three or more em-dashes escalate to error",
-          any(f.code == "em-dash-stack" and f.severity == "error"
-              for f in stacked),
-          [(f.code, f.severity, f.message) for f in stacked])
+    check("stacked pairs are an error that quotes the law, with each "
+          "aside named",
+          [(f.code, f.severity) for f in stacked]
+          == [("em-dash-stack", "error")] and LAW in stacked[0].message
+          and stacked[0].ref == "one | two | three",
+          [(f.code, f.severity, f.ref, f.message) for f in stacked])
+    report = lint.lint_text("A claim — with one aside — stands.")
+    check("a warning is never an error: nothing for write propose to "
+          "stop on", report.errors == []
+          and [f.code for f in report.warnings] == ["em-dash"],
+          report.codes())
+    check("the rendered report prints the warning with its sentence",
+          "[warn] ¶1 em-dash:" in lint.render(report)
+          and "«A claim — with one aside — stands.»" in lint.render(report),
+          lint.render(report))
     ascii_stack = lint.check_em_dashes([
         "A -- one -- B -- two -- C -- three -- D."])
     check("ASCII ' -- ' stacks the same way",
