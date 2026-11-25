@@ -847,6 +847,11 @@ def export_published(db: Database, manuscript: dict, fmt: str,
         title = f"{title} - {selection_slug(order)}"
     if book:
         title = f"{title} - book"  # never overwrites the review copy
+    # A copy marked for one reader is its own file (and its own Drive
+    # upload): the next reader's copy never overwrites it, nor the clean one.
+    recipient = watermark or notice
+    if recipient:
+        title = f"{title} - {recipient}"
     export_dir = root / EXPORT_DIR
     export_dir.mkdir(exist_ok=True)
     md_path = export_dir / export_filename(title)

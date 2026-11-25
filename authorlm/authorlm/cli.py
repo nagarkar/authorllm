@@ -8520,6 +8520,47 @@ def cmd_ask(args):
                        f"## Reply\n\n{reply}\n", encoding="utf-8")
 
 
+def _doc_share_access(args) -> None:
+    """`doc access <file>` and `doc share <file> --commenter EMAIL`: a
+    review copy's sharing, and sharing it with one reader
+    (authorlm.doc_access). --json prints the report for other tools."""
+    import json as _json
+
+    from . import doc_access, gdocs
+
+    if not args.name:
+        sys.exit(f"usage: doc {args.action} <doc-id-or-url>"
+                 + (" --commenter EMAIL" if args.action == "share" else ""))
+    if args.action == "share" and not args.commenter:
+        sys.exit("doc share needs --commenter EMAIL: the one reader to "
+                 "give comment access")
+    try:
+        service = gdocs.get_service(_load_config(args), args.workspace,
+                                    interactive=False)
+        if args.action == "share":
+            report = doc_access.share(service, args.name, args.commenter)
+        else:
+            report = doc_access.access(service, args.name,
+                                       reader=args.commenter)
+    except ValueError as err:
+        sys.exit(f"error: {err}")
+    if args.json:
+        print(_json.dumps(report))
+    else:
+        print(f"{report['name']}  {report['url']}")
+        for row in report["permissions"]:
+            print(f"  {row['role']:<10} {row['type']:<7} {row['email']}")
+        print("  download/print/copy: "
+              + ("off for commenters and viewers"
+                 if report["copy_requires_writer_permission"] else "ON"))
+        for problem in report["problems"]:
+            print(ui.yellow(f"  problem: {problem}"))
+        print("  confidential review copy: "
+              + ("yes" if report["ok"] else "NO"))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def cmd_doc(args):
     from . import docs
 
@@ -8534,6 +8575,9 @@ def cmd_doc(args):
             sys.exit(f"error: {err}")
         print("Google Drive authorization OK — token cached in "
               "~/.authorlm/gdocs_token.json.")
+        return
+    if args.action in ("share", "access"):
+        _doc_share_access(args)
         return
     manuscript = _manuscript(db, args)
     if args.action == "bind":
@@ -10768,13 +10812,19 @@ def build_parser() -> argparse.ArgumentParser:
                "  doc merge becker.md         three-way merge into "
                "_drafts/becker.merged.md (never pushes)\n"
                "  doc resolve-comments AAAB AAAC   resolve addressed "
-               "comments with a receipt")
+               "comments with a receipt\n"
+               "  doc access <doc-id-or-url>  who can open a review copy, "
+               "and whether it is confidential\n"
+               "  doc share <doc-id-or-url> --commenter reader@example.com  "
+               "comment access for one reader; link sharing and "
+               "download/print/copy off")
     p.add_argument("action", choices=["list", "add", "rename", "retire",
                                       "revive",
                                       "show", "push", "pull", "open", "auth",
                                       "bind", "create-manuscript", "threads",
                                       "propose", "decide", "diff", "merge",
-                                      "resolve-comments"])
+                                      "resolve-comments", "share",
+                                      "access"])
     p.add_argument("name", nargs="?", help="file name (add) or name fragment "
                                            "(retire/revive/push/pull/diff/"
                                            "merge); bind: the Doc id or URL; "
@@ -10813,6 +10863,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="decide: decline the thread (revert and close)")
     p.add_argument("--reason", help="decide: the author's reasoning, "
                                     "verbatim — feeds the scoped distiller")
+    p.add_argument("--commenter", metavar="EMAIL",
+                   help="share: the one reader to give comment access; "
+                        "access: check that this reader is a commenter")
+    p.add_argument("--json", action="store_true",
+                   help="share, access: print the sharing report as JSON")
     p.add_argument("--no-comments", action="store_true",
                    help="pull: skip harvesting open Doc comments (default: "
                         "ingest new ones and leave them open as margin "
