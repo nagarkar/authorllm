@@ -74,6 +74,10 @@ def stage_edits(db: Database, manuscript_id: str, owner_id: str, file: str,
     constraint rather than colliding with it. Entries are ordered by
     unit, so the ordinal is stable across re-runs of the same window.
     """
+    from . import structure
+    ms = db.one("SELECT path FROM manuscripts WHERE id = ?", (manuscript_id,))
+    if ms and ms["path"]:
+        structure.decline_owner_edits(ms["path"], file, f"{verb_stem} staging")
     units = passes.paragraphs_of(source_text)
     prefix = f"{owner_id}:{file}:"
     existing = {

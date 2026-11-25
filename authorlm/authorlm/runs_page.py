@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import api, filters as flt, gdocs, lenses, passes, paths
+from . import api, filters as flt, gdocs, lenses, passes, paths, structure
 from .db import Database, ko_fields, loads, now_iso
 from .revisions import read_manuscript_files
 from .structure import reading_order, title_of
@@ -172,6 +172,7 @@ def tabs(db: Database, manuscript: dict,
             "origin_type", (manuscript["id"],)):
         out_forms.setdefault(row["file"], {})[row["origin_type"]] = row["n"]
     protected = set(lenses.protected_files(files))
+    toc_text = files.get(structure.TOC_FILENAME) or ""
     rows = []
     for rel in order:
         text = files[rel]
@@ -184,6 +185,7 @@ def tabs(db: Database, manuscript: dict,
             "checked_out": bool(entry.get("checked_out")),
             "forms_out": out_forms.get(rel, {}),
             "protected": rel in protected,
+            "owner_edits": structure.owner_edits_reason(toc_text, rel),
             "url": gdocs.tab_url(master, tab_id) if master and tab_id
             else None})
     return rows
@@ -202,7 +204,10 @@ def tab_needs(tab: dict) -> str | None:
 
 def tab_blocker(tab: dict) -> str | None:
     """Why no new run may be asked for on this tab now, or None: one
-    producer's forms per tab."""
+    producer's forms per tab. A file only the owner edits (toc `edits =
+    "owner"`) takes no run at all."""
+    if tab.get("owner_edits"):
+        return tab["owner_edits"]
     if tab["forms_out"]:
         whose = ", ".join(f"{n} from the {origin} pass"
                           for origin, n in sorted(tab["forms_out"].items()))

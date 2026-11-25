@@ -29,7 +29,7 @@ interface Artifact {
 }
 interface Tab {
   file: string; title: string; words: number; units: number; checked_out: boolean;
-  forms_out: Record<string, number>; protected: boolean; url: string | null; blocked: string | null; needs: string | null;
+  forms_out: Record<string, number>; protected: boolean; owner_edits?: string | null; url: string | null; blocked: string | null; needs: string | null;
 }
 interface Request {
   id: string; kind: Kind; name: string; file: string; asked_at: string; state: string; detail: string;

@@ -1260,7 +1260,7 @@ history <id>`, never retire + re-add. `--overrides` sets which inherited
 laws it displaces (id prefixes or `default:<key>`, comma list; `''`
 clears). A whole guide takes a new parent with `style guide-move <guide>
 --parent NAME`: its laws and files go with it, only its files' chains
-change (the root and cycles are declined); `style guide` never reparents. `style retire <id> --why REASON [--replaced-by ID]`, `style
+change (the root and cycles are declined); `style guide` never reparents. A guide takes a new name with `style guide-rename <guide> "<new name>"`: guides are keyed by id, so parents, attached files and laws keep their links (a name another guide holds is declined). `style retire <id> --why REASON [--replaced-by ID]`, `style
 unretire <id>`, `style copy <id> --guide NAME | --file FILE`. The owner's
 page for all of these is the Style chip of the audiobook page
 (`#<manuscript>/style:<level>`, `style_page.py`), the same functions with
@@ -1711,6 +1711,24 @@ occasion for this rule: on 2026-09-06 a merged hierarchy.md was
 "verified" mechanically, and a second reader then found a run of
 introduced-but-undeployed distinctions the checklist repairs had left
 behind.
+
+### The Sermons are the owner's alone (`edits = "owner"`)
+The owner's ruling, 2026-11-25: "The aphorisms and 'name the thing itself'
+should not bind the sermons. In fact, I don't want to change the sermons at
+all at this stage. All further edits there will be by me manually." So no
+session proposes, stages, lands or applies any change to `sermons_new.md`
+(or `sermons.md`, retired to `_retired/`), by any road, until he says
+otherwise. The toc.toml key `edits = "owner"` on a file's `[[chapter]]`
+entry enforces it (`structure.owner_edits_reason`): filter
+run/prelude/record/apply/push, lens run and push, morph push, the critique
+pass, `revise stage`, an agent step's land or draft, a developmental edit's
+apply and the Lint view's fixes all decline for it and say why, and the
+Filters and Lint views show the reason. Not blocked: his own edits in the
+Doc, `doc pull` of them, and the audiobook page's paragraph box, where he
+types the text himself. `register = "protected"` is a different key: it
+only keeps lenses off a file's voice. The style laws `se-ef3dbcd6d7bf`
+(aphorisms) and `se-ef7624b77c75` ("Name the thing itself") are displaced
+for the Sermons by `se-e873158f4ff0` and `se-1d2ea6a4d111`.
 
 ### The Filters page and run requests (`authorlm requests`)
 The audiobook page's **Filters** view (`#<manuscript>/runs`, `runs_page.py`,
@@ -3063,7 +3081,7 @@ do all three in the same turn:
    aspect, the exact statement (the author's words preferred), and the
    SCOPE. Scope heuristic: the house style (root guide) when the
    instruction is about the author's prose generally; the part-level
-   guide (e.g. "Part II essays — modern English") when it belongs to that
+   guide (e.g. "Essay Laws", the essays' guide, named "Part II essays — modern English" until 2026-11-25) when it belongs to that
    register; a file-level element (`style add … --file <essay>`) only
    when it is about this one essay's voice. Name the recommended guide
    explicitly, and never ratify silently — the author's one-word answer

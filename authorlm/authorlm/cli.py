@@ -9675,6 +9675,14 @@ def cmd_style(args):
             out = api.move_style_guide(db, manuscript, args.params[0], args.parent)
             print(ui.green("moved") + f" guide '{out['guide']}': under "
                   f"'{out['from']}' → under '{out['to']}'")
+        elif args.action == "guide-rename":
+            # Same id, new name: parents, attachments and laws hold the id.
+            if len(args.params) != 2:
+                sys.exit('usage: style guide-rename <guide> "<new name>"')
+            out = api.rename_style_guide(db, manuscript, args.params[0],
+                                         args.params[1])
+            print(ui.green("renamed") + f" guide '{out['from']}' → "
+                  f"'{out['to']}' (id {out['guide']} unchanged)")
         elif args.action == "history":
             for h in api.style_history(db, manuscript, args.params[0]):
                 print(f"  {h['at'][:16].replace('T', ' ')} {h['event']} by "
@@ -11837,12 +11845,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action",
                    choices=["guides", "guide", "attach", "add", "show", "retire",
                             "unretire", "edit", "history", "move", "copy",
-                            "guide-move"])
+                            "guide-move", "guide-rename"])
     p.add_argument("params", nargs="*",
                    help="guide: <name>; attach: <file> <guide>; "
                         "add: <aspect> \"statement\"; show: <file>; "
                         "retire/unretire/edit/history/move/copy: <id>; "
-                        "guide-move: <guide>")
+                        "guide-move: <guide>; "
+                        "guide-rename: <guide> \"<new name>\"")
     p.add_argument("--parent", help="guide / guide-move: parent guide name")
     p.add_argument("--guide", help="add/move/copy: owning guide name")
     p.add_argument("--file", help="add/move/copy: file for a file-local element")
