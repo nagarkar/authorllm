@@ -1148,6 +1148,12 @@ The lens library: a lens promoted from one book is seen, listed and run on anoth
 
 `lenses.protected_files` and `_is_card` gate which chapters a lens may touch and how the reading-order block labels them.
 
+## `tests.test_lift_math`
+
+`authorlm/tests/test_lift_math.py`
+
+`normalize._lift_math` / `_lift_marked_math` keep TeX opaque while prose rules run. push_doc writes normalize back to disk, so a silent regression guts `\` row breaks and `\{` braces permanently.
+
 ## `tests.test_lint_checks`
 
 `authorlm/tests/test_lint_checks.py`
@@ -1436,11 +1442,23 @@ Doc export can wrap a struck old half in emphasis (`<<*term*>>` for a staged `te
 
 `lenses.resolve_pointers` decides which other chapters a lens INPUTS payload may pull in as pointed-to essays.
 
+## `tests.test_restore_emptied_forms`
+
+`authorlm/tests/test_restore_emptied_forms.py`
+
+`api.restore_emptied_forms` turns an emptied green half back into the old text so settle reads a decline, not a delete (#506's Doc-road twin).
+
 ## `tests.test_run_all`
 
 `authorlm/tests/test_run_all.py`
 
 tests/run_all.py, the suite's one runner, against fixture trees: throwaway test files whose outcome is known, so nothing here needs Node, a model or the real suite. Every test that ought to run runs; a silent skip or an early stop is how one does not. (owner)
+
+## `tests.test_same_old_half`
+
+`authorlm/tests/test_same_old_half.py`
+
+`passes._same_old_half` pairs a pending form's old half with a thread's proposed_old, including the Doc export's emphasis wrapping (`<<*term*>>` for staged `term`).
 
 ## `tests.test_same_para`
 
@@ -1621,6 +1639,12 @@ _No docstring._
 `authorlm/tests/test_verse_poem_level.py`
 
 `verse.poem_level` and `verse.heading_levels` decide where poems sit in a verse file and what the collect report warns about.
+
+## `tests.test_with_preview_voice`
+
+`authorlm/tests/test_with_preview_voice.py`
+
+`audiobook._with_preview_voice` rewrites audiobook.toml so [preview] voice is the named Mac voice, every other line unchanged.
 
 ## `tests.test_write_accept_idempotent`
 
