@@ -665,7 +665,8 @@ def move_style_law(element_id: str, guide: str | None = None,
     def run():
         db = _db()
         return api.move_style_law(db, _manuscript(db, manuscript),
-                                      element_id, guide_name=guide, file=file)
+                                      element_id, guide_name=guide, file=file,
+                                      actor="chat")
     return _guard(run)
 
 
@@ -1460,7 +1461,8 @@ def add_style_law(aspect: str, statement: str, guide: str | None = None,
         db = _db()
         return api.add_style_law(
             db, _manuscript(db, manuscript), aspect, statement,
-            guide_name=guide, file=file, notes=notes, overrides=overrides)
+            guide_name=guide, file=file, notes=notes, overrides=overrides,
+            actor="chat")
     return _guard(run)
 
 
@@ -1471,7 +1473,7 @@ def retire_style_law(element_id: str, manuscript: str | None = None) -> dict:
     def run():
         db = _db()
         return api.retire_style_law(db, _manuscript(db, manuscript),
-                                        element_id)
+                                        element_id, actor="chat")
     return _guard(run)
 
 

@@ -14,15 +14,26 @@ kept in the repo at `library/style-defaults.toml` and read in place, so a
 change there reaches every book. A default is an element with id
 `default:<key>`; a manuscript law departs from it by naming that id in
 `overrides` (a comma-separated list when one law displaces several).
+
+A law changes in place: an edit (`edit_element`) keeps its id, because
+other rows cite ids (`overrides`, statements that name `se-…`, lint's
+copy of the em-dash law), and bumps `version`. Its history, the wording
+before every edit, each retire with its reason, un-retire, move and copy,
+is one `edit_events` row per change with `source = 'style'`, the time,
+the user (`created_by`) and the road (`actor`: cli, web, chat), so no
+earlier wording is lost and any of it can be put back by editing again.
 """
 
 from __future__ import annotations
 
+import difflib
+import json
 import os
+import re
 import tomllib
 from pathlib import Path
 
-from .db import Database, ko_fields
+from .db import Database, ko_fields, now_iso
 
 DEFAULTS_ENV = "AUTHORLM_STYLE_DEFAULTS"
 DEFAULT_PREFIX = "default:"
@@ -181,8 +192,106 @@ def add_element(db: Database, manuscript_id: str, aspect: str, statement: str,
     return row
 
 
-def retire_element(db: Database, element: dict) -> None:
-    db.update("style_laws", element["id"], {"status": "retired"})
+# edit_events.source for a style law's history (see the module docstring).
+HISTORY_SOURCE = "style"
+# The fields an edit may change; scope moves go through move, status
+# through retire / un-retire.
+EDITABLE = ("statement", "notes", "aspect")
+
+
+def record_event(db: Database, element: dict, event: str, actor: str,
+                 detail: dict | None = None) -> None:
+    """One history row for a law: add | edit | retire | unretire | move |
+    copy, with its detail (before/after, reason, from/to, copy ids)."""
+    row = ko_fields("eev")
+    row.update(manuscript_id=element["manuscript_id"], source=HISTORY_SOURCE,
+               run="", item_id=element["id"], file=element.get("file") or "",
+               event=event, verdict=None,
+               detail=json.dumps(detail or {}, ensure_ascii=False),
+               at=now_iso(), actor=actor or "")
+    db.insert("edit_events", row)
+
+
+def law_history(db: Database, manuscript_id: str, law_id: str) -> list[dict]:
+    """A law's history, oldest first: event, at, by (the user), actor (the
+    road: cli, web, chat) and detail."""
+    rows = db.all(
+        "SELECT * FROM edit_events WHERE manuscript_id = ? AND source = ? "
+        "AND item_id = ? ORDER BY at, rowid",
+        (manuscript_id, HISTORY_SOURCE, law_id))
+    return [{"event": r["event"], "at": r["at"], "by": r["created_by"],
+             "actor": r["actor"], "detail": json.loads(r["detail"] or "{}")}
+            for r in rows]
+
+
+def histories(db: Database, manuscript_id: str) -> dict[str, list[dict]]:
+    """Every law's history at once (law id → law_history)."""
+    out: dict[str, list[dict]] = {}
+    for r in db.all(
+            "SELECT * FROM edit_events WHERE manuscript_id = ? AND source = ? "
+            "ORDER BY at, rowid", (manuscript_id, HISTORY_SOURCE)):
+        out.setdefault(r["item_id"], []).append(
+            {"event": r["event"], "at": r["at"], "by": r["created_by"],
+             "actor": r["actor"], "detail": json.loads(r["detail"] or "{}")})
+    return out
+
+
+def edit_element(db: Database, element: dict, actor: str = "cli",
+                 **changes: str | None) -> dict:
+    """Change a law's statement, notes or aspect in place: same id,
+    version + 1, the earlier wording kept in history. A change left as
+    None is no change; notes "" clears the note."""
+    fields: dict = {}
+    for key, value in changes.items():
+        if key not in EDITABLE:
+            raise ValueError(f"a style law's {key} is not edited here")
+        if value is None:
+            continue
+        value = value.strip()
+        if key == "statement" and not value:
+            raise ValueError("a style law needs a statement")
+        if key == "aspect" and value not in ASPECTS:
+            raise ValueError(f"unknown aspect '{value}' (use one of {sorted(ASPECTS)})")
+        value = value or None
+        if value != element[key]:
+            fields[key] = value
+    if not fields:
+        raise ValueError("nothing to change: the law already reads so")
+    with db.transaction():
+        db.update("style_laws", element["id"], fields)
+        record_event(db, element, "edit", actor, {
+            "before": {k: element[k] for k in fields},
+            "after": fields, "version": element["version"] + 1})
+    return {**element, **fields, "version": element["version"] + 1}
+
+
+def retire_element(db: Database, element: dict, reason: str | None = None,
+                   actor: str = "cli", replaced_by: str | None = None) -> None:
+    with db.transaction():
+        db.update("style_laws", element["id"], {"status": "retired"})
+        detail: dict = {"reason": reason} if reason else {}
+        if replaced_by:
+            detail["replaced_by"] = replaced_by
+        record_event(db, element, "retire", actor, detail)
+
+
+def unretire_element(db: Database, element: dict, actor: str = "cli",
+                     reason: str | None = None) -> None:
+    with db.transaction():
+        db.update("style_laws", element["id"], {"status": "active"})
+        record_event(db, element, "unretire", actor,
+                     {"reason": reason} if reason else {})
+
+
+def similarity(a: str, b: str) -> float:
+    """How alike two statements read, 0..1: the larger of the character
+    match ratio and the overlap of their words. A cue for a person, never
+    a decision: it only ever warns."""
+    a, b = a.lower().strip(), b.lower().strip()
+    ratio = difflib.SequenceMatcher(None, a, b).ratio()
+    wa, wb = set(re.findall(r"[a-z']+", a)), set(re.findall(r"[a-z']+", b))
+    jaccard = len(wa & wb) / len(wa | wb) if wa | wb else 0.0
+    return max(ratio, jaccard)
 
 
 def guide_chain(db: Database, manuscript_id: str, file: str) -> list[dict]:
@@ -205,10 +314,11 @@ def guide_chain(db: Database, manuscript_id: str, file: str) -> list[dict]:
     return chain
 
 
-def effective_style(db: Database, manuscript_id: str, file: str) -> list[dict]:
-    """Active elements governing `file`, nearest scope first: file-local
-    rows, then each guide up the chain, then the defaults — minus every
-    element displaced by a nearer element's `overrides` link."""
+def effective_layers(db: Database, manuscript_id: str, file: str) -> list[dict]:
+    """Every active law that reaches `file`, nearest scope first (file-
+    local rows, each guide up the chain, then the defaults), each with
+    `displaced_by`: the ids of the nearer laws whose `overrides` names it
+    (empty for a law in force)."""
     layers: list[list[dict]] = [[dict(e) for e in db.all(
         "SELECT * FROM style_laws WHERE manuscript_id = ? AND file = ? "
         "AND status = 'active' ORDER BY created_at",
@@ -221,9 +331,24 @@ def effective_style(db: Database, manuscript_id: str, file: str) -> list[dict]:
             (manuscript_id, guide["id"]),
         )])
     layers.append(default_laws(manuscript_id))
-    displaced = {i for layer in layers for e in layer
-                 for i in overridden_ids(e["overrides"])}
-    return [e for layer in layers for e in layer if e["id"] not in displaced]
+    by: dict[str, list[str]] = {}
+    for layer in layers:
+        for e in layer:
+            for i in overridden_ids(e["overrides"]):
+                by.setdefault(i, []).append(e["id"])
+    return [{**e, "displaced_by": by.get(e["id"], [])}
+            for layer in layers for e in layer]
+
+
+def effective_style(db: Database, manuscript_id: str, file: str) -> list[dict]:
+    """Active elements governing `file`, nearest scope first: file-local
+    rows, then each guide up the chain, then the defaults — minus every
+    element displaced by a nearer element's `overrides` link."""
+    out = []
+    for e in effective_layers(db, manuscript_id, file):
+        if not e.pop("displaced_by"):
+            out.append(e)
+    return out
 
 
 # The aspects that govern prose. Every other aspect (image, placement,

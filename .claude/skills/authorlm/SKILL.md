@@ -1253,6 +1253,14 @@ recorded reason, `critique reopen` sends an item back to proposed.
 Related repairs: `concept revive <name>` (inverse of a mistaken retire,
 incl. collateral edges — `curate_concepts` op "revive"); `style move <id>
 --guide NAME` / `move_style_element` when a rule sits at the wrong level.
+A law's words change IN PLACE with `style edit <id> [--statement S]
+[--notes N] [--aspect A]`: same id (overrides and statements cite ids),
+version + 1, the earlier wording kept in `style history <id>`, never retire
++ re-add. `style retire <id> --why REASON [--replaced-by ID]`, `style
+unretire <id>`, `style copy <id> --guide NAME | --file FILE`. The owner's
+page for all of these is the Style chip of the audiobook page
+(`#<manuscript>/style:<level>`, `style_page.py`), the same functions with
+the road "web" in each law's history.
 
 ## The knobs table (every new filter, lens, or interlocutor)
 **Author ruling 2026-09-06: "Whenever I ask you to create a filter or

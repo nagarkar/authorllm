@@ -562,6 +562,12 @@ The finding→edit door, and its LOCAL settle transport (docs/filter-pass-design
 
 Manuscript structure: the TOC as authoritative reading order.
 
+## `authorlm.style_page`
+
+`authorlm/authorlm/style_page.py`
+
+The Style laws page: a manuscript's style laws by level, to browse, edit, add, retire, un-retire, move and copy.
+
 ## `authorlm.styles`
 
 `authorlm/authorlm/styles.py`
@@ -1575,6 +1581,12 @@ Figure / illustration / illustration-placement must never cross prompts.
 `authorlm/tests/test_style_defaults.py`
 
 Workspace style defaults: `library/style-defaults.toml` is the lowest layer of every file's effective guide, and a manuscript law displaces a default by naming `default:<key>` in `overrides` (a comma list displaces several), so a book's own law always wins over a default.
+
+## `tests.test_style_page`
+
+`authorlm/tests/test_style_page.py`
+
+The Style laws page (`style_page.dispatch`, `/api/style`) and the verbs it shares with the CLI: edit in place, retire with a reason, un-retire, copy, move, history, and the near-duplicate warning on add.
 
 ## `tests.test_summaries`
 
