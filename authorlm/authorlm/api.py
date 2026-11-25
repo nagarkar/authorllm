@@ -3287,6 +3287,27 @@ def _find_style_law(db: Database, manuscript: dict, prefix: str,
     return dict(rows[0])
 
 
+def _resolve_overrides(db: Database, manuscript: dict, overrides: str) -> str:
+    """`overrides` names one id (prefix) or a comma list; `default:<key>`
+    names a workspace default (styles.default_laws), checked by key.
+    Returns the full ids, comma-joined."""
+    from . import styles as st
+
+    default_ids = {d["id"] for d in st.default_laws()}
+    ids = []
+    for part in st.overridden_ids(overrides):
+        if part.startswith(st.DEFAULT_PREFIX):
+            if part not in default_ids:
+                raise LookupError(
+                    f"no style default '{part}' (known: "
+                    f"{', '.join(sorted(default_ids)) or 'none'})")
+            ids.append(part)
+        else:
+            ids.append(_find_style_law(
+                db, manuscript, part, "status = 'active'", "active")["id"])
+    return ",".join(ids)
+
+
 def add_style_law(db: Database, manuscript: dict, aspect: str, statement: str,
                       guide_name: str | None = None, file: str | None = None,
                       notes: str | None = None,
@@ -3301,23 +3322,7 @@ def add_style_law(db: Database, manuscript: dict, aspect: str, statement: str,
             raise LookupError(f"no style guide named '{guide_name}'")
     if file is not None:
         _validate_file(db, manuscript, file)
-    # `overrides` names one id (prefix) or a comma list; `default:<key>`
-    # names a workspace default (styles.default_laws), checked by key.
-    resolved = None
-    if overrides:
-        default_ids = {d["id"] for d in st.default_laws()}
-        ids = []
-        for part in st.overridden_ids(overrides):
-            if part.startswith(st.DEFAULT_PREFIX):
-                if part not in default_ids:
-                    raise LookupError(
-                        f"no style default '{part}' (known: "
-                        f"{', '.join(sorted(default_ids)) or 'none'})")
-                ids.append(part)
-            else:
-                ids.append(_find_style_law(
-                    db, manuscript, part, "status = 'active'", "active")["id"])
-        resolved = ",".join(ids)
+    resolved = _resolve_overrides(db, manuscript, overrides) if overrides else None
     with db.transaction():
         row = dict(st.add_element(
             db, manuscript["id"], aspect, statement,
@@ -3341,10 +3346,13 @@ def _style_level(db: Database, row: dict) -> str:
 
 def edit_style_law(db: Database, manuscript: dict, prefix: str,
                    statement: str | None = None, notes: str | None = None,
-                   aspect: str | None = None, actor: str = "cli") -> dict:
+                   aspect: str | None = None, actor: str = "cli",
+                   overrides: str | None = None) -> dict:
     """Change a law's words in place (`styles.edit_element`): same id,
-    version + 1, the earlier wording in its history. A workspace default
-    lives in library/style-defaults.toml and is edited there."""
+    version + 1, the earlier wording in its history. `overrides` (id
+    prefixes or default:<key>, comma list; "" clears) sets which inherited
+    laws it displaces. A workspace default lives in
+    library/style-defaults.toml and is edited there."""
     from . import styles as st
 
     if prefix.startswith(st.DEFAULT_PREFIX):
@@ -3353,8 +3361,27 @@ def edit_style_law(db: Database, manuscript: dict, prefix: str,
             "authorlm/library/style-defaults.toml, or add a law that "
             f"overrides it (--overrides {prefix})")
     row = _find_style_law(db, manuscript, prefix, "status != 'rejected'", "known")
+    if overrides is not None and overrides.strip():
+        overrides = _resolve_overrides(db, manuscript, overrides)
+        if row["id"] in st.overridden_ids(overrides):
+            raise ValueError("a law does not displace itself")
     return st.edit_element(db, row, actor=actor, statement=statement,
-                           notes=notes, aspect=aspect)
+                           notes=notes, aspect=aspect, overrides=overrides)
+
+
+def move_style_guide(db: Database, manuscript: dict, name: str,
+                     parent_name: str, actor: str = "cli") -> dict:
+    """Give a guide a new parent (`styles.move_guide`): its laws and
+    files go with it; only its files' chains change."""
+    from . import styles as st
+
+    guide = st.get_guide(db, manuscript["id"], name)
+    if not guide:
+        raise LookupError(f"no style guide named '{name}'")
+    parent = st.get_guide(db, manuscript["id"], parent_name)
+    if not parent:
+        raise LookupError(f"no style guide named '{parent_name}'")
+    return st.move_guide(db, manuscript["id"], dict(guide), dict(parent), actor=actor)
 
 
 def retire_style_law(db: Database, manuscript: dict, prefix: str,

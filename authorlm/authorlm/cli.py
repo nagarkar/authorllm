@@ -9662,9 +9662,19 @@ def cmd_style(args):
             # the version goes up, the earlier wording stays in history.
             row = api.edit_style_law(db, manuscript, args.params[0],
                                      statement=args.statement,
-                                     notes=args.notes, aspect=args.aspect)
+                                     notes=args.notes, aspect=args.aspect,
+                                     overrides=args.overrides)
             print(f"Style element [{row['id'][:8]}] v{row['version']} "
                   f"({row['aspect']}): {row['statement']}")
+            if row.get("overrides"):
+                print(ui.dim(f"      displaces: {row['overrides']}"))
+        elif args.action == "guide-move":
+            # A guide takes a new parent; its laws and files go with it.
+            if not args.parent or len(args.params) != 1:
+                sys.exit("usage: style guide-move <guide> --parent NAME")
+            out = api.move_style_guide(db, manuscript, args.params[0], args.parent)
+            print(ui.green("moved") + f" guide '{out['guide']}': under "
+                  f"'{out['from']}' → under '{out['to']}'")
         elif args.action == "history":
             for h in api.style_history(db, manuscript, args.params[0]):
                 print(f"  {h['at'][:16].replace('T', ' ')} {h['event']} by "
@@ -11826,12 +11836,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("style", help="style guides: ratified prose law per file")
     p.add_argument("action",
                    choices=["guides", "guide", "attach", "add", "show", "retire",
-                            "unretire", "edit", "history", "move", "copy"])
+                            "unretire", "edit", "history", "move", "copy",
+                            "guide-move"])
     p.add_argument("params", nargs="*",
                    help="guide: <name>; attach: <file> <guide>; "
                         "add: <aspect> \"statement\"; show: <file>; "
-                        "retire/unretire/edit/history/move/copy: <id>")
-    p.add_argument("--parent", help="guide: parent guide name")
+                        "retire/unretire/edit/history/move/copy: <id>; "
+                        "guide-move: <guide>")
+    p.add_argument("--parent", help="guide / guide-move: parent guide name")
     p.add_argument("--guide", help="add/move/copy: owning guide name")
     p.add_argument("--file", help="add/move/copy: file for a file-local element")
     p.add_argument("--notes", help="add/edit: free-text notes (inspect/avoid "
@@ -11843,9 +11855,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--replaced-by", dest="replaced_by",
                    help="retire: id (prefix) of the law that replaces this one")
     p.add_argument("--overrides",
-                   help="add: id (prefix) of the inherited element this displaces, "
+                   help="add/edit: id (prefix) of the inherited element this displaces, "
                         "or default:<key> for a workspace default; a comma list "
-                        "displaces several")
+                        "displaces several; edit --overrides '' clears it")
     p.set_defaults(func=cmd_style)
 
     p = sub.add_parser("status", help="show current state")
