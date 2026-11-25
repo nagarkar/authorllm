@@ -1152,7 +1152,7 @@ The lens library: a lens promoted from one book is seen, listed and run on anoth
 
 `authorlm/tests/test_lift_math.py`
 
-`normalize._lift_math` / `_lift_marked_math` keep TeX opaque while prose rules run. push_doc writes normalize back to disk, so a silent regression guts `\\` row breaks and `\\{` braces permanently.
+`normalize._lift_math` / `_lift_marked_math` keep TeX opaque while prose rules run. push_doc writes normalize back to disk, so a silent regression guts `\` row breaks and `\{` braces permanently.
 
 ## `tests.test_lint_checks`
 
