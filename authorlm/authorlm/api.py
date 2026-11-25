@@ -3290,7 +3290,8 @@ def _find_style_law(db: Database, manuscript: dict, prefix: str,
 def add_style_law(db: Database, manuscript: dict, aspect: str, statement: str,
                       guide_name: str | None = None, file: str | None = None,
                       notes: str | None = None,
-                      overrides: str | None = None) -> dict:
+                      overrides: str | None = None, actor: str = "cli",
+                      copy_of: str | None = None) -> dict:
     from . import styles as st
 
     guide = None
@@ -3317,41 +3318,170 @@ def add_style_law(db: Database, manuscript: dict, aspect: str, statement: str,
                 ids.append(_find_style_law(
                     db, manuscript, part, "status = 'active'", "active")["id"])
         resolved = ",".join(ids)
-    return dict(st.add_element(
-        db, manuscript["id"], aspect, statement,
-        guide=dict(guide) if guide else None, file=file, notes=notes,
-        overrides=resolved,
-    ))
+    with db.transaction():
+        row = dict(st.add_element(
+            db, manuscript["id"], aspect, statement,
+            guide=dict(guide) if guide else None, file=file, notes=notes,
+            overrides=resolved,
+        ))
+        st.record_event(db, row, "add", actor,
+                        {"copy_of": copy_of} if copy_of else {})
+    return row
 
 
-def retire_style_law(db: Database, manuscript: dict, prefix: str) -> dict:
+def _style_level(db: Database, row: dict) -> str:
+    """Where a law sits, as the page and `style show` name it."""
+    if row.get("default"):
+        return "workspace default"
+    if row.get("file"):
+        return f"{row['file']} (file-local)"
+    guide = db.one("SELECT name FROM style_guides WHERE id = ?", (row["guide_id"],))
+    return guide["name"] if guide else "?"
+
+
+def edit_style_law(db: Database, manuscript: dict, prefix: str,
+                   statement: str | None = None, notes: str | None = None,
+                   aspect: str | None = None, actor: str = "cli") -> dict:
+    """Change a law's words in place (`styles.edit_element`): same id,
+    version + 1, the earlier wording in its history. A workspace default
+    lives in library/style-defaults.toml and is edited there."""
+    from . import styles as st
+
+    if prefix.startswith(st.DEFAULT_PREFIX):
+        raise LookupError(
+            f"{prefix} is a workspace default: edit it in "
+            "authorlm/library/style-defaults.toml, or add a law that "
+            f"overrides it (--overrides {prefix})")
+    row = _find_style_law(db, manuscript, prefix, "status != 'rejected'", "known")
+    return st.edit_element(db, row, actor=actor, statement=statement,
+                           notes=notes, aspect=aspect)
+
+
+def retire_style_law(db: Database, manuscript: dict, prefix: str,
+                     reason: str | None = None, actor: str = "cli",
+                     replaced_by: str | None = None) -> dict:
     from . import styles as st
 
     row = _find_style_law(db, manuscript, prefix, "status = 'active'", "active")
-    st.retire_element(db, row)
+    if replaced_by:
+        replaced_by = _find_style_law(db, manuscript, replaced_by,
+                                      "status = 'active'", "active")["id"]
+    st.retire_element(db, row, reason=reason, actor=actor, replaced_by=replaced_by)
     return {"id": row["id"], "statement": row["statement"], "status": "retired"}
 
 
-def move_style_law(db: Database, manuscript: dict, prefix: str,
-                       guide_name: str | None = None,
-                       file: str | None = None) -> dict:
-    """Re-scope a style element to another guide or to a file (exactly
-    one). The element keeps its id, status, provenance, and history."""
+def unretire_style_law(db: Database, manuscript: dict, prefix: str,
+                       actor: str = "cli", reason: str | None = None) -> dict:
+    """Put a retired law back in force, same id; its history keeps both."""
+    from . import styles as st
+
+    row = _find_style_law(db, manuscript, prefix, "status = 'retired'", "retired")
+    st.unretire_element(db, row, actor=actor, reason=reason)
+    return {"id": row["id"], "statement": row["statement"], "status": "active"}
+
+
+def style_history(db: Database, manuscript: dict, prefix: str) -> list[dict]:
+    from . import styles as st
+
+    row = _find_style_law(db, manuscript, prefix, "1 = 1", "known")
+    return st.law_history(db, manuscript["id"], row["id"])
+
+
+def _style_target(db: Database, manuscript: dict, guide_name: str | None,
+                  file: str | None) -> tuple[dict | None, str | None]:
     if bool(guide_name) == bool(file):
-        raise ValueError("move needs exactly one of guide_name / file")
-    row = _find_style_law(db, manuscript, prefix, "status != 'retired'", "live")
+        raise ValueError("name exactly one of a guide / a file")
     if guide_name:
         guide = db.one("SELECT * FROM style_guides WHERE manuscript_id = ? "
                        "AND name = ?", (manuscript["id"], guide_name))
         if not guide:
             raise LookupError(f"no style guide named '{guide_name}'")
+        return dict(guide), None
+    _validate_file(db, manuscript, file)
+    return None, file
+
+
+def move_style_law(db: Database, manuscript: dict, prefix: str,
+                       guide_name: str | None = None,
+                       file: str | None = None, actor: str = "cli") -> dict:
+    """Re-scope a style element to another guide or to a file (exactly
+    one). The element keeps its id, status, provenance, and history."""
+    from . import styles as st
+
+    if bool(guide_name) == bool(file):
+        raise ValueError("move needs exactly one of guide_name / file")
+    row = _find_style_law(db, manuscript, prefix, "status != 'retired'", "live")
+    guide, file = _style_target(db, manuscript, guide_name, file)
+    was = _style_level(db, row)
+    with db.transaction():
         db.update("style_laws", row["id"],
-                  {"guide_id": guide["id"], "file": None})
-        return {"id": row["id"], "statement": row["statement"],
-                "guide": guide["name"], "file": None}
-    db.update("style_laws", row["id"], {"guide_id": None, "file": file})
-    return {"id": row["id"], "statement": row["statement"], "guide": None,
-            "file": file}
+                  {"guide_id": guide["id"] if guide else None, "file": file})
+        st.record_event(db, {**row, "file": file}, "move", actor, {
+            "from": was, "to": guide["name"] if guide else f"{file} (file-local)"})
+    return {"id": row["id"], "statement": row["statement"],
+            "guide": guide["name"] if guide else None, "file": file}
+
+
+def copy_style_law(db: Database, manuscript: dict, prefix: str,
+                   guide_name: str | None = None, file: str | None = None,
+                   actor: str = "cli") -> dict:
+    """A new law at another level with the same aspect, statement and
+    note (not its `overrides`: what it displaces depends on where it
+    sits). Both laws' histories say so."""
+    from . import styles as st
+
+    row = _find_style_law(db, manuscript, prefix, "status = 'active'", "active")
+    guide, file = _style_target(db, manuscript, guide_name, file)
+    with db.transaction():
+        new = add_style_law(db, manuscript, row["aspect"], row["statement"],
+                            guide_name=guide["name"] if guide else None,
+                            file=file, notes=row["notes"], actor=actor,
+                            copy_of=row["id"])
+        st.record_event(db, row, "copy", actor, {
+            "copy": new["id"],
+            "to": guide["name"] if guide else f"{file} (file-local)"})
+    return {**new, "guide": guide["name"] if guide else None}
+
+
+SIMILAR_AT = 0.5   # styles.similarity at or above which add warns
+
+
+def similar_style_laws(db: Database, manuscript: dict, statement: str,
+                       guide_name: str | None = None, file: str | None = None,
+                       exclude: str | None = None) -> list[dict]:
+    """Active laws at this level or an ancestor (the defaults included)
+    that read like `statement`, most alike first. A warning, never a
+    block: add goes ahead."""
+    from . import styles as st
+
+    mid = manuscript["id"]
+    if file:
+        laws = [e for e in st.effective_layers(db, mid, file)]
+    else:
+        guide = st.get_guide(db, mid, guide_name or "")
+        if not guide:
+            raise LookupError(f"no style guide named '{guide_name}'")
+        chain, g, seen = [], dict(guide), set()
+        while g and g["id"] not in seen:
+            chain.append(g["id"])
+            seen.add(g["id"])
+            g = (db.one("SELECT * FROM style_guides WHERE id = ?", (g["parent"],))
+                 if g["parent"] else None)
+        laws = [dict(r) for gid in chain for r in db.all(
+            "SELECT * FROM style_laws WHERE manuscript_id = ? AND guide_id = ? "
+            "AND status = 'active' ORDER BY created_at", (mid, gid))]
+        laws += st.default_laws(mid)
+    out = []
+    for law in laws:
+        if law["id"] == exclude:
+            continue
+        score = st.similarity(statement, law["statement"])
+        if score >= SIMILAR_AT:
+            out.append({"id": law["id"], "aspect": law["aspect"],
+                        "statement": law["statement"],
+                        "level": _style_level(db, law),
+                        "score": round(score, 2)})
+    return sorted(out, key=lambda x: -x["score"])
 
 
 def merge_concepts(db: Database, manuscript: dict,

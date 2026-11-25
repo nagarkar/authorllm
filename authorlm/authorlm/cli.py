@@ -9645,9 +9645,45 @@ def cmd_style(args):
                       f"{element['statement']}")
                 if element["notes"]:
                     print(ui.dim(f"      {element['notes']}"))
+                line = _style_provenance(db, manuscript, element)
+                if line:
+                    print(ui.dim(f"      {line}"))
         elif args.action == "retire":
-            result = api.retire_style_law(db, manuscript, args.params[0])
+            result = api.retire_style_law(db, manuscript, args.params[0],
+                                          reason=args.why,
+                                          replaced_by=args.replaced_by)
             print(f"Retired style element: {result['statement']}")
+        elif args.action == "unretire":
+            result = api.unretire_style_law(db, manuscript, args.params[0],
+                                            reason=args.why)
+            print(f"Back in force [{result['id'][:8]}]: {result['statement']}")
+        elif args.action == "edit":
+            # In place: the id stays (overrides and statements cite it),
+            # the version goes up, the earlier wording stays in history.
+            row = api.edit_style_law(db, manuscript, args.params[0],
+                                     statement=args.statement,
+                                     notes=args.notes, aspect=args.aspect)
+            print(f"Style element [{row['id'][:8]}] v{row['version']} "
+                  f"({row['aspect']}): {row['statement']}")
+        elif args.action == "history":
+            for h in api.style_history(db, manuscript, args.params[0]):
+                print(f"  {h['at'][:16].replace('T', ' ')} {h['event']} by "
+                      f"{h['by']} via {h['actor'] or '?'}")
+                d = h["detail"]
+                for key, before in (d.get("before") or {}).items():
+                    print(ui.dim(f"      {key} was: {before}"))
+                    print(ui.dim(f"      {key} now: {d['after'].get(key)}"))
+                for key in ("reason", "from", "to", "copy", "copy_of",
+                            "replaced_by"):
+                    if d.get(key):
+                        print(ui.dim(f"      {key}: {d[key]}"))
+        elif args.action == "copy":
+            if not (args.guide or args.file):
+                sys.exit("usage: style copy <id> --guide NAME | --file FILE")
+            row = api.copy_style_law(db, manuscript, args.params[0],
+                                     guide_name=args.guide, file=args.file)
+            print(ui.green("copied") + f" → [{row['id'][:8]}] "
+                  + (f"guide '{args.guide}'" if args.guide else f"file {args.file}"))
         elif args.action == "move":
             # Re-scope an element to another guide (or a file). Elements
             # imported at house scope routinely belong to one part.
@@ -9661,6 +9697,26 @@ def cmd_style(args):
                      else f"file {result['file']}"))
     except (LookupError, ValueError) as err:
         sys.exit(str(err))
+
+
+def _style_provenance(db, manuscript: dict, element: dict) -> str:
+    """`style show`'s line under a law changed since it was added: its
+    version, the last change (when, by whom, by which road) and, for an
+    edit, the earlier statement."""
+    if element.get("default"):
+        return ""
+    from . import styles as st
+    hist = st.law_history(db, manuscript["id"], element["id"])
+    changes = [h for h in hist if h["event"] != "add"]
+    if not changes:
+        return ""
+    last = changes[-1]
+    words = {"edit": "edited", "move": "moved", "unretire": "un-retired",
+             "copy": "copied", "retire": "retired"}.get(last["event"], last["event"])
+    line = (f"v{element['version']} · {words} {last['at'][:10]} by "
+            f"{last['by']} via {last['actor'] or '?'}")
+    was = (last["detail"].get("before") or {}).get("statement")
+    return line + (f" · was: {was}" if was else "")
 
 
 def cmd_status(args):
@@ -11770,14 +11826,22 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("style", help="style guides: ratified prose law per file")
     p.add_argument("action",
                    choices=["guides", "guide", "attach", "add", "show", "retire",
-                            "move"])
+                            "unretire", "edit", "history", "move", "copy"])
     p.add_argument("params", nargs="*",
                    help="guide: <name>; attach: <file> <guide>; "
-                        "add: <aspect> \"statement\"; show: <file>; retire: <id>")
+                        "add: <aspect> \"statement\"; show: <file>; "
+                        "retire/unretire/edit/history/move/copy: <id>")
     p.add_argument("--parent", help="guide: parent guide name")
-    p.add_argument("--guide", help="add: owning guide name")
-    p.add_argument("--file", help="add: file for a file-local element")
-    p.add_argument("--notes", help="add: free-text notes (inspect/avoid hints)")
+    p.add_argument("--guide", help="add/move/copy: owning guide name")
+    p.add_argument("--file", help="add/move/copy: file for a file-local element")
+    p.add_argument("--notes", help="add/edit: free-text notes (inspect/avoid "
+                                   "hints); edit --notes '' clears them")
+    p.add_argument("--statement", help="edit: the new statement (same id, "
+                                       "version + 1, old wording kept in history)")
+    p.add_argument("--aspect", help="edit: the new aspect")
+    p.add_argument("--why", help="retire/unretire: the reason, kept in history")
+    p.add_argument("--replaced-by", dest="replaced_by",
+                   help="retire: id (prefix) of the law that replaces this one")
     p.add_argument("--overrides",
                    help="add: id (prefix) of the inherited element this displaces, "
                         "or default:<key> for a workspace default; a comma list "
@@ -11887,7 +11951,7 @@ def _dispatch(argv: list[str] | None = None) -> None:
             sys.exit("usage: concept merge <canonical> <duplicate>")
     if args.command == "style":
         required = {"guide": 1, "attach": 2, "add": 2, "show": 1, "retire": 1,
-                    "move": 1}
+                    "unretire": 1, "edit": 1, "history": 1, "move": 1, "copy": 1}
         if len(args.params) < required.get(args.action, 0):
             sys.exit(f"usage: style {args.action} — see 'style --help'")
         if args.action == "add" and bool(args.guide) == bool(args.file):
