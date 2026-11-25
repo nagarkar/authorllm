@@ -248,6 +248,12 @@ The inline directive tags as text: `[Footnote: …]`, `[Explain: …]`, `[Sugges
 
 Inline directives: `[Footnote: …]`, `[Explain: …]` and `[Suggestion: …]` — shorthand instructions written in the prose, drafted in CHAT, landed by the CLI (designs: docs/footnote-directive-design.md, docs/explain-directive-design.md, docs/suggestion-directive-design.md).
 
+## `authorlm.doc_access`
+
+`authorlm/authorlm/doc_access.py`
+
+Who can open a Drive file authorlm made, and sharing it with one reader.
+
 ## `authorlm.docs`
 
 `authorlm/authorlm/docs.py`
@@ -861,6 +867,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 `authorlm/tests/test_devedit.py`
 
 The developmental edit's run folder: coverage from the TOC, step staleness, letter decisions, and verdicts that apply only to unchanged text.
+
+## `tests.test_doc_access`
+
+`authorlm/tests/test_doc_access.py`
+
+`doc access` and `doc share` (authorlm.doc_access): a review copy's sharing read back, and one reader given comment access with everything else closed.
 
 ## `tests.test_doc_add_toc`
 

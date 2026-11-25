@@ -89,6 +89,12 @@ def main() -> int:
             "--watermark", "Review copy for A & B",
             "--format", "font=Times New Roman; size=12; line-spacing=2"])
         check("export with both flags succeeds", code == 0, text)
+        marked = ms / "_exports" / "Book - Review copy for A & B.docx"
+        check("a reader's copy is its own file", marked.is_file(), text)
+        with zipfile.ZipFile(out) as z:
+            check("the clean copy keeps no watermark",
+                  docx_style.HEADER_PART not in set(z.namelist()))
+        out = marked
         with zipfile.ZipFile(out) as z:
             names = set(z.namelist())
             styles = z.read("word/styles.xml").decode()
