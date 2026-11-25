@@ -16,7 +16,8 @@ Severity is the only policy this module carries:
 - `error`   — a law the text breaks mechanically; `write propose` refuses
               unless overridden with a reason (the override is evidence).
 - `warning` — a pattern worth a look that legitimate prose also produces
-              ("X, not Y" is ordinary English; the author writes it).
+              ("X, not Y" is ordinary English; the author writes it; an
+              em-dash is welcome when its aside is expendable).
 - `info`    — a measurement (reading grade) the critic can weigh.
 
 No database access: callers pass the corpus and the concept list in.
@@ -39,6 +40,7 @@ class Finding:
     quote: str              # the sentence or phrase the finding names
     message: str
     ref: str = ""           # what it points at: a file ¶n, a concept, a law
+    line: int = 0           # 1-based line in the file; proof.py sets it
 
     def key(self) -> tuple[str, str]:
         """Identity for delta comparison: the same fault on the same
@@ -215,23 +217,50 @@ def check_term_in_definition(units: list[str]) -> list[Finding]:
     return out
 
 
+# The em-dash law in the owner's words (style law se-29c4a9a82d22).
+EM_DASH_LAW = ("Em dashes are welcome as long as they are used to explain "
+               "something inline and the explanation is expendable. Never "
+               "stack multiple em-dash pairs in one sentence.")
+
+
+def _dash_asides(sentence: str) -> list[str]:
+    """The words the sentence's dashes set off: between each pair, and
+    after a last unpaired dash to the sentence's end."""
+    parts = re.split(f"{_DASH}| -- ", sentence)
+    asides = [parts[k] for k in range(1, len(parts) - 1, 2)]
+    if len(parts) % 2 == 0:
+        asides.append(parts[-1])
+    return [a.strip(" .,;:!?\"'“”‘’)") for a in asides if a.strip()]
+
+
 def check_em_dashes(units: list[str]) -> list[Finding]:
+    """Every sentence with an em-dash. One dash or one pair is a
+    warning: the law welcomes a dash whose inline explanation is
+    expendable, and whether it is expendable is the reader's judgment
+    (the chat session's, which stages a form where it is not), so the
+    finding names the words the dash sets off (`ref`) and never stops
+    anything. Three or more dashes in one sentence is more than one
+    pair, a stack, and stays an error. Both quote the law."""
     out = []
     for i, unit in enumerate(units, 1):
         if is_heading(unit):
             continue
         for s in sentences(unit):
             n = s.count(_DASH) + s.count(" -- ")
+            asides = _dash_asides(s) if n else []
             if n >= 3:
                 out.append(Finding(
                     "em-dash-stack", "error", i, s,
-                    f"{n} em-dashes in one sentence (law: never stack "
-                    f"multiple em-dash pairs; a parenthetical usually "
-                    f"becomes its own sentence)"))
+                    f"{n} em-dashes in one sentence, more than one pair "
+                    f"(law: {EM_DASH_LAW})", ref=" | ".join(asides)))
             elif n >= 1:
                 out.append(Finding(
-                    "em-dash", "info", i, s,
-                    "em-dash present (law: use sparingly)"))
+                    "em-dash", "warning", i, s,
+                    "em-dash sets off "
+                    + " and ".join(f"«{a}»" for a in asides)
+                    + ": leave it if that explains something inline and "
+                      f"could be cut; rewrite it if not (law: {EM_DASH_LAW})",
+                    ref=" | ".join(asides)))
     return out
 
 

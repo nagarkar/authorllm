@@ -2549,6 +2549,14 @@ def _book_status_lines(board: dict) -> list[str]:
     return lines
 
 
+def _rule_list(values: list[str] | None) -> list[str] | None:
+    """`--only a,b --only c` as [a, b, c]; None when the flag is absent."""
+    if not values:
+        return None
+    return [name.strip() for value in values for name in value.split(",")
+            if name.strip()]
+
+
 def cmd_book(args):
     """`authorlm book …`: a book's workflow of roles (book.py). AuthorLM
     says what is next, hands out the pack and records the result; the
@@ -2677,19 +2685,66 @@ def cmd_book(args):
         elif args.action == "lint":
             from . import changes
 
-            board = changes.lint_chapter(db, manuscript, args.file)
+            only, skip = _rule_list(args.only), _rule_list(args.skip)
+            if args.all == bool(args.file):
+                raise ValueError(
+                    "give one chapter file, or --all for the whole book: "
+                    f"authorlm book lint --all -m {name}")
+            if args.all:
+                board = changes.lint_book(db, manuscript, only=only,
+                                          skip=skip)
+                lines = []
+                for finding in board["findings"]:
+                    place = finding["file"] + (
+                        f":{finding['line']}" if finding.get("line") else "")
+                    lines += [f"{place}  [{finding['severity']}] "
+                              f"{finding['code']}: {finding['message']}",
+                              f"  «{finding['quote']}»"]
+                if lines:
+                    lines.append("")
+                if board.get("variant_words"):
+                    words = board["variant_words"]
+                    lines.append(
+                        f"spelling: the manuscript is set to "
+                        f"{'British' if board['variant'] == 'uk' else 'American'}"
+                        f"; it holds {words['us']} American-only and "
+                        f"{words['uk']} British-only spellings")
+                lines.append(f"{board['files']} files: " + (", ".join(
+                    f"{n} {rule}" for rule, n in board["rules"].items())
+                    or "clean"))
+            else:
+                board = changes.lint_chapter(db, manuscript, args.file,
+                                             only=only, skip=skip)
+                lines = []
+                for finding in board["findings"]:
+                    lines += [f"[{finding['severity']}] {finding['code']}: "
+                              f"{finding['message']}",
+                              ("  the paragraph that opens «"
+                               if finding["code"] == "reading-grade"
+                               else f"  line {finding['line']} «"
+                               if finding.get("line") else "  «")
+                              + f"{finding['quote']}»", ""]
+                counts = board["counts"]
+                lines.append(f"{board['file']}: " + (", ".join(
+                    f"{counts[name]} {name}" for name in ("error", "warning",
+                                                          "info")
+                    if counts.get(name)) or "clean"))
+                if board["rules"]:
+                    lines.append("by rule: " + ", ".join(
+                        f"{n} {rule}" for rule, n in board["rules"].items()))
+        elif args.action == "lint-accept":
+            from . import changes
+
+            board = changes.lint_accept(db, manuscript, args.words,
+                                        dry_run=args.dry_run)
+            verb = "Would add" if board["dry_run"] else "Added"
             lines = []
-            for finding in board["findings"]:
-                lines += [f"[{finding['severity']}] {finding['code']}: "
-                          f"{finding['message']}",
-                          ("  the paragraph that opens «"
-                           if finding["code"] == "reading-grade" else "  «")
-                          + f"{finding['quote']}»", ""]
-            counts = board["counts"]
-            lines.append(f"{board['file']}: " + (", ".join(
-                f"{counts[name]} {name}" for name in ("error", "warning",
-                                                      "info")
-                if counts.get(name)) or "clean"))
+            if board["added"]:
+                lines.append(f"{verb} to {board['path']}: "
+                             + ", ".join(board["added"]))
+            if board["already"]:
+                lines.append("Already accepted: "
+                             + ", ".join(board["already"]))
         elif args.action == "history":
             board = book.history(db, manuscript, scope=args.scope,
                                  step=args.step)
@@ -2979,8 +3034,28 @@ def _add_book_parser(sub, common) -> None:
     q = leaf("lint", "the deterministic lint over one whole chapter: each "
                      "finding with its law and the words quoted; no model "
                      "call, nothing written",
-             "authorlm book lint one.md")
-    q.add_argument("file", help="the chapter file")
+             "authorlm book lint one.md --only spelling,footnote")
+    q.add_argument("file", nargs="?", help="the chapter file")
+    q.add_argument("--all", action="store_true",
+                   help="every file of the book in reading order; runs "
+                        "the seven proof rules (spelling, doubled-word, "
+                        "spelling-variant, quote-style, footnote, "
+                        "link-tracking, banned-word) unless --only names "
+                        "others")
+    q.add_argument("--only", action="append", metavar="RULES",
+                   help="report only these rules (comma-separated, or "
+                        "repeat the flag); an unknown name lists them all")
+    q.add_argument("--skip", action="append", metavar="RULES",
+                   help="leave these rules out")
+    q = leaf("lint-accept", "accept words for this manuscript's spell "
+                            "check: appends them to "
+                            "_lint/accepted-words.txt in the manuscript "
+                            "folder; nothing else is written",
+             "authorlm book lint-accept Zorblatt upaya -m SMSTTD")
+    q.add_argument("words", nargs="+", metavar="word",
+                   help="a word as the book spells it")
+    q.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="say which words would be added and write nothing")
     q = leaf("diagram", "the workflow as a Mermaid flowchart drawn from "
                         "the definition; with --scope, each step's status "
                         "there",
