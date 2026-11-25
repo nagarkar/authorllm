@@ -197,6 +197,7 @@ outstanding questions.
 | `setup [--workspace DIR] [--no-questions]` | Point this checkout at a workspace (recorded as `AUTHORLM_WORKSPACE` in `.env`) and create its database; asks where when `--workspace` is omitted |
 | `init --name N --path DIR [identity options]` | Register a manuscript directory (`.md`/`.txt`) with optional `--author`, `--copyright-owner`, `--paperback-isbn`, and `--hardcover-isbn`. Never mines the Concept Graph; run `extract --native` when you want a fresh one. `--extraction off` registers a machine-kept manuscript with extraction switched off for good (`manuscript set --extraction on` later) |
 | `manuscript show/set` | Inspect or update canonical publication identity (`--author`, `--copyright-owner`, ISBN-13 fields, `--extraction on\|off`); the CLI and MCP tools share this record |
+| `manuscript list [--file PATH]` | Every registered manuscript with its directory (no `-m` needed); with `--file`, the one that holds that path or bare filename |
 | `export pdf [--print-ready]` | Export a PDF; confidential review notice, footer, and watermark are on by default, while `--print-ready` omits all three |
 | `export <fmt> … --upload [--as-doc] [--drive-id ID]` | Also put the written file on Google Drive (the manuscript's folder); re-exporting replaces the same Drive file in place. `--as-doc` converts a DOCX to a Google Doc; `--drive-id` adopts a file already on Drive |
 | `export teleprompter --file F` | The passages the author reads on camera (clips marked `voice: author`) as a large-type `_exports/<stem>.teleprompter.docx` and `.txt`, labelled Intro / Outro |
@@ -227,6 +228,7 @@ outstanding questions.
 | `concept reject-edge <edge>` | Reject an inferred relationship (kept for history) |
 | `concept retire <name>` | Remove a concept (and its edges) from view and reasoning; kept for history, revived by `concept add` |
 | `concept list --all` | Include retired/rejected items in the listing |
+| `concept list --file FILE` / `--query TEXT` | The scoped slice: the concepts realized in one essay (introduced there, or named in its text), or those whose name, notes or aliases contain the text; notes as previews, relationships among the selected concepts only |
 | `collect` | Snapshot revision → detect transitions → build episode → update graph → prerequisite-gap delta. The watcher path stages large deletions (>30% of a file) instead of committing them; a manual `collect` always proceeds |
 | `diff [vN [vM]] [file]` | Colored unified diff between collected versions (default: the last two) |
 | `plan` | Writing plan: placement for every unrealized concept (near realized graph neighbors, in TOC reading order), prerequisites first, with intents and precedents |
