@@ -1041,8 +1041,13 @@ this book: …").
   is applied directly even after the first draft, then pushed, and listed
   in the reply; it never needs a form") to every lint fix he accepts on
   that page, spelling corrections included: the page writes it into the
-  file and pushes the tab (pull first when the Doc moved; nothing at all
-  for a tab whose guard stops), never a form. It does NOT extend to a
+  file at once and the tab follows in the background (one tab at a time,
+  a tab's fixes within two seconds in one push; when the Doc moved, the
+  file is put back, pulled, fixed and pushed; a tab whose guard stops
+  shows "not applied, the file is as it was: <why>" with Try again, and
+  one Google cannot be reached for shows "not in the Doc: <why>" with the
+  change kept in the file and Push again; the page's tabs and log show
+  each state, `lint.status`), never a form. It does NOT extend to a
   session: a word change a session finds is still a form. Where it lives:
   https://<tailnet name>/#<manuscript>/runs:lint (`lint_page.py`). Bulk:
   quote marks to the style law's style, tracking tags out of links, a

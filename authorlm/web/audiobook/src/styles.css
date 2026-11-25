@@ -330,6 +330,8 @@ header .top-nav .chip{padding:4px 8px;font-size:12.5px;min-height:30px}
 .lint-diff del{background:var(--bad-soft);color:var(--bad);text-decoration:line-through;padding:0 2px;border-radius:3px}
 .lint-diff ins{background:var(--good-soft);color:var(--good);text-decoration:none;font-weight:700;padding:0 2px;border-radius:3px}
 .lint-preview{margin-top:10px;padding:10px 12px;border-radius:12px;border:2px solid var(--yellow);background:var(--panel)}
+.lint-outcome,.lint-sync{margin:6px 0}
+.lint-outcome .devedit-actions,.lint-sync .pill{display:inline-flex;margin-left:8px;vertical-align:middle}
 .lint-batch{border-top:1px solid var(--line);padding:8px 0}
 .lint-batch summary{cursor:pointer}
 .lint .bar.confirm.runs-confirm{flex-wrap:wrap}

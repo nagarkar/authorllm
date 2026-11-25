@@ -35,7 +35,9 @@ Decisions:
   the owner (2026-11-25): "in the UI, we don't have the chat session
   connected, so those warnings will be ignored and that's ok." (owner)
 - One tab, one road: every accepted fix for a tab is applied in one
-  pull, edit, guarded push. A tab linked to the Doc is read three ways
+  pull, edit, guarded push. On the page the file is written at the click
+  and that road runs in the background (see "the Doc, in the
+  background" below). A tab linked to the Doc is read three ways
   first; changed on both sides, or holding an older text of the file, or
   a push the guard stops, and NOTHING is applied to that tab (the file is
   put back as it was). Enforced by:
@@ -72,6 +74,8 @@ import io
 import json
 import os
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
@@ -891,10 +895,7 @@ def _restage(db, manuscript, rel, revisions, service, docs_service,
     return {"written": written, "warnings": warnings}
 
 
-def apply(db: Database, manuscript: dict, fixes: list[dict], service,
-          docs_service, config: dict | None = None,
-          label: str = "") -> dict:
-    """Every fix, grouped by tab, one road per tab (`apply_tab`)."""
+def _group(manuscript: dict, fixes: list[dict]) -> dict[str, list[dict]]:
     by_file: dict[str, list[dict]] = {}
     for k, fix in enumerate(fixes or []):
         if fix.get("kind") not in FIX_KINDS:
@@ -904,6 +905,16 @@ def apply(db: Database, manuscript: dict, fixes: list[dict], service,
             fix.get("id") or k)})
     if not by_file:
         raise ValueError("no fix to apply")
+    return by_file
+
+
+def apply(db: Database, manuscript: dict, fixes: list[dict], service,
+          docs_service, config: dict | None = None,
+          label: str = "") -> dict:
+    """Every fix, grouped by tab, one road per tab (`apply_tab`), all of
+    it before returning: the CLI's and the tests' synchronous road. The
+    page uses `accept`, which returns once the file is written."""
+    by_file = _group(manuscript, fixes)
     batch = ko_fields("lb")["id"]
     # One snapshot for the whole click, after every tab (a collect reads
     # the whole book, so one per tab would multiply the wait).
@@ -917,18 +928,613 @@ def apply(db: Database, manuscript: dict, fixes: list[dict], service,
             "blocked": sum(len(t["blocked"]) for t in tabs)}
 
 
+# ------------------------------------------- the Doc, in the background
+#
+# Decisions (the owner's report of 2026-11-25: "when I apply a change in
+# lint, it takes quite a lot of time although it should be a local file
+# change. Also, other changes cannot be applied on other paragraphs or
+# other tabs until one change is accepted."):
+# - An Apply on the page writes the file and logs the change at once
+#   (`accept`), and the tab's Doc side follows in the background: one
+#   worker per manuscript takes the tabs to the Doc one at a time, and a
+#   tab's fixes accepted within `SYNC_WINDOW` go in one read, edit and
+#   push. One worker, not one per tab: every push reads, changes and
+#   saves the manuscript's one Doc mapping, so two at once could lose a
+#   tab's pushed stamp. Enforced by:
+#   tests/test_lint_page.py::apply_returns_before_the_doc.
+# - Each tab has one lock, held by a click's file write and by the whole
+#   of its sync, so two fixes on a tab never interleave. A click never
+#   waits on it: a fix accepted while its tab is syncing is kept and
+#   written the moment that sync ends, then synced in the next round.
+#   Enforced by: tests/test_lint_page.py::same_tab_fixes_are_serialized.
+# - The Doc is never written over. When the tab has nothing newer than
+#   the last push, the file is pushed (guarded). When the tab has newer
+#   words, or forms are out, or the guard stops the push, the file is
+#   put back as it was before these fixes and the whole old road runs
+#   (`apply_tab`: three-way read, pull, edit, restage forms, guarded
+#   push) with every guard it had. A tab with forms out is not written
+#   at the click at all: its fixes go straight to that road.
+# - A sync that cannot finish is never silent. "held": the Doc could not
+#   be reached (no sign-in, Google's error, or the server restarted); the
+#   change stays in the file, the tab says "not in the Doc: <reason>",
+#   and Push again or Undo settle it. "withdrawn": a guard stopped it
+#   (the tab and the file both changed, the tab holds an older text,
+#   the tab lost most of the words, a pending form that cannot carry
+#   it, the file changed after the fix); the file is as it was before
+#   the fix, the log row says so, and Try again re-applies it. A change
+#   is never kept in the file over newer words in the Doc: that would
+#   make a conflict the owner did not ask for. Enforced by:
+#   tests/test_lint_page.py::a_stopped_sync_is_shown_and_kept.
+
+SYNC_WINDOW = 2.0   # seconds a tab's fixes wait for more before its sync
+
+
+def _row_meta(doc: str, reason: str = "") -> str:
+    return json.dumps({"doc": doc, **({"reason": reason} if reason else {})})
+
+
+class _Tab:
+    """One tab's road to the Doc."""
+
+    def __init__(self) -> None:
+        # The file, for this page: a click's write and a whole sync.
+        self.lock = threading.Lock()
+        self.jobs: list[dict] = []      # in the file, not yet in the Doc
+        self.deferred: list[dict] = []  # accepted while the tab synced
+        self.kept: list[dict] = []      # a held or withdrawn sync's jobs
+        self.base: str | None = None    # the file before `jobs`
+        self.expected: str | None = None  # the file as this page left it
+        self.state = ""   # queued | syncing | in-doc | held | withdrawn
+        self.reason = ""
+        self.at = ""
+        self.due = 0.0
+        self.fixes: dict[str, dict] = {}  # fix id -> {state, reason}
+
+
+class _Road:
+    """One manuscript's tabs and the one worker that takes them to the
+    Doc (see the decisions above)."""
+
+    def __init__(self, open_db, services) -> None:
+        self.open_db = open_db
+        self.services = services
+        self.manuscript: dict = {}
+        self.guard = threading.Condition()
+        self.tabs: dict[str, _Tab] = {}
+        self.worker: threading.Thread | None = None
+        self.busy = ""
+        self.collect = False
+
+    def tab(self, rel: str) -> _Tab:
+        with self.guard:
+            return self.tabs.setdefault(rel, _Tab())
+
+    def _say(self, tab: _Tab, state: str, reason: str = "",
+             ids=None, fix_state: str | None = None,
+             fix_reason: str | None = None) -> None:
+        with self.guard:
+            tab.state, tab.reason, tab.at = state, reason, now_iso()
+            for i in ids or []:
+                tab.fixes[i] = {"state": fix_state or state,
+                                "reason": reason if fix_reason is None
+                                else fix_reason}
+
+    # ------------------------------------------------------ the click
+
+    def accept_tab(self, db: Database, manuscript: dict, rel: str,
+                   fixes: list[dict], batch: str, label: str,
+                   linked: bool) -> dict:
+        ids = [str(f["id"]) for f in fixes]
+        tab = self.tab(rel)
+        job = {"batch": batch, "label": label, "fixes": fixes,
+               "rows": [], "mode": "write"}
+        if not tab.lock.acquire(blocking=False):
+            with self.guard:
+                tab.deferred.append(job)
+            self._say(tab, tab.state or "queued", tab.reason, ids,
+                      "deferred", "")
+            return {"accepted": ids, "doc": "deferred", "message": (
+                f"{rel}: accepted; written as soon as the tab's sync now "
+                "running ends")}
+        try:
+            if linked and _forms(db, manuscript, rel):
+                path = Path(manuscript["path"]) / rel
+                with self.guard:
+                    if not tab.jobs:
+                        tab.base = tab.expected = path.read_text(
+                            encoding="utf-8")
+                    job["mode"] = "forms"
+                    tab.jobs.append(job)
+                    tab.due = time.monotonic() + SYNC_WINDOW
+                self._say(tab, "queued", "", ids)
+                self._kick()
+                return {"accepted": ids, "doc": "queued", "message": (
+                    f"{rel}: the tab has a pending form, so the fix goes "
+                    "into the file, the form and the Doc together, in the "
+                    "background")}
+            out = self._write_job(db, manuscript, rel, tab, job, linked)
+        finally:
+            tab.lock.release()
+        self._kick()
+        return out
+
+    def _write_job(self, db: Database, manuscript: dict, rel: str,
+                   tab: _Tab, job: dict, linked: bool) -> dict:
+        """The job's fixes into the file, now (the tab's lock held)."""
+        fixes = job["fixes"]
+        ids = [str(f["id"]) for f in fixes]
+        path = Path(manuscript["path"]) / rel
+        text = path.read_text(encoding="utf-8")
+        taken, why, _ = _plan_again(fixes, text, db, manuscript, rel)
+        blocked = [{"id": ids[k], "reason": r} for k, r in why.items()]
+        for b in blocked:
+            with self.guard:
+                tab.fixes[b["id"]] = {"state": "withdrawn",
+                                      "reason": b["reason"]}
+        edits = [(lo, hi, n) for lo, hi, n, _k in taken]
+        applied = [ids[k] for k in sorted({k for *_x, k in taken})]
+        out: dict[str, Any] = {"applied": applied, "blocked": blocked,
+                               "changes": [], "doc": "", "message": ""}
+        if not applied:
+            out["message"] = f"{rel}: nothing applied" + (
+                f". {blocked[0]['reason']}" if blocked else "")
+            return out
+        new_text = apply_edits(text, edits)
+        rows = changed_paragraphs(text, edits)
+        with self.guard:
+            if not tab.jobs:
+                tab.base = text
+        _write(path, new_text)
+        tab.expected = new_text
+        rule = job["label"] or ",".join(sorted({
+            str(f.get("rule") or f["kind"]) for f in fixes
+            if str(f["id"]) in applied}))
+        for row in rows:
+            fields = ko_fields("lc")
+            fields.update(manuscript_id=manuscript["id"],
+                          batch_id=job["batch"], file=rel, rule=rule,
+                          line=row["line"], before_text=row["before"],
+                          after_text=row["after"], pushed=0,
+                          undone_at=None,
+                          metadata=_row_meta("queued" if linked else "none"),
+                          restaged=None)
+            db.insert("lint_changes", fields)
+            job["rows"].append(fields["id"])
+        for f in fixes:
+            if f.get("rule") == "undo" and str(f["id"]) in applied:
+                db.update("lint_changes", str(f["id"]),
+                          {"undone_at": now_iso()})
+        job["applied"] = applied
+        out["changes"] = rows
+        if linked:
+            with self.guard:
+                tab.jobs.append(job)
+                tab.due = time.monotonic() + SYNC_WINDOW
+            self._say(tab, "queued", "", applied)
+            out["doc"] = "queued"
+            out["message"] = (f"{rel}: {len(applied)} fix(es), {len(rows)} "
+                              "paragraph(s) changed in the file; the tab "
+                              "follows in the background")
+        else:
+            self._say(tab, "in-file", "", applied)
+            with self.guard:
+                self.collect = True
+            out["doc"] = "none"
+            out["message"] = (f"{rel}: {len(applied)} fix(es), {len(rows)} "
+                              "paragraph(s) changed; the file has no tab")
+        return out
+
+    # ----------------------------------------------------- the worker
+
+    def _kick(self) -> None:
+        with self.guard:
+            self.guard.notify_all()
+            if self.worker is None:
+                self.worker = threading.Thread(target=self._run,
+                                               name="lint-doc-road",
+                                               daemon=True)
+                self.worker.start()
+
+    def _next(self) -> tuple[str | None, float]:
+        """The queued tab due now, or how long until the next one is
+        (-1: none waits)."""
+        now, wait = time.monotonic(), -1.0
+        for rel, tab in self.tabs.items():
+            if tab.state != "queued":
+                continue
+            if tab.due <= now:
+                return rel, 0.0
+            wait = tab.due - now if wait < 0 else min(wait, tab.due - now)
+        return None, wait
+
+    def _run(self) -> None:
+        db = None
+        while True:
+            with self.guard:
+                rel, wait = self._next()
+                if rel is None and wait >= 0:
+                    self.guard.wait(timeout=wait)
+                    continue
+                if rel is None and not self.collect:
+                    self.worker = None
+                    self.guard.notify_all()
+                    return
+                self.busy = rel or "collect"
+            try:
+                db = db or self.open_db()
+                if rel is None:
+                    with self.guard:
+                        self.collect = False
+                    self._collect(db)
+                else:
+                    self._sync(db, rel)
+            except Exception as err:  # noqa: BLE001 — the server stays up
+                if rel is None:
+                    print(f"  lint: the snapshot after a fix failed ({err})")
+            finally:
+                with self.guard:
+                    self.busy = ""
+                    self.guard.notify_all()
+
+    def _collect(self, db: Database) -> None:
+        try:
+            config = self.services()[0]
+        except Exception:  # noqa: BLE001 — no config: the defaults
+            config = {}
+        _collect(db, self.manuscript, config)
+
+    def _sync(self, db: Database, rel: str) -> None:
+        tab = self.tabs[rel]
+        with tab.lock:
+            with self.guard:
+                jobs, tab.jobs = tab.jobs, []
+                tab.state = "syncing"
+                for j in jobs:
+                    for i in j.get("applied") or [str(f["id"])
+                                                  for f in j["fixes"]]:
+                        tab.fixes[i] = {"state": "syncing", "reason": ""}
+            try:
+                self._take(db, rel, tab, jobs)
+            except Exception as err:  # noqa: BLE001 — said on the tab
+                tab.kept = jobs + tab.kept
+                reason = f"the sync stopped: {type(err).__name__}: {err}"
+                self._mark(db, rel, "held", reason)
+                self._say(tab, "held", reason, [
+                    i for j in jobs for i in (j.get("applied") or [
+                        str(f["id"]) for f in j["fixes"]])])
+            finally:
+                # Fixes accepted while this ran: into the file now, and
+                # to the Doc in the next round.
+                with self.guard:
+                    deferred, tab.deferred = tab.deferred, []
+                for job in deferred:
+                    self._write_job(db, self.manuscript, rel, tab, job, True)
+
+    def _take(self, db: Database, rel: str, tab: _Tab,
+              jobs: list[dict]) -> None:
+        manuscript = self.manuscript
+        ids = [i for j in jobs for i in (j.get("applied") or [
+            str(f["id"]) for f in j["fixes"]])]
+        path = Path(manuscript["path"]) / rel
+
+        def held(reason: str) -> None:
+            # The change stays in the file; the Doc does not have it.
+            tab.kept = jobs + tab.kept
+            self._mark(db, rel, "held", reason)
+            self._say(tab, "held", reason, ids)
+
+        owner_only = _owner_only(manuscript, rel)
+        if owner_only:
+            # Marked the owner's alone after the click: this page's own
+            # change comes out again, and nothing goes to the Doc.
+            if (jobs and tab.base is not None
+                    and path.read_text(encoding="utf-8") == tab.expected):
+                _write(path, tab.base)
+                tab.expected, tab.base = tab.base, None
+                return self._withdraw_kept(db, rel, tab, jobs, ids,
+                                           owner_only)
+            return held(owner_only)
+        try:
+            config, service, docs_service = self.services()
+        except Exception as err:  # noqa: BLE001 — said on the tab
+            config, service, docs_service = {}, None, None
+            signin = str(err)
+        else:
+            signin = ""
+        if service is None or docs_service is None:
+            return held("the server has no Google sign-in now ('authorlm "
+                        "doc auth' in a terminal)" + (
+                            f": {signin}" if signin else ""))
+        try:
+            view = gdocs.doc_three_way(db, manuscript, rel, service,
+                                       docs_service)
+        except Exception as err:  # noqa: BLE001 — Google's errors, said
+            return held(f"the tab could not be read: {err}")
+        carry = any(j["mode"] == "forms" for j in jobs)
+        forms = _forms(db, manuscript, rel)
+        stopped = ""
+        if not carry and view["state"] == "unchanged":
+            return self._done(db, rel, tab, ids)
+        if not carry and not forms and view["state"] == "local_ahead":
+            try:
+                gdocs.push_doc(db, manuscript, rel, service=service,
+                               docs_service=docs_service, guard=True)
+            except Exception as err:  # noqa: BLE001 — the guard, said
+                stopped = str(err)
+            else:
+                return self._done(db, rel, tab, ids)
+        # The tab has newer words, or forms are out, or the push was
+        # stopped: the file goes back to before these fixes and the whole
+        # tab road runs, with every guard it has.
+        if not jobs:
+            return held(
+                "the file and its tab both changed since the last push"
+                + (f" ({stopped})" if stopped else "")
+                + "; settle it under Conflicts on Merge forms, or Undo")
+        now = path.read_text(encoding="utf-8")
+        if now != tab.expected:
+            return self._withdraw_kept(
+                db, rel, tab, jobs, ids,
+                "the file was changed by something else after the fix, so "
+                "it was not taken to the Doc; the change is still in the "
+                "file. Undo it, or push the file with 'authorlm doc push "
+                f"{rel}'", put_back=False)
+        if tab.base is None:
+            return held("the file's text before the fix is not known; "
+                        "Undo it, or settle it under Conflicts on Merge forms")
+        _write(path, tab.base)
+        fixes = [f for j in jobs for f in j["fixes"]]
+        result = apply_tab(db, manuscript, rel, fixes, service,
+                           docs_service, config, batch=jobs[0]["batch"],
+                           label=jobs[0]["label"] if len(jobs) == 1 else "",
+                           collect=False)
+        tab.expected = path.read_text(encoding="utf-8")
+        tab.base = None
+        done = set(result["applied"])
+        if not done:
+            reason = (result["blocked"][0]["reason"] if result["blocked"]
+                      else "nothing to change")
+            return self._withdraw_kept(db, rel, tab, jobs, ids, reason)
+        # The old road logged the paragraphs as they are now (pulled and
+        # fixed); the click's rows, made before the pull, give way to them.
+        for j in jobs:
+            for row_id in j["rows"]:
+                db.update("lint_changes", row_id,
+                          {"metadata": _row_meta("replaced")})
+        reasons = {b["id"]: b["reason"] for b in result["blocked"]}
+        self._undo_back(db, [f for f in fixes if str(f["id"]) in reasons])
+        for f in fixes:
+            if f.get("rule") == "undo" and str(f["id"]) in done:
+                db.update("lint_changes", str(f["id"]),
+                          {"undone_at": now_iso()})
+        with self.guard:
+            for i in ids:
+                tab.fixes[i] = ({"state": "withdrawn", "reason": reasons[i]}
+                                if i in reasons else
+                                {"state": "in-doc", "reason": ""})
+            tab.state, tab.at = "in-doc", now_iso()
+            tab.reason = "; ".join(result["warnings"])
+            self.collect = True
+
+    def _done(self, db: Database, rel: str, tab: _Tab, ids) -> None:
+        tab.kept = []
+        tab.base = None
+        self._mark(db, rel, "in-doc")
+        self._say(tab, "in-doc", "", ids)
+        with self.guard:
+            self.collect = True
+
+    def _withdraw_kept(self, db, rel, tab, jobs, ids, reason,
+                       put_back: bool = True) -> None:
+        """A guard stopped the sync. put_back: the file is as it was
+        before the fixes (their rows say "withdrawn", an undo is not
+        undone). Else the change is in the file and held for the owner."""
+        tab.kept = jobs + tab.kept
+        if not put_back:
+            self._mark(db, rel, "held", reason)
+            self._say(tab, "held", reason, ids)
+            return
+        for j in jobs:
+            for row_id in j["rows"]:
+                db.update("lint_changes", row_id,
+                          {"metadata": _row_meta("withdrawn", reason)})
+        self._undo_back(db, [f for j in jobs for f in j["fixes"]])
+        self._say(tab, "withdrawn", reason, ids)
+        with self.guard:
+            self.collect = True
+
+    def _undo_back(self, db: Database, fixes: list[dict]) -> None:
+        """An undo that did not reach the file: its rows are not undone."""
+        for f in fixes:
+            if f.get("rule") == "undo":
+                db.update("lint_changes", str(f["id"]), {"undone_at": None})
+
+    def _mark(self, db: Database, rel: str, doc: str,
+              reason: str = "") -> None:
+        """The tab's rows still waiting for the Doc: in it now (pushed),
+        or held with the reason."""
+        rows = db.all(
+            "SELECT id, metadata FROM lint_changes WHERE manuscript_id = ? "
+            "AND file = ? AND pushed = 0", (self.manuscript["id"], rel))
+        for r in rows:
+            meta = json.loads(r["metadata"] or "{}")
+            if meta.get("doc") not in ("queued", "held"):
+                continue
+            db.update("lint_changes", r["id"], {
+                "pushed": 1 if doc == "in-doc" else 0,
+                "metadata": _row_meta(doc, reason)})
+
+    # ----------------------------------------------- retry and status
+
+    def retry(self, db: Database, rel: str) -> dict:
+        """Held: send the tab again (Push again). Withdrawn: apply its
+        fixes again, as a new Apply would (Try again)."""
+        tab = self.tab(rel)
+        if not tab.lock.acquire(blocking=False):
+            return {"file": rel, "state": tab.state,
+                    "message": f"{rel} is syncing now; it is sent after"}
+        try:
+            with self.guard:
+                kept, tab.kept = tab.kept, []
+                withdrawn = tab.state == "withdrawn"
+                if not withdrawn:
+                    tab.jobs = kept + tab.jobs
+                    tab.state, tab.due = "queued", time.monotonic()
+                    for job in kept:
+                        for i in job.get("applied") or [
+                                str(f["id"]) for f in job["fixes"]]:
+                            tab.fixes[i] = {"state": "queued", "reason": ""}
+        finally:
+            tab.lock.release()
+        for job in kept if withdrawn else []:
+            self.accept_tab(db, self.manuscript, rel, job["fixes"],
+                            job["batch"], job["label"], True)
+        self._kick()
+        return {"file": rel, "state": tab.state}
+
+    def status(self, db: Database) -> dict:
+        with self.guard:
+            tabs = {rel: {"state": t.state, "reason": t.reason, "at": t.at,
+                          "waiting": sum(len(j["fixes"]) for j in
+                                         t.jobs + t.deferred),
+                          "fixes": dict(t.fixes)}
+                    for rel, t in self.tabs.items() if t.state}
+            busy = bool(self.busy or any(
+                t.state in ("queued", "syncing") for t in self.tabs.values()))
+        # Rows a sync never finished (the server restarted): held.
+        for r in db.all(
+                "SELECT file, metadata FROM lint_changes WHERE manuscript_id "
+                "= ? AND pushed = 0 AND undone_at IS NULL",
+                (self.manuscript["id"],)):
+            meta = json.loads(r["metadata"] or "{}")
+            if meta.get("doc") in ("queued", "held") and r["file"] not in tabs:
+                tabs[r["file"]] = {
+                    "state": "held", "at": "", "waiting": 0, "fixes": {},
+                    "reason": meta.get("reason") or (
+                        "the server restarted before this change reached "
+                        "the Doc; it is in the file. Push again sends it")}
+        return {"tabs": tabs, "busy": busy}
+
+    def flush(self) -> None:
+        """Every queued tab due now (the tests: the window, without
+        waiting it out)."""
+        with self.guard:
+            for tab in self.tabs.values():
+                tab.due = 0.0
+        self._kick()
+
+    def idle(self) -> bool:
+        with self.guard:
+            return self.worker is None and not self.busy
+
+
+_ROADS: dict[tuple, _Road] = {}
+_ROADS_LOCK = threading.Lock()
+
+
+def road(session) -> _Road:
+    """The manuscript's road to the Doc, made once per server."""
+    key = (str(session.workspace), session.manuscript["id"])
+    with _ROADS_LOCK:
+        r = _ROADS.get(key)
+        if r is None:
+            r = _ROADS[key] = _Road(session._thread_db,
+                                    session._doc_services)
+        # Tests swap the session's services; the road reads them per sync.
+        r.services = session._doc_services
+        r.manuscript = dict(session.manuscript)
+        return r
+
+
+def settle(timeout: float = 60.0) -> bool:
+    """Wait until every road is idle (the tests, and a clean stop)."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        with _ROADS_LOCK:
+            roads = list(_ROADS.values())
+        if all(r.idle() for r in roads):
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def accept(db: Database, manuscript: dict, fixes: list[dict], doc_road: _Road,
+           services, label: str = "") -> dict:
+    """The page's Apply: every fix into its file now, logged, and each
+    tab queued for the Doc (see the decisions above). Returns {batch,
+    tabs: [{file, applied, accepted, blocked, changes, doc, message}],
+    applied, blocked}. Blocked at once, nothing written: a file only the
+    owner edits, and a tab in the Doc while the server has no sign-in."""
+    by_file = _group(manuscript, fixes)
+    batch = ko_fields("lb")["id"]
+    links = gdocs.doc_status(db, manuscript)
+    signed_in: bool | None = None
+    tabs = []
+    for rel, group in by_file.items():
+        ids = [str(f["id"]) for f in group]
+        out = {"file": rel, "applied": [], "accepted": [], "blocked": [],
+               "changes": [], "doc": "", "message": "", "batch": batch,
+               "pushed": False, "restaged": 0, "warnings": []}
+        entry = links.get(rel) if isinstance(links.get(rel), dict) else {}
+        linked = bool(links.get("_master_id") and entry.get("tab_id"))
+        reason = _owner_only(manuscript, rel)
+        if reason is None and linked:
+            if signed_in is None:
+                try:
+                    _c, service, docs_service = services()
+                    signed_in = service is not None and docs_service is not None
+                except Exception:  # noqa: BLE001 — no sign-in
+                    signed_in = False
+            if not signed_in:
+                reason = ("this tab is in the Google Doc and the server has "
+                          "no Google sign-in now ('authorlm doc auth' in a "
+                          "terminal), so it cannot be pulled and pushed")
+        if reason:
+            out["blocked"] = [{"id": i, "reason": reason} for i in ids]
+            out["message"] = f"{rel}: nothing applied. {reason}"
+            tabs.append(out)
+            continue
+        out.update(doc_road.accept_tab(db, manuscript, rel, group, batch,
+                                       label, linked))
+        tabs.append(out)
+    return {"batch": batch, "tabs": tabs,
+            "applied": sum(len(t["applied"]) for t in tabs),
+            "accepted": sum(len(t["accepted"]) for t in tabs),
+            "blocked": sum(len(t["blocked"]) for t in tabs)}
+
+
+def _owner_only(manuscript: dict, rel: str) -> str | None:
+    """Why no automated pass may write `rel` (a file only the owner
+    edits), or None: the one check every automated write road makes."""
+    check = getattr(structure, "owner_edits_reason", None)
+    if check is None:
+        return None
+    try:
+        toc = (Path(manuscript["path"]) / structure.TOC_FILENAME).read_text(
+            encoding="utf-8")
+    except OSError:
+        return None
+    return check(toc, rel)
+
+
 # ------------------------------------------------------------ the log
 
 def log(db: Database, manuscript: dict, limit: int = 200) -> list[dict]:
     """The changes this page made, newest batch first, each paragraph's
-    text before and after."""
+    text before and after, and where it stands with the Doc (`doc`:
+    in-doc, queued, held, withdrawn, none; `reason`)."""
     rows = [dict(r) for r in db.all(
         "SELECT id, batch_id, file, rule, line, before_text, after_text, "
-        "pushed, undone_at, created_at FROM lint_changes WHERE "
+        "pushed, undone_at, created_at, metadata FROM lint_changes WHERE "
         "manuscript_id = ? ORDER BY created_at DESC, id LIMIT ?",
         (manuscript["id"], limit))]
     batches: dict[str, dict] = {}
     for r in rows:
+        meta = json.loads(r.pop("metadata") or "{}")
+        if meta.get("doc") == "replaced":
+            continue     # a click's row the tab's whole road re-logged
+        r["doc"] = "in-doc" if r["pushed"] else meta.get("doc") or "none"
+        r["reason"] = meta.get("reason") or ""
         r["segments"] = word_diff(r["before_text"], r["after_text"])
         b = batches.setdefault(r["batch_id"], {
             "batch": r["batch_id"], "at": r["created_at"], "changes": []})
@@ -936,10 +1542,7 @@ def log(db: Database, manuscript: dict, limit: int = 200) -> list[dict]:
     return list(batches.values())
 
 
-def undo(db: Database, manuscript: dict, ids: list[str], service,
-         docs_service, config: dict | None = None) -> dict:
-    """Put the logged paragraphs back as they were, through the same road;
-    the undone rows are marked, and the undo is itself logged."""
+def _undo_fixes(db: Database, manuscript: dict, ids: list[str]) -> list[dict]:
     if not ids:
         raise ValueError("name the changes to undo")
     marks = ",".join("?" for _ in ids)
@@ -947,17 +1550,27 @@ def undo(db: Database, manuscript: dict, ids: list[str], service,
         f"SELECT * FROM lint_changes WHERE manuscript_id = ? AND "
         f"undone_at IS NULL AND (id IN ({marks}) OR batch_id IN ({marks}))",
         (manuscript["id"], *ids, *ids))]
+    rows = [r for r in rows if json.loads(r.get("metadata") or "{}")
+            .get("doc") not in ("withdrawn", "replaced")]
     if not rows:
         raise LookupError("nothing to undo: no such change, or already undone")
-    fixes = [{"id": r["id"], "kind": "paragraph", "file": r["file"],
-              "old": r["after_text"], "new": r["before_text"],
-              "line": r["line"], "rule": "undo"} for r in rows]
+    return [{"id": r["id"], "kind": "paragraph", "file": r["file"],
+             "old": r["after_text"], "new": r["before_text"],
+             "line": r["line"], "rule": "undo"} for r in rows]
+
+
+def undo(db: Database, manuscript: dict, ids: list[str], service,
+         docs_service, config: dict | None = None) -> dict:
+    """Put the logged paragraphs back as they were, through the same road;
+    the undone rows are marked, and the undo is itself logged (the
+    synchronous road, as `apply`)."""
+    fixes = _undo_fixes(db, manuscript, ids)
     out = apply(db, manuscript, fixes, service, docs_service, config,
                 label="undo")
     done = {i for t in out["tabs"] for i in t["applied"]}
-    for r in rows:
-        if r["id"] in done:
-            db.update("lint_changes", r["id"], {"undone_at": now_iso()})
+    for f in fixes:
+        if f["id"] in done:
+            db.update("lint_changes", f["id"], {"undone_at": now_iso()})
     return out
 
 
@@ -965,16 +1578,12 @@ def undo(db: Database, manuscript: dict, ids: list[str], service,
 
 def dispatch(method: str, params: dict[str, Any], session) -> dict:
     """`lint.run`, `lint.preview`, `lint.apply`, `lint.accept`,
-    `lint.ignore`, `lint.log`, `lint.undo`. Only apply and undo touch
-    Google (the tab's pull and push)."""
+    `lint.ignore`, `lint.log`, `lint.undo`, `lint.status`, `lint.retry`.
+    Apply and undo write the file and return; the tab's pull and push run
+    on the manuscript's road in the background (`status` says where each
+    tab stands, `retry` sends a held tab again)."""
     manuscript = session.manuscript
     db = session._thread_db()
-
-    def services():
-        try:
-            return session._doc_services()
-        except Exception:  # noqa: BLE001 — no sign-in: said per tab
-            return {}, None, None
 
     if method == "run":
         return run(db, manuscript, [str(f) for f in params.get("files") or []],
@@ -982,9 +1591,8 @@ def dispatch(method: str, params: dict[str, Any], session) -> dict:
     if method == "preview":
         return preview(db, manuscript, list(params.get("fixes") or []))
     if method == "apply":
-        config, service, docs_service = services()
-        return apply(db, manuscript, list(params.get("fixes") or []),
-                     service, docs_service, config)
+        return accept(db, manuscript, list(params.get("fixes") or []),
+                      road(session), session._doc_services)
     if method == "accept":
         return changes.lint_accept(db, manuscript,
                                    [str(w) for w in params.get("words") or []])
@@ -996,7 +1604,14 @@ def dispatch(method: str, params: dict[str, Any], session) -> dict:
     if method == "log":
         return {"batches": log(db, manuscript)}
     if method == "undo":
-        config, service, docs_service = services()
-        return undo(db, manuscript, [str(i) for i in params.get("ids") or []],
-                    service, docs_service, config)
+        fixes = _undo_fixes(db, manuscript,
+                            [str(i) for i in params.get("ids") or []])
+        return accept(db, manuscript, fixes, road(session),
+                      session._doc_services, label="undo")
+    if method == "status":
+        return road(session).status(db)
+    if method == "retry":
+        rel = changes.docs._resolve_relpath(manuscript,
+                                            str(params.get("file") or ""))
+        return road(session).retry(db, rel)
     return {"error": f"unknown method 'lint.{method}'"}
