@@ -381,6 +381,29 @@ def a_fix_inside_a_pending_form_is_restaged(root: Path) -> None:
           "Beta, replaced now." in db.one(
               "SELECT restaged FROM lint_changes")["restaged"])
 
+    before = (ms / "solo.md").read_text()
+    real_push, calls = lint_page.gdocs.push_doc, []
+
+    def push_once_stopped(*a, **k):
+        calls.append(1)
+        if len(calls) == 2:   # 1: the withdrawal's merge; 2: the fix's own
+            raise LookupError("the Doc changed")
+        return real_push(*a, **k)
+
+    with mock.patch.object(lint_page.gdocs, "push_doc", push_once_stopped):
+        out = _lint(ws, "apply", fake, fixes=[
+            {"id": "q", "kind": "word", "file": "solo.md", "word": "Beta",
+             "to": "Betta", "rule": "spelling"}])
+    forms = {f["note"]: f for f in _forms(db, manuscript)}
+    check("a push the guard stops puts the file back and restages the "
+          "withdrawn forms as they were",
+          out["applied"] == 0 and "the file was put back" in
+          out["tabs"][0]["blocked"][0]["reason"]
+          and (ms / "solo.md").read_text() == before
+          and set(forms) == {"r-alpha", "r-beta", "r-add"}
+          and forms["r-beta"]["proposed_old"] == "Beta is to be replaced.",
+          (out, forms))
+
     listing = _call(ws, fake, "list")
     alpha = _by_note(listing)["r-alpha"]
     _call(ws, fake, "decide", id=alpha["id"], verdict="accept",

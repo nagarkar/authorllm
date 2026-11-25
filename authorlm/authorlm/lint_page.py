@@ -747,11 +747,16 @@ def apply_tab(db: Database, manuscript: dict, rel: str, fixes: list[dict],
     applied_ks = sorted({kept[j] for *_x, j in sub_taken})
     new_text = apply_edits(text, edits)
     revisions: list[tuple[str, dict]] = []
+    originals: list[tuple[str, dict]] = []
     if restage is not None:
         for item in restage:
             t = item["thread"]
             meta = json.loads(t.get("metadata") or "{}")
             old, new = t.get("proposed_old") or "", t.get("proposed_new") or ""
+            originals.append((meta.get("origin") or "lint", {
+                "old": old, "new": new, "note": t.get("note") or "",
+                "anchor_paragraph": meta.get("anchor_paragraph"),
+                "_index": meta.get("index", 0)}))
             if old:
                 span = _form_span(text, t)
                 if span and span != (-1, -1):
@@ -791,7 +796,10 @@ def apply_tab(db: Database, manuscript: dict, rel: str, fixes: list[dict],
         if new_text != text and collect:
             _collect(db, manuscript, config)
     if restage is not None:
-        staged = _restage(db, manuscript, rel, revisions, service,
+        # The push stopped and the file was put back: the forms go back
+        # as they were, not with the fix.
+        staged = _restage(db, manuscript, rel,
+                          revisions if pushed else originals, service,
                           docs_service, config)
         result["restaged"] = staged["written"]
         result["warnings"] += staged["warnings"]
