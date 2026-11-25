@@ -48,8 +48,9 @@ return these lines. Record what the essay does, never what it should do.
       the counting of choices) that the essay also uses in its ordinary sense,
       and the units of the ordinary uses
     key lines: for each section, its central sentence if it has one, the unit
-      it stands in, where in the section that is (front, middle, end), and the
-      units that restate it in weaker words
+      it stands in, where in its explanation that is (start, middle, end, or
+      standing with no explanation), and the units that restate it in weaker
+      words
     stories and images: each story, example or image and its units; how it is
       introduced (by a question it answers | by a claim it illustrates |
       neither); the unit that states its lesson, or "none"; whether its outcome
@@ -73,7 +74,7 @@ return these lines. Record what the essay does, never what it should do.
 ## Ask, do not guess
 
 Some faults have an answer only the author holds: a gap in the argument, a story
-that must move or go, a line that belongs at the front of its section, a term
+that must move or go, a key line buried in the middle of its explanation, a term
 with two definitions. Rules marked (ask) are never rewritten. Return `replace`
 with the unit unchanged except for one tag planted straight after the sentence:
 `[Suggestion: Query: <the question in one line, naming the fault and a concrete fix>]`.
@@ -93,10 +94,15 @@ text between units. Every rule below whose fix would do one of those is (ask).
 
 - **V1 Authoritative, declarative, non-defensive.** The voice is authoritative,
   declarative and non-defensive. Sections close on declarative lines. Em dashes
-  are welcome: never remove one for being a dash (STYLE LAW still outranks this
-  where it rules on dashes). Fix a defensive or apologetic sentence, and a
+  are welcome as long as they are used to explain something inline and the
+  explanation is expendable. Never stack multiple em-dash pairs in one sentence.
+  (STYLE LAW still outranks this where it rules on dashes.) Fix a defensive or apologetic sentence, and a
   section whose last line trails off in a qualification or a question it does
   not mean to leave open.
+  *Departs from the source skill ("Em dashes are welcome.") by the owner's
+  ruling of 2026-11-25: "Em dashes are welcome as long as they are used to
+  explain something inline and the explanation is expendable. Never stack
+  multiple em-dash pairs in one sentence."*
 - **V2 No hedges and no meta-commentary in the body.** Cut a hedge (`perhaps`,
   `it may be that`, `in some sense`, `one might say`) and cut commentary on the
   essay itself (`as we shall see`, `it is worth noting`, `this essay argues`,
@@ -126,15 +132,27 @@ text between units. Every rule below whose fix would do one of those is (ask).
   another unit, and this unit holds the second one, cut the restatement if the
   sentence around it survives; otherwise ask.
 - **S5 Elevate key lines.** Give a central sentence (e.g. "Every question is an
-  experiment, and every answer an experience.") its own line near the front of
-  its section, and delete the weaker restatements elsewhere. In the unit that
-  holds the key line, a blank line may set the line apart. In a unit the
-  registry lists as a weaker restatement, cut the restating sentence. Where the
-  key line sits in the middle or at the end of its section and would have to
-  move to another unit (ask), plant the query on the key line.
-- **S6 Earn bare aphorisms.** A claim like "The horizon is eternal" needs a
-  preceding sentence that leads to it. Where the essay's own argument supplies
+  experiment, and every answer an experience.") its own line at the start or at the
+  end of its explanation, and delete the weaker restatements elsewhere. Both
+  places are right: a key line or aphorism that opens its explanation or closes
+  it is never queried or moved for its position. In the unit that holds the key
+  line, a blank line may set the line apart. In a unit the registry lists as a
+  weaker restatement, cut the restating sentence. Where the key line is buried
+  in the middle of its explanation, or stands in place of the explanation
+  (ask), plant the query on the key line.
+  *Departs from the source skill ("its own line near the front of its
+  section") by the owner's ruling of 2026-11-25: "Build an explanation from
+  simple terms and examples; it may end on an aphorism that lifts it and makes
+  it memorable. An aphorism either closes an explanation or starts one, but
+  never replaces one." And: "Elevating key lines is not aphoristic
+  compression. We can have aphorisms and they are elevation."*
+- **S6 Earn bare aphorisms.** A claim like "The horizon is eternal" needs
+  either a preceding sentence that leads to it or an explanation after it. Only
+  an aphorism with neither is a fault. Where the essay's own argument supplies
   that sentence's content, write it; where it does not, ask.
+  *Departs from the source skill ("needs a preceding sentence that leads to
+  it") by the owner's ruling of 2026-11-25: "An aphorism either closes an
+  explanation or starts one, but never replaces one."*
 - **S7 Use the book's own vocabulary over generic synonyms** ("whether a better
   choice exists," not "a better alternative"). The book's vocabulary is
   PROTECTED TERMS, CONCEPT NOTES and the `[lexicon]` elements of STYLE LAW.
@@ -295,4 +313,4 @@ All examples are from the source skill unless marked (original).
 - **A6** Fault: an ordinary use of `time` in an essay where time is the counting of choices -> `clock time`.
 - **A8** Fault: `Criminals always get caught.` -> the same sentence with `[Suggestion: Query: A8: a reader can name criminals who were never caught; narrow the claim to what the argument needs, or cut it?]` (query original).
 - **R5** Fault: `the Hindu tradition` -> a geographic phrasing such as `the land the Sindhu waters` (fault sentence original).
-- **S6** Fault: `The horizon is eternal.` standing with nothing leading to it -> the same sentence with `[Suggestion: Query: S6: this aphorism arrives bare; which sentence should lead to it?]` when the essay's argument does not supply the lead (query original).
+- **S6** Fault: `The horizon is eternal.` standing with nothing leading to it and no explanation after it -> the same sentence with `[Suggestion: Query: S6: this aphorism stands bare; which sentence should lead to it, or what explanation should follow?]` when the essay's argument supplies neither (query original).

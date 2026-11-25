@@ -87,6 +87,37 @@ SKILL_RULES = {
     "scope: sermons elsewhere": "kjv-bunyan-style",
 }
 
+# The owner's rulings of 2026-11-25 (SMSTTD style laws se-ef3dbcd6d7bf and
+# se-29c4a9a82d22), where the filter departs from the source skill: his
+# words, and the reading of each rule that follows from them.
+RULINGS = {
+    "V1 carries the em-dash ruling": "Em dashes are welcome as long as they "
+        "are used to explain something inline and the explanation is "
+        "expendable. Never stack multiple em-dash pairs in one sentence.",
+    "S5 quotes the aphorism ruling": "An aphorism either closes an "
+        "explanation or starts one, but never replaces one.",
+    "S5 quotes the elevation ruling": "Elevating key lines is not aphoristic "
+        "compression. We can have aphorisms and they are elevation.",
+    "S5: start or end are both right": "its own line at the start or at the "
+        "end of its explanation",
+    "S5: position alone is never queried": "is never queried or moved for "
+        "its position",
+    "S5: only the buried or replacing line is asked about": "buried in the "
+        "middle of its explanation, or stands in place of the explanation "
+        "(ask)",
+    "S5 keeps the restatement cut": "delete the weaker restatements "
+                                    "elsewhere",
+    "S6: a lead-up or an explanation after": "either a preceding sentence "
+        "that leads to it or an explanation after it",
+    "S6: only neither is a fault": "Only an aphorism with neither is a fault",
+}
+
+# The wording these rulings replaced; none of it may come back as a rule.
+SUPERSEDED = ("never remove one for being a dash",
+              "at the end of its section and would have to move",
+              "The horizon is eternal\" needs a preceding sentence that "
+              "leads to it.")
+
 # What the skill asks for that a unit-by-unit filter cannot do; each is
 # named in the filter's Boundaries section so the gap is stated, not silent.
 BOUNDARIES = ("Revision markup", "Placeholders",
@@ -151,6 +182,14 @@ def check_artifact() -> None:
     for label, phrase in SKILL_RULES.items():
         check(f"carries the skill's rule, {label}", _flat(phrase) in flat,
               phrase)
+    for label, phrase in RULINGS.items():
+        check(f"owner's ruling, {label}", _flat(phrase) in flat, phrase)
+    check("each changed rule says it departs from the source skill",
+          flat.count("Departs from the source skill") == 3
+          and flat.count("the owner's ruling of 2026-11-25") == 3)
+    for phrase in SUPERSEDED:
+        check(f"superseded wording is gone: {phrase[:40]}",
+              phrase not in flat, phrase)
     for rule in RULE_IDS:
         check(f"rule {rule} is defined", f"**{rule} " in body, rule)
     for name in BOUNDARIES:
