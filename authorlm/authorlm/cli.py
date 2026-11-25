@@ -230,7 +230,20 @@ def cmd_manuscript(args):
             raise SystemExit(f"error: {err}")
     else:
         identity = api.manuscript_metadata(manuscript)
+    if getattr(args, "json", False):
+        # For other tools (publishinglm's books table keys on the id and shows the
+        # title): the identity plus the export title and subtitle.
+        import json as _json
+
+        from . import export as _export
+
+        settings = _export.load_settings(manuscript)
+        print(_json.dumps({**identity,
+                           "title": settings.get("title") or identity["name"],
+                           "subtitle": settings.get("subtitle", "") or ""}))
+        return
     print(f"Manuscript: {identity['name']}")
+    print(f"  id: {identity['id']}")
     print(f"  path: {identity['path']}")
     print(f"  author: {identity['author'] or '(not set)'}")
     print("  copyright_owner: "
@@ -10483,6 +10496,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "manuscript", help="show or set manuscript publication metadata")
     p.add_argument("action", choices=["show", "set"])
+    p.add_argument("--json", action="store_true",
+                   help="show: the identity, title and subtitle as one JSON line")
     p.add_argument("--author", default=None,
                    help="author or pen name used for publication")
     p.add_argument("--copyright-owner", default=None,
