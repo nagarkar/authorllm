@@ -392,6 +392,12 @@ Lenses — prompt-first sweeps (design: docs/sweep-framework.md; cross-chapter a
 
 Deterministic prose lint — the checks a harness CAN make without a model.
 
+## `authorlm.lint_page`
+
+`authorlm/authorlm/lint_page.py`
+
+The Lint view of the Filters page (`lint_page.dispatch`, reached as the `lint.*` methods of `/api/runs`): run lint on chosen tabs, apply the mechanical fixes in bulk, rule on the rest one by one, and undo.
+
 ## `authorlm.llm`
 
 `authorlm/authorlm/llm.py`
@@ -1191,6 +1197,12 @@ The lens library: a lens promoted from one book is seen, listed and run on anoth
 `authorlm/tests/test_lint_checks.py`
 
 Individual `lint.check_*` helpers encode ratified style laws that `write propose` can refuse as errors.
+
+## `tests.test_lint_page`
+
+`authorlm/tests/test_lint_page.py`
+
+The Lint view of the Filters page (`lint_page`, the `lint.*` methods of `/api/runs`): lint on chosen tabs, bulk mechanical fixes, one-by-one rulings, direct application through the tab's pull and guarded push, and the log with Undo.
 
 ## `tests.test_lint_proof`
 

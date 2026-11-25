@@ -94,6 +94,7 @@ NAME_COLUMNS = (
     ("filter_runs", "file"),
     ("filter_readings", "file"),
     ("run_requests", "file"),
+    ("lint_changes", "file"),
     ("illus_proposals", "file"),
     ("doc_comments", "file"),
     ("doc_threads", "file"),

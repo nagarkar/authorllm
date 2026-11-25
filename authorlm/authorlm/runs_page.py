@@ -583,15 +583,21 @@ def cancel(db: Database, manuscript: dict, request_id: str) -> dict:
 def dispatch(method: str, params: dict[str, Any],
              workspace: str | None = None) -> dict:
     """The page's API (`/api/runs`): catalog, show, save, preview (what a
-    set of requests would do, nothing written), queue, cancel. Every
-    method names the manuscript. The database is the audio page's
-    session's, as for Merge forms. No method calls a model or Google."""
+    set of requests would do, nothing written), queue, cancel, and the
+    Lint view's `lint.*` methods (lint_page.dispatch). Every method names
+    the manuscript. The database is the audio page's session's, as for
+    Merge forms. No method calls a model; only `lint.apply` and
+    `lint.undo` call Google (the tab's pull and push)."""
     from . import audiobook
 
     session = audiobook.session(workspace, params.get("manuscript"))
     manuscript = session.manuscript
     db = session._thread_db()
     try:
+        if method.startswith("lint."):
+            # The Lint view of this page (lint_page.py).
+            from . import lint_page
+            return lint_page.dispatch(method[5:], params, session)
         if method == "catalog":
             return catalog(db, manuscript)
         if method == "show":

@@ -1028,6 +1028,36 @@ this book: …").
   nothing). Run it only on the author's word: a name or term the author
   confirms is spelled as intended. Never accept a word to quiet the
   report.
+- **The Lint view of the Filters page applies lint fixes directly
+  (author's word, 2026-11-25).** His words: "Lint output should be
+  reviewed in the UI if possible (e.g. accepting spelling corrections) or
+  just fixed (e.g. quote style) directly in the doc by clicking an
+  'apply' button. I don't want to review each quote change or other
+  formatting standardization one at a time; it has to be bulk. Bulk is
+  not possible for spellings and things like 'unbalanced quotes'; I have
+  to rule on it one by one in the UI for those. I assume you won't use
+  forms for lint output". This extends the punctuation exception of
+  2026-11-11 ("a punctuation fix or a ratified punctuation preference ...
+  is applied directly even after the first draft, then pushed, and listed
+  in the reply; it never needs a form") to every lint fix he accepts on
+  that page, spelling corrections included: the page writes it into the
+  file and pushes the tab (pull first when the Doc moved; nothing at all
+  for a tab whose guard stops), never a form. It does NOT extend to a
+  session: a word change a session finds is still a form. Where it lives:
+  https://<tailnet name>/#<manuscript>/runs:lint (`lint_page.py`). Bulk:
+  quote marks to the style law's style, tracking tags out of links, a
+  spelling variant per word. One by one: spelling, doubled words,
+  unbalanced quote marks, footnotes, banned words, em-dash stacks, the
+  style checks. Every change is logged (table `lint_changes`, with Undo
+  on the page); "Legitimate use" adds the finding to
+  `_lint/ignored-findings.tsv` in the manuscript folder. A fix that falls
+  inside a pending outside form withdraws and restages that tab's forms
+  with the fix carried into their old and new words (the stale-forms
+  road); a filter's or lens's form, or one he has ruled on or edited,
+  leaves the fix "blocked by a pending form". Em-dash warnings show only
+  their count there: he said "in the UI, we don't have the chat session
+  connected, so those warnings will be ignored and that's ok"; they stay
+  yours to judge as above.
 
 **Restart from any point:** `authorlm book restart <step> [--scope <s>]
 --reason '<what was wrong>'` (`--dry-run` lists first). The run and every

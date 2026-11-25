@@ -311,6 +311,30 @@ header .top-nav .chip{padding:4px 8px;font-size:12.5px;min-height:30px}
 .runs-request{padding:10px 0;border-top:1px solid var(--line)}
 .runs-request:first-of-type{border-top:0}
 .runs-commands{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,Menlo,monospace;margin:6px 0}
+/* The Lint view of the Filters page (Lint.tsx). */
+.runs-views{margin:10px 12px 0}
+.lint .card{min-width:0}
+.lint-rules{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:10px}
+.lint-rules .runs-group-title{flex:1 1 100%;margin:4px 0 0}
+.lint-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}
+.lint-chips label.pill{display:inline-flex;align-items:center}
+.lint-hide{position:absolute;opacity:0;width:1px;height:1px}
+.lint-tabs{max-height:40vh;overflow:auto}
+.lint-finding p{overflow-wrap:anywhere}
+.lint-quote{font-style:italic;color:var(--muted)}
+.lint-text{min-height:8rem;margin-top:8px;width:100%;box-sizing:border-box}
+.lint-typed{flex:1 1 12rem;margin-top:0}
+.lint-word,.lint-tab-out{border-top:1px solid var(--line);padding:8px 0}
+.lint-pair{margin-top:8px;font-size:14px;overflow-wrap:anywhere}
+.lint-diff{margin:2px 0 0;line-height:1.5}
+.lint-diff del{background:var(--bad-soft);color:var(--bad);text-decoration:line-through;padding:0 2px;border-radius:3px}
+.lint-diff ins{background:var(--good-soft);color:var(--good);text-decoration:none;font-weight:700;padding:0 2px;border-radius:3px}
+.lint-preview{margin-top:10px;padding:10px 12px;border-radius:12px;border:2px solid var(--yellow);background:var(--panel)}
+.lint-batch{border-top:1px solid var(--line);padding:8px 0}
+.lint-batch summary{cursor:pointer}
+.lint .bar.confirm.runs-confirm{flex-wrap:wrap}
+.lint-queued.bar.confirm{position:sticky;bottom:8px;top:auto;z-index:5}
+.lint .btn{white-space:normal;text-align:left;max-width:100%}
 
 /* Style laws (StyleLaws.tsx): a manuscript's laws by level. */
 .sl{padding:0 0 4rem}
