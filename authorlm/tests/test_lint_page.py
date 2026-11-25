@@ -107,12 +107,37 @@ def _linked(root: Path, name: str):
     return ws, ms, fake
 
 
-def _lint(ws: Path, method: str, fake=None, **params) -> dict:
+def _lint(ws: Path, method: str, fake=None, settle: bool = True,
+          **params) -> dict:
+    """One `lint.*` call. An apply, undo or retry returns once the file is
+    written; with `settle` the background road to the Doc is waited out
+    too (inside the same Google stand-in), and its outcome per fix is
+    added as `doc` ({fix id: {state, reason}}) with each tab's `state`."""
     ctx = _google(fake) if fake is not None else _no_google()
     with ctx, contextlib.redirect_stdout(io.StringIO()):
-        return runs_page.dispatch(f"lint.{method}",
-                                  {"manuscript": "book", **params},
-                                  workspace=str(ws))
+        out = runs_page.dispatch(f"lint.{method}",
+                                 {"manuscript": "book", **params},
+                                 workspace=str(ws))
+        if settle and method in ("apply", "undo", "retry"):
+            assert lint_page.settle(), "the road to the Doc did not settle"
+            status = runs_page.dispatch("lint.status", {"manuscript": "book"},
+                                        workspace=str(ws))
+            out["doc"] = {i: f for t in status["tabs"].values()
+                          for i, f in t["fixes"].items()}
+            out["states"] = {f: t["state"] for f, t in status["tabs"].items()}
+            out["status"] = status
+    return out
+
+
+def _why(out: dict, fix_id: str) -> str:
+    """Why a fix did not land: said at the click, or by the road after."""
+    for t in out.get("tabs", []):
+        for b in t["blocked"]:
+            if b["id"] == fix_id:
+                return b["reason"]
+    got = out.get("doc", {}).get(fix_id, {})
+    return got.get("reason", "") if got.get("state") in (
+        "withdrawn", "held") else ""
 
 
 def _forms(db, manuscript) -> list[dict]:
@@ -326,9 +351,10 @@ def a_guard_applies_nothing_for_the_tab(root: Path) -> None:
         {"id": "w", "kind": "word", "file": "solo.md", "word": "Alpha",
          "to": "Alfa", "rule": "spelling"}])
     check("a tab that lost most of the file's words is never pulled over "
-          "the file (sandbox check, 2026-11-25)",
-          out["applied"] == 0 and "far less than the file" in
-          out["tabs"][0]["blocked"][0]["reason"]
+          "the file (sandbox check, 2026-11-25): the fix is withdrawn in "
+          "the background and the file is as it was",
+          out["doc"]["w"]["state"] == "withdrawn"
+          and "far less than the file" in _why(out, "w")
           and (ms2 / "solo.md").read_text() == full, out)
     (ms / "solo.md").write_text(before.replace("Delta closes",
                                                "Delta, locally, closes"))
@@ -338,8 +364,8 @@ def a_guard_applies_nothing_for_the_tab(root: Path) -> None:
          "to": "Alfa", "rule": "spelling"}])
     check("changed in the file and in the tab: nothing applied, the "
           "reason shown",
-          out["applied"] == 0 and "both changed" in
-          out["tabs"][0]["blocked"][0]["reason"]
+          out["doc"]["w"]["state"] == "withdrawn"
+          and "both changed" in _why(out, "w")
           and "Alfa" not in (ms / "solo.md").read_text(), out)
 
 
@@ -362,8 +388,10 @@ def a_fix_inside_a_pending_form_is_restaged(root: Path) -> None:
          "to": "replaced", "rule": "spelling"}])
     text = (ms / "solo.md").read_text()
     forms = {f["note"]: f for f in _forms(db, manuscript)}
-    check("a spelling fix inside a pending form lands in the file",
-          out["applied"] == 1 and "Beta is to be replaced." in text, out)
+    check("a spelling fix inside a pending form lands in the file, through "
+          "the background road (accepted at the click, written there)",
+          out["accepted"] == 1 and out["doc"]["s"]["state"] == "in-doc"
+          and "Beta is to be replaced." in text, out)
     check("the form is restaged with the fix in its old and new words, "
           "under its own origin and note",
           forms["r-beta"]["proposed_old"] == "Beta is to be replaced."
@@ -397,8 +425,8 @@ def a_fix_inside_a_pending_form_is_restaged(root: Path) -> None:
     forms = {f["note"]: f for f in _forms(db, manuscript)}
     check("a push the guard stops puts the file back and restages the "
           "withdrawn forms as they were",
-          out["applied"] == 0 and "the file was put back" in
-          out["tabs"][0]["blocked"][0]["reason"]
+          out["doc"]["q"]["state"] == "withdrawn"
+          and "the file was put back" in _why(out, "q")
           and (ms / "solo.md").read_text() == before
           and set(forms) == {"r-alpha", "r-beta", "r-add"}
           and forms["r-beta"]["proposed_old"] == "Beta is to be replaced.",
@@ -413,8 +441,8 @@ def a_fix_inside_a_pending_form_is_restaged(root: Path) -> None:
          "to": "Gama", "rule": "spelling"}])
     check("a form you have ruled on is not withdrawn: the fix is blocked by "
           "it, with its origin",
-          out["applied"] == 0 and "blocked by a pending form from harvest"
-          in out["tabs"][0]["blocked"][0]["reason"]
+          out["doc"]["a"]["state"] == "withdrawn"
+          and "blocked by a pending form from harvest" in _why(out, "a")
           and "Gama" not in (ms / "solo.md").read_text(), out)
 
     ws, db, manuscript, ms, fake = _filter_staged(root, "filter-form-ws")
@@ -425,17 +453,293 @@ def a_fix_inside_a_pending_form_is_restaged(root: Path) -> None:
          "to": "walls", "rule": "spelling"}])
     check("a filter's forms are never withdrawn by a lint fix, even for a "
           "fix outside them: blocked by a pending form, naming it",
-          out["applied"] == 0 and "blocked by a pending form" in
-          out["tabs"][0]["blocked"][0]["reason"]
+          out["doc"]["w"]["state"] == "withdrawn"
+          and "blocked by a pending form" in _why(out, "w")
           and (ms / "solo.md").read_text() == before, out)
+
+
+
+# ------------------------------------------- the Doc, in the background
+#
+# Source: the owner's report of 2026-11-25 ("when I apply a change in
+# lint, it takes quite a lot of time although it should be a local file
+# change. Also, other changes cannot be applied on other paragraphs or
+# other tabs until one change is accepted."). Timing-independent: the
+# Doc's push is held on an Event, so "returns before the push" is a fact
+# of order, not of speed.
+
+TWO = "# Two\n\nOmega opens here.\n\nPsi closes the second tab.\n"
+
+
+def _linked_two(root: Path, name: str):
+    """solo.md (ESSAY) and two.md (TWO), each pushed to its tab of one
+    fake Doc, no forms out."""
+    ws = root / name
+    ms = ws / "book"
+    ms.mkdir(parents=True)
+    (ms / "solo.md").write_text(ESSAY)
+    (ms / "two.md").write_text(TWO)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main(["--workspace", str(ws), "init", "--name", "book",
+                  "--path", str(ms), "--extraction", "off"])
+    db = api.open_db(str(ws))
+    manuscript = api.get_manuscript(db)
+    with contextlib.redirect_stdout(io.StringIO()):
+        api.collect(db, manuscript, {})
+    fake = _SurgicalDocFake([("book", ""), ("solo.md", ESSAY),
+                             ("two.md", TWO)], render=True)
+    meta = gdocs._mapping(db, manuscript)
+    meta.setdefault("gdocs", {}).update({
+        "_master_id": "doc-fake", "_container_tab": "tab-1",
+        "solo.md": {"tab_id": "tab-2", "checked_out": True,
+                    "pushed_hash": _h(normalize_markdown(ESSAY))},
+        "two.md": {"tab_id": "tab-3", "checked_out": True,
+                   "pushed_hash": _h(normalize_markdown(TWO))}})
+    gdocs._save_mapping(db, manuscript, meta)
+    audiobook._SESSIONS.pop((str(ws), "book"), None)
+    audiobook.session(str(ws), "book", inline=True)
+    return ws, db, manuscript, ms, fake
+
+
+class _HeldPush:
+    """gdocs.push_doc, held until `release` (each call records its file
+    and waits); the real push then runs."""
+
+    def __init__(self):
+        import threading
+        self.gate = threading.Event()
+        self.started = threading.Event()
+        self.files: list[str] = []
+        self.real = lint_page.gdocs.push_doc
+
+    def __call__(self, db, manuscript, rel, *a, **k):
+        self.files.append(rel)
+        self.started.set()
+        assert self.gate.wait(30), "the held push was never released"
+        return self.real(db, manuscript, rel, *a, **k)
+
+
+def _word(fid: str, file: str, word: str, to: str) -> dict:
+    return {"id": fid, "kind": "word", "file": file, "word": word, "to": to,
+            "rule": "spelling"}
+
+
+def apply_returns_before_the_doc(root: Path) -> None:
+    print("background road:")
+    ws, db, manuscript, ms, fake = _linked_two(root, "bg-ws")
+    held = _HeldPush()
+    with _google(fake), mock.patch.object(lint_page.gdocs, "push_doc", held):
+        out = _lint(ws, "apply", fake, settle=False,
+                    fixes=[_word("a", "solo.md", "Alpha", "Alfa")])
+        check("Apply returns with the fix in the file before the Doc's "
+              "push has finished",
+              out["applied"] == 1 and out["tabs"][0]["doc"] == "queued"
+              and "Alfa stays" in (ms / "solo.md").read_text()
+              and "Alfa" not in fake.tab_text("solo.md"), out)
+        check("and the change is logged at once, waiting for the Doc",
+              [r["doc"] for b in _lint(ws, "log", fake)["batches"]
+               for r in b["changes"]] == ["queued"],
+              _lint(ws, "log", fake)["batches"])
+        assert held.started.wait(10), "the sync never began"
+        status = _lint(ws, "status", fake)
+        check("the tab says it is syncing while its push runs",
+              status["tabs"]["solo.md"]["state"] == "syncing", status)
+        other = _lint(ws, "apply", fake, settle=False,
+                      fixes=[_word("o", "two.md", "Omega", "Omegas")])
+        check("a fix on another tab is applied to its file while the first "
+              "tab syncs",
+              other["applied"] == 1
+              and "Omegas opens" in (ms / "two.md").read_text(), other)
+        held.gate.set()
+        assert lint_page.settle()
+        status = _lint(ws, "status", fake)
+    check("both tabs reach the Doc, one after the other",
+          "Alfa stays" in fake.tab_text("solo.md")
+          and "Omegas opens" in fake.tab_text("two.md")
+          and held.files == ["solo.md", "two.md"]
+          and {f: t["state"] for f, t in status["tabs"].items()}
+          == {"solo.md": "in-doc", "two.md": "in-doc"}, (held.files, status))
+    rows = db.all("SELECT pushed, metadata FROM lint_changes")
+    check("their rows say pushed to the tab",
+          len(rows) == 2 and all(r["pushed"] == 1 for r in rows), rows)
+    check("and the pushed stamps of both tabs are kept",
+          gdocs.unchanged_since_push(db, manuscript, "solo.md")
+          and gdocs.unchanged_since_push(db, manuscript, "two.md"))
+
+
+def same_tab_fixes_are_serialized(root: Path) -> None:
+    print("one tab, in order:")
+    ws, db, _manuscript, ms, fake = _linked_two(root, "serial-ws")
+    held = _HeldPush()
+    with _google(fake), mock.patch.object(lint_page.gdocs, "push_doc", held):
+        _lint(ws, "apply", fake, settle=False,
+              fixes=[_word("a", "solo.md", "Alpha", "Alfa")])
+        assert held.started.wait(10), "the sync never began"
+        second = _lint(ws, "apply", fake, settle=False,
+                       fixes=[_word("d", "solo.md", "Delta", "Deltas")])
+        check("a second fix on a tab that is syncing is accepted at once, "
+              "not written under the running push",
+              second["accepted"] == 1 and second["tabs"][0]["doc"]
+              == "deferred" and "Deltas" not in (ms / "solo.md").read_text(),
+              second)
+        held.gate.set()
+        assert lint_page.settle()
+    text, tab = (ms / "solo.md").read_text(), fake.tab_text("solo.md")
+    check("both land, in the file and in the tab, in two pushes",
+          "Alfa stays" in text and "Deltas closes" in text
+          and "Alfa stays" in tab and "Deltas closes" in tab
+          and held.files == ["solo.md", "solo.md"], (text, tab, held.files))
+    check("nothing waits and every row is pushed",
+          all(r["pushed"] == 1 for r in db.all(
+              "SELECT pushed FROM lint_changes")))
+
+    # Fixes accepted on one tab within the window: one push.
+    lint_page.SYNC_WINDOW = 60.0
+    calls = []
+    real = lint_page.gdocs.push_doc
+
+    def counted(*a, **k):
+        calls.append(a[2])
+        return real(*a, **k)
+
+    try:
+        with _google(fake), mock.patch.object(lint_page.gdocs, "push_doc",
+                                              counted):
+            for fid, word, to in (("g", "Gamma", "Gama"),
+                                  ("b", "Beta", "Betta")):
+                _lint(ws, "apply", fake, settle=False,
+                      fixes=[_word(fid, "solo.md", word, to)])
+            check("within the window both fixes are in the file and the "
+                  "tab is queued",
+                  "Gama is" in (ms / "solo.md").read_text()
+                  and "Betta is" in (ms / "solo.md").read_text()
+                  and _lint(ws, "status", fake)["tabs"]["solo.md"]["state"]
+                  == "queued")
+            lint_page.road(audiobook.session(str(ws), "book")).flush()
+            assert lint_page.settle()
+    finally:
+        lint_page.SYNC_WINDOW = 0.0
+    check("and they go to the Doc in one push",
+          calls == ["solo.md"] and "Gama is" in fake.tab_text("solo.md")
+          and "Betta is" in fake.tab_text("solo.md"), calls)
+
+
+def a_stopped_sync_is_shown_and_kept(root: Path) -> None:
+    print("a sync that cannot finish:")
+    ws, db, _manuscript, ms, fake = _linked_two(root, "stop-ws")
+
+    def unreachable(*_a, **_k):
+        raise RuntimeError("Google answered 503")
+
+    with mock.patch.object(lint_page.gdocs, "doc_three_way", unreachable):
+        out = _lint(ws, "apply", fake,
+                    fixes=[_word("a", "solo.md", "Alpha", "Alfa")])
+    check("the Doc out of reach: the change stays in the file and the tab "
+          "says not in the Doc, with the reason",
+          out["states"]["solo.md"] == "held"
+          and "503" in out["status"]["tabs"]["solo.md"]["reason"]
+          and "Alfa stays" in (ms / "solo.md").read_text()
+          and "Alfa" not in fake.tab_text("solo.md"), out)
+    check("the log row says it is held, not pushed",
+          [(r["doc"], r["pushed"]) for b in _lint(ws, "log", fake)["batches"]
+           for r in b["changes"]] == [("held", 0)])
+    again = _lint(ws, "retry", fake, file="solo.md")
+    check("Push again sends it",
+          again["states"]["solo.md"] == "in-doc"
+          and "Alfa stays" in fake.tab_text("solo.md")
+          and db.one("SELECT pushed FROM lint_changes")["pushed"] == 1,
+          again)
+
+    # The owner typed in the tab since the last push: the fix is not
+    # pushed over it; the tab's words come down first, then the fix.
+    fake.edit("tab-3", "Psi closes", "Psi, typed in the Doc, closes")
+    out = _lint(ws, "apply", fake,
+                fixes=[_word("o", "two.md", "Omega", "Omegas")])
+    text, tab = (ms / "two.md").read_text(), fake.tab_text("two.md")
+    check("newer words in the Doc are pulled before the fix goes up: both "
+          "are in the file and in the tab",
+          out["doc"]["o"]["state"] == "in-doc"
+          and "Omegas opens" in text and "typed in the Doc" in text
+          and "Omegas opens" in tab and "typed in the Doc" in tab,
+          (out, text, tab))
+    logged = [r for b in _lint(ws, "log", fake)["batches"] for r in b["changes"]
+              if r["file"] == "two.md"]
+    check("its log row is the paragraph as it stands after the pull",
+          len(logged) == 1 and logged[0]["after_text"] == "Omegas opens "
+          "here." and logged[0]["doc"] == "in-doc", logged)
+
+    # Undo goes the same road.
+    batch = next(b["batch"] for b in _lint(ws, "log", fake)["batches"]
+                 if b["changes"][0]["file"] == "two.md")
+    undone = _lint(ws, "undo", fake, ids=[batch])
+    check("Undo writes the file at once and the tab follows",
+          undone["applied"] == 1
+          and "Omega opens" in (ms / "two.md").read_text()
+          and "Omega opens" in fake.tab_text("two.md")
+          and undone["states"]["two.md"] == "in-doc", undone)
+
+    # Undo of a fix whose sync is still queued: both reach the Doc as one.
+    lint_page.SYNC_WINDOW = 60.0
+    try:
+        with _google(fake):
+            _lint(ws, "apply", fake, settle=False,
+                  fixes=[_word("g", "solo.md", "Gamma", "Gama")])
+            b = next(b["batch"] for b in _lint(ws, "log", fake)["batches"]
+                     if "Gama" in b["changes"][0]["after_text"])
+            _lint(ws, "undo", fake, settle=False, ids=[b])
+            lint_page.road(audiobook.session(str(ws), "book")).flush()
+            assert lint_page.settle()
+    finally:
+        lint_page.SYNC_WINDOW = 0.0
+    check("an Undo before the sync: the file and the tab end as they began",
+          "Gamma is" in (ms / "solo.md").read_text()
+          and "Gama" not in fake.tab_text("solo.md"))
+
+    # A file marked the owner's alone (the owner's ruling of 2026-11-25 on
+    # the Sermons: "I don't want to change the sermons at all at this
+    # stage. All further edits there will be by me manually."): the
+    # click and the road both make the one check.
+    before = (ms / "two.md").read_text()
+    toc = ms / "toc.toml"
+    plain = ('[[chapter]]\nfile = "solo.md"\n\n'
+             '[[chapter]]\nfile = "two.md"\n')
+    toc.write_text(plain + 'edits = "owner"\n')
+    out = _lint(ws, "apply", fake,
+                fixes=[_word("p", "two.md", "Psi", "Psy")])
+    check("a file only the owner edits (toc edits = \"owner\") gets no "
+          "fix: nothing written",
+          out["applied"] == 0 and 'edits = "owner"' in _why(out, "p")
+          and (ms / "two.md").read_text() == before, out)
+    toc.write_text(plain)
+    lint_page.SYNC_WINDOW = 60.0
+    try:
+        with _google(fake):
+            _lint(ws, "apply", fake, settle=False,
+                  fixes=[_word("p", "two.md", "Psi", "Psy")])
+            toc.write_text(plain + 'edits = "owner"\n')
+            lint_page.road(audiobook.session(str(ws), "book")).flush()
+            assert lint_page.settle()
+            status = _lint(ws, "status", fake)
+    finally:
+        lint_page.SYNC_WINDOW = 0.0
+    check("marked after the click: the road puts the file back and sends "
+          "nothing",
+          (ms / "two.md").read_text() == before
+          and "Psy" not in fake.tab_text("two.md")
+          and status["tabs"]["two.md"]["state"] == "withdrawn"
+          and 'edits = "owner"' in status["tabs"]["two.md"]["reason"],
+          status)
 
 
 def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="lint-page-"))
+    lint_page.SYNC_WINDOW = 0.0   # no window to wait out; batching proved
     for fn in (the_fixes_are_mechanical, the_actions_follow_the_rule,
                apply_goes_into_the_text_not_a_form,
                a_guard_applies_nothing_for_the_tab,
-               a_fix_inside_a_pending_form_is_restaged):
+               a_fix_inside_a_pending_form_is_restaged,
+               apply_returns_before_the_doc, same_tab_fixes_are_serialized,
+               a_stopped_sync_is_shown_and_kept):
         fn(root)
     print(f"OK — {PASSED} Lint view checks")
 
