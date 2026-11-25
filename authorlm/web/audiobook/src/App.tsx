@@ -3,10 +3,11 @@ import { VolumeSlider } from "./audioGain";
 import { ParaNav } from "./ParaNav";
 import { recall, remember } from "./remember";
 import { VoicePicker } from "./ListenVoice";
-import { deveditTransport, formsTransport, request, setManuscript, workbenchTransport } from "./transport";
+import { deveditTransport, formsTransport, request, runsTransport, setManuscript, workbenchTransport } from "./transport";
 import { Workbench } from "./Workbench";
 import { DevEdit } from "./DevEdit";
 import { MergeForms, type FormsActions, type FormsTab } from "./MergeForms";
+import { FiltersLenses } from "./FiltersLenses";
 
 // Mirrors audiobook.Session.status (authorlm/audiobook.py).
 interface ChapterSummary { stem: string; title: string; total: number; generated: number; previewed: number; remaining: number; remainingCharacters: number; stitched: string | null; stitchStale: boolean; }
@@ -44,16 +45,18 @@ const when = (iso: string | null | undefined) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
 const mmss = (s: number | null | undefined) => s == null ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-type PageMode = "chapters" | "pron" | "devedit" | "forms";
-// #<manuscript>/<stem>, #<manuscript>/pron:<term>, #<manuscript>/devedit or #<manuscript>/forms; a bare #<stem> opens
+type PageMode = "chapters" | "pron" | "devedit" | "forms" | "runs";
+// #<manuscript>/<stem>, #<manuscript>/pron:<term>, #<manuscript>/devedit, #<manuscript>/forms or
+// #<manuscript>/runs[:<filter|lens>:<name>] (Filters & lenses, with the open one); a bare #<stem> opens
 // on the server's -m manuscript.
-const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string; tab?: string} => {
+const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string; tab?: string; item?: string} => {
   let h = decodeURIComponent(location.hash.replace(/^#/, ""));
   let ms = "";
   const slash = h.indexOf("/");
   if (slash >= 0) { ms = h.slice(0, slash); h = h.slice(slash + 1); }
   if (h.startsWith("pron")) return {ms, mode: "pron", stem: "", term: h.slice(5)};
   if (h === "devedit") return {ms, mode: "devedit", stem: "", term: ""};
+  if (h === "runs" || h.startsWith("runs:")) return {ms, mode: "runs", stem: "", term: "", item: h.slice(5)};
   if (h === "forms" || h.startsWith("forms:")) return {ms, mode: "forms", stem: "", term: "", tab: h.slice(6)};
   return {ms, mode: "chapters", stem: h, term: ""};
 };
@@ -94,6 +97,7 @@ export function App() {
     return () => { live = false; window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
   }, [ms, mode]);
   const [formsTab, setFormsTab] = useState<string>(parseHash().tab || "");
+  const [runsItem, setRunsItem] = useState<string>(parseHash().item || "");
   const [formsActions, setFormsActions] = useState<FormsActions | null>(null);
   const onFormsTabs = useCallback((tabs: FormsTab[], actions: FormsActions) => {
     setFormsTabs(tabs); setFormsActions(actions);
@@ -135,10 +139,11 @@ export function App() {
     // Choices that survive a reload (author's rule 2026-11-21): the view and
     // its tab live in the URL; the last chapter per manuscript in storage.
     const rest = mode === "pron" ? (term ? `pron:${term}` : "pron") : mode === "devedit" ? mode
-      : mode === "forms" ? (formsTab ? `forms:${formsTab}` : "forms") : stem;
+      : mode === "forms" ? (formsTab ? `forms:${formsTab}` : "forms")
+      : mode === "runs" ? (runsItem ? `runs:${runsItem}` : "runs") : stem;
     history.replaceState(null, "", `#${encodeURIComponent(ms)}/${rest}`);
     if (mode === "chapters" && stem) remember(`authorlm.lastStem.${ms}`, stem);
-  }, [ms, stem, mode, term, formsTab]);
+  }, [ms, stem, mode, term, formsTab, runsItem]);
   const switchManuscript = useCallback((name: string) => {
     audioRef.current?.pause();
     setNow(null);
@@ -147,6 +152,7 @@ export function App() {
     setManuscript(name);
     latestStem.current = "";
     setStem("");
+    setRunsItem("");
     setMs(name);
   }, []);
   const openWord = useCallback((t: string) => { setTerm(t); setMode("pron"); window.scrollTo({top: 0}); }, []);
@@ -228,6 +234,8 @@ export function App() {
           <button className={`chip${mode === "forms" ? " on" : ""}`} aria-pressed={mode === "forms"} onClick={() => setMode("forms")}
             title={formsSummary ? Object.entries(formsSummary.tabs).map(([f, t]) => `${f.replace(/\.md$/, "")}: ${t.open} open, ${t.ruled} ruled`).join("\n") || "No open forms" : undefined}>
             Merge{formsSummary ? ` · ${formsSummary.open - formsSummary.ruled}` : ""}</button>
+          <button className={`chip${mode === "runs" ? " on" : ""}`} aria-pressed={mode === "runs"} onClick={() => setMode("runs")}
+            title="Browse and edit the filters and lenses, and ask for runs on tabs">Filters</button>
           <a className="chip" href={`/try-text${location.hash}`} title="Try things out: read pasted text aloud">Audition</a>
         </nav>
         <div className="title-row">
@@ -303,6 +311,7 @@ export function App() {
       {mode === "pron" && <Workbench key={ms} transport={workbenchTransport} manuscript={ms} initialTerm={term || undefined} />}
       {mode === "devedit" && <DevEdit key={ms} transport={deveditTransport} manuscript={ms} />}
       {mode === "forms" && <MergeForms key={ms} transport={formsTransport} manuscript={ms} tab={formsTab} onTabs={onFormsTabs} />}
+      {mode === "runs" && <FiltersLenses key={ms} transport={runsTransport} manuscript={ms} open={runsItem} onOpen={setRunsItem} />}
       {mode === "chapters" && <JobStrip jobs={jobs} held={status.held || []} onForms={openForms} />}
 
       {mode === "chapters" && chapter && cur && (

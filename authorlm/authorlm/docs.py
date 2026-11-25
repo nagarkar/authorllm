@@ -93,6 +93,7 @@ NAME_COLUMNS = (
     ("section_summaries", "file"),
     ("filter_runs", "file"),
     ("filter_readings", "file"),
+    ("run_requests", "file"),
     ("illus_proposals", "file"),
     ("doc_comments", "file"),
     ("doc_threads", "file"),

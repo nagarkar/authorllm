@@ -512,6 +512,12 @@ The register of settled choices: every choice the author has made about a book, 
 
 Revision Collector and Revision Analyzer (RFC AuthorLM §17.3–§17.4).
 
+## `authorlm.runs_page`
+
+`authorlm/authorlm/runs_page.py`
+
+The Filters and lenses page (`runs_page.dispatch`, `/api/runs`): browse every filter and lens a manuscript sees, edit an artifact's text in place, and ask for runs of one or more of them on one or more tabs.
+
 ## `authorlm.sessions`
 
 `authorlm/authorlm/sessions.py`
@@ -1441,6 +1447,12 @@ Doc export can wrap a struck old half in emphasis (`<<*term*>>` for a staged `te
 `authorlm/tests/test_run_all.py`
 
 tests/run_all.py, the suite's one runner, against fixture trees: throwaway test files whose outcome is known, so nothing here needs Node, a model or the real suite. Every test that ought to run runs; a silent skip or an early stop is how one does not. (owner)
+
+## `tests.test_runs_page`
+
+`authorlm/tests/test_runs_page.py`
+
+The Filters and lenses page (`runs_page.dispatch`, `/api/runs`): browse the filters and lenses a manuscript sees, save an edited artifact back to its file, and ask for runs on chosen tabs.
 
 ## `tests.test_same_para`
 
