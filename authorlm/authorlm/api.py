@@ -6016,7 +6016,10 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
     `docs/morph-design.md` §10). The mechanics are identical because the
     forms are the identical shape: judgment tags are insertions ruled by
     presence, replace forms are ruled by their old/new text, and both
-    settle through the same `<<old>>{{new}}` tab either producer uses."""
+    settle through the same `<<old>>{{new}}` tab either producer uses.
+
+    An emptied green half (`<<old>>{{}}`) is a decline, as on the filter
+    and lens roads (`restore_emptied_forms` before settle)."""
     from . import gdocs
     from . import lenses as _lenses
     from . import morph as _morph
@@ -6052,9 +6055,14 @@ def morph_resolve(db: Database, manuscript: dict, config: dict, file: str,
         collect(db, manuscript, config, source="pre-morph-settle")
     # Judgment tags first (`_rule_judgments`), so record_resolution's
     # unmatched loop never sees them. Nothing is written until the local
-    # file is known to merge — the same shape as `lens_resolve`.
-    marked, rulings = _rule_judgments(fetched["marked"], written)
+    # file is known to merge — the same shape as `lens_resolve`. An
+    # emptied green half (`<<old>>{{}}`, or a bare `<<old>>`) is a
+    # decline, as on the filter and lens roads: restore before settle so
+    # `final_text_from_marked` does not keep an empty new and delete the
+    # paragraph (CLI: empty/delete the green half = decline).
     replaces = [t for t in written if (t.get("proposed_old") or "") != ""]
+    marked = restore_emptied_forms(fetched["marked"], replaces)
+    marked, rulings = _rule_judgments(marked, written)
     final, forms = passes.final_text_from_marked(
         marked, written=replaces, kinds=("replace",))
     final, _ = form_grammar.strip_form_remnants(

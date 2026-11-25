@@ -1342,6 +1342,12 @@ Pure helpers behind Veo clip generation: duration buckets, day spend, prompt com
 
 `summarize rebuild --model --effort` reaches the API layer.
 
+## `tests.test_morph_settle_emptied`
+
+`authorlm/tests/test_morph_settle_emptied.py`
+
+Morph Doc settle: an emptied green half is a decline, not a delete.
+
 ## `tests.test_morph_targets`
 
 `authorlm/tests/test_morph_targets.py`
