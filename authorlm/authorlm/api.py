@@ -3384,6 +3384,18 @@ def move_style_guide(db: Database, manuscript: dict, name: str,
     return st.move_guide(db, manuscript["id"], dict(guide), dict(parent), actor=actor)
 
 
+def rename_style_guide(db: Database, manuscript: dict, name: str,
+                       new_name: str, actor: str = "cli") -> dict:
+    """Rename a guide (`styles.rename_guide`): same id, so its parent,
+    children, attached files and laws are untouched."""
+    from . import styles as st
+
+    guide = st.get_guide(db, manuscript["id"], name)
+    if not guide:
+        raise LookupError(f"no style guide named '{name}'")
+    return st.rename_guide(db, manuscript["id"], dict(guide), new_name, actor=actor)
+
+
 def retire_style_law(db: Database, manuscript: dict, prefix: str,
                      reason: str | None = None, actor: str = "cli",
                      replaced_by: str | None = None) -> dict:
@@ -4352,6 +4364,10 @@ def _filter_capture(db: Database, manuscript: dict, file: str,
         structure.refuse_sidecar(Path(file).name)
         raise LookupError(
             f"'{file}' is not in the manuscript's reading order")
+    if not verb.endswith("resolve"):
+        # A file only the owner edits takes no new pass (toc `edits =
+        # "owner"`); a resolve only carries the owner's own verdicts home.
+        structure.decline_owner_edits(manuscript["path"], rel, verb)
     if rel in inflight:
         # The refusal borrows `passes.build_context`'s wording verbatim:
         # what is on disk is a placeholder, not the essay, so a filter
@@ -6760,6 +6776,13 @@ def stage_revisions(db: Database, manuscript: dict, file: str,
     if not revisions:
         result["url"] = tab_link()
         return result
+    owner_only = structure.owner_edits_reason(
+        (Path(manuscript["path"]) / structure.TOC_FILENAME).read_text(
+            encoding="utf-8")
+        if (Path(manuscript["path"]) / structure.TOC_FILENAME).exists()
+        else "", rel)
+    if owner_only:
+        return held(owner_only)
     pending = gdocs.forms_pending(db, mid, rel)
     if pending:
         n = db.one(

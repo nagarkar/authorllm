@@ -376,7 +376,9 @@ def build_context(db: Database, manuscript: dict, file: str,
     the pass has always done."""
     from .styles import render as render_style
     from . import input_blocks
+    from .structure import decline_owner_edits
 
+    decline_owner_edits(manuscript["path"], file, "the critique pass")
     gate = preflight(db, manuscript, file, pass_row)
     if not gate["clear"] and not force:
         raise RuntimeError(_gate_message(gate))

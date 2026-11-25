@@ -1850,6 +1850,9 @@ def apply_item(manuscript: dict, item: dict, text: str | None = None) -> str:
     when None) in its file. The original must occur exactly once; anything
     else means the file changed since the item was made, and nothing is
     written. Returns the file name."""
+    from .structure import decline_owner_edits
+
+    decline_owner_edits(manuscript["path"], item["file"], "developmental edit")
     path = Path(manuscript["path"]) / item["file"]
     body = path.read_text(encoding="utf-8")
     original = item["original"]

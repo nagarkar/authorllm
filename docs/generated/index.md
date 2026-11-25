@@ -1378,6 +1378,12 @@ Pure Omni helpers: model gate, duration clamp, billed USD from token usage, and 
 
 `threads.own_line_form` / `math_spans` / `in_math` / `pending_forms` decide which bare `{{…}}` count as staged insertions on Doc-road resolve.
 
+## `tests.test_owner_edits`
+
+`authorlm/tests/test_owner_edits.py`
+
+A file only the owner edits: `edits = "owner"` on its toc.toml entry.
+
 ## `tests.test_paragraph_records`
 
 `authorlm/tests/test_paragraph_records.py`

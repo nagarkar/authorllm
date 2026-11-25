@@ -42,6 +42,7 @@ interface Group { rule: string; count: number; act: "one" | "bulk" | "count"; ig
 interface RunResult {
   files: string[]; groups: Group[]; counts: Record<string, number>; ignored: Record<string, number>;
   quote_laws: Record<string, { id: string; statement: string }>; ignore_file: string; accepted_file: string; error?: string;
+  held?: Record<string, string>;
 }
 interface Fix { id?: string; kind: "curl" | "untrack" | "word" | "paragraph"; file: string; rule: string; word?: string; to?: string; old?: string; new?: string; line?: number }
 interface Segment { op: "equal" | "delete" | "insert"; text: string }
@@ -50,7 +51,7 @@ interface TabOut { file: string; applied: string[]; blocked: { id: string; reaso
 interface Applied { batch: string; tabs: TabOut[]; applied: number; blocked: number; error?: string }
 interface LogRow { id: string; file: string; rule: string; line: number; before_text: string; after_text: string; pushed: number; undone_at: string | null; created_at: string; segments: Segment[] }
 interface Batch { batch: string; at: string; changes: LogRow[] }
-interface TabInfo { file: string; title: string; checked_out: boolean; url: string | null }
+interface TabInfo { file: string; title: string; checked_out: boolean; url: string | null; owner_edits?: string | null }
 
 const readJSON = <T,>(key: string, fallback: T): T => {
   try { const v = JSON.parse(recall(key) || "null"); return v == null ? fallback : v as T; } catch { return fallback; }
@@ -235,7 +236,8 @@ export function Lint({ transport, manuscript, tabs, ticked, setTicked, filter, o
         <div className="runs-tabs lint-tabs">{tabs.map(t => (
           <label key={t.file} className="runs-tab">
             <input type="checkbox" checked={ticked.includes(t.file)} onChange={() => ticks(ticked, setTicked, t.file)} />
-            <span className="runs-tab-body"><span className="runs-name">{t.title}</span><span className="muted"> {t.file}{t.checked_out ? " · in the Doc (pulled first, pushed after)" : ""}</span></span>
+            <span className="runs-tab-body"><span className="runs-name">{t.title}</span><span className="muted"> {t.file}{t.checked_out ? " · in the Doc (pulled first, pushed after)" : ""}</span>
+              {t.owner_edits && <span className="moved bad-note">Not linted, no fix applied: {t.owner_edits}</span>}</span>
           </label>))}</div>
         {rulePicker("Proof rules", PROOF)}
         {rulePicker("Style checks", STYLE)}
@@ -269,6 +271,7 @@ export function Lint({ transport, manuscript, tabs, ticked, setTicked, filter, o
           {result.files.map(f => <button key={f} className={`pill${filterFile === f ? " on" : ""}`} onClick={() => onFilter(`${filterRule || "all"}:${f}`)}>{short(f)}</button>)}
         </div>
         {groups.length === 0 && <p className="muted">Nothing found.</p>}
+        {Object.entries(result.held ?? {}).map(([file, why]) => <p key={file} className="moved bad-note">{short(file)} not linted: {why}</p>)}
         {Object.keys(result.ignored).length > 0 && <p className="muted">Left out as legitimate uses: {Object.entries(result.ignored).map(([r, n]) => `${n} ${ruleName(r)}`).join(", ")} (listed in {result.ignore_file}; delete a line there to see one again).</p>}
       </section>}
 

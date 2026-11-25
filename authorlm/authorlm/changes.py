@@ -167,7 +167,10 @@ def _require_writable(db: Database, manuscript: dict, relpath: str,
     not; returns the tab's state otherwise. `tab_state(relpath)` stands in
     for the read of Google (tests pass one)."""
     from . import gdocs
+    from .structure import decline_owner_edits
 
+    # A file only the owner edits (toc `edits = "owner"`) first.
+    decline_owner_edits(manuscript["path"], relpath, "agent step")
     name = manuscript["name"]
     entry = gdocs.doc_status(db, manuscript).get(relpath)
     if isinstance(entry, dict) and entry.get("checked_out"):

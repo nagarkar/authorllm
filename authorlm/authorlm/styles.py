@@ -291,6 +291,29 @@ def move_guide(db: Database, manuscript_id: str, guide: dict, parent: dict,
     return {"guide": guide["name"], **detail}
 
 
+def rename_guide(db: Database, manuscript_id: str, guide: dict, name: str,
+                 actor: str = "cli") -> dict:
+    """Give a guide a new name. Guides are keyed by id: a child's parent,
+    a file's attachment and a law's owner all hold the id, so every link
+    stays as it was and no file's law changes. Only lookups by name
+    (`--guide`, `--parent`, `attach`) take the new name. A name another
+    guide of the manuscript holds (case-insensitive, as lookups are) is
+    declined, so a name always finds one guide."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("a guide's name cannot be empty")
+    if name == guide["name"]:
+        raise ValueError(f"'{guide['name']}' already has that name")
+    other = get_guide(db, manuscript_id, name)
+    if other and other["id"] != guide["id"]:
+        raise ValueError(f"another style guide is named '{other['name']}'")
+    detail = {"from": guide["name"], "to": name}
+    with db.transaction():
+        db.update("style_guides", guide["id"], {"name": name})
+        record_event(db, dict(guide), "guide-rename", actor, detail)
+    return {"guide": guide["id"], **detail}
+
+
 def retire_element(db: Database, element: dict, reason: str | None = None,
                    actor: str = "cli", replaced_by: str | None = None) -> None:
     with db.transaction():

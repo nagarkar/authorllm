@@ -488,6 +488,50 @@ def guide_move_reparents_a_guide_and_nothing_else(root: Path) -> None:
           and laws["q"]["id"] not in ids("p.md"), out)
 
 
+def guide_rename_keeps_every_link(root: Path) -> None:
+    """`style guide-rename`: a guide takes a new name. Guides are keyed by
+    id (a child's parent, a file's attachment and a law's owner all name
+    the id), so every link survives and every file's law is unchanged;
+    the rename is in the guide's history; a name another guide holds,
+    an empty name and an unknown guide are declined."""
+    ws, db, manuscript, laws = _book(root, "guide-rename")
+    mid = manuscript["id"]
+    files = ("a.md", "r.md", "p.md", "loose.md")
+
+    def ids(f: str) -> list[str]:
+        return [e["id"] for e in styles.effective_style(db, mid, f)]
+
+    before = {f: ids(f) for f in files}
+    part = styles.get_guide(db, mid, "Part")
+    out = api.rename_style_guide(db, manuscript, "Part", "Essay Laws")
+    check("guide-rename says the old and the new name",
+          out == {"guide": part["id"], "from": "Part", "to": "Essay Laws"}, out)
+    renamed = styles.get_guide(db, mid, "Essay Laws")
+    check("the guide keeps its id under the new name",
+          renamed is not None and renamed["id"] == part["id"])
+    check("the old name no longer finds it", styles.get_guide(db, mid, "Part") is None)
+    check("every file's law is unchanged", {f: ids(f) for f in files} == before)
+    recaps = styles.get_guide(db, mid, "Recaps")
+    check("a child guide still sits under it", recaps["parent"] == part["id"])
+    hist = styles.law_history(db, mid, part["id"])
+    check("the rename is in the guide's history",
+          hist[-1]["event"] == "guide-rename"
+          and hist[-1]["detail"] == {"from": "Part", "to": "Essay Laws"}, hist)
+    for bad, name, new in (("a name another guide holds", "Essay Laws", "papers"),
+                           ("an empty name", "Essay Laws", "  "),
+                           ("an unknown guide", "Nowhere", "Somewhere"),
+                           ("the name it already has", "Essay Laws", "Essay Laws")):
+        try:
+            api.rename_style_guide(db, manuscript, name, new)
+            check(f"guide-rename declines {bad}", False)
+        except (LookupError, ValueError):
+            check(f"guide-rename declines {bad}", True)
+    out = _cli(ws, "style", "guide-rename", "Essay Laws", "Part")
+    check("style guide-rename on the command line",
+          "Essay Laws" in out and "Part" in out
+          and styles.get_guide(db, mid, "Part")["id"] == part["id"], out)
+
+
 def edit_sets_what_a_law_displaces(root: Path) -> None:
     """`style edit --overrides`: a law starts (or stops) displacing an
     inherited law, same id, the change in its history; only files under
@@ -564,6 +608,7 @@ def main() -> None:
                an_essay_shows_its_effective_law_as_sent,
                reads_write_nothing, page_writes_are_the_cli_verbs,
                cli_verbs_and_show, guide_move_reparents_a_guide_and_nothing_else,
+               guide_rename_keeps_every_link,
                edit_sets_what_a_law_displaces, server_routes_api_style):
         print(f"{fn.__name__}:")
         fn(root)

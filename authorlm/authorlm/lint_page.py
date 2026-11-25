@@ -76,7 +76,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
 
-from . import api, changes, gdocs, proof
+from . import api, changes, gdocs, proof, structure
 from .db import Database, ko_fields, now_iso
 
 IGNORE_FILE = "_lint/ignored-findings.tsv"
@@ -97,6 +97,15 @@ COUNT_ONLY = ("em-dash",)
 ORDER = ONE_BY_ONE + STYLE_ONE_BY_ONE + BULK + COUNT_ONLY
 FIX_KINDS = ("curl", "untrack", "word", "paragraph")
 PREVIEW_PAIRS = 5
+
+
+def _toc(manuscript: dict) -> str:
+    """toc.toml's text, or "" (for the owner-edits flag)."""
+    path = Path(manuscript["path"]) / structure.TOC_FILENAME
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def _flat(text: str) -> str:
@@ -220,8 +229,15 @@ def run(db: Database, manuscript: dict, files: list[str],
     by_rule: dict[str, list[dict]] = {}
     hidden: dict[str, int] = {}
     quote_laws: dict[str, dict] = {}
+    held: dict[str, str] = {}
+    toc_text = _toc(manuscript)
     for query in files:
         rel = changes.docs._resolve_relpath(manuscript, query)
+        owner_only = structure.owner_edits_reason(toc_text, rel)
+        if owner_only:
+            # Not linted: no fix may reach it, so a finding is no use.
+            held[rel] = owner_only
+            continue
         text = known.get(rel)
         if text is None:
             text = (root / rel).read_text(encoding="utf-8")
@@ -268,7 +284,7 @@ def run(db: Database, manuscript: dict, files: list[str],
                       for f in files],
             "rules": wanted, "groups": groups,
             "counts": {g["rule"]: g["count"] for g in groups},
-            "ignored": hidden, "quote_laws": quote_laws,
+            "ignored": hidden, "quote_laws": quote_laws, "held": held,
             "ignore_file": str(root / IGNORE_FILE),
             "accepted_file": str(root / proof.ACCEPTED_FILE)}
 
@@ -603,6 +619,9 @@ def apply_tab(db: Database, manuscript: dict, rel: str, fixes: list[dict],
         result["message"] = f"{rel}: nothing applied. {reason}"
         return result
 
+    owner_only = structure.owner_edits_reason(_toc(manuscript), rel)
+    if owner_only:
+        return block_all(owner_only)
     if linked and (service is None or docs_service is None):
         return block_all(
             "this tab is in the Google Doc and the server has no Google "

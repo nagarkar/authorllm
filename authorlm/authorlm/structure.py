@@ -182,6 +182,54 @@ def toc_attrs(toc_text: str) -> dict[str, dict]:
             for c in _toc_chapters(toc_text)}
 
 
+
+# A file only the owner edits (owner ruling 2026-11-25 on the Sermons: "I
+# don't want to change the sermons at all at this stage. All further edits
+# there will be by me manually."). `edits = "owner"` on the file's
+# [[chapter]] entry, a toc key and not a marker in the file, for the
+# reason SIDECAR_FILES gives: a Doc round trip cannot eat it. Every road
+# that writes to a file without the owner's hand checks it and declines
+# with `owner_edits_reason`: filter run/prelude/record/apply/push, lens
+# run and push, morph push, the critique pass, revise stage, an agent
+# step's landing or draft, a developmental edit's apply, and the Lint
+# view's fixes; the Filters and Lint views show the reason. Not checked,
+# by design: the owner's own edits in the Doc, `doc pull` of them, and the
+# audiobook page's paragraph editor, where the owner types the text.
+# `register = "protected"` is a different key: it keeps a lens off the
+# file's VOICE and nothing else.
+OWNER_EDITS_KEY = "edits"
+OWNER_EDITS_VALUE = "owner"
+
+
+def owner_edits_files(toc_text: str) -> list[str]:
+    """Files whose toc entry says `edits = "owner"`, in toc order."""
+    return [f for f, a in toc_attrs(toc_text).items()
+            if a.get(OWNER_EDITS_KEY) == OWNER_EDITS_VALUE]
+
+
+def owner_edits_reason(toc_text: str, file: str) -> str | None:
+    """Why no automated pass may write to `file`, or None. Matches by file
+    name, as toc entries name files."""
+    name = Path(file).name
+    if file not in owner_edits_files(toc_text) and name not in owner_edits_files(toc_text):
+        return None
+    return (f'{name} is marked edits = "owner" in toc.toml: the owner edits '
+            f"it by hand, so no automated pass writes to it (owner ruling "
+            f"2026-11-25). His edits in the Doc and 'doc pull' still work.")
+
+
+def decline_owner_edits(root, file: str, road: str = "") -> None:
+    """Raise ValueError with the reason when `file` under the manuscript
+    folder `root` is the owner's alone."""
+    try:
+        toc_text = (Path(root) / TOC_FILENAME).read_text(encoding="utf-8")
+    except OSError:
+        return
+    why = owner_edits_reason(toc_text, file)
+    if why:
+        raise ValueError(f"{road + ': ' if road else ''}nothing was changed. {why}")
+
+
 # The `summary` key of a [[chapter]] entry: one sentence, hidden from the
 # reader, stating what the essay argues. It is the developmental edit's
 # standard of drift (devedit.essay_pack carries it to every checker) and the

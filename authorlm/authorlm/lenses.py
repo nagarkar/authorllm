@@ -841,6 +841,10 @@ def assemble(db: Database, manuscript: dict, name: str, file: str,
         files = read_manuscript_files(Path(manuscript["path"]))
     rel = find_file(files, file)
     text = files[rel]
+    from .structure import owner_edits_reason, TOC_FILENAME
+    owner_only = owner_edits_reason(files.get(TOC_FILENAME) or "", rel)
+    if owner_only:
+        raise ValueError(f"lens run: nothing was changed. {owner_only}")
     if rel in protected_files(files):
         raise ValueError(f"{rel} is a protected register — no lens runs on "
                          "it; the register protects its voice by design.")
