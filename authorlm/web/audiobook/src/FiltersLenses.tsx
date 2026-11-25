@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Transport } from "./transport";
 import { recall, remember } from "./remember";
+import { Lint } from "./Lint";
 
 // Mirrors runs_page.dispatch (authorlm/runs_page.py): every filter and lens
 // the manuscript sees, the text of one of them (editable, saved back to its
@@ -13,6 +14,8 @@ import { recall, remember } from "./remember";
 //   URL hash      the manuscript and the open filter or lens
 //                 (#<manuscript>/runs:<kind>:<name>, kept by App.tsx): they
 //                 name what is being looked at, worth a bookmark or a link.
+//                 The Lint view is #<manuscript>/runs:lint[:<rule>[:<file>]]
+//                 (Lint.tsx), for the same reason.
 //   localStorage  per manuscript: the ticked filters and lenses, the ticked
 //                 tabs, the find box and the scroll position (personal
 //                 working state, of no use in a shared link); per artifact:
@@ -65,6 +68,8 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
   transport: Transport; manuscript: string; open: string; onOpen: (key: string) => void;
 }) {
   const store = `authorlm.runs.${manuscript}`;
+  // The Lint view shares this page, its tabs and their saved ticks.
+  const isLint = open === "lint" || open.startsWith("lint:");
   const [cat, setCat] = useState<Catalog | null>(null);
   const [error, setError] = useState("");
   const [find, setFind] = useState(() => recall(`${store}.find`));
@@ -125,7 +130,7 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
   const draftKey = open ? `${store}.draft.${open}` : "";
   useEffect(() => {
     setShown(null); setNote(null);
-    if (!open) return;
+    if (!open || isLint) return;
     const [kind, name] = open.split(":");
     let live = true;
     transport.request<Shown & { error?: string }>("show", { kind, name }).then(s => {
@@ -215,6 +220,19 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
   };
 
   if (!cat) return <div className="card muted">{error || "Reading the filters and lenses…"}</div>;
+  const views = (
+    <div className="devedit-actions runs-views" role="tablist">
+      <button className={`pill${isLint ? "" : " on"}`} role="tab" aria-selected={!isLint} onClick={() => onOpen("")}>Filters and lenses</button>
+      <button className={`pill${isLint ? " on" : ""}`} role="tab" aria-selected={isLint} onClick={() => onOpen("lint")}>Lint</button>
+    </div>
+  );
+  if (isLint) return (
+    <div className="runs">
+      {views}
+      <Lint transport={transport} manuscript={manuscript} tabs={cat.tabs} ticked={tabs} setTicked={setTabs}
+        filter={open.slice(5)} onFilter={f => onOpen(f ? `lint:${f}` : "lint")} />
+    </div>
+  );
   const waiting = cat.requests.filter(r => WAITING.has(r.state));
   const openArtifact = all.find(a => keyOf(a) === open);
   const pairLine = (p: Pair) => `${p.kind} ${p.name} on ${p.file.replace(/\.md$/, "")}`;
@@ -248,6 +266,7 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
 
   return (
     <div className="runs">
+      {views}
       {error && <div className="status bad">{error}</div>}
 
       <section className="card">

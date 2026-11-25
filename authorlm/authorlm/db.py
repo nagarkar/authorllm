@@ -521,6 +521,26 @@ CREATE TABLE IF NOT EXISTS run_requests (
     cancelled_at    TEXT
 );
 
+-- One paragraph a fix on the Filters page's Lint view changed
+-- (lint_page.py): the text before and after, for the author to read and
+-- undo. A fix goes straight into the file and its tab, never a form; this
+-- is its record. `undone_at` is set when Undo put the before back (the
+-- undo is logged as its own rows). `restaged` holds the forms withdrawn
+-- and restaged to carry the fix, as staged again (JSON), or NULL.
+CREATE TABLE IF NOT EXISTS lint_changes (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id   TEXT NOT NULL,
+    batch_id        TEXT NOT NULL,   -- one Apply click
+    file            TEXT NOT NULL,   -- relpath
+    rule            TEXT NOT NULL,   -- the lint rule(s) fixed, or 'undo'
+    line            INTEGER,         -- the paragraph's first line, before
+    before_text     TEXT NOT NULL,
+    after_text      TEXT NOT NULL,
+    pushed          INTEGER NOT NULL DEFAULT 0,  -- 1: the tab got it too
+    undone_at       TEXT,
+    restaged        TEXT
+);
+
 -- One shared whole-essay reading per (filter family, file), issue #412
 -- (readings.py). A run COPIES it into filter_runs.registry at prelude time
 -- and never reads it again, so a later reading cannot touch a live run.
