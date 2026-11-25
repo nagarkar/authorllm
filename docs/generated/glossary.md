@@ -2,6 +2,7 @@
 
 # Glossary
 
+- **accepted-words file** (`authorlm.proof`): `<manuscript>/_lint/accepted-words.txt`, the words the author has accepted for the spell check, one per line.
 - **actor** (`authorlm.book`): who carries out a step: `agent`, or `human:<who>`.
 - **agent edits** (`authorlm.book`): the manuscript's setting for how an agent's edit reaches a chapter: `forms` (it waits for the author) or `direct` (it lands in the file with a change list).
 - **change** (`authorlm.changes`): one replacement an agent role landed in a chapter file: the words that stood (`old`), the words that replaced them (`new`) and the reason (`note`); a row of `step_changes`, `applied` or `reverted`.
@@ -11,12 +12,14 @@
 - **item** (`authorlm.devedit`): one proposed change: an exact original passage and its proposed replacement, or a structural move stated in one line.
 - **landing** (`authorlm.changes`): one call of `land`: a batch of changes to one file, all written or none.
 - **pack** (`authorlm.book`): what a role is handed when its run starts: its contract, the register entries in scope, what the steps before it returned, and, on a rerun, the superseded result as reference.
+- **proof check** (`authorlm.proof`): one of the seven deterministic rules of this module, named by its code (`RULES`).
 - **reading** (`authorlm.register`): the machine's restatement, in one to three sentences, of what the author's words settle.
 - **register** (`authorlm.register`): the record of the choices the author has settled for one manuscript, the tables `register_entries` and `register_uses`.
 - **register entry** (`authorlm.register`): one choice: its kind, its key, the author's words, the machine's reading, an optional test, and its scope (the whole book or one document).
 - **register use** (`authorlm.register`): a record that a piece of work rests on an entry, in one of two modes: `applies` (the work does what the entry says) or `infers` (the work goes beyond what the entry says).
 - **role file** (`authorlm.book`): a Claude Code subagent file for one agent role, `.claude/agents/book-<role slug>.md`, named in that role's packs.
 - **run** (`authorlm.devedit`): one developmental edit of one manuscript, the folder `_devedit/<run-id>/`.
+- **spelling variant** (`authorlm.proof`): American (`us`) or British (`uk`) spelling, read from the manuscript's `language`.
 - **step** (`authorlm.book`): one role's turn in the workflow: its id, role, actor, grain, the steps it follows, what it is given, what it returns and what it leaves alone.
 - **step contract** (`authorlm.book`): what a step asks of its role: its role, grain, the steps it follows, what it is given, what it returns and what it leaves alone. Not its actor.
 - **step event** (`authorlm.book`): one change of a step run's status, a row of `step_events`: the run, the status before and after, who, and why.

@@ -39,6 +39,7 @@ class Finding:
     quote: str              # the sentence or phrase the finding names
     message: str
     ref: str = ""           # what it points at: a file ¶n, a concept, a law
+    line: int = 0           # 1-based line in the file; proof.py sets it
 
     def key(self) -> tuple[str, str]:
         """Identity for delta comparison: the same fault on the same

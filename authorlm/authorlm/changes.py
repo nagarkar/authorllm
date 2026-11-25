@@ -796,32 +796,191 @@ def revert(db: Database, manuscript: dict, config: dict,
 
 # ---------------------------------------------------------------------- lint
 
-def lint_chapter(db: Database, manuscript: dict, file: str) -> dict:
-    """The deterministic lint (lint.py) over one whole chapter as it is on
-    disk, against the rest of the book: `{file, findings, counts, next}`,
-    each finding with its law, its severity and the words quoted. No
-    model call, nothing written, open under either `agent_edits` value.
-    The chapter itself is left out of the overlap check, so a chapter is
-    not reported as repeating itself."""
-    from . import critic, lint
+# The codes `lint.lint_text` reports, in the order of its checks. With
+# `proof.RULES` they are every rule `book lint` can be asked for.
+LINT_CODES = ("what-opener", "this-not-that", "term-in-definition",
+              "em-dash-stack", "em-dash", "long-sentence", "reading-grade",
+              "overlap", "redefinition", "italic-term")
 
+
+def lint_rules(only: list[str] | None = None,
+               skip: list[str] | None = None,
+               default: tuple[str, ...] | None = None) -> list[str]:
+    """The rules a `book lint` run reports: `only` when given, else
+    `default` (every rule when None), minus `skip`. An unknown name is an
+    error that lists the names."""
+    from . import proof
+
+    every = LINT_CODES + proof.RULES
+    unknown = [r for r in (only or []) + (skip or []) if r not in every]
+    if unknown:
+        raise ValueError(
+            f"unknown lint rule: {', '.join(unknown)}. The rules are: "
+            f"{', '.join(every)}")
+    chosen = list(only) if only else list(default or every)
+    return [r for r in every if r in chosen and r not in (skip or [])]
+
+
+def proof_lexicon(db: Database, manuscript: dict):
+    """What the spell check accepts for this manuscript beyond the
+    dictionary: every concept name and alias (any status: a retired
+    concept's name is still spelled that way), the pronunciation
+    dictionary's terms, the capitalised words of the current filter
+    readings, and the accepted-words file. The variant is the
+    manuscript's language. `used` and `names` are read from the book's
+    own text (`proof.vocabulary`)."""
+    from . import proof, pronunciations
+
+    root = Path(manuscript["path"])
+    terms: list[str] = []
+    for row in db.all("SELECT name, aliases FROM concept_nodes "
+                      "WHERE manuscript_id = ?", (manuscript["id"],)):
+        terms.append(row["name"])
+        terms += loads(row["aliases"], [])
+    sidecar = root / pronunciations.FILENAME
+    if sidecar.is_file():
+        terms += pronunciations.terms(sidecar.read_text(encoding="utf-8"))
+    for row in db.all("SELECT registry FROM filter_readings WHERE "
+                      "manuscript_id = ? AND status = 'current'",
+                      (manuscript["id"],)):
+        terms += proof.capitalised_words(row["registry"])
+    terms += proof.read_accepted(root)
+    from . import critic
+
+    used, names = proof.vocabulary(critic.book(manuscript)[0].values())
+    return proof.Lexicon(
+        variant=proof.variant_of(manuscript.get("language") or ""),
+        accepted=proof.accepted_set(terms), used=used, names=names)
+
+
+def _proof_findings(db: Database, manuscript: dict, relpath: str,
+                    text: str, rules: list[str], lexicon) -> list:
+    """The proof findings for one file: its quote-style law and banned
+    words are read from the style laws that govern THAT file."""
+    from . import proof, styles
+
+    wanted = [r for r in rules if r in proof.RULES]
+    if not wanted:
+        return []
+    statements = [law["statement"] for law in styles.effective_style(
+        db, manuscript["id"], relpath)]
+    return proof.proof_text(text, lexicon=lexicon, rules=wanted,
+                            law=proof.quote_law(statements),
+                            bans=proof.ban_terms(statements))
+
+
+def _finding_row(f) -> dict:
+    row = {"code": f.code, "severity": f.severity,
+           # The reading grade is a paragraph's; lint.py quotes the
+           # paragraph's opening words only.
+           "quote": " ".join(f.quote.split())
+           + ("…" if f.code == "reading-grade" else ""),
+           # A paragraph number is no use to a reader: the words
+           # quoted are the place.
+           "message": re.sub(r"\s*¶\d+", "", f.message),
+           "ref": re.sub(r"\s*¶\d+", "", f.ref)}
+    if f.line:
+        row["line"] = f.line
+    return row
+
+
+def _rule_counts(findings: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for finding in findings:
+        counts[finding["code"]] = counts.get(finding["code"], 0) + 1
+    return counts
+
+
+def lint_chapter(db: Database, manuscript: dict, file: str,
+                 only: list[str] | None = None,
+                 skip: list[str] | None = None) -> dict:
+    """The deterministic lint over one whole chapter as it is on disk,
+    against the rest of the book: `{file, findings, counts, rules,
+    next}`, each finding with its law, its severity and the words quoted;
+    a proof finding (proof.py) also has its line. `only` and `skip` name
+    rules. No model call, nothing written, open under either
+    `agent_edits` value. The chapter itself is left out of the overlap
+    check, so a chapter is not reported as repeating itself."""
+    from . import critic
+
+    rules = lint_rules(only, skip)
     relpath = docs._resolve_relpath(manuscript, file)
     text = (Path(manuscript["path"]) / relpath).read_text(encoding="utf-8")
-    report = critic.lint_draft(db, manuscript, relpath, text,
-                               include_self=False)
-    findings = [{"code": f.code, "severity": f.severity,
-                 # The reading grade is a paragraph's; lint.py quotes the
-                 # paragraph's opening words only.
-                 "quote": " ".join(f.quote.split())
-                 + ("…" if f.code == "reading-grade" else ""),
-                 # A paragraph number is no use to a reader: the words
-                 # quoted are the place.
-                 "message": re.sub(r"\s*¶\d+", "", f.message),
-                 "ref": re.sub(r"\s*¶\d+", "", f.ref)}
-                for f in report.findings]
+    found = []
+    if any(r in LINT_CODES for r in rules):
+        found += critic.lint_draft(db, manuscript, relpath, text,
+                                   include_self=False).findings
+    found += _proof_findings(db, manuscript, relpath, text, rules,
+                             proof_lexicon(db, manuscript))
+    findings = [_finding_row(f) for f in found if f.code in rules]
     counts: dict[str, int] = {}
     for finding in findings:
         counts[finding["severity"]] = counts.get(finding["severity"], 0) + 1
     return {"manuscript": manuscript["name"], "file": relpath,
             "findings": findings, "counts": counts,
+            "rules": _rule_counts(findings),
             "next": f"authorlm book status -m {manuscript['name']}"}
+
+
+def lint_book(db: Database, manuscript: dict,
+              only: list[str] | None = None,
+              skip: list[str] | None = None) -> dict:
+    """`lint_chapter` over every file of the book, in reading order:
+    `{files, findings, rules, by_file, variant, variant_words, next}`,
+    each finding with its file. Without `only` it runs the proof rules
+    alone: they take about a second for a whole book, where the nine
+    checks of lint.py compare every chapter with every other and are a
+    chapter's report. Name any of the nine in `only` to have them too.
+    Nothing is written."""
+    from . import critic, proof
+
+    rules = lint_rules(only, skip, default=proof.RULES)
+    files, order = critic.book(manuscript)
+    names = [n for n in order if n in files] + sorted(
+        n for n in files if n not in order)
+    lexicon = proof_lexicon(db, manuscript)
+    findings: list[dict] = []
+    by_file: dict[str, int] = {}
+    variant_words = {"us": 0, "uk": 0}
+    for name in names:
+        text = files[name]
+        found = []
+        if any(r in LINT_CODES for r in rules):
+            found += critic.lint_draft(db, manuscript, name, text,
+                                       include_self=False).findings
+        found += _proof_findings(db, manuscript, name, text, rules, lexicon)
+        rows = [{"file": name, **_finding_row(f)} for f in found
+                if f.code in rules]
+        findings += rows
+        if rows:
+            by_file[name] = len(rows)
+        if "spelling-variant" in rules:
+            for key, n in proof.variant_counts(text).items():
+                variant_words[key] += n
+    board = {"manuscript": manuscript["name"], "files": len(names),
+             "findings": findings, "rules": _rule_counts(findings),
+             "by_file": by_file, "variant": lexicon.variant,
+             "next": f"authorlm book lint <file> -m {manuscript['name']}"}
+    if "spelling-variant" in rules:
+        board["variant_words"] = variant_words
+    return board
+
+
+def lint_accept(db: Database, manuscript: dict, words: list[str],
+                dry_run: bool = False) -> dict:
+    """The author accepts words for the spell check: each is appended to
+    the manuscript's accepted-words file (`proof.ACCEPTED_FILE`), once.
+    `{path, added, already, next}`. With `dry_run`, nothing is written."""
+    from . import proof
+
+    root = Path(manuscript["path"])
+    words = [proof.check_word(w) for w in words]
+    have = set(proof.read_accepted(root))
+    added = (proof.new_accepted(root, words) if dry_run
+             else proof.add_accepted(root, words))
+    return {"manuscript": manuscript["name"],
+            "path": str(root / proof.ACCEPTED_FILE), "added": added,
+            "already": [w for w in dict.fromkeys(words) if w in have],
+            "dry_run": dry_run,
+            "next": f"authorlm book lint --all --only spelling "
+                    f"-m {manuscript['name']}"}

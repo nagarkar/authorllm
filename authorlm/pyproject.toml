@@ -44,6 +44,7 @@ authorlm = [
     "brand/*",
     "prompts/*.md",
     "publication/*",
+    "spelling/*",
     "triage_profiles/*.json",
     "triage_dist/*.html",
     "workbench_dist/*.html",

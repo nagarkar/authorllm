@@ -989,7 +989,25 @@ this book: …").
   holds no verdicts for that run: the change list is the record.
 - `authorlm book lint <file>`: the deterministic lint over one whole
   chapter against the rest of the book, words quoted, no model call. Open
-  under either setting.
+  under either setting. It runs the nine style checks and the seven proof
+  checks (`spelling`, `doubled-word`, `spelling-variant`, `quote-style`,
+  `footnote`, `link-tracking`, `banned-word`); a proof finding names its
+  line, and the report ends with a count per rule. `--only a,b` and
+  `--skip a,b` choose rules by name.
+- `authorlm book lint --all`: the proof checks over every file of the
+  book in reading order, one line per finding (`file:line`), a count per
+  rule, and how many American-only and British-only spellings the book
+  holds. About two seconds for a whole book. The nine style checks join
+  only when `--only` names them. The spelling variant is the manuscript's
+  language (`authorlm manuscript set --language en-GB` for British; unset is
+  American). Banned words and the quote style are read from the style
+  laws that govern each file.
+- `authorlm book lint-accept <word>…`: the author accepts words for the
+  spell check. They are appended to `_lint/accepted-words.txt` in the
+  manuscript folder; nothing else is written (`--dry-run` writes
+  nothing). Run it only on the author's word: a name or term the author
+  confirms is spelled as intended. Never accept a word to quiet the
+  report.
 
 **Restart from any point:** `authorlm book restart <step> [--scope <s>]
 --reason '<what was wrong>'` (`--dry-run` lists first). The run and every
