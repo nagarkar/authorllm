@@ -1254,9 +1254,13 @@ Related repairs: `concept revive <name>` (inverse of a mistaken retire,
 incl. collateral edges — `curate_concepts` op "revive"); `style move <id>
 --guide NAME` / `move_style_element` when a rule sits at the wrong level.
 A law's words change IN PLACE with `style edit <id> [--statement S]
-[--notes N] [--aspect A]`: same id (overrides and statements cite ids),
-version + 1, the earlier wording kept in `style history <id>`, never retire
-+ re-add. `style retire <id> --why REASON [--replaced-by ID]`, `style
+[--notes N] [--aspect A] [--overrides IDS]`: same id (overrides and
+statements cite ids), version + 1, the earlier wording kept in `style
+history <id>`, never retire + re-add. `--overrides` sets which inherited
+laws it displaces (id prefixes or `default:<key>`, comma list; `''`
+clears). A whole guide takes a new parent with `style guide-move <guide>
+--parent NAME`: its laws and files go with it, only its files' chains
+change (the root and cycles are declined); `style guide` never reparents. `style retire <id> --why REASON [--replaced-by ID]`, `style
 unretire <id>`, `style copy <id> --guide NAME | --file FILE`. The owner's
 page for all of these is the Style chip of the audiobook page
 (`#<manuscript>/style:<level>`, `style_page.py`), the same functions with

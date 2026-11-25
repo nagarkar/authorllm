@@ -444,6 +444,95 @@ def cli_verbs_and_show(root: Path) -> None:
           _row(db, laws["img"]["id"])["status"] == "retired")
 
 
+def guide_move_reparents_a_guide_and_nothing_else(root: Path) -> None:
+    """`style guide-move`: a guide takes a new parent. Its own laws and
+    files stay with it; the new parent's laws now reach its files; the
+    new parent's own files, and every other file, are untouched."""
+    ws, db, manuscript, laws = _book(root, "guide-move")
+    mid = manuscript["id"]
+
+    def ids(f: str) -> list[str]:
+        return [e["id"] for e in styles.effective_style(db, mid, f)]
+
+    before = {f: ids(f) for f in ("a.md", "r.md", "loose.md")}
+    check("before the move a paper does not get the part's laws",
+          laws["q"]["id"] not in ids("p.md"))
+    out = api.move_style_guide(db, manuscript, "Papers", "Part")
+    check("guide-move says where the guide was and now is",
+          out["from"] == "House" and out["to"] == "Part", out)
+    after_p = ids("p.md")
+    check("the part's laws now reach the guide's files, its own and the house's stay",
+          laws["q"]["id"] in after_p and laws["paper"]["id"] in after_p
+          and laws["plain"]["id"] in after_p, after_p)
+    check("the new parent's files and every other file are unchanged",
+          {f: ids(f) for f in before} == before)
+    guide = styles.get_guide(db, mid, "Papers")
+    hist = styles.law_history(db, mid, guide["id"])
+    check("the move is recorded in the guide's history",
+          [h["event"] for h in hist] == ["guide-move"]
+          and hist[0]["detail"] == {"from": "House", "to": "Part"}, hist)
+    for bad, name, parent in (("itself", "Part", "Part"),
+                              ("its own descendant", "Part", "Recaps"),
+                              ("the root", "House", "Part"),
+                              ("an unknown parent", "Papers", "Nowhere"),
+                              ("an unknown guide", "Nowhere", "Part"),
+                              ("the parent it already has", "Papers", "Part")):
+        try:
+            api.move_style_guide(db, manuscript, name, parent)
+            check(f"guide-move declines {bad}", False)
+        except (LookupError, ValueError):
+            check(f"guide-move declines {bad}", True)
+    out = _cli(ws, "style", "guide-move", "Papers", "--parent", "House")
+    check("style guide-move on the command line",
+          "Papers" in out and "House" in out
+          and laws["q"]["id"] not in ids("p.md"), out)
+
+
+def edit_sets_what_a_law_displaces(root: Path) -> None:
+    """`style edit --overrides`: a law starts (or stops) displacing an
+    inherited law, same id, the change in its history; only files under
+    the displacing law lose the displaced one."""
+    ws, db, manuscript, laws = _book(root, "edit-overrides")
+    mid = manuscript["id"]
+    api.move_style_guide(db, manuscript, "Papers", "Part")
+    paper = laws["paper"]
+    out = api.edit_style_law(db, manuscript, paper["id"][:10],
+                             overrides=laws["q"]["id"][:10])
+    check("edit sets overrides to the full id, same law, version + 1",
+          out["id"] == paper["id"] and out["overrides"] == laws["q"]["id"]
+          and _row(db, paper["id"])["version"] == paper["version"] + 1, out)
+    p = [e["id"] for e in styles.effective_style(db, mid, "p.md")]
+    a = [e["id"] for e in styles.effective_style(db, mid, "a.md")]
+    check("the displaced law leaves the papers only",
+          laws["q"]["id"] not in p and laws["q"]["id"] in a, (p, a))
+    edit = api.style_history(db, manuscript, paper["id"])[-1]
+    check("history keeps what it displaced before and after",
+          edit["detail"]["before"] == {"overrides": None}
+          and edit["detail"]["after"] == {"overrides": laws["q"]["id"]}, edit)
+    api.edit_style_law(db, manuscript, paper["id"],
+                       overrides=f"{laws['q']['id']},default:serial-comma")
+    check("a comma list, a default among them",
+          _row(db, paper["id"])["overrides"]
+          == f"{laws['q']['id']},default:serial-comma")
+    api.edit_style_law(db, manuscript, paper["id"], overrides="")
+    check("an empty overrides clears it", _row(db, paper["id"])["overrides"] is None
+          and laws["q"]["id"] in [e["id"] for e in
+                                  styles.effective_style(db, mid, "p.md")])
+    for bad, value in (("the law itself", paper["id"]),
+                       ("an unknown law", "se-nothere"),
+                       ("an unknown default", "default:nothere")):
+        try:
+            api.edit_style_law(db, manuscript, paper["id"], overrides=value)
+            check(f"edit --overrides declines {bad}", False)
+        except (LookupError, ValueError):
+            check(f"edit --overrides declines {bad}", True)
+    out = _cli(ws, "style", "edit", paper["id"][:10], "--overrides",
+               laws["q"]["id"][:10])
+    check("style edit --overrides on the command line",
+          _row(db, paper["id"])["overrides"] == laws["q"]["id"]
+          and "displaces" in out, out)
+
+
 def server_routes_api_style(root: Path) -> None:
     from http.server import ThreadingHTTPServer
     from authorlm import audiobook_server
@@ -474,7 +563,8 @@ def main() -> None:
                a_guide_shows_laws_defined_there,
                an_essay_shows_its_effective_law_as_sent,
                reads_write_nothing, page_writes_are_the_cli_verbs,
-               cli_verbs_and_show, server_routes_api_style):
+               cli_verbs_and_show, guide_move_reparents_a_guide_and_nothing_else,
+               edit_sets_what_a_law_displaces, server_routes_api_style):
         print(f"{fn.__name__}:")
         fn(root)
     print(f"OK — {PASSED} style page checks")

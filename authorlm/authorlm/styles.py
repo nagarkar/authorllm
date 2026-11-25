@@ -195,8 +195,10 @@ def add_element(db: Database, manuscript_id: str, aspect: str, statement: str,
 # edit_events.source for a style law's history (see the module docstring).
 HISTORY_SOURCE = "style"
 # The fields an edit may change; scope moves go through move, status
-# through retire / un-retire.
-EDITABLE = ("statement", "notes", "aspect")
+# through retire / un-retire. `overrides` arrives resolved to full ids
+# (api.edit_style_law), so a law can start or stop displacing another
+# without a new id.
+EDITABLE = ("statement", "notes", "aspect", "overrides")
 
 
 def record_event(db: Database, element: dict, event: str, actor: str,
@@ -263,6 +265,30 @@ def edit_element(db: Database, element: dict, actor: str = "cli",
             "before": {k: element[k] for k in fields},
             "after": fields, "version": element["version"] + 1})
     return {**element, **fields, "version": element["version"] + 1}
+
+
+def move_guide(db: Database, manuscript_id: str, guide: dict, parent: dict,
+               actor: str = "cli") -> dict:
+    """Give a guide a new parent. Its laws and attached files stay with
+    it; the new parent's chain now reaches its files; no other file's
+    chain changes. The root stays the root, and a guide never goes under
+    itself or its own descendant (the tree stays a tree)."""
+    if guide["parent"] is None:
+        raise ValueError(f"'{guide['name']}' is the root guide; it has no parent to change")
+    if parent["id"] == guide["parent"]:
+        raise ValueError(f"'{guide['name']}' already sits under '{parent['name']}'")
+    node = parent
+    while node is not None:
+        if node["id"] == guide["id"]:
+            raise ValueError(f"'{parent['name']}' is '{guide['name']}' or lies under it")
+        node = (db.one("SELECT * FROM style_guides WHERE id = ?", (node["parent"],))
+                if node["parent"] else None)
+    was = db.one("SELECT name FROM style_guides WHERE id = ?", (guide["parent"],))
+    detail = {"from": was["name"] if was else None, "to": parent["name"]}
+    with db.transaction():
+        db.update("style_guides", guide["id"], {"parent": parent["id"]})
+        record_event(db, dict(guide), "guide-move", actor, detail)
+    return {"guide": guide["name"], **detail}
 
 
 def retire_element(db: Database, element: dict, reason: str | None = None,
