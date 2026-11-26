@@ -85,6 +85,12 @@ REGISTRY: list[Prompt] = [
            "rules (grammar, conditioning, idempotency); the editorial law "
            "is the author's _filters/<name>.md artifact, sent beside it",
            file="filter-run.md", module=None),
+    Prompt("engine-protocol", "engine try; the per-essay workflow's turns",
+           "how an engine session works: the structured reply (text, "
+           "reason, proposed, suggested blurbs), the read requests it may "
+           "make (the catalogue is filled in), the web, and that it changes "
+           "nothing itself; first in every engine's standing context",
+           file="engine-protocol.md", module=None),
     Prompt("interlocutor", "interlocutor run",
            "a whole-book reading from inside one tradition — the reading "
            "protocol, the verdict scale, the locus rule and the report "

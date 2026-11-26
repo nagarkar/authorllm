@@ -1,21 +1,26 @@
 """The per-essay workflow's briefs as library files: `authorlm/library/workflow/`.
 
-Hermetic: reads only the files in the repo. Checks that every brief loads,
-that `order.toml` names exactly the filter files present (and each pass's
-role is in `roles.toml`), that each filter stays under 2,200 characters,
+Hermetic: reads only the files in the repo. Checks that every brief loads
+in the layout `authorlm/workflow/context.py` reads, that `order.toml`'s
+`order` names exactly the filter files present, that each filter stays
+under 2,200 characters,
 and that no file uses "ruling"/"ruled" for the author's working decisions
 or names a retired style-law id.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 WORKFLOW = Path(__file__).resolve().parents[1] / "library" / "workflow"
 FILTERS = WORKFLOW / "filters"
+STEPS = ("letter", "construction", "filters", "admission-check")
 
 FILTER_MAX = 2200
 CHARTER_MAX = 2600
@@ -62,9 +67,12 @@ def _all_files() -> list[Path]:
 
 
 def test_every_file_loads() -> None:
-    expected = {"charter.md", "roles.toml", "letter.md", "construction.md",
-                "order.toml", "admission-check.md", "filters/_shared.md",
-                "protected-register.md"}
+    # The layout authorlm/workflow/context.py reads: roles/<step>.md and
+    # briefs/<step>.md for each step in context.STEP_BRIEF that has model
+    # work of its own ("start" is not written yet), plus the admission check.
+    expected = {"charter.md", "order.toml", "protected-register.md"}
+    for step in STEPS:
+        expected |= {f"roles/{step}.md", f"briefs/{step}.md"}
     present = {str(p.relative_to(WORKFLOW)) for p in _all_files()}
     check("every brief is present", expected <= present,
           sorted(expected - present))
@@ -88,37 +96,52 @@ def test_every_file_loads() -> None:
 
 def test_order_names_exactly_the_filters() -> None:
     order = tomllib.loads((WORKFLOW / "order.toml").read_text(encoding="utf-8"))
-    roles = tomllib.loads((WORKFLOW / "roles.toml").read_text(encoding="utf-8"))
-    names = [p["name"] for p in order["pass"]]
-    files = {p.stem for p in FILTERS.glob("*.md") if not p.stem.startswith("_")}
+    names = order["order"]
+    files = {p.stem for p in FILTERS.glob("*.md")}
     check("no pass listed twice", len(names) == len(set(names)), names)
     check("order.toml names exactly the filter files present",
           set(names) == files,
           {"no file": sorted(set(names) - files),
            "not in order": sorted(files - set(names))})
-    for p in order["pass"]:
-        check(f"{p['name']}: role is in roles.toml", p["role"] in roles,
-              p["role"])
-        check(f"{p['name']}: stage is known",
+    check("every pass in order has its stage and default, and no other",
+          set(order["pass"]) == set(names), sorted(order["pass"]))
+    for name in names:
+        p = order["pass"][name]
+        check(f"{name}: stage is known",
               p["stage"] in {"claims", "line", "copy"}, p["stage"])
-        check(f"{p['name']}: default is known",
+        check(f"{name}: default is known",
               p["default"] in {"ticked", "unticked", "audiobook"},
               p["default"])
-    stages = [p["stage"] for p in order["pass"]]
+    stages = [order["pass"][n]["stage"] for n in names]
     rank = {"claims": 0, "line": 1, "copy": 2}
     check("stages run claims, then line, then copy",
           stages == sorted(stages, key=rank.__getitem__), stages)
     check("copyedit is last", names[-1] == "copyedit", names)
-    for step in ("letter", "construction", "line", "copyedit",
-                 "admission-check"):
-        check(f"roles.toml has a role for {step}",
-              bool(roles.get(step, {}).get("role", "").strip()))
+
+
+def test_context_reads_this_library() -> None:
+    """The workflow core reads these files: the standard order and every
+    step's role and brief come back non-empty and not marked missing."""
+    from authorlm.workflow import context
+    old = os.environ.pop(context.LIBRARY_ENV, None)
+    try:
+        check("context reads this folder",
+              context.library_dir().resolve() == WORKFLOW.resolve(),
+              context.library_dir())
+        order = tomllib.loads(
+            (WORKFLOW / "order.toml").read_text(encoding="utf-8"))["order"]
+        check("standard_order() is order.toml's list",
+              context.standard_order() == order, context.standard_order())
+        steps = set(context.STEP_BRIEF.values()) - {"start"}
+        check("every step context names (but start) has a role and a brief",
+              steps <= set(STEPS), sorted(steps - set(STEPS)))
+    finally:
+        if old is not None:
+            os.environ[context.LIBRARY_ENV] = old
 
 
 def test_filter_sizes() -> None:
     for path in sorted(FILTERS.glob("*.md")):
-        if path.stem.startswith("_"):
-            continue
         n = len(path.read_text(encoding="utf-8"))
         check(f"{path.name} under {FILTER_MAX} characters ({n})",
               n < FILTER_MAX, n)
@@ -136,7 +159,7 @@ def test_no_ruling_words_or_retired_laws() -> None:
 
 def main() -> int:
     tests = [test_every_file_loads, test_order_names_exactly_the_filters,
-             test_filter_sizes, test_no_ruling_words_or_retired_laws]
+             test_context_reads_this_library, test_filter_sizes, test_no_ruling_words_or_retired_laws]
     failed = 0
     for t in tests:
         print(t.__name__)

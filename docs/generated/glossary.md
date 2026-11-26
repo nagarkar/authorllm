@@ -20,9 +20,11 @@
 - **register** (`authorlm.register`): the record of the choices the author has settled for one manuscript, the tables `register_entries` and `register_uses`.
 - **register entry** (`authorlm.register`): one choice: its kind, its key, the author's words, the machine's reading, an optional test, and its scope (the whole book or one document).
 - **register use** (`authorlm.register`): a record that a piece of work rests on an entry, in one of two modes: `applies` (the work does what the entry says) or `infers` (the work goes beyond what the entry says).
+- **request** (`authorlm.engines.base`): a read the model asks for through the catalogue (engines/catalogue.py); every one is logged on the reply.
 - **role file** (`authorlm.book`): a Claude Code subagent file for one agent role, `.claude/agents/book-<role slug>.md`, named in that role's packs.
 - **run** (`authorlm.devedit`): one developmental edit of one manuscript, the folder `_devedit/<run-id>/`.
 - **spelling variant** (`authorlm.proof`): American (`us`) or British (`uk`) spelling, read from the manuscript's `language`.
+- **standing** (`authorlm.engines.base`): the blocks that do not change from turn to turn.
 - **step** (`authorlm.book`): one role's turn in the workflow: its id, role, actor, grain, the steps it follows, what it is given, what it returns and what it leaves alone.
 - **step contract** (`authorlm.book`): what a step asks of its role: its role, grain, the steps it follows, what it is given, what it returns and what it leaves alone. Not its actor.
 - **step event** (`authorlm.book`): one change of a step run's status, a row of `step_events`: the run, the status before and after, who, and why.

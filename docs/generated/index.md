@@ -272,6 +272,12 @@ Post-processing for a pandoc .docx: a review watermark and manuscript formatting
 
 Export files on the author's Drive: the export Doc and per-output uploads.
 
+## `authorlm.engines`
+
+`authorlm/authorlm/engines/__init__.py`
+
+Engines: who makes a per-essay workflow's model turns.
+
 ## `authorlm.export`
 
 `authorlm/authorlm/export.py`
@@ -567,6 +573,12 @@ Manuscript structure: the TOC as authoritative reading order.
 `authorlm/authorlm/style_page.py`
 
 The Style laws page: a manuscript's style laws by level, to browse, edit, add, retire, un-retire, move and copy.
+
+## `authorlm.style_snapshots`
+
+`authorlm/authorlm/style_snapshots.py`
+
+Named snapshots of a manuscript's style laws.
 
 ## `authorlm.styles`
 
@@ -957,6 +969,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 `authorlm/tests/test_effective_style.py`
 
 `styles.effective_style` (and `guide_chain`) compose ratified law into drafting prompts with no model in the loop. Wrong override / retire / chain math injects or drops binding law.
+
+## `tests.test_engines`
+
+`authorlm/tests/test_engines.py`
+
+Engines and the read catalogue (authorlm/authorlm/engines/; design docs/plans/filter-lens-consolidation.md 11.9 Q6, Q8b, Q16, Q20, Q20a-c, U8).
 
 ## `tests.test_episode_for_intent`
 
@@ -1611,6 +1629,12 @@ Workspace style defaults: `library/style-defaults.toml` is the lowest layer of e
 `authorlm/tests/test_style_page.py`
 
 The Style laws page (`style_page.dispatch`, `/api/style`) and the verbs it shares with the CLI: edit in place, retire with a reason, un-retire, copy, move, history, and the near-duplicate warning on add.
+
+## `tests.test_style_snapshots`
+
+`authorlm/tests/test_style_snapshots.py`
+
+Named snapshots of the style laws (`style_snapshots`, `style snapshot`).
 
 ## `tests.test_summaries`
 

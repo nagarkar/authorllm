@@ -1,77 +1,70 @@
-# The single standard order of the filter passes in the per-essay workflow.
+# The single standard order of the filter passes in the per-essay workflow
+# (read by authorlm/workflow/context.py: `standard_order()` reads `order`).
 #
 # Ticking a pass after construction only includes it; the order always
-# comes from this list, whatever order the passes were ticked in. A new
-# filter is given its place here when it is added, after the admission
-# check (admission-check.md) finds no conflict with the passes before and
-# after it.
+# comes from `order`, whatever order the passes were ticked in. A new
+# filter (filters/<name>.md) is given its place here when it is added,
+# after the admission check (briefs/admission-check.md) finds no conflict
+# with the passes before and after it.
 #
 # Before these passes: the letter, then construction (with its wrap-up).
 # After them: lint (`book lint`, the code-checked conventions) and the
 # proof checks, then the audio stage for a manuscript with an audiobook.
 # None of those is on the checklist.
-#
-# Keys:
-#   name     the filter; its text is filters/<name>.md
+
+order = [
+  "cross-references",
+  "claim-strength",
+  "unsourced-claims",
+  "figures",
+  "plain-reader",
+  "repetition",
+  "concision",
+  "audio-friendly",
+  "copyedit",
+]
+
+# Per pass:
 #   stage    "claims" (what a sentence claims, how strongly, on what
 #            source), "line" (sentences on settled content) or "copy"
-#   role     the role line from roles.toml this pass runs under
-#   default  "ticked" or "unticked": the starting tick on a first
-#            instance; "audiobook" means ticked for a manuscript with an
-#            audiobook and unticked otherwise. A later instance starts
-#            from the last instance's ticks, and a pass the letter marks
-#            not needed starts unticked.
+#   default  the starting tick on a first instance: "ticked", "unticked",
+#            or "audiobook" (ticked for a manuscript with an audiobook,
+#            unticked otherwise). A later instance starts from the last
+#            instance's ticks, and a pass the letter marks not needed
+#            starts unticked.
 
-[[pass]]
-name = "cross-references"
+[pass.cross-references]
 stage = "claims"
-role = "line"
 default = "ticked"
 
-[[pass]]
-name = "claim-strength"
+[pass.claim-strength]
 stage = "claims"
-role = "line"
 default = "ticked"
 
-[[pass]]
-name = "unsourced-claims"
+[pass.unsourced-claims]
 stage = "claims"
-role = "line"
 default = "ticked"
 
-[[pass]]
-name = "figures"
+[pass.figures]
 stage = "line"
-role = "line"
 default = "ticked"
 
-[[pass]]
-name = "plain-reader"
+[pass.plain-reader]
 stage = "line"
-role = "line"
 default = "ticked"
 
-[[pass]]
-name = "repetition"
+[pass.repetition]
 stage = "line"
-role = "line"
 default = "ticked"
 
-[[pass]]
-name = "concision"
+[pass.concision]
 stage = "line"
-role = "line"
 default = "ticked"
 
-[[pass]]
-name = "audio-friendly"
+[pass.audio-friendly]
 stage = "line"
-role = "line"
 default = "audiobook"
 
-[[pass]]
-name = "copyedit"
+[pass.copyedit]
 stage = "copy"
-role = "copyedit"
 default = "ticked"
