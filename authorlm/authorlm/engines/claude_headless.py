@@ -108,6 +108,64 @@ def mcp_config(workspace: str, manuscript: str) -> dict:
         "env": env}}}
 
 
+# Claude Code's installer puts `claude` here. A launch agent's PATH need not
+# include it (the served app's did not, 2026-11-26), so it is tried after PATH.
+DEFAULT_BINARY = "~/.local/bin/claude"
+CONFIG_BINARY_KEY = "claude_binary"
+DOCTOR_NAME = "engine: claude-headless binary"
+
+
+def _executable(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def find_binary(config: dict | None = None,
+                which: Callable[[str], str | None] = shutil.which,
+                default: str = DEFAULT_BINARY) -> tuple[str | None, list[str]]:
+    """The `claude` to run (None when none is found) and every place looked,
+    in order: `[engines] claude_binary` in authorlm/config.toml when set,
+    and then only there (a wrong setting is reported, never passed over);
+    else PATH; else DEFAULT_BINARY."""
+    if config is None:
+        from . import _config
+
+        config = _config()
+    setting = str((config.get("engines") or {}).get(CONFIG_BINARY_KEY) or "").strip()
+    if setting:
+        path = os.path.expanduser(setting)
+        where = f"[engines] {CONFIG_BINARY_KEY} = {setting} in authorlm/config.toml"
+        return (path if _executable(path) else None), [where]
+    found = which("claude")
+    if found:
+        return found, ["PATH"]
+    path = os.path.expanduser(default)
+    return (path if _executable(path) else None), ["PATH", path]
+
+
+def not_found_message(looked: list[str]) -> str:
+    return ("the Claude Code CLI ('claude') was not found; looked in: "
+            + "; ".join(looked) + f". Install it, or set [engines] "
+            f"{CONFIG_BINARY_KEY} in authorlm/config.toml to its full path")
+
+
+def doctor_check(config: dict | None = None,
+                 which: Callable[[str], str | None] = shutil.which,
+                 default: str = DEFAULT_BINARY) -> dict:
+    """`authorlm doctor`'s check that claude-headless finds `claude`:
+    {name, ok, state, detail, fix}, as web_pages.doctor_checks."""
+    found, looked = find_binary(config, which, default)
+    if found:
+        return {"name": DOCTOR_NAME, "ok": True, "state": "found",
+                "detail": found, "fix": ""}
+    return {"name": DOCTOR_NAME, "ok": False, "state": "missing",
+            "detail": not_found_message(looked),
+            "fix": ("install Claude Code; for the served app put the folder of "
+                    "`command -v claude` on its PATH (rerun "
+                    "scripts/install-launch-agent.sh <manuscript>, then launchctl "
+                    "kickstart -k gui/$(id -u)/com.nagarkar.authorlm.serve), or set "
+                    f"[engines] {CONFIG_BINARY_KEY} in authorlm/config.toml")}
+
+
 class ClaudeHeadlessEngine(Engine):
     name = "claude-headless"
 
@@ -120,9 +178,11 @@ class ClaudeHeadlessEngine(Engine):
 
     @property
     def binary(self) -> str:
-        found = self._binary or shutil.which("claude")
+        if self._binary:
+            return self._binary
+        found, looked = find_binary()
         if not found:
-            raise NotConfigured("the Claude Code CLI ('claude') is not on PATH")
+            raise NotConfigured(not_found_message(looked))
         return found
 
     def command(self, *, workspace: str, manuscript: str, session_id: str,

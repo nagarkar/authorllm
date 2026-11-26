@@ -2284,7 +2284,11 @@ older than the lockfile; about 20 s). A build that cannot run (no npm on the
 agent's PATH, an npm error) never stops the server: it serves the old page,
 logs why to `~/.authorlm/logs/serve.log`, and `authorlm doctor` (each check
 with its state, detail and fix; `--json`; exit 1 when one fails; needs no
-workspace) shows the page as `stale` or `missing` with the fix. Verify
+workspace) shows the page as `stale` or `missing` with the fix. It also
+checks that the Workflows page's claude-headless engine finds `claude`
+(`[engines] claude_binary` in `authorlm/config.toml` when set, else PATH,
+else `~/.local/bin/claude`; the install script puts claude's folder on the
+agent's PATH). Verify
 `curl -s http://127.0.0.1:8792/health`
 and show `http://127.0.0.1:8792/#<stem>` in the in-app Browser pane. The
 page is one chapter at a time with a dropdown, under a manuscript

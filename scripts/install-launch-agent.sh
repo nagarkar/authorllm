@@ -23,7 +23,11 @@ ffmpeg_dir="$(dirname "$(command -v ffmpeg)")"
 # than its sources (authorlm/authorlm/web_pages.py). Without npm it serves the old page and
 # `authorlm doctor` flags it.
 npm_dir="$(dirname "$(command -v npm || echo /usr/local/bin/npm)")"
-path="$(dirname "$authorlm"):$ffmpeg_dir:$npm_dir:/usr/bin:/bin:/usr/sbin:/sbin"
+# claude's folder too (usually ~/.local/bin): the Workflows page's claude-headless engine runs
+# `claude -p` (authorlm/authorlm/engines/claude_headless.py). Without it Recommend fails with
+# "the Claude Code CLI ('claude') was not found" and `authorlm doctor` flags it.
+claude_dir="$(dirname "$(command -v claude || echo "$HOME/.local/bin/claude")")"
+path="$(dirname "$authorlm"):$claude_dir:$ffmpeg_dir:$npm_dir:/usr/bin:/bin:/usr/sbin:/sbin"
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.authorlm/logs"
 sed -e "s#__AUTHORLM__#$authorlm#g" -e "s#__PATH__#$path#g" -e "s#__REPO__#$repo#g" \
   -e "s#__HOME__#$HOME#g" -e "s#__MANUSCRIPT__#$manuscript#g" \
