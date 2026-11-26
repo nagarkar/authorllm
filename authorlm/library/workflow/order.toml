@@ -1,0 +1,70 @@
+# The single standard order of the filter passes in the per-essay workflow
+# (read by authorlm/workflow/context.py: `standard_order()` reads `order`).
+#
+# Ticking a pass after construction only includes it; the order always
+# comes from `order`, whatever order the passes were ticked in. A new
+# filter (filters/<name>.md) is given its place here when it is added,
+# after the admission check (briefs/admission-check.md) finds no conflict
+# with the passes before and after it.
+#
+# Before these passes: the letter, then construction (with its wrap-up).
+# After them: lint (`book lint`, the code-checked conventions) and the
+# proof checks, then the audio stage for a manuscript with an audiobook.
+# None of those is on the checklist.
+
+order = [
+  "cross-references",
+  "claim-strength",
+  "unsourced-claims",
+  "figures",
+  "plain-reader",
+  "repetition",
+  "concision",
+  "audio-friendly",
+  "copyedit",
+]
+
+# Per pass:
+#   stage    "claims" (what a sentence claims, how strongly, on what
+#            source), "line" (sentences on settled content) or "copy"
+#   default  the starting tick on a first instance: "ticked", "unticked",
+#            or "audiobook" (ticked for a manuscript with an audiobook,
+#            unticked otherwise). A later instance starts from the last
+#            instance's ticks, and a pass the letter marks not needed
+#            starts unticked.
+
+[pass.cross-references]
+stage = "claims"
+default = "ticked"
+
+[pass.claim-strength]
+stage = "claims"
+default = "ticked"
+
+[pass.unsourced-claims]
+stage = "claims"
+default = "ticked"
+
+[pass.figures]
+stage = "line"
+default = "ticked"
+
+[pass.plain-reader]
+stage = "line"
+default = "ticked"
+
+[pass.repetition]
+stage = "line"
+default = "ticked"
+
+[pass.concision]
+stage = "line"
+default = "ticked"
+
+[pass.audio-friendly]
+stage = "line"
+default = "audiobook"
+
+[pass.copyedit]
+stage = "copy"
+default = "ticked"
