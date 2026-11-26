@@ -37,7 +37,10 @@ applied), and advancing goes by `page_gate`: the walk at its end, the
 wrap-up ruled, lint run; anything else is a skip with one sentence.
 
 Skips take one sentence of reason; engine and unit switches take a reason
-mid-instance (Q6-Q9). Usage totals per instance, essay and month (Q7).
+mid-instance (Q6-Q9). The author's brief can be edited at any step of an
+open instance (`brief`), even while a model turn runs: that turn keeps the
+brief it started with, the next one reads the new brief. Usage totals per
+instance, essay and month (Q7).
 
 Model turns (`MODEL_TURNS`, a redo or bracketed edit in `act`) run as
 background jobs when the page asks (`dispatch(background=True)`,
@@ -68,7 +71,7 @@ METHODS = ("overview", "instance", "start", "recommend", "rec", "list",
            "act", "reopen", "beat_done", "conclude", "wrapup", "principle",
            "filters", "lint", "skip", "advance", "engine", "unit", "blurbs",
            "blurb_add", "blurb_hide", "usage", "estimate", "land", "leave",
-           "summaries", "job_dismiss")
+           "summaries", "job_dismiss", "brief")
 
 # The read-only methods: they write nothing (the page polls none of them).
 READ_ONLY = ("overview", "instance", "blurbs", "usage", "estimate")
@@ -1544,6 +1547,13 @@ def dispatch(method: str, params: dict[str, Any],
         return instance_view(db, manuscript, inst["id"])
     if method == "job_dismiss":
         jobs.dismiss(db, inst["id"], str(p.get("job") or ""))
+        return instance_view(db, manuscript, inst["id"])
+    if method == "brief":
+        # The one write allowed while a model turn runs: the brief is read
+        # when a turn starts (core.ask), so the running turn keeps the brief
+        # it started with and the next turn reads the new one; saving it
+        # touches nothing the running turn records (core.set_brief).
+        core.set_brief(db, inst, str(p.get("brief") or ""))
         return instance_view(db, manuscript, inst["id"])
     run = jobs.running(db, inst["id"])
     if run:

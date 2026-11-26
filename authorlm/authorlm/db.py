@@ -804,7 +804,8 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
     {KNOWLEDGE_OBJECT_COLUMNS},
     instance_id TEXT NOT NULL,
     kind TEXT NOT NULL,           -- skip | engine-switch | unit-switch |
-                                  -- list-change | principle | ruling
+                                  -- list-change | brief-change |
+                                  -- principle | ruling
     reason TEXT NOT NULL DEFAULT '',
     words TEXT NOT NULL DEFAULT '',        -- the author's words, verbatim
     detail TEXT NOT NULL DEFAULT '{{}}'    -- JSON: from, to, list, essay, ...

@@ -23,6 +23,10 @@ import { recall, remember } from "./remember";
 // - the scroll position → localStorage per manuscript and instance
 //   (`authorlm.wf.scroll.<ms>.<instance>`), a place in a long page, restored
 //   after the instance loads;
+// - an unsaved draft of the brief → localStorage per manuscript and
+//   instance (`authorlm.wf.briefDraft.<ms>.<instance>`), half-written text
+//   that is personal and not worth a link; a reload reopens the editor
+//   with it, and Save or Cancel clears it;
 // - whether hidden blurbs are shown → localStorage per manuscript.
 
 interface Usage { turns?: number; input?: number; cached?: number; output?: number; dollars?: number; est_subscription?: number; }
@@ -371,12 +375,60 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
 
 // ---------------------------------------------------------------- steps
 
+// The author's brief, on every step (owner, 2026-11-26, at the start step:
+// "if I have read the recap for sermon 3 and I've read sermon 3 and I have
+// some thoughts about what we should take into account, should I be able
+// to edit the brief and add things there?"). Edit opens a roomy textarea;
+// Save goes to workflow_page `brief` (core.set_brief). Saving is allowed
+// while a model turn runs: that turn keeps the brief it started with.
+function BriefCard({ v, run, asking, manuscript }: {
+  v: View; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; asking: boolean; manuscript: string;
+}) {
+  const inst = v.instance;
+  const key = `authorlm.wf.briefDraft.${manuscript}.${inst.id}`;
+  const [draft, setDraftState] = useState<string | null>(() => { const d = recall(key); return d ? d : null; });
+  const setDraft = (d: string | null) => { remember(key, d ?? ""); setDraftState(d); };
+  useEffect(() => { const d = recall(key); setDraftState(d ? d : null); }, [key]);
+  const open = inst.step !== "done";
+  const turnRunning = v.job?.state === "running";
+  const changes = v.decisions.filter(d => d.kind === "brief-change");
+  const last = changes[changes.length - 1];
+  if (!open && !inst.brief) return null;
+  const editing = open && draft !== null;
+  const unchanged = editing && draft.trim() === (inst.brief || "").trim();
+  return (
+    <div className="card wf-brief">
+      <div className="card-head"><span>The brief</span>
+        {open && !editing && <button className="pill" onClick={() => setDraft(inst.brief || "")}>Edit</button>}</div>
+      {!editing && (inst.brief ? <p className="wf-brief-text">{inst.brief}</p>
+        : <p className="muted">No brief yet: say what to build or improve, and what to take into account.</p>)}
+      {!editing && last && <div className="muted">Edited {changes.length > 1 ? `${changes.length} times; last ` : ""}at the {STEP_WORDS[last.detail.step] || last.detail.step} step, {new Date(last.created_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}. Earlier turns kept the brief they had.</div>}
+      {editing && <>
+        <textarea className="devedit-edit wf-brief-edit" autoFocus value={draft} aria-label="The brief"
+          rows={Math.min(24, Math.max(8, draft.split("\n").length + Math.ceil(draft.length / 60)))}
+          placeholder="What to build or improve, and what to take into account (several paragraphs are fine)"
+          // The caret opens at the end: the usual edit is adding thoughts.
+          onFocus={e => { const n = e.currentTarget.value.length; e.currentTarget.setSelectionRange(n, n); }}
+          onChange={e => setDraft(e.target.value)} />
+        <div className="muted">{turnRunning
+          ? "A turn is running: it uses the brief it started with; the next turn reads the one you save."
+          : "The next model turn reads the brief you save; earlier turns keep the one they had."}</div>
+        <div className="devedit-actions">
+          <button className="pill on" disabled={asking || unchanged} onClick={async () => {
+            if (await run("brief", { brief: draft })) setDraft(null);
+          }}>{asking ? "Saving…" : "Save"}</button>
+          <button className="pill" disabled={asking} onClick={() => setDraft(null)}>Cancel</button>
+        </div>
+      </>}
+    </div>
+  );
+}
+
 function StartStep({ v, run, busy }: { v: View; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
   const inst = v.instance;
   const [add, setAdd] = useState<Record<string, string>>({});
   const recs = v.recommendations;
   return <>
-    {inst.brief && <div className="card"><div className="card-head"><span>The brief</span></div><p>{inst.brief}</p></div>}
     {inst.carried_from && <div className="card muted">Choices carried from the last instance.
       {(v.since_last.added.length || v.since_last.removed.length) ? ` Since then: added ${v.since_last.added.join(", ") || "none"}; removed ${v.since_last.removed.join(", ") || "none"}.` : " The reading order has not changed since."}</div>}
     {LISTS.map(which => (
@@ -800,6 +852,7 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
           {view.skipped.length > 0 && <ul className="muted">{view.skipped.map(d => <li key={d.id}>Skipped {(d.detail.skipped || []).join(", ")}: {d.reason}</li>)}</ul>}
         </div>
 
+        <BriefCard key={inst.id} v={view} run={run} asking={asking} manuscript={manuscript} />
         {view.job && <JobCard key={view.job.id} job={view.job} run={run}
           dismiss={() => void run("job_dismiss", { job: view.job!.id })} />}
         <LandingCard v={view} run={run} busy={busy} />

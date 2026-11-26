@@ -424,6 +424,10 @@ header .popover select{width:100%;max-width:none;flex:none;background:var(--grou
 .wf-gate .pill.on{min-height:44px;padding:8px 18px;font-size:15px}
 .wf-reason{margin:8px 0 0;padding:8px 10px;border-left:4px solid var(--band);background:var(--ground);border-radius:6px}
 .wf-said{margin:6px 0}
+.wf-brief .card-head .pill{margin-left:auto;min-height:40px}
+.wf-brief-text{white-space:pre-wrap;margin:6px 0}
+.wf-brief-edit{min-height:12em;line-height:1.45;resize:vertical}
+.wf-brief .devedit-actions .pill{min-height:44px;padding:8px 18px}
 .wf-diff del.del{text-decoration:line-through}
 .wf-diff ins.add{text-decoration:none}
 .wf-listen{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}

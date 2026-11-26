@@ -915,9 +915,18 @@ are not yet sent from the CLI.
 - `set-engine` and `set-unit` mid-instance take `--reason`; each is
   recorded. `decide --kind principle|ruling --words` records the author's
   words; nothing is a ruling unless the author marks it so.
+- The author's brief can change at any step of an open instance: when he
+  has thoughts to add (after reading a recap, say), run `workflow brief <i>
+  --set "TEXT"` or `--file PATH` (`-` for stdin; the whole new brief, not
+  an addition; `--dry-run` first if unsure), or he uses Edit on the brief
+  card of the Workflows page. The next model turn reads the new brief and
+  rebuilds its session; earlier turns keep the one they had; a turn
+  already running keeps the brief it started with. Each change is a
+  `brief-change` decision holding the old and new text. A done instance
+  keeps its brief. Never change the brief without the author's words.
 - Read-only: `list`, `status`, `show`, `turns`, `usage [--essay|--month]`,
-  `filters <i>` without `--set`, `blurbs` without a change, `land <i>
-  --dry-run`.
+  `filters <i>` without `--set`, `brief <i>` without `--set`/`--file` (or
+  with `--dry-run`), `blurbs` without a change, `land <i> --dry-run`.
 - Any essay in the reading order can have a workflow; no file is treated
   specially (owner, 2026-11-26: "there should be no special casing").
   An essay whose toc entry says `register = "protected"` gets the

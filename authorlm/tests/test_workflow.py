@@ -570,6 +570,93 @@ def _cli(ws, *argv) -> str:
     return out.getvalue()
 
 
+def _author_brief(ctx: dict) -> str:
+    return next(b["text"] for b in ctx["standing"] if b["name"] == "author-brief")
+
+
+def test_brief_is_editable_at_any_step() -> None:
+    """Owner, 2026-11-26, at the start step of wi-7abca47358e0: "if I have
+    read the recap for sermon 3 and I've read sermon 3 and I have some
+    thoughts about what we should take into account, should I be able to
+    edit the brief and add things there?" The brief changes at any step of
+    an open instance; the next turn's standing context carries the new
+    brief and its session rebuilds; earlier turns stay as they were; the
+    change is recorded with both texts; a done instance keeps its brief."""
+    from authorlm.engines.base import SessionRef, Turn
+
+    with world() as (db, ms, _ws):
+        inst = core.start(db, ms, "one", "refine", brief="Keep the argument.")
+        new = "Keep the argument.\n\nAlso: the recap says the third move is weak."
+        inst = core.set_brief(db, inst, new)
+        check("the start step's brief changes", inst["brief"] == new)
+        inst = core.advance(db, inst)
+        engine = FakeEngine()
+        core.send_turn(db, ms, inst, "start", "write the letter", engine=engine)
+        ctx1 = engine.sent[-1][0]
+        check("a turn sends the brief as the author-brief block",
+              _author_brief(ctx1) == new)
+        turns_before = [dict(t) for t in core.turns(db, inst)]
+        later = new + "\n\nAnd mind the recap's last paragraph."
+        inst = core.set_brief(db, inst, "  " + later + "\n")
+        check("a later step's brief changes; the text is trimmed",
+              inst["brief"] == later and inst["step"] == "letter", inst["brief"])
+        core.send_turn(db, ms, inst, "reply", "go on", engine=engine)
+        ctx2 = engine.sent[-1][0]
+        check("the next turn reads the new brief", _author_brief(ctx2) == later)
+        ref = SessionRef.after("claude-headless", "h", Turn.of(ctx1))
+        check("the session made under the old brief is not resumed: it rebuilds",
+              ref.resumable("claude-headless",
+                            Turn.of({**ctx2, "standing": ctx1["standing"]}))
+              and not ref.resumable("claude-headless", Turn.of(ctx2)))
+        check("earlier turns stay as they were",
+              [dict(t) for t in core.turns(db, inst)][:len(turns_before)]
+              == turns_before)
+        changes = [d for d in core.decisions(db, inst) if d["kind"] == "brief-change"]
+        check("each change is recorded with the old text, the new and the step",
+              [(d["detail"]["from"], d["detail"]["to"], d["detail"]["step"])
+               for d in changes] == [("Keep the argument.", new, "start"),
+                                     (new, later, "letter")], changes)
+        raises(lambda: core.set_brief(db, inst, later + "  "), ValueError,
+               "unchanged")
+        inst = core.skip(db, inst, "Testing the brief.", "done")
+        raises(lambda: core.set_brief(db, inst, "too late"), ValueError,
+               "done")
+        check("a done instance keeps its brief",
+              core.get_instance(db, ms, inst["id"])["brief"] == later)
+
+
+def test_brief_cli() -> None:
+    with world() as (db, ms, ws):
+        iid = json.loads(_cli(ws, "start", "one", "--kind", "refine",
+                              "--brief", "sharpen", "--json"))["id"]
+        before = _tables(db)
+        out = _cli(ws, "brief", iid)
+        check("brief alone shows it", "brief: sharpen" in out, out)
+        out = _cli(ws, "brief", iid, "--set", "sharpen, and cut", "--dry-run")
+        check("--dry-run says what would change", "would change the brief" in out, out)
+        check("brief alone and --dry-run write nothing", _tables(db) == before)
+        board = json.loads(_cli(ws, "brief", iid, "--json"))
+        check("--json carries next", board["brief"] == "sharpen" and board["next"])
+        _cli(ws, "brief", iid, "--set", "sharpen, and cut")
+        check("--set replaces it",
+              core.get_instance(db, ms, iid)["brief"] == "sharpen, and cut")
+        path = Path(ws) / "brief.md"
+        path.write_text("Para one.\n\nPara two.\n", encoding="utf-8")
+        out = _cli(ws, "brief", iid, "--file", str(path))
+        check("--file reads several paragraphs",
+              core.get_instance(db, ms, iid)["brief"] == "Para one.\n\nPara two.", out)
+        out = _cli(ws, "show", iid)
+        check("show lists each brief change without the texts",
+              out.count("brief-change at start") == 2 and "Para two" in out, out)
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                _cli(ws, "brief", iid, "--set", "Para one.\n\nPara two.")
+                raise AssertionError("expected exit")
+            except SystemExit as e:
+                check("an unchanged brief is an error, exit non-zero",
+                      "error: the brief is unchanged" in str(e.code), e.code)
+
+
 def test_cli_end_to_end() -> None:
     with world() as (db, ms, ws):
         out = _cli(ws, "start", "sermons_new", "--kind", "refine")
@@ -677,6 +764,8 @@ def main() -> None:
              test_usage_totals,
              test_session_ref_is_persisted,
              test_unknown_cost_is_not_zero,
+             test_brief_is_editable_at_any_step,
+             test_brief_cli,
              test_cli_end_to_end,
              test_a_rename_carries_the_workflow,
              test_migration_is_additive]
