@@ -781,6 +781,67 @@ def test_a_decision_with_edits_applies_when_answered() -> None:
               row)
 
 
+def test_updating_a_decision_undoes_the_earlier_option() -> None:
+    """Update decision must restore the prior option's prose before applying
+    the new one; otherwise both stay and the reused item id forgets the first."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ms = _manuscript(Path(tmp))
+        folder = devedit.new_run(ms)
+        devedit.confirm_coverage(folder)
+        one = Path(ms["path"]) / "one.md"
+        one.write_text("# One\n\nAlpha passage here.\n\nBeta passage here.\n")
+        devedit.stage_dir(folder).mkdir(parents=True)
+        (devedit.stage_dir(folder) / "decisions.json").write_text(json.dumps([
+            {"n": 1, "question": "Which?", "options": ["A", "B", "draft"],
+             "edits": {
+                 "A": [{"file": "one.md", "original": "Alpha passage here.",
+                        "proposed": "Alpha CHANGED A."}],
+                 "B": [{"file": "one.md", "original": "Beta passage here.",
+                        "proposed": "Beta CHANGED B."}]}}]))
+        devedit.decide_and_apply(DB, folder, ms, 1, "A")
+        row = devedit.decide_and_apply(DB, folder, ms, 1, "B")
+        body = one.read_text()
+        check("updating A→B restores A's original and applies B",
+              "Alpha passage here." in body and "Beta CHANGED B." in body
+              and "Alpha CHANGED A." not in body
+              and row["applied"][0]["id"] == "stage0-d1.1", body)
+        row = devedit.decide_and_apply(DB, folder, ms, 1, "draft")
+        body = one.read_text()
+        check("updating to an option with no edits restores B too",
+              "Beta passage here." in body and "Beta CHANGED B." not in body
+              and row["applied"] == [], body)
+        q = {i["id"]: i for i in devedit.queue(DB, folder)}
+        check("the superseded item is rejected, not still accepted as applied",
+              q["stage0-d1.1"]["verdict"] == "reject"
+              and not q["stage0-d1.1"].get("applied"), q["stage0-d1.1"])
+
+
+def test_a_second_verdict_must_use_revise() -> None:
+    """verdict is first decision only; a second call would flip status without
+    undoing an accept. revise is the door that swaps the file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ms = _manuscript(Path(tmp))
+        folder = devedit.new_run(ms)
+        items = [{"id": "v1.1", "file": "one.md", "tier": "must",
+                  "original": "It moves all.", "proposed": "It moves everything.",
+                  "finding": "f1"}]
+        _with_items(folder, items)
+        _with_queue(folder, items)
+        one = Path(ms["path"]) / "one.md"
+        devedit.verdict(DB, folder, ms, "v1.1", "accept")
+        try:
+            devedit.verdict(DB, folder, ms, "v1.1", "reject", reason="changed mind")
+            check("a second verdict is refused", False)
+        except ValueError as err:
+            check("a second verdict is refused", "revise" in str(err), err)
+        check("accept prose stays until revise undoes it",
+              "It moves everything." in one.read_text())
+        devedit.revise(DB, folder, ms, "v1.1", "reject", reason="changed mind")
+        check("revise reject restores the original",
+              "It moves all." in one.read_text()
+              and "It moves everything." not in one.read_text())
+
+
 def test_a_verdict_can_be_revised() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ms = _manuscript(Path(tmp))
@@ -1123,6 +1184,8 @@ def main() -> None:
              test_the_ledger_holds_the_standard_across_passes,
              test_audit_finds_what_must_be_fixed_first,
              test_a_decision_with_edits_applies_when_answered,
+             test_updating_a_decision_undoes_the_earlier_option,
+             test_a_second_verdict_must_use_revise,
              test_a_verdict_can_be_revised,
              test_the_arc_step_comes_first,
              test_a_whole_paragraph_edit_on_the_card,
