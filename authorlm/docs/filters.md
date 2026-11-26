@@ -341,7 +341,7 @@ be making.
 ## `history-not-quality` (ratified 2026-09-01)
 
 Written for `hierarchy.md`, and the first filter to declare
-`summaries = true` (design §9.1a) — its findings turn on what the Metaphysic
+`summaries = true` (design §9.1a) — its findings turn on what the Appendix
 already defines, so it pays for the cross-essay view.
 
 Bounded against its siblings in its own prose: `claim-status` owns a verb

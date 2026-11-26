@@ -1407,7 +1407,7 @@ of one critic: `interlocutor list` shows what every installed artifact
 carries as `position`, the draft payload's POSITION ON RECORD block seeds
 the new artifact with it, and you put it to the author in the same breath
 as the rest of the reading — "the other critics carry the Recapitulation
-and the Metaphysic as your position; same here?" — naming any file one
+and Which Nothing as your position; same here?" — naming any file one
 critic carries and the others do not. When the author names a different
 position for one critic, ask once whether the change is for that critic
 or for all of them, and edit the other artifacts if it is for all. Ratified order of first use: Epictetus,
@@ -1559,7 +1559,7 @@ measured numbers.
 **The payload already carries cross-essay DEFINITIONS without it.**
 `scoped_concepts(file=…)` selects a concept if it was introduced in this
 essay OR its name or alias appears in the essay's text — so a term
-defined in `metaphysic.md` and used in `hierarchy.md` arrives with its
+defined in `which-nothing.md` and used in `hierarchy.md` arrives with its
 notes, its aliases, and the graph edges among the selected nodes. The
 limit worth knowing: an essay only receives the definition of a concept
 whose name it ALREADY WRITES. A concept the essay needs but has not yet
