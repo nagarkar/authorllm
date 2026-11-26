@@ -159,6 +159,16 @@ paragraphs = 6                # the first N paragraph sections under that headin
 path = "_assets/audiobook-cover.jpg"   # square, ≥ 2400 px, RGB; the print cover is not square
 ```
 
+A manuscript an outside caller keeps (a corpus document ytlm or beelm
+keeps through corpuslm) is seeded with "Compiled by {author}" in the
+opening and "compiled by {author}" in the closing, since its author
+gathered the text rather than wrote it. `audio init` decides this once,
+when it writes the file: the manuscript is an outside caller's when
+`api.outside_callers` finds caller metadata on its row (see
+`docs/outside-caller-design.md`). The extraction switch is not the test,
+because the owner turns it off on books of their own. A file already
+seeded keeps whatever it says; edit its two lines by hand.
+
 Placeholders in `[credits]` resolve from manuscript metadata (§9). An
 unknown key, wrong type, or invalid value is an export error naming the
 field. The file itself and `text.voice`, `headings.voice`, `credits.voice`
