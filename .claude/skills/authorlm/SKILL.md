@@ -1146,6 +1146,24 @@ an item (author ruling 2026-11-09):
    breaks a rule. End with the options the author can pick, ours, theirs,
    or a combination, and recommend one.
 
+## Engines and the read catalogue (`authorlm engine`)
+The per-essay workflow's model turns run on an **engine** chosen per
+workflow instance (design `docs/plans/filter-lens-consolidation.md` 11.9
+Q6): `claude-headless` (Claude Code `claude -p`, the subscription) or
+`openai-api` (billed); `claude-api` and `codex-headless` are named but not
+built. Code: `authorlm/authorlm/engines/`. Every engine replies with a
+structured reason, proposed text and suggested blurbs, and reads the book
+only through the **read catalogue** (`authorlm engine catalogue`): essays
+in toc.toml's reading order, their summaries (refreshed first), the style
+rules for a file, concept notes, profiles, earlier workflow instances.
+Anything outside the book comes back DECLINED with its reason; every
+request is listed on the reply. By hand:
+- `authorlm engine read <request> --arg file=<essay>`: what an engine gets.
+- `authorlm engine try <engine> [--model M] --essay <file> --message "…"`:
+  one turn on the essay; prints the reply, the requests and the usage
+  (billed dollars, or the subscription estimate). Say the cost to the
+  author before running `openai-api`.
+
 ## External critique intake (critic input is never law until triaged)
 Design reference: `docs/critique-pass-design.md`. When the author brings a
 critic's report (editorial analysis, beta-reader notes, any external

@@ -272,6 +272,12 @@ Post-processing for a pandoc .docx: a review watermark and manuscript formatting
 
 Export files on the author's Drive: the export Doc and per-output uploads.
 
+## `authorlm.engines`
+
+`authorlm/authorlm/engines/__init__.py`
+
+Engines: who makes a per-essay workflow's model turns.
+
 ## `authorlm.export`
 
 `authorlm/authorlm/export.py`
@@ -951,6 +957,12 @@ End-to-end test of every MVP use case, driven through the real CLI.
 `authorlm/tests/test_effective_style.py`
 
 `styles.effective_style` (and `guide_chain`) compose ratified law into drafting prompts with no model in the loop. Wrong override / retire / chain math injects or drops binding law.
+
+## `tests.test_engines`
+
+`authorlm/tests/test_engines.py`
+
+Engines and the read catalogue (authorlm/authorlm/engines/; design docs/plans/filter-lens-consolidation.md 11.9 Q6, Q8b, Q16, Q20, Q20a-c, U8).
 
 ## `tests.test_episode_for_intent`
 
