@@ -196,6 +196,7 @@ Terms:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -525,6 +526,27 @@ def _write_atomic(path: Path, text: str) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(text, encoding="utf-8")
     os.replace(temporary, path)
+
+
+@contextlib.contextmanager
+def _chapter_lock(path: Path):
+    """Exclusive lock for a whole-file read-modify-write of a chapter.
+
+    Sibling `<name>.authorlm-edit.lock` — the same name
+    `audio.replace_block` uses — so two writers of one chapter (two
+    `book land`s, or a land beside an audiobook-page save) cannot both
+    plan against one snapshot and drop each other's edit."""
+    import fcntl
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".authorlm-edit.lock")
+    with open(lock_path, "a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def init_definition(db: Database, manuscript: dict, *,

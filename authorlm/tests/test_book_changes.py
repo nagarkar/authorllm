@@ -25,7 +25,9 @@ os.environ["AUTHORLM_STYLE_DEFAULTS"] = \
 import json
 import re
 import sys
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -40,6 +42,7 @@ assert Path(authorlm.__file__).resolve().parent == HERE.parent / "authorlm", (
     f"testing the wrong package: {authorlm.__file__}")
 
 from authorlm import api, book, changes, docs  # noqa: E402
+from authorlm.db import Database  # noqa: E402
 
 from test_book_workflow import NO_USES, Workspace, quiet  # noqa: E402
 
@@ -1117,6 +1120,93 @@ class RoleFileTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             with self.subTest(path=path.name):
                 self.assertIsNone(RULED_OUT.search(text))
+
+
+# ----------------------------------------------------------- concurrency
+
+class ConcurrentLandTests(Book):
+    """Two overlapping lands of one chapter must both apply (the lock
+    in `land`), not leave one `applied` row whose `new` is gone."""
+
+    def test_unlocked_race_drops_one_land(self):
+        """Forced interleaving without the lock: both plan against one
+        snapshot; the later write wins; the earlier `new` is gone."""
+        path = self.root / "one.md"
+        path.write_text("alpha beta gamma delta\n", encoding="utf-8")
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def unlocked(old: str, new: str) -> None:
+            try:
+                before = path.read_text(encoding="utf-8")
+                items, text = changes._check_items(
+                    [{"old": old, "new": new, "note": "A fix."}], before)
+                self.assertEqual(len(items), 1)
+                barrier.wait(timeout=5)
+                # Plain write_text (not _write_atomic): two threads share
+                # one pid, so the atomic helper's temp name would collide.
+                path.write_text(text, encoding="utf-8")
+            except BaseException as err:  # noqa: BLE001 — collect for assert
+                errors.append(err)
+
+        t1 = threading.Thread(target=unlocked, args=("alpha", "ALPHA"))
+        t2 = threading.Thread(target=unlocked, args=("beta", "BETA"))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        self.assertEqual(errors, [])
+        self.assertNotEqual(
+            path.read_text(encoding="utf-8"), "ALPHA BETA gamma delta\n",
+            "unlocked race should demonstrate the lost-land failure mode")
+
+    def test_two_lands_on_one_file_both_apply(self):
+        """Two processes landing non-overlapping edits of one chapter
+        keep both edits and both `applied` rows."""
+        self.run_step("interview")
+        self.run_step("draft", "one.md")
+        run = self.running("lint", "one.md")
+        path = self.root / "one.md"
+        db_path = self.db.path
+        manuscript = self.manuscript
+        for _ in range(20):
+            path.write_text("alpha beta gamma delta\n", encoding="utf-8")
+            quiet(api.collect, self.db, self.manuscript, {})
+            a = [{"old": "alpha", "new": "ALPHA",
+                  "note": "Capitalise the first word."}]
+            b = [{"old": "beta", "new": "BETA",
+                  "note": "Capitalise the second word."}]
+
+            def land_one(items: list[dict]) -> dict:
+                # Each worker opens its own connection: sqlite will not
+                # use a connection created on another thread.
+                db = Database(db_path)
+                try:
+                    return changes.land(
+                        db, manuscript, {}, run, "one.md", items,
+                        tab_state=unlinked)
+                finally:
+                    db.conn.close()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fa = pool.submit(land_one, a)
+                fb = pool.submit(land_one, b)
+                fa.result()
+                fb.result()
+            self.assertEqual(path.read_text(encoding="utf-8"),
+                             "ALPHA BETA gamma delta\n")
+            statuses = {r["old"]: r["status"] for r in self.db.all(
+                "SELECT old, status FROM step_changes WHERE run_id = ? "
+                "AND status = 'applied'", (run,))}
+            self.assertEqual(statuses.get("alpha"), "applied")
+            self.assertEqual(statuses.get("beta"), "applied")
+            # Clear applied rows so the next iteration's lands are clean.
+            for row in self.db.all(
+                    "SELECT id FROM step_changes WHERE run_id = ?", (run,)):
+                self.db.update("step_changes", row["id"], {
+                    "status": "reverted", "reverted_at": "t",
+                    "reverted_by": "test",
+                    "reverted_reason": "reset for next trial"})
 
 
 if __name__ == "__main__":
