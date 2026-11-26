@@ -9727,8 +9727,87 @@ def cmd_style(args):
             print(ui.green("moved") + f" [{result['id'][:8]}] → "
                   + (f"guide '{result['guide']}'" if result.get("guide")
                      else f"file {result['file']}"))
+        elif args.action == "snapshot":
+            _style_snapshot(db, manuscript, args)
     except (LookupError, ValueError) as err:
         sys.exit(str(err))
+
+
+def _style_snapshot(db, manuscript: dict, args) -> None:
+    """`style snapshot <name>` takes one; `snapshot list`, `snapshot show
+    <name>`, `snapshot restore <name> [--dry-run]` (style_snapshots.py).
+    Restore is a write verb; --dry-run prints the same list and changes
+    nothing."""
+    from . import style_snapshots as ss
+
+    mid = manuscript["id"]
+    params = args.params
+    verb = params[0] if params and params[0] in ss.VERBS else "take"
+    if verb == "list":
+        snaps = ss.list_snapshots(db, mid)
+        if not snaps:
+            print('No style-law snapshots yet. Take one: '
+                  'style snapshot <name> --note "..."')
+            return
+        for s in snaps:
+            print(f"  {s['name']} — {s['laws']} law(s), "
+                  f"{s['created_at'][:16].replace('T', ' ')} by {s['created_by']}")
+            if s["note"]:
+                print(ui.dim(f"      {s['note']}"))
+        return
+    if verb == "take":
+        if len(params) != 1:
+            sys.exit('usage: style snapshot <name> [--note "..."] | snapshot list '
+                     "| snapshot show <name> | snapshot restore <name> [--dry-run]")
+        snap = ss.take(db, mid, params[0], note=args.note or "")
+        print(ui.green("snapshot") + f" '{snap['name']}': {snap['laws']} active "
+              f"law(s) of {manuscript['name']} recorded")
+        return
+    if len(params) != 2:
+        sys.exit(f"usage: style snapshot {verb} <name>"
+                 + (" [--dry-run]" if verb == "restore" else ""))
+    name = params[1]
+    if verb == "show":
+        snap = ss.show(db, mid, name)
+        print(ui.bold(f"Snapshot '{snap['name']}' of {manuscript['name']}: "
+                      f"{len(snap['laws'])} law(s), taken "
+                      f"{snap['created_at'][:16].replace('T', ' ')} by "
+                      f"{snap['created_by']}"))
+        if snap["note"]:
+            print(ui.dim(f"  {snap['note']}"))
+        counts: dict[str, int] = {}
+        for law in snap["laws"]:
+            counts[law["status_now"]] = counts.get(law["status_now"], 0) + 1
+            now = ("" if law["status_now"] == "active" and not law["changed"]
+                   else f" — now {law['status_now']}"
+                   + (f", changed: {', '.join(law['changed'])}"
+                      if law["changed"] else ""))
+            print(f"  [{law['id'][:11]}] v{law['version']} ({law['aspect']}) "
+                  f"{law['statement'][:90]}{now}")
+        print(ui.dim("  now: " + ", ".join(
+            f"{n} {k}" for k, n in sorted(counts.items()))))
+        return
+    out = ss.restore(db, mid, name, dry_run=args.dry_run)
+    head = "would change" if args.dry_run else "changed"
+    total = sum(len(out[k]) for k in ("unretire", "edit", "move", "retire"))
+    print(ui.bold(f"Restore of '{name}': {head} {total} law(s)"))
+    for law in out["unretire"]:
+        print(f"  back in force [{law['id'][:11]}] {law['statement'][:80]}")
+    for law in out["edit"]:
+        print(f"  words put back [{law['id'][:11]}]: {', '.join(law['diff'])}")
+        for key, (now, then) in law["diff"].items():
+            print(ui.dim(f"      {key} now: {now}"))
+            print(ui.dim(f"      {key} then: {then}"))
+    for law in out["move"]:
+        print(f"  moved back [{law['id'][:11]}] {law['from']} → {law['to']}")
+    for law in out["retire"]:
+        print(f"  retired [{law['id'][:11]}] (not in the snapshot) "
+              f"{law['statement'][:80]}")
+    for law in out["left"]:
+        print(ui.dim(f"  left alone [{law['id'][:11]}] now {law['status_now']}: "
+                     f"{law['statement'][:80]}"))
+    if args.dry_run and total:
+        print(ui.dim("  dry run: nothing changed; run without --dry-run to restore"))
 
 
 def _style_provenance(db, manuscript: dict, element: dict) -> str:
@@ -11864,13 +11943,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action",
                    choices=["guides", "guide", "attach", "add", "show", "retire",
                             "unretire", "edit", "history", "move", "copy",
-                            "guide-move", "guide-rename"])
+                            "guide-move", "guide-rename", "snapshot"])
     p.add_argument("params", nargs="*",
                    help="guide: <name>; attach: <file> <guide>; "
                         "add: <aspect> \"statement\"; show: <file>; "
                         "retire/unretire/edit/history/move/copy: <id>; "
                         "guide-move: <guide>; "
-                        "guide-rename: <guide> \"<new name>\"")
+                        "guide-rename: <guide> \"<new name>\"; "
+                        "snapshot: <name> | list | show <name> | "
+                        "restore <name>")
+    p.add_argument("--note", help="snapshot: a note kept with the snapshot")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="snapshot restore: print what would change, change nothing")
     p.add_argument("--parent", help="guide / guide-move: parent guide name")
     p.add_argument("--guide", help="add/move/copy: owning guide name")
     p.add_argument("--file", help="add/move/copy: file for a file-local element")
@@ -11991,7 +12075,8 @@ def _dispatch(argv: list[str] | None = None) -> None:
             sys.exit("usage: concept merge <canonical> <duplicate>")
     if args.command == "style":
         required = {"guide": 1, "attach": 2, "add": 2, "show": 1, "retire": 1,
-                    "unretire": 1, "edit": 1, "history": 1, "move": 1, "copy": 1}
+                    "unretire": 1, "edit": 1, "history": 1, "move": 1, "copy": 1,
+                    "snapshot": 1}
         if len(args.params) < required.get(args.action, 0):
             sys.exit(f"usage: style {args.action} — see 'style --help'")
         if args.action == "add" and bool(args.guide) == bool(args.file):

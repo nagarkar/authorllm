@@ -568,6 +568,12 @@ Manuscript structure: the TOC as authoritative reading order.
 
 The Style laws page: a manuscript's style laws by level, to browse, edit, add, retire, un-retire, move and copy.
 
+## `authorlm.style_snapshots`
+
+`authorlm/authorlm/style_snapshots.py`
+
+Named snapshots of a manuscript's style laws.
+
 ## `authorlm.styles`
 
 `authorlm/authorlm/styles.py`
@@ -1605,6 +1611,12 @@ Workspace style defaults: `library/style-defaults.toml` is the lowest layer of e
 `authorlm/tests/test_style_page.py`
 
 The Style laws page (`style_page.dispatch`, `/api/style`) and the verbs it shares with the CLI: edit in place, retire with a reason, un-retire, copy, move, history, and the near-duplicate warning on add.
+
+## `tests.test_style_snapshots`
+
+`authorlm/tests/test_style_snapshots.py`
+
+Named snapshots of the style laws (`style_snapshots`, `style snapshot`).
 
 ## `tests.test_summaries`
 
