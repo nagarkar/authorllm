@@ -10746,6 +10746,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_devedit)
 
+    from .workflow import cli as _workflow_cli
+    _workflow_cli.add_parser(sub, common)
+
     _add_register_parser(sub, common)
     _add_book_parser(sub, common)
 

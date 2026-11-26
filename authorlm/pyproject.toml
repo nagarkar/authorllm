@@ -36,7 +36,7 @@ authorlm = "authorlm.cli:main"
 authorlm-mcp = "authorlm.mcp_server:main"
 
 [tool.setuptools]
-packages = ["authorlm", "authorlm.adapters"]
+packages = ["authorlm", "authorlm.adapters", "authorlm.workflow"]
 
 [tool.setuptools.package-data]
 authorlm = [

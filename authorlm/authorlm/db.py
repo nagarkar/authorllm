@@ -696,6 +696,97 @@ CREATE TABLE IF NOT EXISTS step_changes (
     reverted_reason TEXT          -- their reason, verbatim
 );
 
+-- The per-essay editing workflow (workflow/, design
+-- docs/plans/filter-lens-consolidation.md §11.9, §12 row 1). A workflow is
+-- one essay and one kind; each run of it is an instance; the instance's
+-- turns are the editing session, the continuity every engine is fed from
+-- (§11.9 Q5). The author's choices are decisions; a decision is a ruling
+-- only when the author marks it so (Q14).
+CREATE TABLE IF NOT EXISTS workflows (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    file TEXT NOT NULL,           -- the essay's relpath
+    kind TEXT NOT NULL,           -- new | refine | re-review
+    UNIQUE (manuscript_id, file, kind)
+);
+
+CREATE TABLE IF NOT EXISTS workflow_instances (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    workflow_id TEXT NOT NULL,    -- workflows.id
+    manuscript_id TEXT NOT NULL,
+    file TEXT NOT NULL,           -- copied from the workflow, for lookups
+    kind TEXT NOT NULL,           -- copied from the workflow
+    number INTEGER NOT NULL,      -- 1, 2, ... per workflow
+    step TEXT NOT NULL DEFAULT 'start',  -- start | letter | construction |
+                                  -- wrapup | filters | lint | done
+    brief TEXT NOT NULL DEFAULT '',      -- what the author wants this time
+    reference TEXT NOT NULL DEFAULT '[]',  -- JSON: essay files, whole text,
+                                  -- content binding, never imitated
+    voice TEXT NOT NULL DEFAULT '[]',      -- JSON: essay files, whole text, style
+    aware TEXT NOT NULL DEFAULT '[]',      -- JSON: essay files, summaries only
+    engine TEXT NOT NULL,         -- claude-headless | openai-api | ...
+    model TEXT NOT NULL DEFAULT '',
+    engine_state TEXT NOT NULL DEFAULT '{{}}',  -- JSON the engine keeps
+                                  -- (e.g. a headless session id)
+    unit TEXT NOT NULL,           -- construction: paragraph | section
+    construction_mode TEXT NOT NULL,  -- beats | apply-findings
+    filter_unit TEXT NOT NULL DEFAULT 'section',  -- paragraph | section
+    filters TEXT NOT NULL DEFAULT '[]',    -- JSON: the passes selected
+    filters_confirmed INTEGER NOT NULL DEFAULT 0,  -- 1: the author set them
+                                  -- this instance (0: carried over, pre-ticked)
+    carried_from TEXT,            -- the instance the choices came from
+    toc_order TEXT NOT NULL DEFAULT '[]',  -- JSON: reading order at start
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE (workflow_id, number)
+);
+
+-- One row per turn of an instance's session, append-only.
+CREATE TABLE IF NOT EXISTS session_turns (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    instance_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    step TEXT NOT NULL,           -- the instance's step when the turn ran
+    unit_label TEXT NOT NULL DEFAULT '',  -- e.g. "paragraph 7", "section 2"
+    action TEXT NOT NULL,         -- accept | reject | redo | edit | reply | start
+    author_text TEXT NOT NULL DEFAULT '',
+    blurbs TEXT NOT NULL DEFAULT '[]',     -- JSON: blurbs ticked
+    reply TEXT NOT NULL DEFAULT '',        -- the model's reply text
+    reason TEXT NOT NULL DEFAULT '',       -- what changed and why
+    proposed TEXT NOT NULL DEFAULT '',     -- the proposed text (the form)
+    engine TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    usage TEXT NOT NULL DEFAULT '{{}}',    -- JSON: input, cached, output,
+                                  -- dollars, est_subscription
+    requests TEXT NOT NULL DEFAULT '[]',   -- JSON: [{{name, args, chars}}]
+    UNIQUE (instance_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS workflow_decisions (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    instance_id TEXT NOT NULL,
+    kind TEXT NOT NULL,           -- skip | engine-switch | unit-switch |
+                                  -- list-change | principle | ruling
+    reason TEXT NOT NULL DEFAULT '',
+    words TEXT NOT NULL DEFAULT '',        -- the author's words, verbatim
+    detail TEXT NOT NULL DEFAULT '{{}}'    -- JSON: from, to, list, essay, ...
+);
+
+-- Short reasons ticked on a redo (Q8b, Q11): one list per manuscript, most
+-- recently used first; a blurb can be hidden, never deleted.
+CREATE TABLE IF NOT EXISTS blurbs (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    last_used TEXT,
+    hidden INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (manuscript_id, text)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_instances_essay
+    ON workflow_instances (manuscript_id, file, created_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_decisions_instance
+    ON workflow_decisions (instance_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_step_changes_run
     ON step_changes (manuscript_id, run_id, seq);
 CREATE INDEX IF NOT EXISTS idx_triage_runs_lookup
