@@ -778,6 +778,12 @@ Offline checks for tools/author_watch.py: the one watcher for the Dev edit and M
 
 Beat-by-beat repetition: the drafter is shown what earlier essays already say about the beat's concepts, the critic and the lint read only the book (never the files toc.toml declares outside), and a borrowed term set in italics once stays italic.
 
+## `tests.test_block_kind`
+
+`authorlm/tests/test_block_kind.py`
+
+`audio._block_kind` classifies one blank-line block for the audiobook export. A drift here narrates a heading as a paragraph, drops a list into prose, or speaks a footnote definition. Pure over strings; no workspace. Run: python3 tests/test_block_kind.py
+
 ## `tests.test_book_changes`
 
 `authorlm/tests/test_book_changes.py`
@@ -1671,6 +1677,12 @@ toc.toml `summary`: one hidden sentence per essay stating what it argues.
 `authorlm/tests/test_triage_app.py`
 
 _No docstring._
+
+## `tests.test_try_text_manuscript`
+
+`authorlm/tests/test_try_text_manuscript.py`
+
+#486: /api/try-text and /api/voices honour the page's open manuscript.
 
 ## `tests.test_unchanged_since_push`
 
