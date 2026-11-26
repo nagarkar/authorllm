@@ -4717,7 +4717,7 @@ def settled_form_outcomes(db: Database, manuscript_id: str,
     left out: that form in the tab is the pending one, and only its own
     resolve may settle it."""
     rows = db.all(
-        "SELECT state, proposed_old, proposed_new FROM doc_threads "
+        "SELECT state, proposed_old, proposed_new, metadata FROM doc_threads "
         "WHERE manuscript_id = ? AND file = ? "
         "AND state IN ('cleaned', 'declined', 'stale', 'written') "
         "ORDER BY created_at, id", (manuscript_id, relpath))
@@ -4727,11 +4727,25 @@ def settled_form_outcomes(db: Database, manuscript_id: str,
         return (old, "" if old else (r["proposed_new"] or ""))
 
     pending = {key(r) for r in rows if r["state"] == "written"}
-    return [{"old": r["proposed_old"] or "", "new": r["proposed_new"] or "",
-             "keep": "new" if r["state"] == "cleaned" else "old"}
-            for r in rows
-            if r["state"] != "written" and any(key(r))
-            and key(r) not in pending]
+    outcomes = []
+    for r in rows:
+        if r["state"] == "written" or not any(key(r)) or key(r) in pending:
+            continue
+        old = r["proposed_old"] or ""
+        proposed = r["proposed_new"] or ""
+        meta = loads(r["metadata"], {}) or {}
+        if old:
+            news = [proposed] if proposed else []
+        else:
+            staged = meta.get("original_new") or proposed
+            news = []
+            for n in (staged, proposed):
+                if n and n not in news:
+                    news.append(n)
+        outcomes.append({
+            "old": old, "new": news[0] if news else "", "news": news,
+            "keep": "new" if r["state"] == "cleaned" else "old"})
+    return outcomes
 
 
 def form_news(db: Database, manuscript_id: str, relpath: str) -> list[str]:
@@ -4749,8 +4763,10 @@ def _half_form(full: str, outcome: dict) -> bool:
     `{{new` or `new}}` for any form."""
     olds = ({outcome["old"], rendered_text(outcome["old"])}
             if outcome.get("old") else set())
-    news = ({outcome["new"], rendered_text(outcome["new"])}
-            if outcome.get("new") else set())
+    raw_news = outcome.get("news") or ([outcome["new"]]
+                                       if outcome.get("new") else [])
+    news = {n for raw in raw_news if raw
+            for n in (raw, rendered_text(raw))}
     return (any(f"<<{o}" in full or f"{o}>>" in full for o in olds if o)
             or any(f"{{{{{n}" in full or f"{n}}}}}" in full
                    for n in news if n))
@@ -4831,9 +4847,19 @@ def settle_forms_in_tab(db: Database, manuscript: dict, file: str,
                     return None
                 return "<<", tab_old, full[after - 2: close + 2]
             return None
-        for tab_new in (outcome["new"], rendered_text(outcome["new"])):
-            if f"{{{{{tab_new}}}}}" in full:
-                return "{{", "", tab_new + "}}"
+        # `news` lists every half that might still mark the form in the
+        # live tab: the staged new after a Merge-forms ruling, and the
+        # rewritten proposed_new when the author edited the green half
+        # in the Doc itself. Fall back to `new` alone for older callers.
+        raw_news = outcome.get("news") or [outcome.get("new") or ""]
+        seen: list[str] = []
+        for raw in raw_news:
+            for tab_new in (raw, rendered_text(raw)):
+                if not tab_new or tab_new in seen:
+                    continue
+                seen.append(tab_new)
+                if f"{{{{{tab_new}}}}}" in full:
+                    return "{{", "", tab_new + "}}"
         return None
 
     faults: list[str] = []
