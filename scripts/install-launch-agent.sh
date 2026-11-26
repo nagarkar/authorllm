@@ -19,7 +19,11 @@ if ! (cd "$repo/authorlm" && "$authorlm" _manuscripts) | grep -Fxq "$manuscript"
   exit 2
 fi
 ffmpeg_dir="$(dirname "$(command -v ffmpeg)")"
-path="$(dirname "$authorlm"):$ffmpeg_dir:/usr/bin:/bin:/usr/sbin:/sbin"
+# npm's folder too: the server rebuilds the audiobook page at start when a merge left it older
+# than its sources (authorlm/authorlm/web_pages.py). Without npm it serves the old page and
+# `authorlm doctor` flags it.
+npm_dir="$(dirname "$(command -v npm || echo /usr/local/bin/npm)")"
+path="$(dirname "$authorlm"):$ffmpeg_dir:$npm_dir:/usr/bin:/bin:/usr/sbin:/sbin"
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.authorlm/logs"
 sed -e "s#__AUTHORLM__#$authorlm#g" -e "s#__PATH__#$path#g" -e "s#__REPO__#$repo#g" \
   -e "s#__HOME__#$HOME#g" -e "s#__MANUSCRIPT__#$manuscript#g" \

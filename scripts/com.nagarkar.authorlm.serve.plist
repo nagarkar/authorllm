@@ -8,8 +8,10 @@
   scripts/install-launch-agent.sh, which writes the machine-specific copy to ~/Library/LaunchAgents/
   and prints the one command the owner runs to load it (Claude Code loads nothing that starts at
   login). The manuscript is only the one the page opens on; its dropdown lists the rest.
-  PATH is spelled out because launchd's default has no ffmpeg or pandoc.
-  Restart onto new code (after every merge that touches the server's Python):
+  PATH is spelled out because launchd's default has no ffmpeg, pandoc or npm.
+  At start the server rebuilds the page when it is older than its sources under
+  authorlm/web/audiobook/ (authorlm/authorlm/web_pages.py), so one restart deploys both.
+  Restart onto new code (after every merge that touches the server's Python or the page):
     launchctl kickstart -k gui/$(id -u)/com.nagarkar.authorlm.serve
 -->
 <plist version="1.0">

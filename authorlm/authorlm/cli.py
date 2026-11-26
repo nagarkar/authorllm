@@ -10036,6 +10036,25 @@ def _style_provenance(db, manuscript: dict, element: dict) -> str:
     return line + (f" · was: {was}" if was else "")
 
 
+def cmd_doctor(args):
+    """Each check with its state, detail and fix; exit 1 when one fails.
+    Needs no workspace, so it runs before `setup` too."""
+    from . import web_pages
+
+    checks = web_pages.doctor_checks()
+    ok = all(c["ok"] for c in checks)
+    if getattr(args, "as_json", False):
+        print(json.dumps({"ok": ok, "checks": checks}, indent=2))
+    else:
+        for c in checks:
+            print(f"[{'ok' if c['ok'] else 'FAIL'}] {c['name']}: {c['state']}"
+                  f" — {c['detail']}")
+            if c["fix"]:
+                print(f"       fix: {c['fix']}")
+    if not ok:
+        sys.exit(1)
+
+
 def cmd_status(args):
     db = _open_db(args)
     manuscript = _manuscript(db, args)
@@ -11085,8 +11104,9 @@ def build_parser() -> argparse.ArgumentParser:
         "write",
         help="beat-by-beat co-writing loop: draft → author verdict → append "
              "(docs/autoregressive-writing-design.md); 'write start' is the "
-             "construction step of 'authorlm workflow' and opens on its own "
-             "only there (else --skip-reason)")
+             "construction step of 'authorlm workflow'; it runs the old "
+             "machinery, outside the workflow even at that step, so it "
+             "always needs --skip-reason")
     p.add_argument("action",
                    choices=["start", "plan", "intents", "status", "draft",
                             "critique", "propose", "show", "landed", "accept",
@@ -11279,7 +11299,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="author-defined lenses (_lenses/*.md prompts, plus the shared "
              "library's): add, list, show, promote <name> (move into the "
              "library), "
-             "run <name> <file>, register (external findings on stdin), "
+             "run <name> <file> (outside the essay's workflow ('authorlm "
+             "workflow'), so it always needs --skip-reason), register "
+             "(external findings on stdin), "
              "review <n>, push <file> (staged lens edits → Doc forms), "
              "resolve <file> (read the tab back)")
     p.add_argument("action",
@@ -11428,11 +11450,14 @@ def build_parser() -> argparse.ArgumentParser:
             "The filter pass. A LENS reads one essay whole and reports "
             "findings; a FILTER reads one essay UNIT BY UNIT and proposes "
             "an edit to each unit, conditioned on what came before.\n\n"
-            "THROUGH THE WORKFLOW. `filter run` and `filter prelude` open "
-            "on their own only when the essay's workflow ('authorlm "
-            "workflow') is at its filter step; elsewhere they print how to "
-            "start or continue it, and --skip-reason \"<one sentence>\" "
-            "runs them anyway, recorded on the workflow as a skip.\n\n"
+            "THROUGH THE WORKFLOW. Filters run inside the essay's workflow "
+            "('authorlm workflow'), at its filters step. `filter run` and "
+            "`filter prelude` run the old machinery, which does not read "
+            "the workflow, so they always run outside it, even at the "
+            "filters step: without --skip-reason \"<one sentence>\" they "
+            "print how to start or continue the workflow; with it they run, "
+            "recorded on the workflow as a skip. Later windows of the same "
+            "filter on that workflow need no second reason.\n\n"
             "NOTE THE FLAG POLARITY, which is the OPPOSITE of 'write "
             "draft'. `filter run` makes NO model call: it prints the "
             "payload for the conversation to draft against. The billed "
@@ -12200,6 +12225,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("status", help="show current state")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser(
+        "doctor",
+        help="check the install: each check with its state, detail and fix; "
+             "exit 1 when one fails (now: each web page is built and not "
+             "older than its sources). Example: authorlm doctor --json")
+    p.add_argument("--json", action="store_true", dest="as_json",
+                   help="print the checks as JSON")
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("log", help="narrative log of recent transitions")
     p.add_argument("--limit", type=int, default=20)

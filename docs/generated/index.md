@@ -670,6 +670,14 @@ The always-on usage ledger — where the money went.
 
 Verse structure — the one seam that knows what a poem is.
 
+## `authorlm.web_pages`
+
+`authorlm/authorlm/web_pages.py`
+
+The built web pages against their sources: whether each compiled page (`authorlm/<out>/index.html`) is older than the files under `web/<page>/` it is built from, and the rebuild `authorlm audio serve` runs when it is.
+
+Never imports: cli, api.
+
 ## `authorlm.workbench`
 
 `authorlm/authorlm/workbench.py`
@@ -1743,6 +1751,12 @@ _No docstring._
 `authorlm/tests/test_verse_poem_level.py`
 
 `verse.poem_level` and `verse.heading_levels` decide where poems sit in a verse file and what the collect report warns about.
+
+## `tests.test_web_pages`
+
+`authorlm/tests/test_web_pages.py`
+
+The built web pages against their sources (`authorlm/web_pages.py`): staleness by modification time, the rebuild `audio serve` runs at start, `authorlm doctor`'s page checks, and the help texts of the roads the workflow retired (`filter run`/`prelude`, `lens run`, `write start`), which since #527 always need --skip-reason.
 
 ## `tests.test_workflow`
 
