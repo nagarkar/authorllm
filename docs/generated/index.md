@@ -1228,6 +1228,12 @@ A Listen button's voice: /api/try-text takes an optional `voice`, one of the off
 
 Live-LLM integration tests with record/replay (RFC §24.5 discipline).
 
+## `tests.test_locate_block_list_region`
+
+`authorlm/tests/test_locate_block_list_region.py`
+
+locate_block one-per-item must skip region tag lines when picking a list line.
+
 ## `tests.test_locate_block_voice`
 
 `authorlm/tests/test_locate_block_voice.py`
