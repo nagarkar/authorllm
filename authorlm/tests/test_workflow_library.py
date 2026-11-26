@@ -49,6 +49,11 @@ RETIRED_LAW_IDS = {
     "se-f8a1cde78a48",  # tone: challenging and unflinching
     "se-1dbb9891191d",  # tone (retired before the sort)
     "se-201235e9e162",  # bold claim after a heading
+    # Kept by the sort but code-checkable and in `book lint`, so retired as
+    # style rules (plan 11.9 U8: lint alone carries what code can check).
+    "se-5f4e1b2d3d52",  # 32 footnote anchors: lint `footnote`
+    "se-bc9880045a67",  # 42 spelling: lint `spelling`, `doubled-word`
+    "se-1796270b8dd5",  # 89 no sentence opens with "What": lint `what-opener`
 }
 
 RULING = re.compile(r"\brul(?:ing|ings|ed)\b", re.IGNORECASE)

@@ -44,10 +44,17 @@ extraction_max_chars = 24000
 # To re-enable billed, model-pinned drafting, restore the section (see design §15):
 #   model = "anthropic/claude-fable-5", max_tokens = 8000, effort = "high",
 #   timeout_seconds = 600, cache = true
+# The per-essay workflow (`authorlm workflow`) does not read this section: its
+# engine and model are chosen per instance, with usage shown on every turn
+# ([engines] below). The 2026-08-30 note above governs only `write draft`.
 
 # [filtering] — DELIBERATELY ABSENT. This is the THIRD instance of the pattern,
 # after [writing] above and [budget] below, and the pattern is now standing:
 # what is absent is what is off.
+#
+# The per-essay workflow's filter step does not read this section either: it
+# runs on the instance's engine ([engines] below). What follows is about the
+# old `filter run` road only.
 #
 # Filter passes run in the CONVERSATION (subscription-covered), fed by the
 # payload `authorlm filter run <name> <file>` prints. Note the flag polarity,

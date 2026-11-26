@@ -255,6 +255,14 @@ def test_footnotes() -> None:
     check("all under one rule", {f.code for f in hits} == {"footnote"})
     check("a file with every marker defined once is clean",
           proof.check_footnotes("One.[^a]\n\n[^a]: Note.\n") == [])
+    bare = proof.check_footnotes(
+        "A claim.[1] A link [text](u) and [ref][2].\n\n"
+        "[^a]: KSA 11, 38[12]; see [3].\n\n`x[4]` in code.\n")
+    check("a bare numeric anchor in the prose is a warning; a citation's "
+          "17[55], a link and a note's own text are not",
+          sorted((f.ref, f.severity, f.line) for f in bare)
+          == [("[1]", "warning", 1), ("[^a]", "warning", 3)],
+          [(f.ref, f.severity, f.line) for f in bare])
 
 
 # ---------------------------------------------------------- link tracking

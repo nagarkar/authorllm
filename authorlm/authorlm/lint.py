@@ -217,7 +217,9 @@ def check_term_in_definition(units: list[str]) -> list[Finding]:
     return out
 
 
-# The em-dash law in the owner's words (style law se-29c4a9a82d22).
+# The em-dash law in the owner's words (style law se-29c4a9a82d22 as first
+# written). The style rule now keeps only the judgment half (an inline,
+# expendable explanation); the stacking half is lint's alone (em-dash-stack).
 EM_DASH_LAW = ("Em dashes are welcome as long as they are used to explain "
                "something inline and the explanation is expendable. Never "
                "stack multiple em-dash pairs in one sentence.")
