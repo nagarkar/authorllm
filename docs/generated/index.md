@@ -1072,6 +1072,12 @@ footnote_prefixes must stay injective when nested paths share a stem.
 
 The Merge forms page's Conflicts (`forms_page.settle`, `forms_page.land_conflict`, `/api/forms` list / settle / land / enqueue): a file changed both in the file and in its Doc tab since the last push, settled in the browser instead of by hand.
 
+## `tests.test_forms_out`
+
+`authorlm/tests/test_forms_out.py`
+
+`forms_page._forms_out` is the conflict-land hold: open producer forms or other origin forms on the tab block landing until they are merged.
+
 ## `tests.test_forms_page`
 
 `authorlm/tests/test_forms_page.py`
@@ -1179,6 +1185,12 @@ Interlocutor tests (docs/interlocutor-design.md).
 `authorlm/tests/test_label_opt.py`
 
 Footnote `| label:` override parsing (`directives._LABEL_OPT`).
+
+## `tests.test_last_read`
+
+`authorlm/tests/test_last_read.py`
+
+`changes._last_read` picks the author's latest finished person-step that was given `changes` and that covers the pack's scope.
 
 ## `tests.test_lens_library`
 
@@ -1521,6 +1533,12 @@ The Filters and lenses page (`runs_page.dispatch`, `/api/runs`): browse the filt
 `authorlm/tests/test_same_para.py`
 
 `gdocs._norm_para` / `_same_para` / `first_divergence` / `divergence_note` align Doc paragraphs with the markdown export for diff-push.
+
+## `tests.test_scope_filter`
+
+`authorlm/tests/test_scope_filter.py`
+
+`changes._scope_filter` turns a `--scope` label into the document ids `list_changes` may show: None for the whole book, a part's documents, or one chapter id.
 
 ## `tests.test_section_summaries`
 
