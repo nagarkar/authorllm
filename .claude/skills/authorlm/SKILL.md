@@ -860,6 +860,34 @@ workflow over `authorlm devedit` (devedit.py owns the run folder,
   push <file>`; a file whose tab has pending suggested edits is settled
   first, never pushed over.
 
+## The per-essay workflow (`authorlm workflow`; being built)
+
+Design: `docs/plans/filter-lens-consolidation.md` §11.9 (the owner's
+decisions, with his words) and §12. Piece 1, the record and its gates, is
+in; the engines, briefs and the Workflows page come next, so model turns
+are not yet sent from the CLI.
+
+- A workflow is one essay and one kind (`new`, `refine`, `re-review`); each
+  run is an instance with three lists (`reference`: whole text, content
+  binding; `voice`: whole text, style; `aware`: summaries), an engine and
+  model, a construction unit and mode, a filter unit, and a filter
+  selection. `workflow start <essay> --kind K` carries all of these over
+  from the essay's last instance; `show` says what came from where and
+  which essays were added to the book since.
+- Steps: start → letter → construction → wrapup → filters → lint → done.
+  `advance` moves on only when the gate is met (construction once every
+  letter finding is accepted, rejected or deferred; the filters only after
+  the wrap-up; lint once the filters are chosen with `filters <i> --set`).
+  `skip <i> --reason "<one sentence>" [--to STEP]` moves past a gate and
+  records the reason.
+- `set-engine` and `set-unit` mid-instance take `--reason`; each is
+  recorded. `decide --kind principle|ruling --words` records the author's
+  words; nothing is a ruling unless the author marks it so.
+- Read-only: `list`, `status`, `show`, `turns`, `usage [--essay|--month]`,
+  `filters <i>` without `--set`, `blurbs` without a change.
+- Any essay in the reading order can have a workflow; no file is treated
+  specially (owner, 2026-11-26: "there should be no special casing").
+
 ## The book workflow and the register (`authorlm book`, `authorlm register`)
 
 A book is a workflow of roles; each step is done by an agent or a named
