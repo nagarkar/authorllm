@@ -240,6 +240,18 @@ def summary(db: Database, manuscript: dict) -> dict:
             "tabs": tabs}
 
 
+def _replace_landing(text: str, old: str, new: str) -> str:
+    """`text` with the first whole landing of `old` swapped for `new`. A
+    bare `str.replace` would rewrite inside a longer word (`cause` inside
+    `because`), so a neighbour card then showed garble; fixing that garble
+    in Edit widened the form and Merge stacked the passage on the real
+    surroundings (2026-11-23)."""
+    if not old or old not in text:
+        return text
+    return re.sub(r"(?<!\w)" + re.escape(old) + r"(?!\w)",
+                  lambda _: new, text, count=1)
+
+
 def _ruled_neighbours(forms: list[dict]) -> list[dict]:
     """Each card's prefix and suffix with the other forms of its file that
     are already accepted or edited read as what they will land as, not as
@@ -260,8 +272,8 @@ def _ruled_neighbours(forms: list[dict]) -> list[dict]:
         for fid, (old, new) in landing.items():
             if fid == f["id"]:
                 continue
-            pre, suf = pre.replace(old, new, 1) if old in pre else pre, \
-                suf.replace(old, new, 1) if old in suf else suf
+            pre, suf = _replace_landing(pre, old, new), \
+                _replace_landing(suf, old, new)
         f["prefix"], f["suffix"] = pre, suf
     return forms
 
