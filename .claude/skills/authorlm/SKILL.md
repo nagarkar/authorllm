@@ -895,11 +895,29 @@ are not yet sent from the CLI.
   the wrap-up; lint once the filters are chosen with `filters <i> --set`).
   `skip <i> --reason "<one sentence>" [--to STEP]` moves past a gate and
   records the reason.
+- Landing: accepted and edited units reach the essay only by landing,
+  which writes the file and then pushes its Doc tab through the Doc road
+  (`push_doc`, guarded; never a second push path). It runs when
+  `advance` or `skip` leaves construction, the wrap-up or the filters, and
+  on demand: `workflow land <i>` (`--dry-run` shows each unit's from/to
+  and writes nothing; Land and Preview on the Workflows page). Each unit
+  lands on its original text, never its position; walks are cut from the
+  instance's base text (the essay when construction began), so the
+  author's edits between turns stay. A unit whose original is gone is not
+  landed: `workflow status` and the page show it as needing the author,
+  with both texts; he edits the file by hand or settles it with `land
+  <i> --leave <label>`. Nothing is written while the tab has edits not in
+  the file (pull, or `doc merge`, then land again) or forms pending; a
+  stopped push puts the file back. A reopen of a landed unit takes it
+  back out of the file. A beat walk lands whole, only while the file is
+  still the text it started from. `edits = "owner"` declines a landing;
+  `register = "protected"` does not.
 - `set-engine` and `set-unit` mid-instance take `--reason`; each is
   recorded. `decide --kind principle|ruling --words` records the author's
   words; nothing is a ruling unless the author marks it so.
 - Read-only: `list`, `status`, `show`, `turns`, `usage [--essay|--month]`,
-  `filters <i>` without `--set`, `blurbs` without a change.
+  `filters <i>` without `--set`, `blurbs` without a change, `land <i>
+  --dry-run`.
 - Any essay in the reading order can have a workflow; no file is treated
   specially (owner, 2026-11-26: "there should be no special casing").
   An essay whose toc entry says `register = "protected"` gets the

@@ -20,6 +20,13 @@ the owner's words) and §12 row 1. In short:
   author marks it so (Q14).
 - Any essay in the reading order can have a workflow; no file is special-
   cased (owner, 2026-11-26: "there should be no special casing").
+- Every walk is cut from the instance's base text: the essay as it stood
+  when the instance first reached construction (or a later step), taken
+  once and kept on the instance. The live file may move under an open
+  instance (the author edits it, a landing writes it); a unit's label
+  therefore always names the same text. Each unit turn also records the
+  unit's original text (`unit_before`), and a ruling lands on that text,
+  never on a position (`landing`).
 """
 
 from __future__ import annotations
@@ -95,6 +102,7 @@ def _instance(row) -> dict:
         out[key] = loads(out[key], [])
     out["engine_state"] = loads(out["engine_state"], {})
     out["filters_confirmed"] = bool(out["filters_confirmed"])
+    out.setdefault("base_text", None)
     return out
 
 
@@ -410,12 +418,57 @@ def _next_step(step: str) -> str:
     return STEPS[STEPS.index(step) + 1]
 
 
+# ---------------------------------------------------------------- base text
+
+def file_text(manuscript: dict, file: str) -> str | None:
+    """The essay file's text now, or None when there is no such file."""
+    path = Path(manuscript["path"]) / file
+    try:
+        return path.read_text(encoding="utf-8")
+    except (FileNotFoundError, IsADirectoryError):
+        return None
+
+
+def base_text(manuscript: dict, instance: dict) -> str:
+    """The text every walk of the instance is cut from: its base when
+    taken, else the file as it is now (a new essay's absent file is "")."""
+    if instance.get("base_text") is not None:
+        return instance["base_text"]
+    return file_text(manuscript, instance["file"]) or ""
+
+
+def _manuscript_of(db: Database, instance: dict) -> dict:
+    return dict(db.one("SELECT * FROM manuscripts WHERE id = ?",
+                       (instance["manuscript_id"],)))
+
+
+def ensure_base(db: Database, manuscript: dict, instance: dict) -> dict:
+    """Take the instance's base text if it has none yet: the file as it
+    is now. Returns the instance as stored."""
+    if instance.get("base_text") is not None:
+        return instance
+    db.update("workflow_instances", instance["id"],
+              {"base_text": file_text(manuscript, instance["file"]) or ""})
+    return _instance(db.one("SELECT * FROM workflow_instances WHERE id = ?",
+                            (instance["id"],)))
+
+
+def _base_change(db: Database, instance: dict, to: str) -> dict:
+    """The base text to take when the step moves to `to`: at the first
+    step that walks the essay (construction or later)."""
+    if (instance.get("base_text") is not None
+            or STEPS.index(to) < STEPS.index("construction")):
+        return {}
+    manuscript = _manuscript_of(db, instance)
+    return {"base_text": file_text(manuscript, instance["file"]) or ""}
+
+
 def advance(db: Database, instance: dict) -> dict:
     why = gate(db, instance)
     if why:
         raise ValueError(why)
     to = _next_step(instance["step"])
-    changes = {"step": to}
+    changes = {"step": to, **_base_change(db, instance, to)}
     if to == "done":
         changes["finished_at"] = now_iso()
     return _touch(db, instance, changes)
@@ -450,7 +503,7 @@ def skip(db: Database, instance: dict, reason: str, to: str | None = None) -> di
                          detail={"from": step, "to": target,
                                  "skipped": passed,
                                  "gate": gate(db, instance)})
-        changes = {"step": target}
+        changes = {"step": target, **_base_change(db, instance, target)}
         if target == "done":
             changes["finished_at"] = now_iso()
         out = _touch(db, instance, changes)
@@ -641,11 +694,12 @@ def _check_turn(instance: dict, action: str, author_text: str,
 def record_turn(db: Database, instance: dict, action: str, *,
                 author_text: str = "", blurbs: list[str] | None = None,
                 unit_label: str = "", reply: dict | None = None,
-                session_ref: str | None = None) -> dict:
+                session_ref: str | None = None, unit_before: str = "") -> dict:
     """Append one turn to the instance's session. `reply` is a normalized
     engine reply (contract.normalize_reply) when the turn asked the model;
     `session_ref` the engine's handle after it, stored in the instance's
-    engine_state in the same transaction as the turn."""
+    engine_state in the same transaction as the turn. `unit_before` is the
+    unit's original text, which a ruling lands on."""
     blurbs = list(blurbs or [])
     _check_turn(instance, action, author_text, blurbs)
     reply = reply or {}
@@ -664,6 +718,7 @@ def record_turn(db: Database, instance: dict, action: str, *,
             "usage": json.dumps(reply.get("usage") or {}),
             "requests": json.dumps(reply.get("requests") or [],
                                    ensure_ascii=False),
+            "unit_before": unit_before or "",
         }
         db.insert("session_turns", row)
         if blurbs:
@@ -713,7 +768,7 @@ def ask(db: Database, manuscript: dict, instance: dict, action: str,
 def send_turn(db: Database, manuscript: dict, instance: dict, action: str,
               message: str, *, engine=None, author_text: str | None = None,
               blurbs: list[str] | None = None, unit_label: str = "",
-              context_extra: dict | None = None) -> dict:
+              context_extra: dict | None = None, unit_before: str = "") -> dict:
     """Ask the instance's engine for the next reply and record the turn,
     with the engine's session ref (`ask`, then `record_turn`). `message` is
     what goes to the engine; `author_text` the author's own words (default:
@@ -725,7 +780,7 @@ def send_turn(db: Database, manuscript: dict, instance: dict, action: str,
                      context_extra=context_extra)
     return record_turn(db, instance, action, author_text=author_text,
                        blurbs=blurbs, unit_label=unit_label, reply=reply,
-                       session_ref=ref)
+                       session_ref=ref, unit_before=unit_before)
 
 
 # ------------------------------------------------------------------- blurbs

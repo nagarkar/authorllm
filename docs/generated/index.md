@@ -1764,6 +1764,12 @@ The built web pages against their sources (`authorlm/web_pages.py`): staleness b
 
 The per-essay editing workflow's record (authorlm/workflow/): the step gates, carry-over between instances, engine and unit switches with their reasons, the turns recorded from an engine, blurbs, usage totals, the standing context's stable order, the protected register, no file special-cased, and the CLI.
 
+## `tests.test_workflow_landing`
+
+`authorlm/tests/test_workflow_landing.py`
+
+Landing (`authorlm.workflow.landing`): an instance's ruled units written into the essay file and pushed to its Doc tab through the Doc road.
+
 ## `tests.test_workflow_library`
 
 `authorlm/tests/test_workflow_library.py`

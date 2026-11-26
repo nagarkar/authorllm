@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import sys
 
-from . import context, core
+from . import context, core, landing
 
 READ_ONLY = ("list", "status", "show", "turns", "usage")
 
@@ -77,6 +77,34 @@ def _usage_lines(totals: dict) -> list[str]:
     return lines
 
 
+def _clip(text: str) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= 160 else text[:157] + "…"
+
+
+def _land_lines(out: dict | None) -> list[str]:
+    """A landing's result: what landed, what waits, what needs the author."""
+    if not out:
+        return []
+    lines = [f"  landing: {out['note']}"]
+    for u in out["units"]:
+        if u["status"] in ("landed", "left"):
+            continue
+        word = {"land": "would land" if out["dry_run"] else "landed",
+                "already": "already in the file", "waiting": "not landed",
+                "needs-owner": "NEEDS YOU, not landed"}.get(u["status"], u["status"])
+        lines.append(f"    {u['step']} {u['label']}: {word}"
+                     + (f" — {u['reason']}" if u.get("reason") else ""))
+        if u["status"] == "needs-owner" or (out["dry_run"] and u["status"] == "land"):
+            lines.append(f"      from: {_clip(u['original'])}")
+            lines.append(f"      to:   {_clip(u['new'])}")
+    return lines
+
+
+def _road(db, manuscript, args):
+    return landing.make_road(db, manuscript, getattr(args, "workspace", None))
+
+
 def cmd_workflow(args):
     from ..cli import _manuscript, _open_db
 
@@ -103,13 +131,20 @@ def cmd_workflow(args):
                    or ["no workflow instances"])
         elif verb == "status":
             rows = core.status(db, manuscript, args.essay)
-            _print(args, rows, [
-                f"{r['file']}: {r['kind']} #{r['number']} at {r['step']}"
-                + (f" → {r['next']}" if r["next"] else "")
-                + (f" (waits: {r['waits_for']})" if r["waits_for"]
-                   and r["step"] != "done" else "")
-                + f"  [{r['instance']}]" for r in rows]
-                or ["no workflow instances"])
+            lines = []
+            for r in rows:
+                st = landing.status(db, manuscript, core.get_instance(
+                    db, manuscript, r["instance"]))
+                r["landing"] = st
+                lines.append(
+                    f"{r['file']}: {r['kind']} #{r['number']} at {r['step']}"
+                    + (f" → {r['next']}" if r["next"] else "")
+                    + (f" (waits: {r['waits_for']})" if r["waits_for"]
+                       and r["step"] != "done" else "")
+                    + f"  [{r['instance']}]")
+                if landing.status_line(st):
+                    lines.append(f"  landing: {landing.status_line(st)}")
+            _print(args, rows, lines or ["no workflow instances"])
         elif verb == "show":
             inst = core.get_instance(db, manuscript, args.instance)
             _print(args, {**inst, "gate": core.gate(db, inst),
@@ -171,14 +206,28 @@ def cmd_workflow(args):
                     + ("" if inst["filters_confirmed"]
                        else " (pre-ticked; not yet chosen)"),
                     f"standard order: {', '.join(order) or '(not written yet)'}"])
-        elif verb == "skip":
+        elif verb in ("skip", "advance"):
+            before = core.get_instance(db, manuscript, args.instance)
+            inst = (core.skip(db, before, args.reason, args.to)
+                    if verb == "skip" else core.advance(db, before))
+            out = landing.after_move(db, manuscript, before, inst,
+                                     road=_road(db, manuscript, args),
+                                     workspace=getattr(args, "workspace", None))
+            _print(args, {**inst, "landed": out},
+                   _show_lines(db, inst) + _land_lines(out))
+        elif verb == "land":
             inst = core.get_instance(db, manuscript, args.instance)
-            inst = core.skip(db, inst, args.reason, args.to)
-            _print(args, inst, _show_lines(db, inst))
-        elif verb == "advance":
-            inst = core.get_instance(db, manuscript, args.instance)
-            inst = core.advance(db, inst)
-            _print(args, inst, _show_lines(db, inst))
+            if args.leave:
+                left = landing.leave(db, manuscript, inst, args.leave)
+                _print(args, left, [f"left as the file has it: "
+                                    f"{', '.join(left['left'])}"])
+            else:
+                out = landing.land(db, manuscript, inst, dry_run=args.dry_run,
+                                   road=None if args.dry_run
+                                   else _road(db, manuscript, args),
+                                   trigger="verb", workspace=getattr(args, "workspace", None))
+                _print(args, out, [f"{inst['file']} [{inst['id']}]"]
+                       + _land_lines(out))
         elif verb == "decide":
             inst = core.get_instance(db, manuscript, args.instance)
             d = core.decide(db, inst, args.kind, args.words, args.reason or "")
@@ -275,14 +324,28 @@ def add_parser(sub, common) -> None:
     instance(q)
     q.add_argument("--set", metavar="A,B,C")
 
-    q = leaf("skip", "move past the step's gate with one sentence of reason")
+    q = leaf("skip", "move past the step's gate with one sentence of reason "
+                     "(lands the rulings of the steps passed, as advance does)")
     instance(q)
     q.add_argument("--reason", required=True)
     q.add_argument("--to", choices=core.STEPS[1:],
                    help="skip to this later step (default: the next)")
 
-    q = leaf("advance", "move to the next step when its gate is met")
+    q = leaf("advance", "move to the next step when its gate is met; "
+                        "leaving construction, the wrap-up or the filters "
+                        "lands their rulings in the essay and its Doc tab")
     instance(q)
+
+    q = leaf("land", "land the instance's ruled units in the essay file and "
+                     "push its Doc tab (each unit matched by its original "
+                     "text; one whose original is gone waits for you)")
+    instance(q)
+    q.add_argument("--dry-run", action="store_true",
+                   help="show what would land and what needs you; write "
+                        "nothing (read-only)")
+    q.add_argument("--leave", metavar="LABEL",
+                   help="settle a unit that needs you as the file has it: "
+                        "it is not landed and no longer reported")
 
     q = leaf("decide", "record a principle the author stated, or a ruling the "
                        "author explicitly marked as one")

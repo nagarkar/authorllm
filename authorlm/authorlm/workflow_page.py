@@ -9,9 +9,10 @@ Everything the page writes goes through the workflow package
 (`authorlm.workflow.core`): instances, turns, decisions, blurbs, the step
 gates. Model turns go through the engine contract
 (`workflow.contract.make_engine`, filled by the engines package; tests
-register a fake). The page never writes the manuscript file or the Doc:
-changes to an essay happen only through forms the author accepts, and the
-accepted text of each unit lives on the session record (the turns).
+register a fake). The accepted text of each unit lives on the session
+record (the turns); the page writes the essay file and its Doc tab only
+through `workflow.landing` (when a step ends, on Land, and when a reopen
+takes a landed unit back), never directly.
 
 What the page shows for an instance, by step:
 
@@ -57,7 +58,7 @@ METHODS = ("overview", "instance", "start", "recommend", "rec", "list",
            "letter", "letter_reply", "finding", "accept_letter", "propose",
            "act", "reopen", "beat_done", "conclude", "wrapup", "principle",
            "filters", "lint", "skip", "advance", "engine", "unit", "blurbs",
-           "blurb_add", "blurb_hide", "usage", "estimate")
+           "blurb_add", "blurb_hide", "usage", "estimate", "land", "leave")
 
 # The read-only methods: they write nothing (the page polls none of them).
 READ_ONLY = ("overview", "instance", "blurbs", "usage", "estimate")
@@ -182,7 +183,10 @@ def unit_state(history: list[dict], before: str = "") -> dict:
     last = history[-1]
     model_turns = [t for t in history if t["engine"]]
     form = model_turns[-1] if model_turns else None
-    out: dict[str, Any] = {"turns": len(history)}
+    out: dict[str, Any] = {"turns": len(history), "seq": last["seq"],
+                           "ruled_before": last.get("unit_before") or next(
+                               (t.get("unit_before") for t in reversed(history)
+                                if t.get("unit_before")), "")}
     if form:
         out["form"] = {"seq": form["seq"], "reason": form["reason"],
                        "proposed": form["proposed"], "text": form["reply"],
@@ -290,28 +294,40 @@ def _segments(turns: list[dict], decisions: list[dict], step: str,
 def _phase_walk(db: Database, manuscript: dict, inst: dict, step: str,
                 turns: list[dict] | None = None,
                 decisions: list[dict] | None = None) -> dict:
+    views = phase_stretches(db, manuscript, inst, step, turns, decisions)
+    earlier: list[dict] = []
+    for i, v in enumerate(views[:-1], start=1):
+        earlier += [{"label": u["label"], "kind": u.get("kind", ""),
+                     "state": u["state"], "text": u.get("text", ""),
+                     "stretch": i}
+                    for u in v["units"]
+                    if u["state"] in RESOLVED and u["state"] != "passed"]
+    view = views[-1]
+    view["earlier"] = earlier
+    return view
+
+
+def phase_stretches(db: Database, manuscript: dict, inst: dict, step: str,
+                    turns: list[dict] | None = None,
+                    decisions: list[dict] | None = None) -> list[dict]:
+    """Each stretch of the walk at `step` (cut at unit switches), in
+    order: the walk over the text the stretch before it left, with that
+    text as `base`. Construction starts from the instance's base text
+    (`core.base_text`), never the live file, so a label always names the
+    same text; the filters start from the text the wrap-up left."""
     turns = core.turns(db, inst) if turns is None else turns
     decisions = core.decisions(db, inst) if decisions is None else decisions
     if step == "construction":
-        text = core._files(manuscript).get(inst["file"], "")
+        text = core.base_text(manuscript, inst)
     else:
         text = _after_wrapup(db, manuscript, inst, turns, decisions)["text"]
-    earlier: list[dict] = []
-    stretches = _segments(turns, decisions, step, inst)
-    view: dict = {}
-    for i, (st, ts) in enumerate(stretches, start=1):
-        base = text
+    views = []
+    for st, ts in _segments(turns, decisions, step, inst):
         view = _walk_over(text, st["unit"], st["mode"], _by_label(ts, step))
-        if i < len(stretches):
-            earlier += [{"label": u["label"], "kind": u.get("kind", ""),
-                         "state": u["state"], "text": u.get("text", ""),
-                         "stretch": i}
-                        for u in view["units"]
-                        if u["state"] in RESOLVED and u["state"] != "passed"]
-            text = view["text"]
-    view["base"] = base
-    view["earlier"] = earlier
-    return view
+        view["base"] = text
+        views.append(view)
+        text = view["text"]
+    return views
 
 
 def _walk(db: Database, manuscript: dict, inst: dict, step: str) -> dict:
@@ -503,6 +519,13 @@ _WORKSPACE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "workflow_page_workspace", default=None)
 
 
+def _road(db: Database, manuscript: dict):
+    """The Doc road landings go through (`workflow.landing`), for the
+    workspace the page was opened on."""
+    from .workflow import landing
+    return landing.make_road(db, manuscript, _WORKSPACE.get())
+
+
 def _context_extra(db: Database, manuscript: dict, inst: dict) -> dict:
     """What the page adds to the instance context: the essay as it now
     stands (the working text, not the untouched file), the workspace and
@@ -513,11 +536,13 @@ def _context_extra(db: Database, manuscript: dict, inst: dict) -> dict:
 
 def _send(db: Database, manuscript: dict, inst: dict, action: str,
           message: str, *, author_text: str | None = None,
-          blurbs: list[str] | None = None, unit_label: str = "") -> dict:
+          blurbs: list[str] | None = None, unit_label: str = "",
+          unit_before: str = "") -> dict:
     """One model turn, recorded with the engine's session ref in the same
     transaction (`core.send_turn`)."""
     return core.send_turn(db, manuscript, inst, action, message,
                           engine=_engine(inst), author_text=author_text,
+                          unit_before=unit_before,
                           blurbs=blurbs, unit_label=unit_label,
                           context_extra=_context_extra(db, manuscript, inst))
 
@@ -854,6 +879,8 @@ def instance_view(db: Database, manuscript: dict, ref: str) -> dict:
         out["unplaced"] = _after_wrapup(db, manuscript, inst, turns)["unplaced"]
     if inst["step"] in ("lint", "done"):
         out["lint"] = _lint_view(turns)
+    from .workflow import landing
+    out["landing"] = landing.status(db, manuscript, inst)
     out["principles"] = [d for d in out["decisions"] if d["kind"] == "principle"]
     out["skipped"] = [d for d in out["decisions"] if d["kind"] == "skip"]
     return out
@@ -1029,6 +1056,7 @@ def propose(db: Database, manuscript: dict, inst: dict, label: str | None) -> di
     label is given; a named unit only when it is not yet worked."""
     step = inst["step"]
     _check_label_step(inst, step)
+    inst = core.ensure_base(db, manuscript, inst)
     if step == "wrapup":
         raise ValueError("the wrap-up's items come from the wrap-up itself")
     if step == "filters" and not inst["filters_confirmed"]:
@@ -1046,7 +1074,7 @@ def propose(db: Database, manuscript: dict, inst: dict, label: str | None) -> di
                             else "reopen it to work it again"))
     return _send(db, manuscript, inst, "start",
                  _unit_message(db, manuscript, inst, step, label, unit["before"]),
-                 author_text="", unit_label=label)
+                 author_text="", unit_label=label, unit_before=unit["before"])
 
 
 def act(db: Database, manuscript: dict, inst: dict, label: str, action: str,
@@ -1058,8 +1086,10 @@ def act(db: Database, manuscript: dict, inst: dict, label: str, action: str,
     first, so a stale click never overwrites the author's own text."""
     step = _step_for(inst, label)
     _check_label_step(inst, step)
+    inst = core.ensure_base(db, manuscript, inst)
     unit, _walk_ = _unit(db, manuscript, inst, step, label)
     state = unit["state"]
+    before = unit.get("before", "")
     blurbs = [b for b in (blurbs or []) if b.strip()]
     if action == "accept":
         proposed = (unit.get("form") or {}).get("proposed", "")
@@ -1067,12 +1097,13 @@ def act(db: Database, manuscript: dict, inst: dict, label: str, action: str,
             raise ValueError(f"{label} has no proposal waiting to accept "
                              f"(it is {state})")
         return core.record_turn(db, inst, "accept", author_text=proposed,
-                                unit_label=label)
+                                unit_label=label, unit_before=before)
     if action == "reject":
         if state not in ("pending",) and not (step == "wrapup" and state == "open"):
             raise ValueError(f"{label} has no proposal waiting to reject "
                              f"(it is {state})")
-        return core.record_turn(db, inst, "reject", unit_label=label)
+        return core.record_turn(db, inst, "reject", unit_label=label,
+                                unit_before=before)
     if state in RESOLVED and state != "passed":
         raise ValueError(f"{label} is {state}; reopen it first")
     if action == "redo":
@@ -1081,33 +1112,40 @@ def act(db: Database, manuscript: dict, inst: dict, label: str, action: str,
                              "wrong")
         return _send(db, manuscript, inst, "redo",
                      _redo_message(label, blurbs, free),
-                     author_text=free.strip(), blurbs=blurbs, unit_label=label)
+                     author_text=free.strip(), blurbs=blurbs, unit_label=label,
+                     unit_before=before)
     if action == "edit":
         if not text.strip():
             raise ValueError("an edit carries the author's text")
         if core.needs_model("edit", text):
             return _send(db, manuscript, inst, "edit", _edit_message(label, text),
-                         author_text=text, unit_label=label)
+                         author_text=text, unit_label=label, unit_before=before)
         return core.record_turn(db, inst, "edit", author_text=text,
-                                unit_label=label)
+                                unit_label=label, unit_before=before)
     raise ValueError("action is accept, reject, redo or edit")
 
 
 def reopen(db: Database, manuscript: dict, inst: dict, label: str) -> dict:
     """Go back to a unit already ruled (Q11, confirmed 2026-11-25): the
     engine proposes it again; units after it are kept, and the engine is
-    told so."""
+    told so. A unit already landed in the essay is first taken back out of
+    it (`landing.revert`): the file gets the unit's original text again."""
+    from .workflow import landing
+
     step = _step_for(inst, label)
     _check_label_step(inst, step)
+    inst = core.ensure_base(db, manuscript, inst)
     unit, _w = _unit(db, manuscript, inst, step, label)
     if unit["state"] not in RESOLVED:
         raise ValueError(f"{label} is not ruled yet; nothing to reopen")
+    landing.revert(db, manuscript, inst, step, label, road=_road(db, manuscript))
     kept = unit.get("text", "")
     return _send(db, manuscript, inst, "reply",
                  f"Reopen {label}: the author goes back to this unit. The units "
                  "after it are kept as they are. Propose it again in the light "
                  f"of everything since.\n\nAs it was kept:\n\n{kept}",
-                 author_text=f"(reopened {label})", unit_label=label)
+                 author_text=f"(reopened {label})", unit_label=label,
+                 unit_before=unit.get("before", ""))
 
 
 def draft_letter(db: Database, manuscript: dict, inst: dict) -> dict:
@@ -1339,6 +1377,16 @@ def wrapup(db: Database, manuscript: dict, inst: dict) -> dict:
 
 # ------------------------------------------------------------- dispatch
 
+def _land_after(db: Database, manuscript: dict, before: dict,
+                after: dict) -> dict | None:
+    """Land once a step that rules text has ended (`landing.after_move`);
+    the step has moved either way, and the result says what landed."""
+    from .workflow import landing
+    return landing.after_move(db, manuscript, before, after,
+                              road=_road(db, manuscript), actor="web",
+                              workspace=_WORKSPACE.get())
+
+
 def _blurb_list(p: dict) -> list[str]:
     raw = p.get("blurbs") or []
     if isinstance(raw, str):
@@ -1442,12 +1490,34 @@ def dispatch(method: str, params: dict[str, Any],
         core.set_filters(db, inst, [str(n) for n in names],
                          [x["name"] for x in passes()])
     elif method == "skip":
-        core.skip(db, inst, str(p.get("reason") or ""), p.get("to") or None)
+        moved = core.skip(db, inst, str(p.get("reason") or ""), p.get("to") or None)
+        landed = _land_after(db, manuscript, inst, moved)
+        out = instance_view(db, manuscript, inst["id"])
+        out["landed"] = landed
+        return out
     elif method == "advance":
         why = page_gate(db, manuscript, inst)
         if why:
             raise ValueError(why)
-        core.advance(db, inst)
+        moved = core.advance(db, inst)
+        landed = _land_after(db, manuscript, inst, moved)
+        out = instance_view(db, manuscript, inst["id"])
+        out["landed"] = landed
+        return out
+    elif method in ("land", "leave"):
+        from .workflow import landing
+        if method == "leave":
+            landing.leave(db, manuscript, inst, str(p.get("label") or ""),
+                          actor="web")
+            landed = None
+        else:
+            landed = landing.land(db, manuscript, inst,
+                                  dry_run=bool(p.get("dry_run")),
+                                  road=_road(db, manuscript), trigger="page",
+                                  actor="web", workspace=_WORKSPACE.get())
+        out = instance_view(db, manuscript, inst["id"])
+        out["landed"] = landed
+        return out
     elif method == "engine":
         core.set_engine(db, inst, str(p.get("engine") or ""),
                         p.get("model") if p.get("model") is not None else None,

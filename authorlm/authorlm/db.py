@@ -736,6 +736,9 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
                                   -- this instance (0: carried over, pre-ticked)
     carried_from TEXT,            -- the instance the choices came from
     toc_order TEXT NOT NULL DEFAULT '[]',  -- JSON: reading order at start
+    base_text TEXT,               -- the essay as construction found it: every
+                                  -- walk is cut from this, not the live file
+                                  -- (NULL: not yet taken; the file is read)
     updated_at TEXT NOT NULL,
     finished_at TEXT,
     UNIQUE (workflow_id, number)
@@ -759,7 +762,42 @@ CREATE TABLE IF NOT EXISTS session_turns (
     usage TEXT NOT NULL DEFAULT '{{}}',    -- JSON: input, cached, output,
                                   -- dollars, est_subscription
     requests TEXT NOT NULL DEFAULT '[]',   -- JSON: [{{name, args, chars}}]
+    unit_before TEXT NOT NULL DEFAULT '',  -- the unit's original text when
+                                  -- the turn ran: what a ruling lands on
     UNIQUE (instance_id, seq)
+);
+
+-- Landing (workflow/landing.py): the ruled units written into the essay
+-- file and pushed to its Doc tab. One row per landing run, with the file
+-- before and after it, so a landing can be undone; one row per ruled unit,
+-- keyed by the ruling turn, so landing twice lands nothing twice.
+CREATE TABLE IF NOT EXISTS workflow_land_runs (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    instance_id TEXT NOT NULL,
+    file TEXT NOT NULL,
+    trigger TEXT NOT NULL DEFAULT '',     -- step-end | verb | page | reopen
+    pre_text TEXT,                -- the file before (NULL: it did not exist)
+    post_text TEXT,               -- the file after (NULL: nothing written)
+    landed INTEGER NOT NULL DEFAULT 0,    -- units written this run
+    pushed INTEGER NOT NULL DEFAULT 0,    -- 1: the Doc tab was brought up
+    note TEXT NOT NULL DEFAULT '',        -- why nothing was written or pushed
+    actor TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS workflow_landings (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    instance_id TEXT NOT NULL,
+    step TEXT NOT NULL,           -- construction | wrapup | filters
+    stretch INTEGER NOT NULL DEFAULT 1,  -- the walk's stretch (unit switches)
+    label TEXT NOT NULL,          -- the unit's label in that stretch
+    seq INTEGER NOT NULL,         -- the ruling turn's seq
+    state TEXT NOT NULL,          -- landed | needs-owner | reverted | left
+    original TEXT NOT NULL DEFAULT '',
+    new TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    run_id TEXT,                  -- workflow_land_runs.id that last moved it
+    updated_at TEXT NOT NULL,
+    UNIQUE (instance_id, step, stretch, label, seq)
 );
 
 CREATE TABLE IF NOT EXISTS workflow_decisions (
@@ -1005,6 +1043,13 @@ class Database:
                 )
         if provenance_added:
             self._backfill_provenance()
+        if "base_text" not in self._columns("workflow_instances"):
+            self.conn.execute(
+                "ALTER TABLE workflow_instances ADD COLUMN base_text TEXT")
+        if "unit_before" not in self._columns("session_turns"):
+            self.conn.execute(
+                "ALTER TABLE session_turns ADD COLUMN unit_before TEXT "
+                "NOT NULL DEFAULT ''")
         if "comment_id" in self._columns("doc_threads"):
             self._migrate_thread_origins()
 
