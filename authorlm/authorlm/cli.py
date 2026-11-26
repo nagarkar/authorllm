@@ -2717,6 +2717,7 @@ def cmd_book(args):
                 config = _load_config(args)
                 fixed = changes.lint_fix(
                     db, manuscript, targets, config=config,
+                    only=only, skip=skip,
                     services=lambda: (
                         _gd.get_service(config, args.workspace,
                                         interactive=False),
@@ -5467,12 +5468,13 @@ def cmd_filter(args):
                 raise SystemExit("usage: authorlm filter prelude <name> "
                                  "<essay.md>  (the registry JSON on stdin, "
                                  "or --native)")
-            _through_workflow(db, manuscript, args.file, "filter", args.name,
-                              args.skip_reason)
+            road = _through_workflow(db, manuscript, args.file, "filter",
+                                     args.name, args.skip_reason)
             result = api.filter_prelude(
                 db, manuscript, config, args.name, args.file,
                 replace=args.replace, native=args.native,
                 reply=_stdin_text())
+            _record_road(db, manuscript, road)
             _print_filter_warnings(result.get("warnings"))
             if result.get("kind") == "pronunciations":
                 if "proposed" not in result:
@@ -5533,12 +5535,13 @@ def cmd_filter(args):
             if not (args.name and args.file):
                 raise SystemExit("usage: authorlm filter run <name> "
                                  "<essay.md>")
-            _through_workflow(db, manuscript, args.file, "filter", args.name,
-                              args.skip_reason)
+            road = _through_workflow(db, manuscript, args.file, "filter",
+                                     args.name, args.skip_reason)
             result = api.filter_run(
                 db, manuscript, config, args.name, args.file,
                 window=args.window, from_unit=getattr(args, "from_unit", None),
                 again=args.again, native=args.native)
+            _record_road(db, manuscript, road)
             _print_filter_warnings(result["warnings"])
             start, end = result["window"]
             print(ui.bold(
@@ -6471,12 +6474,13 @@ def cmd_lens(args):
         raise SystemExit(f"usage: authorlm lens {args.action} <name> <file>")
     session, _ = api.ensure_session(db, manuscript)
     if args.action == "run":
-        _through_workflow(db, manuscript, args.file, "lens", args.name,
-                          args.skip_reason)
+        road = _through_workflow(db, manuscript, args.file, "lens",
+                                 args.name, args.skip_reason)
         try:
             meta_, _body_ = lenses.load_lens(manuscript, args.name)
         except (LookupError, ValueError) as err:
             raise SystemExit(f"error: {err}")
+        _record_road(db, manuscript, road)
         if meta_.get("grain") == "poem" and not args.poem:
             # The whole-file loop at poem grain: one payload per poem.
             try:
@@ -7235,20 +7239,31 @@ def cmd_interlocutor(args):
 
 
 def _through_workflow(db, manuscript: dict, essay: str, road: str,
-                      name: str = "", reason: str | None = None) -> dict:
+                      name: str = "", reason: str | None = None,
+                      new: bool = False) -> dict:
     """A retired road's entry point (workflow/roads.py, §11.9 Q2): open
-    when the essay's workflow is at the road's own step, or with a skip of
-    one sentence of reason, recorded on the essay's workflow; otherwise
-    stop and say how to start or continue the workflow."""
+    only with a skip of one sentence of reason, or one given before for
+    this road and name on the open instance; otherwise stop and say how to
+    start or continue the workflow. Checks and writes nothing: the verb
+    runs its own checks next, and `_record_road` records the skip after
+    them, so a mistyped name or file leaves no trace on the workflow."""
     from .workflow import roads
 
     try:
-        out = roads.enter(db, manuscript, essay, road, name=name,
-                          reason=reason)
+        return roads.enter(db, manuscript, essay, road, name=name,
+                           reason=reason, dry_run=True, new=new)
     except roads.SentToWorkflow as err:
         raise SystemExit(str(err))
     except (LookupError, ValueError) as err:
         raise SystemExit(f"error: {err}")
+
+
+def _record_road(db, manuscript: dict, plan: dict) -> dict:
+    """Record the skip `_through_workflow` planned, once the verb's own
+    checks have passed, and say so."""
+    from .workflow import roads
+
+    out = roads.record(db, manuscript, plan)
     inst = out["instance"]
     if out["how"] == "skip":
         started = out["decision"]["detail"].get("instance_started")
@@ -7505,12 +7520,13 @@ def cmd_write(args):
         if args.action == "start":
             if not args.params:
                 sys.exit("usage: write start <file> [--intent <id>]")
-            _through_workflow(db, manuscript, args.params[0], "beats",
-                              reason=args.skip_reason)
+            road = _through_workflow(db, manuscript, args.params[0], "beats",
+                                     reason=args.skip_reason, new=args.new)
             result = api.write_start(db, manuscript, config,
                                      args.params[0], args.intent,
                                      after=args.after, brief=_stdin_text(),
                                      new=args.new, style=args.style)
+            _record_road(db, manuscript, road)
             w = result["writeup"]
             print(f"Writeup [{w['id'][:11]}] on {w['file']}.")
             if result["created"]:

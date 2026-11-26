@@ -1025,7 +1025,8 @@ LINT_OWNS = {"quote-style": "quotation marks", "dash-form": "dash form",
 
 def lint_fix(db: Database, manuscript: dict, files: list[str],
              services=None, config: dict | None = None,
-             dry_run: bool = False) -> dict:
+             dry_run: bool = False, only: list[str] | None = None,
+             skip: list[str] | None = None) -> dict:
     """`book lint --fix`: lint's mechanical fixes (MECHANICAL_FIXES) applied
     straight into each file, and into its Doc tab through the Lint view's
     guarded road (lint_page.apply: pull, edit, guarded push; a guard that
@@ -1034,15 +1035,19 @@ def lint_fix(db: Database, manuscript: dict, files: list[str],
     applied, changes: [{line, before, after}], blocked, message}],
     applied, blocked, dry_run}. `services` returns (drive, docs) and is
     asked only when a fix reaches a tab linked to the Doc. `dry_run`
-    counts and writes nothing."""
+    counts and writes nothing. `only` and `skip` are `book lint`'s: a
+    mechanical fix runs only when its rule is among the rules chosen."""
     from . import lint_page
 
+    chosen = set(lint_rules(only, skip))
     root = Path(manuscript["path"])
     fixes, planned = [], {}
     for query in files:
         rel = docs._resolve_relpath(manuscript, query)
         text = (root / rel).read_text(encoding="utf-8")
         for rule, kind in MECHANICAL_FIXES.items():
+            if rule not in chosen:
+                continue
             fix = {"id": f"{rule}:{rel}", "kind": kind, "file": rel,
                    "rule": rule}
             edits = lint_page.edits_for(fix, text, db, manuscript, rel)

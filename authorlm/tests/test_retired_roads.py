@@ -8,8 +8,14 @@ versus copyedit (§11.9 Q2, U8, U9; §12 row 6).
   `skip` decision on the essay's open instance (a refine instance is
   started when there is none, a new one for an essay that does not exist
   yet, the decision saying why).
-- At the road's own step (filters for filters and lenses, construction
-  beat by beat for the beat loop) the road opens with no word.
+- Even at the road's own step (filters for filters and lenses,
+  construction beat by beat for the beat loop) the road needs a reason:
+  the old machinery does not carry the instance's lists or engine.
+- A mistyped filter, lens or file, or a verb whose own checks fail,
+  leaves no instance and no decision; the Filters view's queue is all or
+  nothing.
+- The essay is resolved as the verbs resolve it: a subfolder path, or a
+  unique part of the name.
 - `book lint` owns quote marks, dash form, spelling by dictionary and
   footnote anchors; `--fix` applies the mechanical fixes directly and
   lists them; the copyedit brief never names what lint owns.
@@ -98,7 +104,10 @@ def cli(ws: Path, *argv: str) -> tuple[str, str | None]:
     """(stdout, the SystemExit message or None)."""
     buf = io.StringIO()
     stop = None
-    with contextlib.redirect_stdout(buf):
+    saved_stdin, sys.stdin = sys.stdin, io.StringIO("")   # nothing piped
+    with contextlib.redirect_stdout(buf), \
+            contextlib.ExitStack() as stack:
+        stack.callback(setattr, sys, "stdin", saved_stdin)
         try:
             cli_main(["--workspace", str(ws), *argv])
         except SystemExit as err:
@@ -166,7 +175,8 @@ def test_skip_with_reason_is_recorded() -> None:
               and len(_skips(db, inst)) == 1, again)
         other = None
         try:
-            roads.enter(db, man, "one.md", "filter", name="other-pass")
+            roads.enter(db, man, "one.md", "filter",
+                        name="strunk-and-white-grammar")
         except roads.SentToWorkflow as err:
             other = str(err)
         check("another filter is sent to the workflow again, naming the "
@@ -194,7 +204,7 @@ def test_skip_with_reason_is_recorded() -> None:
         check("a dry run checks the reason and writes nothing",
               dry["how"] == "skip" and core.instances(db, man, "two.md") == [])
 
-        new = roads.enter(db, man, "three", "beats",
+        new = roads.enter(db, man, "three", "beats", new=True,
                           reason="Drafting a short new essay from a brief.")
         check("a skip for an essay that does not exist yet starts a new "
               "instance", new["instance"]["kind"] == "new"
@@ -209,15 +219,23 @@ def test_skip_with_reason_is_recorded() -> None:
               (out, stop))
 
 
-def test_the_roads_own_step_needs_no_word() -> None:
+def test_the_roads_own_step_still_needs_a_reason() -> None:
     with world() as (db, man, _ws, _ms):
         inst = core.start(db, man, "one", "refine")
         inst = core.skip(db, inst, "Straight to the filters for this test.",
                          to="filters")
+        core.set_filters(db, inst, ["own-pass"])
         for road, name in (("filter", "own-pass"), ("lens", "own-lens")):
-            out = roads.enter(db, man, "one.md", road, name=name)
-            check(f"a {road} at the filter step opens through the workflow",
-                  out["how"] == "workflow" and out["decision"] is None)
+            try:
+                roads.enter(db, man, "one.md", road, name=name)
+                closed = ""
+            except roads.SentToWorkflow as err:
+                closed = str(err)
+            check(f"a {road} at the filter step, even a selected one, runs "
+                  "outside the workflow and needs a reason",
+                  "at the filters step" in closed
+                  and "even here it runs outside the workflow" in closed
+                  and "--skip-reason" in closed, closed)
         try:
             roads.enter(db, man, "one.md", "beats")
             closed = ""
@@ -225,23 +243,21 @@ def test_the_roads_own_step_needs_no_word() -> None:
             closed = str(err)
         check("the beat loop at the filter step is sent back",
               "belongs to the construction step" in closed, closed)
-        check("no skip was recorded for the roads at their own step",
+        check("nothing was recorded by being sent back",
               len(_skips(db, inst)) == 1)
 
         refine = core.start(db, man, "two", "refine")
         refine = core.skip(db, refine, "Letter done in chat.",
                            to="construction")
+        core.set_unit(db, refine, mode="beats", reason="The letter says rebuild.")
         try:
             roads.enter(db, man, "two.md", "beats")
             closed = ""
         except roads.SentToWorkflow as err:
             closed = str(err)
-        check("a refine construction applying findings is not the beat loop",
-              "not beat by beat" in closed, closed)
-        core.set_unit(db, refine, mode="beats", reason="The letter says rebuild.")
-        out = roads.enter(db, man, "two.md", "beats")
-        check("construction built beat by beat opens the beat loop",
-              out["how"] == "workflow")
+        check("construction built beat by beat still needs a reason for "
+              "the old beat loop", "at the construction step" in closed
+              and "--skip-reason" in closed, closed)
 
         core.skip(db, core.get_instance(db, man, inst["id"]),
                   "Finished for this test.", to="done")
@@ -250,8 +266,96 @@ def test_the_roads_own_step_needs_no_word() -> None:
             closed = ""
         except roads.SentToWorkflow as err:
             closed = str(err)
-        check("a finished instance is not an open one: start the next",
-              "no open workflow" in closed, closed)
+        check("a finished instance is not an open one: start a re-review",
+              "no open workflow" in closed
+              and "workflow start one --kind re-review" in closed, closed)
+        out = roads.enter(db, man, "one.md", "filter", name="own-pass",
+                          reason="One more pass after the last review.")
+        check("a skip on an essay that has been through the workflow starts "
+              "a re-review, so the letter sees the earlier instances",
+              out["instance"]["kind"] == "re-review", out["instance"])
+
+
+def test_bad_input_leaves_no_trace() -> None:
+    with world() as (db, man, ws, _ms):
+        why = "Only this pass is wanted now."
+        for argv in (("filter", "run", "typo-pass", "one.md"),
+                     ("filter", "prelude", "typo-pass", "one.md"),
+                     ("filter", "run", "own-pass", "nosuch.md"),
+                     ("lens", "run", "typo-lens", "one.md"),
+                     ("write", "start", "nosuch.md"),
+                     ("write", "start", "one.md", "--new")):
+            _out, stop = cli(ws, *argv, "--skip-reason", why)
+            check(f"`{' '.join(argv)}` with a reason stops",
+                  stop is not None, stop)
+            check(f"and leaves no workflow instance or decision",
+                  core.instances(db, man) == []
+                  and db.one("SELECT COUNT(*) AS n FROM workflow_decisions"
+                             )["n"] == 0, argv)
+        # The verb's own checks run before the skip is recorded: a beat
+        # loop start that fails its own gate (--new needs a brief and a
+        # style) records nothing either.
+        _out, stop = cli(ws, "write", "start", "three.md", "--new",
+                         "--skip-reason", why)
+        check("a write start that fails its own checks records nothing",
+              stop is not None and core.instances(db, man) == [], stop)
+
+        items = [{"kind": "filter", "name": "own-pass"}]
+        for files in (["one.md", "zzz.md"],):
+            try:
+                runs_page.enqueue(db, man, items, files, skip_reason=why)
+                raised = False
+            except LookupError:
+                raised = True
+            check("the Filters view's queue with a bad second tab is "
+                  "declined", raised)
+        try:
+            runs_page.enqueue(db, man, items + [{"kind": "lens",
+                                                 "name": "typo"}],
+                              ["one.md", "two.md"], skip_reason=why)
+            raised = False
+        except LookupError:
+            raised = True
+        check("and with an unknown lens after a good filter", raised)
+        try:
+            runs_page.enqueue(db, man, items, ["one.md"],
+                              skip_reason="Two sentences. Not one.")
+            raised = False
+        except ValueError:
+            raised = True
+        check("and with a reason that is not one sentence", raised)
+        check("none of them wrote an instance, a decision or a request",
+              core.instances(db, man) == []
+              and db.one("SELECT COUNT(*) AS n FROM workflow_decisions"
+                         )["n"] == 0
+              and db.one("SELECT COUNT(*) AS n FROM run_requests")["n"] == 0)
+
+
+def test_essays_resolve_as_the_verbs_do() -> None:
+    with world() as (db, man, _ws, ms):
+        (ms / "part").mkdir()
+        (ms / "part" / "four.md").write_text("# Four\n\nIn a folder.\n")
+        (ms / "toc.toml").write_text(TOC + '\n[[chapter]]\nfile = '
+                                     '"part/four.md"\n')
+        inst = core.start(db, man, "part/four.md", "refine")
+        out = roads.enter(db, man, "part/four.md", "filter", name="own-pass",
+                          reason="Only this pass for the folder essay.")
+        check("an essay in a subfolder is found by its path, on its own "
+              "open instance", out["instance"]["id"] == inst["id"]
+              and out["file"] == "part/four.md", out["file"])
+        short = roads.enter(db, man, "four", "filter", name="own-pass")
+        check("a unique part of the name finds the same essay",
+              short["how"] == "skipped-before"
+              and short["instance"]["id"] == inst["id"])
+        try:
+            roads.enter(db, man, "ascend", "filter", name="own-pass",
+                        reason="A typo.")
+            raised = ""
+        except LookupError as err:
+            raised = str(err)
+        check("a name that matches no essay is an error, never a new "
+              "workflow", bool(raised) and core.instances(
+                  db, man, "ascend.md") == [], raised)
 
 
 def test_filters_view_requests() -> None:
@@ -296,6 +400,17 @@ def test_dash_form() -> None:
           proof.dash_law(["Dashes: a spaced em dash ( — )."]) == "spaced")
     check("a law that says nothing of dashes is not read",
           proof.dash_law(["Quotation marks: curly."]) is None)
+    for law, want in (("Dashes: a spaced em dash, not closed.", "spaced"),
+                      ("Dashes: a spaced em dash; en dashes for ranges, no "
+                       "spaces.", "spaced"),
+                      ("Dashes: never a spaced em dash.", "closed"),
+                      ("Dashes: no spaces around a dash.", "closed")):
+        check(f"{law!r} reads as {want}", proof.dash_law([law]) == want,
+              proof.dash_law([law]))
+    drifted = "He paused — then spoke — and left — briefly, then—went."
+    check("with no law the form is closed, not the file's own majority",
+          proof.dash_style(drifted, None) == "closed"
+          and [f[2] for f in proof.dash_faults(drifted)] == ["—"] * 3)
     text = ("The answer -- if there is one -- waits. A well-known case, "
             "pp. 3-5, 1914–1918, 1914 – 1918, Smith–Jones. He paused — then "
             "spoke - briefly. `a -- b` and 3 - 4.\n\n| a | b |\n|---|---|\n"
@@ -321,6 +436,19 @@ def test_lint_fix_applies_and_lists() -> None:
         codes = {f["code"] for f in board["findings"]}
         check("book lint reports quote marks, dash form and tracking tags",
               {"quote-style", "dash-form", "link-tracking"} <= codes, codes)
+        only = changes.lint_fix(db, man, ["one.md"], dry_run=True,
+                                only=["spelling"])
+        check("--fix with --only for another rule plans no mechanical fix",
+              only["planned"] == {}, only["planned"])
+        some = changes.lint_fix(db, man, ["one.md"], dry_run=True,
+                                skip=["dash-form"])
+        check("--skip leaves that rule's fix out",
+              sorted(p["rule"] for p in some["planned"]["one.md"])
+              == ["link-tracking", "quote-style"], some["planned"])
+        out, _stop = cli(ws, "book", "lint", "one.md", "--fix", "--only",
+                         "spelling", "-m", "MS")
+        check("`book lint --only spelling --fix` writes nothing",
+              (ms / "one.md").read_text() == ONE, out)
         dry = changes.lint_fix(db, man, ["one.md"], dry_run=True)
         check("a dry run plans the three mechanical fixes and writes nothing",
               sorted(p["rule"] for p in dry["planned"]["one.md"])
@@ -397,7 +525,9 @@ def test_skill_points_to_the_workflow() -> None:
 def main() -> None:
     tests = [test_old_verbs_send_to_the_workflow,
              test_skip_with_reason_is_recorded,
-             test_the_roads_own_step_needs_no_word,
+             test_the_roads_own_step_still_needs_a_reason,
+             test_bad_input_leaves_no_trace,
+             test_essays_resolve_as_the_verbs_do,
              test_filters_view_requests,
              test_dash_form,
              test_lint_fix_applies_and_lists,

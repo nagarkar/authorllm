@@ -84,8 +84,11 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
   const [review, setReview] = useState<Asked | null>(null);
   const [asked, setAsked] = useState<Asked | null>(null);
   const [busy, setBusy] = useState(false);
-  // A run outside the essay's workflow takes one sentence of why, recorded
-  // on the workflow as a skip (runs_page.enqueue, workflow/roads.py).
+  // A run asked for here is outside the essay's workflow and takes one
+  // sentence of why, recorded on the workflow as a skip (runs_page.enqueue,
+  // workflow/roads.py). The unsent draft lives in browser storage, so it
+  // survives a reload (the 2026-11-21 reload rule); a queue that succeeds
+  // empties it, so a reason is never sent again for later requests.
   const [skipReason, setSkipReason] = useState(() => recall(`${store}.skipReason`));
 
   const load = useCallback(async () => {
@@ -219,7 +222,7 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
     setBusy(true);
     try {
       const out = await transport.request<Asked>("queue", params());
-      if (out.error) setError(out.error); else { setAsked(out); setReview(null); setError(""); await load(); }
+      if (out.error) setError(out.error); else { setAsked(out); setReview(null); setError(""); setSkipReason(""); await load(); }
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   };
   const cancel = async (id: string) => {
@@ -337,8 +340,8 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
           {pickedItems.some(a => a.kind === "lens") ? cat.drafting.lens.note : ""}
         </p>
         <label className="runs-skip">
-          <span className="muted">Runs go through each essay's workflow (its filter step). To ask outside it, say why in one sentence; it is recorded on the essay's workflow as a skip.</span>
-          <input type="text" value={skipReason} placeholder="Leave empty to go through the workflow"
+          <span className="muted">A run asked for here runs outside the essay's workflow (it does not carry the workflow's lists, engine or filter selection), so it needs one sentence of why, recorded on the essay's workflow as a skip; a filter or lens already skipped for an essay is not asked again. The box empties once the runs are asked for.</span>
+          <input type="text" value={skipReason} placeholder="One sentence: why run these outside the workflow"
             onChange={e => { setSkipReason(e.target.value); setReview(null); setAsked(null); }} />
         </label>
         <div className="devedit-actions">

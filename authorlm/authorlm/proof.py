@@ -946,20 +946,57 @@ _DASH_RUN = re.compile(r"(?<=\S)[ \t]*(?:-{1,3}|–|—)[ \t]*(?=\S)")
 _NOT_PROSE = set("|-:<>!=*_#+`~")
 
 
+_DASH_FORM = re.compile(
+    r"\b(?P<neg>(?:not|never|no)\s+(?:an?\s+)?)?(?P<form>closed|unspaced|"
+    r"spaced)\s+(?:\(?[—–-]\)?\s+)?(?:em[\s-]+)?dash", re.IGNORECASE)
+_DASH_NOT = re.compile(r"\b(?:not|never)\s+(?P<form>closed|unspaced|spaced)\b",
+                       re.IGNORECASE)
+
+
+def _dash_form_of(statement: str) -> str | None:
+    """The em dash form one statement sets, or None when it sets none or
+    says both. The form named on the dash itself ('a spaced em dash',
+    'closed em dash') decides; a negated one ('not closed', 'never a
+    spaced dash') counts for the other form; loose words ('no spaces',
+    'spaced') decide only when they all point one way."""
+    def norm(form: str) -> str:
+        return "closed" if form.lower() in ("closed", "unspaced") else "spaced"
+
+    def flip(form: str) -> str:
+        return "spaced" if form == "closed" else "closed"
+
+    named = set()
+    for m in _DASH_FORM.finditer(statement):
+        form = norm(m.group("form"))
+        named.add(flip(form) if m.group("neg") else form)
+    for m in _DASH_NOT.finditer(statement):
+        named.add(flip(norm(m.group("form"))))
+    if len(named) == 1:
+        return named.pop()
+    if named:
+        return None                        # says both: not read
+    closed = re.search(r"\bclosed\b|\bno spaces?\b|\bunspaced\b|"
+                       r"\bwithout spaces?\b", statement, re.IGNORECASE)
+    spaced = re.search(r"\bspaced\b|(?<!\bno )(?<!\bwithout )\bspaces? "
+                       r"(?:on|either|around|both)\b",
+                       statement, re.IGNORECASE)
+    if closed and spaced:
+        return None
+    return "closed" if closed else "spaced" if spaced else None
+
+
 def dash_law(statements: list[str]) -> str | None:
     """`closed` or `spaced` when a style law states the em dash's form,
     else None. The nearest law that speaks wins (the caller passes them
-    nearest first). The house default (library/style-defaults.toml):
-    "a closed em dash (—), no spaces"."""
+    nearest first); a law that names both forms without saying which is
+    the em dash's is not read. The house default
+    (library/style-defaults.toml): "a closed em dash (—), no spaces"."""
     for statement in statements:
         if not _DASH_LAW.search(statement or ""):
             continue
-        if re.search(r"\bclosed\b|\bno spaces?\b|\bunspaced\b|\bwithout "
-                     r"spaces?\b", statement, re.IGNORECASE):
-            return "closed"
-        if re.search(r"\bspaced\b|\bspaces? (?:on|either|around|both)\b",
-                     statement, re.IGNORECASE):
-            return "spaced"
+        form = _dash_form_of(statement)
+        if form:
+            return form
     return None
 
 
@@ -993,14 +1030,11 @@ def _dash_fault(text: str, m: re.Match, style: str) -> tuple[str, str] | None:
 
 
 def dash_style(text: str, law: str | None = None) -> str:
-    """The em dash form a file is held to: the law's, else the form the
-    file uses more, else closed (the house default)."""
-    if law in ("closed", "spaced"):
-        return law
-    prose = masked(text)
-    spaced = len(re.findall(r"(?<=\S)[ \t]+—[ \t]+(?=\S)", prose))
-    closed = len(re.findall(r"(?<=[^\s—])—(?=[^\s—])", prose))
-    return "spaced" if spaced > closed else "closed"
+    """The em dash form a file is held to: the law's, else closed (the
+    house form). Never the file's own majority: a file that drifted to
+    spaced dashes is not held to its drift. `text` is kept for callers."""
+    del text
+    return law if law in ("closed", "spaced") else "closed"
 
 
 def dash_faults(text: str, law: str | None = None

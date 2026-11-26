@@ -220,8 +220,7 @@ def _quote_target(db: Database, manuscript: dict, rel: str,
 
 def _dash_target(db: Database, manuscript: dict, rel: str) -> str | None:
     """The em dash form a style law governing `rel` sets (`closed` or
-    `spaced`), or None (then the file's own majority, closed on a tie:
-    proof.dash_style)."""
+    `spaced`), or None (then closed, the house form: proof.dash_style)."""
     from . import styles
 
     return proof.dash_law([r["statement"] for r in styles.effective_style(

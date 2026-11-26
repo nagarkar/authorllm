@@ -120,14 +120,16 @@ call the curation or filter tools while narrating.
 **Retired as an entry point (§11.9 Q2).** A new essay or a rebuild goes
 through the essay's workflow (`authorlm workflow start <essay> --kind new`,
 or `--kind refine` with construction set to `beats`); the beat loop is that
-workflow's construction step, built beat by beat. `write start` opens on
-its own only when the essay's open instance is at construction with mode
-`beats`; anywhere else it stops and prints the `authorlm workflow` command
-that starts or continues the essay's workflow. To run it anyway, the
-author gives one sentence of why: `write start <file> --skip-reason
-"<why>"`, recorded as a skip decision on the essay's open instance (a
-refine instance, or a new one for an essay that does not exist yet, is
-started when there is none). Never supply the reason yourself. The rest
+workflow's construction step, built beat by beat. `write start` runs the
+old machinery, which carries none of the instance's lists, engine or unit,
+so it always runs outside the workflow, even at construction: without a
+reason it stops and prints the `authorlm workflow` command that starts or
+continues the essay's workflow. To run it anyway, the author gives one
+sentence of why: `write start <file> --skip-reason "<why>"`, recorded as a
+skip decision on the essay's open instance (a refine instance, a re-review
+for an essay already through the workflow, or a new one with `--new`, is
+started when there is none) once the verb's own checks pass. Never supply
+the reason yourself. The rest
 of this section is how the loop runs once it is open.
 
 When the author wants a chapter written or rewritten beat by beat (design:
@@ -908,11 +910,13 @@ are not yet sent from the CLI.
   and lenses ... it could be that I skip some steps and give a reason and
   just run the filters. But by default ... you go through that workflow").
   `filter run`/`prelude`, `lens run`, `write start` and the Filters view's
-  run requests open at their own step (filters; construction by beats) and
-  otherwise print how to start or continue the workflow; `--skip-reason
+  run requests run the old machinery, which does not read the instance
+  (its lists, engine, unit, filter selection), so they always print how to
+  start or continue the workflow, even at their own step; `--skip-reason
   "<one sentence>"` runs them anyway and records a skip decision (detail:
   road, name, step, `outside_workflow`) on the open instance, starting a
-  refine instance when there is none. The skip does not move the step.
+  refine (or re-review) instance when there is none. The skip does not
+  move the step.
 - Lint versus copyedit (U8, U9): `book lint` alone owns quote marks, dash
   form, spelling by dictionary, footnote anchors and doubled words; the
   copyedit filter never touches them. At the lint step run `authorlm book
@@ -1518,13 +1522,16 @@ rough comparison. The checked-in canonical copies live in
 **Retired as an entry point (§11.9 Q2).** Filters and lenses run inside
 the essay's workflow, at its filter step (`authorlm workflow status
 <essay>`; start one with `authorlm workflow start <essay> --kind refine`).
-`filter run`, `filter prelude` and `lens run` open on their own only when
-the essay's open instance is at the `filters` step; anywhere else they stop
-and print the `authorlm workflow` command that starts or continues it. To
-run one anyway, the author gives one sentence of why: `--skip-reason
-"<why>"`, recorded as a skip decision on the essay's open instance (a
-refine instance is started when there is none); later windows of the same
-filter on that instance need no second reason. Never supply the reason
+`filter run`, `filter prelude` and `lens run` run the old machinery, which
+carries none of the instance's lists, engine or filter selection, so they
+always run outside the workflow, even at the `filters` step: without a
+reason they stop and print the `authorlm workflow` command that starts or
+continues it. To run one anyway, the author gives one sentence of why:
+`--skip-reason "<why>"`, recorded as a skip decision on the essay's open
+instance (a refine or re-review instance is started when there is none)
+once the verb's own checks pass, so a mistyped filter, lens or file leaves
+no trace; later windows of the same filter on that instance need no second
+reason. Never supply the reason
 yourself. The developmental edit's whole-book run is a book-level pass and
 is not affected (Q1a). The rest of this section is how a pass runs once
 it is open.
@@ -1858,12 +1865,14 @@ lets the author tick filters, lenses and tabs and **ask for runs**. The page
 calls no model and stages nothing: each (filter or lens, tab) becomes a
 `run_requests` row. A tab with forms out, a protected register (lenses), an
 artifact that does not parse, and a filter that already ran on the same text
-are left out with the reason shown. A tab whose workflow is not at its
-filter step is left out too, with the `authorlm workflow` command that
-starts or continues it, unless the author fills the page's "outside the
-workflow" box with one sentence of why; then each request is queued and a
-skip decision is recorded on the essay's workflow, so the session's
-`filter run` / `lens run` for it opens with no second reason.
+are left out with the reason shown. Every other request runs the old
+machinery, outside the essay's workflow, so it is left out too, with the
+`authorlm workflow` command that starts or continues it, unless the author
+fills the page's "outside the workflow" box with one sentence of why (or
+gave one before for that filter or lens on the essay's open instance);
+then each request is queued and a skip decision is recorded on the essay's
+workflow, so the session's `filter run` / `lens run` for it opens with no
+second reason. The queue is all or nothing, and the box empties after it.
 
 `authorlm requests [-m <ms>]` lists the requests waiting for a session, each
 with its verbs in order; `requests list --all` adds the ones further on;
