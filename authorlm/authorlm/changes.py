@@ -57,21 +57,32 @@ Decisions:
   tests/test_book_changes.py::LandDeclinesTests::test_a_tab_the_author_edited_is_pulled_first.
 - A change is put back only while its `new` text still stands exactly
   once in the file; otherwise that one is declined and the answer quotes
-  what stands there now. A change put back keeps its row, with who and
+  what stands there now. Putting one back is also declined when the
+  restore would leave another still-applied change for that chapter
+  unable to be found again (its `new` stood once and would not): a later
+  land that enclosed an earlier `new` cannot be half-undone by reverting
+  the earlier id alone. A change put back keeps its row, with who and
   why. Enforced by:
   tests/test_book_changes.py::RevertTests::test_revert_puts_the_text_back_and_keeps_the_row
   and
-  tests/test_book_changes.py::RevertTests::test_revert_declines_when_the_text_has_moved_on.
+  tests/test_book_changes.py::RevertTests::test_revert_declines_when_the_text_has_moved_on
+  and
+  tests/test_book_changes.py::RevertTests::test_revert_declines_when_a_later_land_encloses_this_new.
 - A first draft is not a change list item. A chapter file that holds only
   its title is filled by `draft`: the whole text is written through the
   same checks, the snapshot taken after it is the copy of the draft, the
   run's event log says so, and `book done` lists the file among the run's
   artifacts. No `step_changes` row is written. A file that already holds
   prose is written over only by the run that drafted it or by a rerun of
-  the step. Enforced by:
+  the step. A whole-file write marks every still-applied change for that
+  chapter as put back (reason: written over by a new draft), so a later
+  `revert` cannot splice an earlier `old` into unrelated new prose that
+  happens to hold the old `new` once. Enforced by:
   tests/test_book_changes.py::DraftTests::test_a_first_draft_is_an_artifact_and_an_event_not_a_change
   and
-  tests/test_book_changes.py::DraftTests::test_a_file_that_holds_prose_is_not_drafted_over.
+  tests/test_book_changes.py::DraftTests::test_a_file_that_holds_prose_is_not_drafted_over
+  and
+  tests/test_book_changes.py::DraftTests::test_a_draft_over_marks_earlier_lands_put_back.
 - Every landing, draft and revert is one row of `step_events` (through
   `book.note`), so `book history` shows it. Enforced by:
   tests/test_book_changes.py::LandTests::test_a_landing_shows_in_the_history.
@@ -446,7 +457,7 @@ def draft(db: Database, manuscript: dict, config: dict, run_id: str,
     from .revisions import is_placeholder
 
     run, step = _open_run(db, manuscript, run_id, "draft")
-    relpath, _document_id, path = _file_in_scope(db, manuscript, run, file)
+    relpath, document_id, path = _file_in_scope(db, manuscript, run, file)
     if not (text or "").strip() or _only_a_title(text):
         raise ValueError("the draft is empty: give the chapter's whole "
                          "text, its title line included")
@@ -473,11 +484,25 @@ def draft(db: Database, manuscript: dict, config: dict, run_id: str,
     words = len(body.split())
     if relpath not in drafted:
         drafted = [*drafted, relpath]
+    earlier = db.all(
+        "SELECT * FROM step_changes WHERE manuscript_id = ? AND "
+        "document_id = ? AND status = 'applied'",
+        (manuscript["id"], document_id))
+    at = now_iso()
+    who = (run.get("actor") or "agent").strip() or "agent"
     with db.transaction():
+        for crow in earlier:
+            db.update("step_changes", crow["id"], {
+                "status": "reverted", "reverted_at": at,
+                "reverted_by": who,
+                "reverted_reason": "written over by a new draft"})
+        cleared = len(earlier)
         book.note(
             db, manuscript, run["id"], actor=run["actor"],
             reason=f"drafted {relpath}: {words} words"
-                   + (", written over the earlier draft" if replaced else ""),
+                   + (", written over the earlier draft" if replaced else "")
+                   + (f"; marked {cleared} earlier change(s) as put back"
+                      if cleared else ""),
             changes={"result": json.dumps(
                 {**loads(row["result"], {}), DRAFTED_KEY: drafted},
                 ensure_ascii=False)})
@@ -713,6 +738,28 @@ def _find_change(db: Database, manuscript: dict, change_id: str):
     return rows[0]
 
 
+def _revert_blocks_sibling(db: Database, manuscript: dict, row,
+                           text: str, putative: str) -> str | None:
+    """Why this restore must wait, or None. Another still-applied change
+    for the same chapter whose `new` stands once now must still stand
+    once after the restore; otherwise the author would be left with a
+    hybrid file and an unreventable sibling (a later land that enclosed
+    this `new`, or a chain where this restore doubles another's `new`)."""
+    for other in db.all(
+            "SELECT * FROM step_changes WHERE manuscript_id = ? AND "
+            "document_id = ? AND status = 'applied' AND id != ?",
+            (manuscript["id"], row["document_id"], row["id"])):
+        if (text.count(other["new"]) == 1
+                and putative.count(other["new"]) != 1):
+            return (
+                f"putting this back would leave {other['id']} "
+                f"(«{_short(other['new'])}») unable to be found again "
+                "to put back; put that one back first "
+                f"(authorlm book revert {other['id']} --reason '<why>' "
+                f"-m {manuscript['name']})")
+    return None
+
+
 def revert(db: Database, manuscript: dict, config: dict,
            change_ids: list[str] | None = None, *, run: str | None = None,
            reason: str, by: str = "author", workspace: str | None = None,
@@ -720,8 +767,9 @@ def revert(db: Database, manuscript: dict, config: dict,
     """Put changes back: the named ones, or every applied change of
     `run` (last landed first); returns `{reverted, declined, next}`. Each
     is judged on its own: a change is put back only while its `new` text
-    stands exactly once in its file. The reason is kept verbatim, with
-    who; the row stays."""
+    stands exactly once in its file, and only when the restore would not
+    leave another still-applied change for that chapter unable to be put
+    back. The reason is kept verbatim, with who; the row stays."""
     book._require_document_ids(db, manuscript)
     if not (reason or "").strip():
         raise ValueError("putting a change back records why: --reason "
@@ -777,6 +825,12 @@ def revert(db: Database, manuscript: dict, config: dict,
                 f"the words this change put in now stand {count} times in "
                 "the file, so the place cannot be told.")
             continue
+        putative = text.replace(row["new"], row["old"], 1)
+        blocked = _revert_blocks_sibling(
+            db, manuscript, row, text, putative)
+        if blocked is not None:
+            decline(blocked)
+            continue
         at = now_iso()
         with db.transaction():
             db.update("step_changes", row["id"], {
@@ -786,7 +840,7 @@ def revert(db: Database, manuscript: dict, config: dict,
             book.note(db, manuscript, row["run_id"], actor=by.strip(),
                       reason=f"put back {row['id']} in {relpath}: "
                              f"{reason.strip()}")
-            book._write_atomic(path, text.replace(row["new"], row["old"]))
+            book._write_atomic(path, putative)
         _quiet_collect(db, manuscript, config, "book-revert", after=True)
         reverted.append(_change(db, _find_change(db, manuscript, row["id"])))
         if state != "unlinked" and relpath not in pushes:
