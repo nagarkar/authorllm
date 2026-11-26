@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from authorlm.export import export_filename
+from authorlm.export import export_filename, recipient_slug
 
 
 def check(label: str, cond: bool, detail: object = "") -> None:
@@ -53,9 +53,35 @@ def test_empty_refuses() -> None:
           export_filename("///") == "---.md")
 
 
+def test_recipient_slug_keeps_readers_apart() -> None:
+    # The a1e38c8 guarantee: each reader's copy is its own file (and Drive
+    # upload). Sanitizing path-unsafe characters alone would collapse
+    # "Alice/Bob" onto "Alice-Bob" and replace the earlier copy.
+    check("a safe recipient is unchanged",
+          recipient_slug("Alice") == "Alice")
+    check("ampersand is left alone (not path-unsafe)",
+          recipient_slug("Review copy for A & B")
+          == "Review copy for A & B")
+    slash = recipient_slug("Alice/Bob")
+    colon = recipient_slug("Alice:Bob")
+    literal = recipient_slug("Alice-Bob")
+    check("a slash is sanitized and disambiguated",
+          slash.startswith("Alice-Bob-") and slash != "Alice-Bob", slash)
+    check("a colon does not collide with a slash",
+          colon != slash and colon.startswith("Alice-Bob-"), colon)
+    check("a literal hyphenated name keeps its own file",
+          literal == "Alice-Bob"
+          and literal != slash and literal != colon, literal)
+    try:
+        recipient_slug("  ")
+        check("empty recipient is declined", False)
+    except ValueError as err:
+        check("empty recipient is declined", "empty" in str(err).lower(), err)
+
+
 def main() -> None:
     for t in (test_strip_and_append_md, test_unsafe_characters,
-              test_empty_refuses):
+              test_empty_refuses, test_recipient_slug_keeps_readers_apart):
         print(f"{t.__name__}:")
         t()
     print("ALL CHECKS PASSED")

@@ -6,8 +6,9 @@ what a confidential review copy needs (`ok`, `problems`): no link or domain
 sharing, nobody but the owner able to edit, download/print/copy off for
 everyone else, and, when a reader is named, that reader present as a
 commenter. `share` makes a file so: it turns download/print/copy off, removes
-link and domain sharing, gives the reader comment access without Google's
-notification email (the author sends the link), then reports `access`.
+link and domain sharing and every non-owner editor (writers can always
+download), gives the reader comment access without Google's notification
+email (the author sends the link), then reports `access`.
 
 The Drive token's scope is `drive.file`: both work on files authorlm created
 (its uploads and export Docs), which is every review copy it makes.
@@ -77,12 +78,21 @@ def share(service, ref: str, reader: str) -> dict:
         fileId=file_id, body={"copyRequiresWriterPermission": True},
         fields="id"))
     found = None
+    # Snapshot first: deletes during the loop must not skip a later perm.
     for perm in _permissions(service, file_id):
+        email = (perm.get("emailAddress") or "").lower()
+        role = perm.get("role") or ""
         if perm.get("type") in ("anyone", "domain"):
             _execute(service.permissions().delete(
                 fileId=file_id, permissionId=perm["id"]))
-        elif (perm.get("emailAddress") or "").lower() == reader:
+        elif email == reader:
             found = perm
+        elif role in EDIT_ROLES and role != "owner":
+            # Writers (and organizers) can always download and edit. Leave
+            # one and `access` stays not-ok: the review copy is not
+            # confidential. Close them down with the link sharing.
+            _execute(service.permissions().delete(
+                fileId=file_id, permissionId=perm["id"]))
     if found is None:
         _execute(service.permissions().create(
             fileId=file_id, sendNotificationEmail=False,
