@@ -58,10 +58,16 @@ Decisions:
 - A change is put back only while its `new` text still stands exactly
   once in the file; otherwise that one is declined and the answer quotes
   what stands there now. A change put back keeps its row, with who and
-  why. Enforced by:
+  why. Several named change ids in one file are put back together when
+  every `new` still stands once and they do not overlap, so a batch
+  whose later `new` equals an earlier item's `old` cannot leave the
+  file stuck when the ids are given in `book changes` list order.
+  Enforced by:
   tests/test_book_changes.py::RevertTests::test_revert_puts_the_text_back_and_keeps_the_row
   and
-  tests/test_book_changes.py::RevertTests::test_revert_declines_when_the_text_has_moved_on.
+  tests/test_book_changes.py::RevertTests::test_revert_declines_when_the_text_has_moved_on
+  and
+  tests/test_book_changes.py::RevertTests::test_named_ids_put_back_a_batch_whose_later_new_is_an_earlier_old.
 - A first draft is not a change list item. A chapter file that holds only
   its title is filled by `draft`: the whole text is written through the
   same checks, the snapshot taken after it is the copy of the draft, the
@@ -713,15 +719,47 @@ def _find_change(db: Database, manuscript: dict, change_id: str):
     return rows[0]
 
 
+def _spans_to_put_back(text: str, rows: list
+                       ) -> list[tuple[int, int, dict]] | None:
+    """Positions of each row's `new` in `text` for a simultaneous put-back,
+    or None when any `new` is missing, doubled, or overlaps another. The
+    land batch's mirror: every `new` unique and non-overlapping so each
+    `old` can be restored without walking the list in argv or seq order."""
+    spans: list[tuple[int, int, dict]] = []
+    for row in rows:
+        count = text.count(row["new"])
+        if count != 1:
+            return None
+        start = text.index(row["new"])
+        spans.append((start, start + len(row["new"]), row))
+    spans.sort()
+    for (_s, end, _a), (start, _e, _b) in zip(spans, spans[1:]):
+        if start < end:
+            return None
+    return spans
+
+
+def _apply_put_backs(text: str, spans: list[tuple[int, int, dict]]) -> str:
+    result = text
+    for start, end, row in sorted(spans, reverse=True):
+        result = result[:start] + row["old"] + result[end:]
+    return result
+
+
 def revert(db: Database, manuscript: dict, config: dict,
            change_ids: list[str] | None = None, *, run: str | None = None,
            reason: str, by: str = "author", workspace: str | None = None,
            tab_state=None) -> dict:
     """Put changes back: the named ones, or every applied change of
-    `run` (last landed first); returns `{reverted, declined, next}`. Each
-    is judged on its own: a change is put back only while its `new` text
-    stands exactly once in its file. The reason is kept verbatim, with
-    who; the row stays."""
+    `run` (last landed first); returns `{reverted, declined, next}`. A
+    single change is put back only while its `new` text stands exactly
+    once. Several named changes in one file are put back in one write
+    when every `new` still stands once and they do not overlap (the land
+    batch's mirror), so a batch whose later `new` equals an earlier
+    item's `old` cannot leave the file stuck half-reverted when the ids
+    are given in `book changes` list order; otherwise each change is
+    judged on its own. A whole `--run` still walks last-landed-first.
+    The reason is kept verbatim, with who; the row stays."""
     book._require_document_ids(db, manuscript)
     if not (reason or "").strip():
         raise ValueError("putting a change back records why: --reason "
@@ -743,26 +781,79 @@ def revert(db: Database, manuscript: dict, config: dict,
     reverted: list[dict] = []
     declined: list[dict] = []
     pushes: list[str] = []
-    for row in rows:
+    who = by.strip()
+    why = reason.strip()
+
+    def decline(row, relpath: str, message: str) -> None:
+        declined.append({"id": row["id"], "file": relpath, "why": message})
+
+    # Several named ids: try one simultaneous put-back per file first, so
+    # a landed batch whose later new equals an earlier old cannot be
+    # walked (in `book changes` ascending order) into a doubled `new`
+    # that then refuses the rest. `--run` keeps its own order elsewhere.
+    pending = list(rows)
+    if change_ids and len(rows) > 1:
+        by_file: dict[str, list] = {}
+        for row in rows:
+            by_file.setdefault(_change(db, row)["file"], []).append(row)
+        kept: list = []
+        for relpath, group in by_file.items():
+            if len(group) < 2:
+                kept.extend(group)
+                continue
+            path = Path(manuscript["path"]) / relpath
+            if not path.is_file():
+                kept.extend(group)
+                continue
+            if any(row["status"] == "reverted" for row in group):
+                kept.extend(group)
+                continue
+            try:
+                state = _require_writable(db, manuscript, relpath, config,
+                                          workspace, tab_state)
+            except ValueError:
+                kept.extend(group)
+                continue
+            _quiet_collect(db, manuscript, config, "pre-book-revert")
+            text = path.read_text(encoding="utf-8")
+            spans = _spans_to_put_back(text, group)
+            if spans is None:
+                kept.extend(group)
+                continue
+            at = now_iso()
+            with db.transaction():
+                for row in group:
+                    db.update("step_changes", row["id"], {
+                        "status": "reverted", "reverted_at": at,
+                        "reverted_by": who, "reverted_reason": why})
+                    book.note(db, manuscript, row["run_id"], actor=who,
+                              reason=f"put back {row['id']} in {relpath}: "
+                                     f"{why}")
+                book._write_atomic(path, _apply_put_backs(text, spans))
+            _quiet_collect(db, manuscript, config, "book-revert", after=True)
+            for row in group:
+                reverted.append(
+                    _change(db, _find_change(db, manuscript, row["id"])))
+            if state != "unlinked" and relpath not in pushes:
+                pushes.append(relpath)
+        pending = kept
+
+    for row in pending:
         change = _change(db, row)
         relpath = change["file"]
         path = Path(manuscript["path"]) / relpath
-
-        def decline(why: str) -> None:
-            declined.append({"id": row["id"], "file": relpath, "why": why})
-
         if row["status"] == "reverted":
-            decline(f"already put back by {row['reverted_by']}: "
-                    f"{row['reverted_reason']}")
+            decline(row, relpath, f"already put back by {row['reverted_by']}: "
+                                  f"{row['reverted_reason']}")
             continue
         if not path.is_file():
-            decline(f"{relpath} is not on disk")
+            decline(row, relpath, f"{relpath} is not on disk")
             continue
         try:
             state = _require_writable(db, manuscript, relpath, config,
                                       workspace, tab_state)
         except ValueError as err:
-            decline(str(err))
+            decline(row, relpath, str(err))
             continue
         count = path.read_text(encoding="utf-8").count(row["new"])
         if count == 1:
@@ -771,6 +862,7 @@ def revert(db: Database, manuscript: dict, config: dict,
         count = text.count(row["new"])
         if count != 1:
             decline(
+                row, relpath,
                 ("the text has moved on: the words this change put in are "
                  "no longer in the file. " + _stands_now(text, row["new"]))
                 if count == 0 else
@@ -778,15 +870,16 @@ def revert(db: Database, manuscript: dict, config: dict,
                 "the file, so the place cannot be told.")
             continue
         at = now_iso()
+        start = text.index(row["new"])
         with db.transaction():
             db.update("step_changes", row["id"], {
                 "status": "reverted", "reverted_at": at,
-                "reverted_by": by.strip(),
-                "reverted_reason": reason.strip()})
-            book.note(db, manuscript, row["run_id"], actor=by.strip(),
-                      reason=f"put back {row['id']} in {relpath}: "
-                             f"{reason.strip()}")
-            book._write_atomic(path, text.replace(row["new"], row["old"]))
+                "reverted_by": who, "reverted_reason": why})
+            book.note(db, manuscript, row["run_id"], actor=who,
+                      reason=f"put back {row['id']} in {relpath}: {why}")
+            book._write_atomic(
+                path, text[:start] + row["old"]
+                + text[start + len(row["new"]):])
         _quiet_collect(db, manuscript, config, "book-revert", after=True)
         reverted.append(_change(db, _find_change(db, manuscript, row["id"])))
         if state != "unlinked" and relpath not in pushes:

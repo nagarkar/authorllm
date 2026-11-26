@@ -629,6 +629,34 @@ class RevertTests(Book):
         self.assertEqual((last["from_status"], last["to_status"]),
                          ("done", "done"))
 
+    def test_named_ids_put_back_a_batch_whose_later_new_is_an_earlier_old(
+            self):
+        # Land foo→baz and bar→foo on "foo bar" → "baz foo". Giving the
+        # change ids in `book changes` ascending order used to restore
+        # baz→foo first ("foo foo"), so the later change's `new` stood
+        # twice and could not be put back. Simultaneous put-back restores
+        # both regardless of argv order.
+        (self.root / "one.md").write_text("# One\n\nfoo bar\n",
+                                          encoding="utf-8")
+        quiet(api.collect, self.db, self.manuscript, {})
+        book.restart(self.db, self.manuscript, "lint", "one.md",
+                     reason="retry with a renaming batch")
+        run = self.running("lint", "one.md")
+        landed = self.land(run, "one.md", [
+            {"old": "foo", "new": "baz",
+             "note": "Rename the first term."},
+            {"old": "bar", "new": "foo",
+             "note": "Rename the second term."},
+        ])["landed"]
+        self.assertEqual(self.text().strip(), "# One\n\nbaz foo")
+        ids = [c["id"] for c in landed]  # ascending seq, list order
+        report = self.revert(*ids, reason="undo the renaming batch")
+        self.assertEqual(report["declined"], [])
+        self.assertEqual(len(report["reverted"]), 2)
+        self.assertEqual(self.text().strip(), "# One\n\nfoo bar")
+        self.assertEqual({r["status"] for r in self.rows()
+                          if r["run_id"] == run}, {"reverted"})
+
     def test_revert_needs_a_reason_and_a_target(self):
         with self.assertRaisesRegex(ValueError, "records why"):
             self.revert(self.typo, reason=" ")
