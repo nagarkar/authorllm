@@ -1702,6 +1702,12 @@ _No docstring._
 
 `verse.poem_level` and `verse.heading_levels` decide where poems sit in a verse file and what the collect report warns about.
 
+## `tests.test_workflow_library`
+
+`authorlm/tests/test_workflow_library.py`
+
+The per-essay workflow's briefs as library files: `authorlm/library/workflow/`.
+
 ## `tests.test_write_accept_idempotent`
 
 `authorlm/tests/test_write_accept_idempotent.py`
