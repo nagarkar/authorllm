@@ -88,12 +88,32 @@ DISALLOWED = ("Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Read",
               "Glob", "Grep", "Task", "Agent") + tuple(
     f"Bash(authorlm {v}:*)" for v in WRITE_VERBS)
 
-Runner = Callable[[list[str], str, Path, float], tuple[int, str, str]]
+Runner = Callable[[list[str], str, Path, float, dict], tuple[int, str, str]]
+
+# Variables that make Claude Code bill or route elsewhere than its own
+# sign-in. authorlm loads authorlm/.env into os.environ, and that file sets
+# ANTHROPIC_API_KEY (and ANTHROPIC_BASE_URL) for LiteLLM's API calls; passed
+# on, `claude -p` uses that key instead of the subscription login and the
+# turn fails ("Invalid API key", seen live 2026-11-26). So the child gets
+# no ANTHROPIC_* variable at all, nor the switches to Bedrock, Vertex or
+# Foundry: headless Claude runs on the CLI's own sign-in, as designed.
+AUTH_PREFIX = "ANTHROPIC_"
+AUTH_SWITCHES = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                 "CLAUDE_CODE_USE_FOUNDRY")
 
 
-def _run(argv: list[str], stdin: str, cwd: Path, timeout: float) -> tuple[int, str, str]:
+def child_env(environ: dict | None = None) -> dict:
+    """The environment for the `claude` child: ours without AUTH_PREFIX
+    variables and AUTH_SWITCHES."""
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items()
+            if not k.startswith(AUTH_PREFIX) and k not in AUTH_SWITCHES}
+
+
+def _run(argv: list[str], stdin: str, cwd: Path, timeout: float,
+         env: dict) -> tuple[int, str, str]:
     proc = subprocess.run(argv, input=stdin, capture_output=True, text=True,
-                          cwd=str(cwd), timeout=timeout)
+                          cwd=str(cwd), timeout=timeout, env=env)
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -237,7 +257,7 @@ class ClaudeHeadlessEngine(Engine):
             argv = self.command(workspace=workspace, manuscript=manuscript,
                                 session_id=ref.handle, resume=True)
             code, out, err = self._runner(argv, ref.catch_up(turn, message), cwd,
-                                          self.timeout)
+                                          self.timeout, child_env())
             result = _result_event(out)
             if code == 0 and result and not result.get("is_error"):
                 return self._reply(turn, ref.handle, out, result)
@@ -246,7 +266,7 @@ class ClaudeHeadlessEngine(Engine):
         argv = self.command(workspace=workspace, manuscript=manuscript,
                             session_id=session_id, resume=False)
         code, out, err = self._runner(argv, self.first_message(turn, message),
-                                      cwd, self.timeout)
+                                      cwd, self.timeout, child_env())
         result = _result_event(out)
         if result is None or code != 0 or result.get("is_error"):
             detail = (result or {}).get("result") or err.strip()[-500:] or f"exit {code}"

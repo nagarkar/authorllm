@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -311,15 +312,36 @@ def check_claude_headless(ws: str) -> None:
     calls: list[dict] = []
     script: list = []
 
-    def runner(argv, stdin, cwd, timeout):
-        calls.append({"argv": argv, "stdin": stdin, "cwd": cwd})
+    def runner(argv, stdin, cwd, timeout, env):
+        calls.append({"argv": argv, "stdin": stdin, "cwd": cwd, "env": env})
         return script.pop(0)
 
     eng = ClaudeHeadlessEngine("opus", runner=runner, binary="/bin/claude-fake")
     ctx = {"standing": ["CHARTER", "ESSAY one.md text"], "turns": [], "session_ref": None,
            "manuscript": "Book", "essay": "one.md", "workspace": ws}
     script.append((0, _stream("will-be-ignored", reply), ""))
-    got = eng.send(ctx, "Work paragraph 1.")
+    # authorlm/.env puts an API key in os.environ for LiteLLM; the `claude`
+    # child must run on its own sign-in, not on that key (live 2026-11-26).
+    planted = {"ANTHROPIC_API_KEY": "sk-test-not-real", "ANTHROPIC_AUTH_TOKEN": "t",
+               "ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "CLAUDE_CODE_USE_BEDROCK": "1",
+               "AUTHORLM_KEEP_ME": "1"}
+    saved = {k: os.environ.get(k) for k in planted}
+    os.environ.update(planted)
+    try:
+        got = eng.send(ctx, "Work paragraph 1.")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    env = calls[0]["env"]
+    leaked = sorted(k for k in env if k.startswith("ANTHROPIC_")
+                    or k == "CLAUDE_CODE_USE_BEDROCK")
+    check("headless: the child's env has no ANTHROPIC_* or provider switch",
+          not leaked, leaked)
+    check("headless: the rest of the env is passed on (PATH, others)",
+          env.get("AUTHORLM_KEEP_ME") == "1" and "PATH" in env)
     argv = calls[0]["argv"]
 
     def flag(name):
