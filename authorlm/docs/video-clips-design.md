@@ -313,7 +313,7 @@ AuthorLM makes the model call.
 | `media list [ms] [--file F] [--key K]` | the one umbrella verb: every clip, collage and illustration, each with its `kind` (below) | no |
 | `clip ensure ms:key [--generate] [--dry-run] [--force]` | paths of fresh takes; generates only when none is fresh, or with `--generate` to add one; else a job id or gate reasons | yes |
 | `clip job <id>` | state; when done the take's path; always paths to the composed prompt, request, response and error log, so podlm can diagnose a bad generation | no |
-| `clip attach ms:key <file>` | inserts an outside asset as take `iNN`; returns its path | no |
+| `clip attach ms:key <file>` | inserts an outside asset as take `iNN` via exclusive create (same helper polls use), so two overlapping attaches cannot share a path and wipe one import; returns its path | no |
 | `clip pick ms:key NN` | registers the chosen take; moves the embed line | no |
 | `clip resolve <file>` | lands staged spec proposals (§8e) | no |
 
