@@ -1712,7 +1712,7 @@ _No docstring._
 
 `authorlm/tests/test_workflow.py`
 
-The per-essay editing workflow's record (authorlm/workflow/): the step gates, carry-over between instances, engine and unit switches with their reasons, the turns recorded from an engine, blurbs, usage totals, the standing context's stable order, no file special-cased, and the CLI.
+The per-essay editing workflow's record (authorlm/workflow/): the step gates, carry-over between instances, engine and unit switches with their reasons, the turns recorded from an engine, blurbs, usage totals, the standing context's stable order, the protected register, no file special-cased, and the CLI.
 
 ## `tests.test_write_accept_idempotent`
 

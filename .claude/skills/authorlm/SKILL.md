@@ -887,6 +887,9 @@ are not yet sent from the CLI.
   `filters <i>` without `--set`, `blurbs` without a change.
 - Any essay in the reading order can have a workflow; no file is treated
   specially (owner, 2026-11-26: "there should be no special casing").
+  An essay whose toc entry says `register = "protected"` gets the
+  protected-register block in every step's standing context (the flag
+  decides, never the file name).
 
 ## The book workflow and the register (`authorlm book`, `authorlm register`)
 

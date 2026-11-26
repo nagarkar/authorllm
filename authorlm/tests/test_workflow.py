@@ -1,7 +1,8 @@
 """The per-essay editing workflow's record (authorlm/workflow/): the step
 gates, carry-over between instances, engine and unit switches with their
 reasons, the turns recorded from an engine, blurbs, usage totals, the
-standing context's stable order, no file special-cased, and the CLI.
+standing context's stable order, the protected register, no file
+special-cased, and the CLI.
 
     python3 tests/test_workflow.py
 """
@@ -27,6 +28,7 @@ file = "preface.md"
 
 [[chapter]]
 file = "one.md"
+register = "protected"
 
 [[chapter]]
 file = "two.md"
@@ -409,6 +411,34 @@ def test_turns_context_and_blurbs() -> None:
         raises(lambda: contract.make_engine("openai-api", "gpt-5"), LookupError)
 
 
+def test_protected_register_is_honoured() -> None:
+    with world() as (db, ms, _ws):
+        mine = core.start(db, ms, "one", "refine")
+        blocks = {b["name"]: b for b in context.standing_context(db, ms, mine)}
+        check("an essay whose toc entry says register = \"protected\" gets "
+              "the strong instruction (fallback when the library file is "
+              "missing)",
+              blocks["protected-register"]["text"]
+              == context.PROTECTED_REGISTER_FALLBACK)
+        lib = Path(os.environ[context.LIBRARY_ENV])
+        (lib / "protected-register.md").write_text("Keep the register.")
+        blocks = {b["name"]: b for b in context.standing_context(db, ms, mine)}
+        check("the library's protected-register text when it is there",
+              blocks["protected-register"]["text"] == "Keep the register.")
+        other = core.start(db, ms, "two", "refine")
+        names = [b["name"] for b in context.standing_context(db, ms, other)]
+        blocks = {b["name"]: b for b in context.standing_context(db, ms, other)}
+        check("an essay without the flag gets an empty block in the same place",
+              blocks["protected-register"]["text"] == ""
+              and tuple(names) == context.BLOCK_ORDER)
+        root = Path(ms["path"])
+        (root / "toc.toml").write_text(TOC.replace(
+            'file = "one.md"\nregister = "protected"', 'file = "one.md"'))
+        blocks = {b["name"]: b for b in context.standing_context(db, ms, mine)}
+        check("the flag alone decides, never the file name",
+              blocks["protected-register"]["text"] == "")
+
+
 def test_usage_totals() -> None:
     with world() as (db, ms, _ws):
         a = core.advance(db, core.start(db, ms, "one", "refine"))
@@ -560,6 +590,7 @@ def main() -> None:
              test_carry_over,
              test_switches_need_reasons_and_are_logged,
              test_turns_context_and_blurbs,
+             test_protected_register_is_honoured,
              test_usage_totals,
              test_cli_end_to_end,
              test_a_rename_carries_the_workflow,

@@ -14,6 +14,8 @@ empty block marked `missing`, so the shape never changes):
     library/workflow/briefs/<step>.md    the step's brief (letter, construction, ...)
     library/workflow/filters/<name>.md   one filter's text
     library/workflow/order.toml          `order = [...]`: the standard filter order
+    library/workflow/protected-register.md  sent when the essay's toc entry
+                                         says `register = "protected"`
 
 `AUTHORLM_WORKFLOW_LIBRARY` points elsewhere (tests).
 """
@@ -24,7 +26,7 @@ import os
 import tomllib
 from pathlib import Path
 
-from .. import styles
+from .. import structure, styles
 from ..db import Database
 from . import core
 
@@ -32,7 +34,15 @@ LIBRARY_ENV = "AUTHORLM_WORKFLOW_LIBRARY"
 # The order of the standing blocks. Never reorder casually: a change here
 # invalidates every engine's cached prefix.
 BLOCK_ORDER = ("charter", "role", "brief", "author-brief", "filters",
-               "style-rules", "reference", "voice", "aware")
+               "style-rules", "protected-register", "reference", "voice",
+               "aware")
+# Owner, 2026-11-26: `register = "protected"` is a generic toc attribute and
+# every workflow honours it strongly. Driven by the flag only, never by a
+# file name. Used when the library file is not there.
+PROTECTED_REGISTER_FALLBACK = (
+    "This text's register is protected: do not change its diction, cadence "
+    "or voice; propose only changes of meaning, structure or fact.")
+REGISTER_KEY, PROTECTED = "register", "protected"
 # Which brief and role a step reads. Wrap-up is part of construction (Q23);
 # lint has no model work of its own beyond the filters' roles.
 STEP_BRIEF = {"start": "start", "letter": "letter",
@@ -75,6 +85,12 @@ def _essay_text(files: dict, name: str) -> str | None:
     return files.get(name)
 
 
+def is_protected(files: dict, file: str) -> bool:
+    """Whether the essay's toc entry says `register = "protected"`."""
+    attrs = structure.toc_attrs(files.get(structure.TOC_FILENAME) or "")
+    return attrs.get(file, {}).get(REGISTER_KEY) == PROTECTED
+
+
 def standing_context(db: Database, manuscript: dict, instance: dict,
                      files: dict | None = None) -> list[dict]:
     """The standing blocks of the instance's session, in `BLOCK_ORDER`.
@@ -107,6 +123,11 @@ def standing_context(db: Database, manuscript: dict, instance: dict,
         blocks.append(_block("filters", ""))
     blocks.append(_block("style-rules",
                          styles.render(db, manuscript["id"], instance["file"])))
+    if is_protected(files, instance["file"]):
+        text = _read(lib / "protected-register.md") or PROTECTED_REGISTER_FALLBACK
+        blocks.append(_block("protected-register", text, protected=True))
+    else:
+        blocks.append(_block("protected-register", "", protected=False))
 
     def ordered(names):
         return sorted(names, key=lambda n: order.index(n) if n in order
