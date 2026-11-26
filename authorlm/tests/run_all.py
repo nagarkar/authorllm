@@ -136,9 +136,28 @@ def ensure_pages(root: Path, built, build,
             "them fail.")
 
 
-def run_file(root: Path, path: Path, timeout: float = TIMEOUT_S) -> FileResult:
+def test_env() -> dict[str, str]:
+    """The environment every test file runs in. PYTHONPATH starts with this
+    checkout's authorlm/, so a worktree tests its own package, not the one
+    `pip install -e` points at (#425)."""
     # -O would turn the assert inside most files' check() into nothing.
     env = {k: v for k, v in os.environ.items() if k != "PYTHONOPTIMIZE"}
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(ROOT), env.get("PYTHONPATH")) if p)
+    return env
+
+
+def imported_from() -> Path:
+    """Where `import authorlm` resolves under test_env()."""
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import authorlm, os; print(os.path.dirname(authorlm.__file__))"],
+        cwd=str(ROOT), env=test_env(), capture_output=True, text=True, check=True)
+    return Path(out.stdout.strip()).resolve()
+
+
+def run_file(root: Path, path: Path, timeout: float = TIMEOUT_S) -> FileResult:
+    env = test_env()
     started = time.monotonic()
     # A file, not a pipe: a child that leaves a daemon holding the pipe open
     # must not make this wait past its exit.
@@ -213,6 +232,14 @@ def main(argv: list[str] | None = None) -> int:
                              f"(default {TIMEOUT_S})")
     args = parser.parse_args(argv)
     root = args.dir.resolve()
+
+    package = imported_from()
+    print(f"authorlm imported from {package}", flush=True)
+    if not package.is_relative_to(ROOT.parent):
+        print(f"STOPPED, no test ran: authorlm is imported from {package}, "
+              f"not from the checkout running the tests ({ROOT.parent}).",
+              file=sys.stderr)
+        return 2
 
     if not args.no_build:
         setup = _load_setup()
