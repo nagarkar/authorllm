@@ -53,6 +53,17 @@ type PageMode = "chapters" | "pron" | "devedit" | "forms" | "runs" | "style" | "
 // #<manuscript>/style[:<level>] (Style laws: all, guide:<name>, file:<name>, defaults),
 // #<manuscript>/workflows[:<essay>/<instance>/<step>] (Workflows); a bare #<stem> opens
 // on the server's -m manuscript.
+// Every view, in menu order: its name and one line of what is inside.
+const MODES: [PageMode, string, string][] = [
+  ["chapters", "Browse", "Chapters: read, preview and render paragraphs"],
+  ["pron", "Audio", "Audio settings: pronunciations"],
+  ["devedit", "Dev edit", "The developmental edit"],
+  ["forms", "Merge", "Merge forms: settle each tab's changes"],
+  ["runs", "Filters", "Browse and edit the filters and lenses, and ask for runs on tabs"],
+  ["style", "Style", "Style laws: browse, edit, add and retire, by level"],
+  ["workflows", "Workflows", "The per-essay editing workflow: lists, letter, construction, wrap-up, filters"],
+];
+const modeLabel = (m: PageMode) => MODES.find(x => x[0] === m)?.[1] ?? m;
 const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string; tab?: string; item?: string} => {
   let h = decodeURIComponent(location.hash.replace(/^#/, ""));
   let ms = "";
@@ -113,6 +124,15 @@ export function App() {
     setFormsTabs(tabs); setFormsActions(actions);
   }, []);
   const [error, setError] = useState<string>("");
+  // The view menu and the voice-and-volume popover: open for a moment only.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [soundOpen, setSoundOpen] = useState(false);
+  useEffect(() => {
+    if (!menuOpen && !soundOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { setMenuOpen(false); setSoundOpen(false); } };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menuOpen, soundOpen]);
   const [confirm, setConfirm] = useState<null | {label: string; run: () => Promise<void>}>(null);
   const [now, setNow] = useState<{source: Source; id: string} | null>(null);
   const [continuous, setContinuous] = useState(true);
@@ -241,30 +261,63 @@ export function App() {
   return (
     <div className="page">
       <header>
-        <nav className="modes top-nav" aria-label="Pages">
-          <button className={`chip${mode === "chapters" ? " on" : ""}`} aria-pressed={mode === "chapters"} onClick={() => setMode("chapters")}>Browse</button>
-          <button className={`chip${mode === "pron" ? " on" : ""}`} aria-pressed={mode === "pron"} onClick={() => setMode("pron")} title="Audio settings: pronunciations">Audio</button>
-          <button className={`chip${mode === "devedit" ? " on" : ""}`} aria-pressed={mode === "devedit"} onClick={() => setMode("devedit")}>Dev edit</button>
-          <button className={`chip${mode === "forms" ? " on" : ""}`} aria-pressed={mode === "forms"} onClick={() => setMode("forms")}
-            title={formsSummary ? Object.entries(formsSummary.tabs).map(([f, t]) => `${f.replace(/\.md$/, "")}: ${t.open} open, ${t.ruled} ruled`).join("\n") || "No open forms" : undefined}>
-            Merge{formsSummary ? ` · ${formsSummary.open - formsSummary.ruled}` : ""}</button>
-          <button className={`chip${mode === "runs" ? " on" : ""}`} aria-pressed={mode === "runs"} onClick={() => setMode("runs")}
-            title="Browse and edit the filters and lenses, and ask for runs on tabs">Filters</button>
-          <button className={`chip${mode === "style" ? " on" : ""}`} aria-pressed={mode === "style"} onClick={() => setMode("style")} title="Style laws: browse, edit, add and retire, by level">Style</button>
-          <button className={`chip${mode === "workflows" ? " on" : ""}`} aria-pressed={mode === "workflows"} onClick={() => setMode("workflows")}
-            title="The per-essay editing workflow: lists, letter, construction, wrap-up, filters">Workflows</button>
-          <a className="chip" href={`/try-text${location.hash}`} title="Try things out: read pasted text aloud">Audition</a>
-        </nav>
-        <div className="title-row">
-          <h1 className="display"><img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />{book.title}</h1>
-          <span className="count">{account ? `${fmt(account.remaining)} chars left` : book.quality}</span>
-        </div>
-        {/* Row 1: manuscript and its tab; row 2: voice and volume; row 3:
-            icons and actions. No labels (author's layout, 2026-11-21). */}
-        {(manuscripts.length > 1 || mode === "chapters" || (mode === "forms" && formsTabs.length > 0)) && <div className="bar hrow">
-          {manuscripts.length > 1 && <select value={ms} onChange={e => switchManuscript(e.target.value)} aria-label="Manuscript">
+        {/* One compact bar on every width (owner's ask 2026-11-26, "Use standard
+            UI controls like drop-downs, … menus, etc."): the view's name opens a
+            menu of every view, the manuscript is a drop-down of short keys, and
+            the speaker opens a popover with the voice and volume. The page is a
+            640-px column on every screen, so desktop gets the same bar. Which
+            view is open lives in the URL hash (below); whether the menu or the
+            popover is open is not kept: it is a moment, not a choice. */}
+        <div className="topbar">
+          <img className="brand-icon" src="/icon-192.png" alt="AuthorLM" />
+          <button className="view-pick" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => { setSoundOpen(false); setMenuOpen(o => !o); }}
+            title={book.title}>{modeLabel(mode)}{mode === "forms" && formsSummary ? ` · ${formsSummary.open - formsSummary.ruled}` : ""} <span aria-hidden="true">▾</span></button>
+          {manuscripts.length > 1 && <select className="ms-pick" value={ms} onChange={e => switchManuscript(e.target.value)} aria-label="Manuscript" title={book.title}>
             {manuscripts.map(name => <option key={name} value={name}>{name}</option>)}
           </select>}
+          <div className="pop-wrap">
+            <button className="chip icon" aria-label="Voice and volume" aria-haspopup="dialog" aria-expanded={soundOpen}
+              onClick={() => { setMenuOpen(false); setSoundOpen(o => !o); }}>🔊</button>
+            {soundOpen && <>
+              <div className="pop-backdrop" onClick={() => setSoundOpen(false)} />
+              <div className="popover" role="dialog" aria-label="Voice and volume">
+                {mode === "chapters" && <label className="pop-row"><span>Preview voice</span><select className="voice-pick" value={status.previewVoice.current} aria-label="Preview voice"
+                  onChange={async e => {
+                    audioRef.current?.pause();
+                    setNow(null);
+                    try { await request("previewVoice", {voice: e.target.value}); setError(""); await load(stem); }
+                    catch (err) { setError((err as Error).message); }
+                  }}>
+                  {status.previewVoice.choices.map(v => {
+                    const missing = status.previewVoice.missing.includes(v);
+                    return <option key={v} value={v} disabled={missing}>{missing ? `${v} (not installed on this Mac)` : v}</option>;
+                  })}
+                </select></label>}
+                {(mode === "forms" || mode === "devedit") && <label className="pop-row"><span>Listen voice</span><VoicePicker manuscript={ms} /></label>}
+                {mode === "workflows" && <label className="pop-row"><span>Listen voice</span><WorkflowVoicePicker manuscript={ms} /></label>}
+                <VolumeSlider />
+                {account && <div className="pop-note">{fmt(account.remaining)} ElevenLabs characters left</div>}
+              </div>
+            </>}
+          </div>
+        </div>
+        {menuOpen && <div className="sheet-backdrop" onClick={e => { if (e.target === e.currentTarget) setMenuOpen(false); }}>
+          <nav className="sheet" role="menu" aria-label="Pages">
+            <div className="sheet-head">
+              <span className="display">{book.title}</span>
+              <button className="close" onClick={() => setMenuOpen(false)} aria-label="Close the menu">✕</button>
+            </div>
+            {account && <div className="sheet-note">{fmt(account.remaining)} ElevenLabs characters left</div>}
+            {MODES.map(([m, label, about]) => {
+              const count = m === "forms" && formsSummary ? formsSummary.open - formsSummary.ruled : null;
+              return <button key={m} role="menuitemradio" aria-checked={mode === m} className={`sheet-item${mode === m ? " on" : ""}`}
+                onClick={() => { setMode(m); setMenuOpen(false); window.scrollTo({top: 0}); }}>
+                <b>{label}{count !== null ? ` · ${count}` : ""}</b><span>{about}</span></button>;
+            })}
+            <a role="menuitem" className="sheet-item" href={`/try-text${location.hash}`}><b>Audition</b><span>Try things out: read pasted text aloud</span></a>
+          </nav>
+        </div>}
+        {(mode === "chapters" || (mode === "forms" && formsTabs.length > 0)) && <div className="bar hrow">
           {mode === "chapters" && <select value={stem} onChange={e => { setNow(null); setStem(e.target.value); }} aria-label="Chapter">
             {book.chapters.map(c => (
               <option key={c.stem} value={c.stem}>
@@ -277,23 +330,6 @@ export function App() {
             {formsTabs.map(t => <option key={t.file} value={t.file}>{t.file.replace(/\.md$/, "")} — {formsTabLabel(t)}</option>)}
           </select>}
         </div>}
-        <div className="bar hrow">
-          {mode === "chapters" && <select className="voice-pick" value={status.previewVoice.current} aria-label="Preview voice"
-            onChange={async e => {
-              audioRef.current?.pause();
-              setNow(null);
-              try { await request("previewVoice", {voice: e.target.value}); setError(""); await load(stem); }
-              catch (err) { setError((err as Error).message); }
-            }}>
-            {status.previewVoice.choices.map(v => {
-              const missing = status.previewVoice.missing.includes(v);
-              return <option key={v} value={v} disabled={missing}>{missing ? `${v} (not installed on this Mac)` : v}</option>;
-            })}
-          </select>}
-          {(mode === "forms" || mode === "devedit") && <VoicePicker manuscript={ms} />}
-          {mode === "workflows" && <WorkflowVoicePicker manuscript={ms} />}
-          <VolumeSlider />
-        </div>
         {mode === "forms" && formsTabs.length > 0 && (() => {
           const cur = formsTabs.find(t => t.file === formsTab) ?? formsTabs[0];
           const waiting = cur.merging || cur.queued >= 0;

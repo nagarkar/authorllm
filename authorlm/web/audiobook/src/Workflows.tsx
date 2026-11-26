@@ -666,32 +666,69 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
   const shownStep = route.step && inst && ov.steps.indexOf(route.step) <= ov.steps.indexOf(inst.step) ? route.step : inst?.step || "";
   const setStep = (s: string) => onRoute({ ...route, essay: inst?.file || route.essay, instance: inst?.id || "", step: s === inst?.step ? "" : s });
 
+  // The essay drop-down (owner's ask 2026-11-26: "Use standard UI controls
+  // like drop-downs … to make workflows and tasks easily navigable"): the
+  // essays with an open workflow first, then those whose workflows are all
+  // done, then the rest. Its choice, with the instance and step, stays in
+  // the URL hash, as before (App.tsx writes it from `route`).
+  const inProgress = ov.essays.filter(e => e.open);
+  const finished = ov.essays.filter(e => !e.open && e.instances.length);
+  const notStarted = ov.essays.filter(e => !e.instances.length);
+  const essayOption = (e: Essay) => {
+    const at = e.instances.find(i => i.id === e.open) || e.instances[e.instances.length - 1];
+    return <option key={e.file} value={e.file}>{short(e.file)}{at ? ` — ${at.kind} #${at.number} · ${STEP_WORDS[at.step]}` : ""}
+      {e.instances.length > 1 ? ` (${e.instances.length})` : ""}</option>;
+  };
+  const startOpen = !essay?.instances.length;
+  // The instance shown belongs to the chosen essay (a reply still in flight
+  // for the essay left behind is not drawn under the new one).
+  const here = !!(view && inst && inst.file === route.essay);
+
   return (
     <div className="wf">
       {error && <div className="status bad">{error}</div>}
-      <div className="card">
-        <div className="card-head"><span>Workflows</span><span className="muted">{ov.usage.month_name}: {usageLine(ov.usage.month)}</span></div>
-        <div className="wf-essays">
-          {ov.essays.map(e => {
-            const latest = e.instances[e.instances.length - 1];
-            return <button key={e.file} className={`wf-essay${e.file === route.essay ? " on" : ""}`}
-              onClick={() => onRoute({ essay: e.file, instance: "", step: "" })}>
-              <b>{short(e.file)}</b>
-              <span className="muted">{latest ? `${latest.kind} #${latest.number} · ${STEP_WORDS[latest.step]}` : "no workflow yet"}
-                {e.instances.length > 1 ? ` · ${e.instances.length} instances` : ""}</span>
-            </button>;
+      <div className="card wf-nav">
+        <label className="wf-field">Essay
+          <select value={route.essay} aria-label="Essay" onChange={e => onRoute({ essay: e.target.value, instance: "", step: "" })}>
+            {!route.essay && <option value="">Choose an essay — {inProgress.length} in progress</option>}
+            {route.essay && !essay && <option value={route.essay}>{short(route.essay)} (not in this manuscript)</option>}
+            {inProgress.length > 0 && <optgroup label="In progress">{inProgress.map(essayOption)}</optgroup>}
+            {finished.length > 0 && <optgroup label="Done">{finished.map(essayOption)}</optgroup>}
+            {notStarted.length > 0 && <optgroup label="Not started">{notStarted.map(essayOption)}</optgroup>}
+          </select>
+        </label>
+        {/* Nothing chosen yet: the next thing to do is to pick up a workflow
+            already under way, one tap each (ui.md: the main action first). */}
+        {!route.essay && inProgress.length > 0 && <div className="devedit-actions">
+          {inProgress.map(e => {
+            const at = e.instances.find(i => i.id === e.open)!;
+            return <button key={e.file} className="pill on wf-continue" onClick={() => onRoute({ essay: e.file, instance: "", step: "" })}>
+              Continue {short(e.file)} · {STEP_WORDS[at.step]}</button>;
           })}
-        </div>
-      </div>
-
-      {route.essay && <div className="card">
-        <div className="card-head"><span>{short(route.essay)}</span></div>
-        {essay && essay.instances.length > 0 && <div className="devedit-actions">
-          {essay.instances.map(i => <button key={i.id} className={`pill${i.id === instanceId ? " on" : ""}`}
-            onClick={() => onRoute({ essay: route.essay, instance: i.id, step: "" })}>{i.kind} #{i.number}: {STEP_WORDS[i.step]}</button>)}
         </div>}
-        {!essay?.open && <div className="wf-start">
-          <div className="muted">Start a workflow on this essay. The lists, engine, units and filters carry over from its last instance.</div>
+        {essay && essay.instances.length > 0 && <div className="wf-nav-row">
+          <label className="wf-field">Workflow
+            <select value={instanceId} aria-label="Workflow instance" onChange={e => onRoute({ essay: route.essay, instance: e.target.value, step: "" })}>
+              {essay.instances.map(i => <option key={i.id} value={i.id}>{i.kind} #{i.number} · {STEP_WORDS[i.step]}</option>)}
+            </select>
+          </label>
+          {here && inst && <label className="wf-field">Step
+            <select value={shownStep} aria-label="Step" onChange={e => setStep(e.target.value)}>
+              {ov.steps.map(s => {
+                const reached = ov.steps.indexOf(s) <= ov.steps.indexOf(inst.step);
+                return <option key={s} value={s} disabled={!reached}>{STEP_WORDS[s]}{s === inst.step ? " (current)" : reached ? " (done)" : ""}</option>;
+              })}
+            </select>
+          </label>}
+        </div>}
+        {instanceId && !here && !error && <div className="muted">Loading the workflow…</div>}
+        {here && view && inst && inst.step !== "done" && <div className="wf-gate">
+          {view.gate ? <span className="muted">Next ({STEP_WORDS[view.next_step || ""]}) waits: {view.gate}</span>
+            : <button className="pill on" disabled={busy} onClick={() => void run("advance", {})}>On to {STEP_WORDS[view.next_step || ""]}</button>}
+        </div>}
+        {route.essay && essay && !essay.open && <details className="wf-start" key={route.essay} open={startOpen}>
+          <summary>{startOpen ? "Start a workflow on this essay" : "Start a new workflow on this essay"}</summary>
+          <div className="muted">The lists, engine, units and filters carry over from its last instance.</div>
           <div className="devedit-actions">
             <select value={startForm.kind} onChange={e => setStartForm(f => ({ ...f, kind: e.target.value }))} aria-label="Kind">
               {ov.kinds.map(k => <option key={k} value={k}>{k}</option>)}</select>
@@ -709,28 +746,24 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
               const r = await transport.request<{ id: string }>("start", { essay: route.essay, ...startForm });
               setStartForm(f => ({ ...f, brief: "" })); await loadOv(); onRoute({ essay: route.essay, instance: r.id, step: "" });
             } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
-          }}>Start</button>
-        </div>}
-      </div>}
+          }}>Start workflow</button>
+        </details>}
+        <details className="wf-usage">
+          <summary>Usage</summary>
+          {here && view && <>
+            <p>This instance: {usageLine(view.usage.instance)}</p>
+            <p>This essay: {usageLine(view.usage.essay)}</p>
+          </>}
+          <p>{ov.usage.month_name}: {usageLine(ov.usage.month)}</p>
+        </details>
+      </div>
 
-      {view && inst && <>
+      {here && view && inst && <>
         <div className="card wf-head">
           <div className="card-head"><span>{short(inst.file)} · {inst.kind} #{inst.number}</span>
             <span className="muted">{inst.engine}{inst.model ? ` (${inst.model})` : ""} · {inst.construction_mode}, by {inst.unit}; filters by {inst.filter_unit}</span>
             {view.protected && <span className="wf-tier must" title="register = &quot;protected&quot; in the toc">protected register</span>}</div>
-          <nav className="devedit-tabs wf-steps" aria-label="Steps">
-            {ov.steps.map(s => {
-              const reached = ov.steps.indexOf(s) <= ov.steps.indexOf(inst.step);
-              return <button key={s} className={`pill${s === shownStep ? " on" : ""}`} disabled={!reached} onClick={() => setStep(s)}>
-                {STEP_WORDS[s]}{s === inst.step ? " •" : ""}</button>;
-            })}
-          </nav>
-          {inst.step !== "done" && <div className="wf-gate">
-            {view.gate ? <span className="muted">Next ({STEP_WORDS[view.next_step || ""]}) waits: {view.gate}</span>
-              : <button className="pill on" disabled={busy} onClick={() => void run("advance", {})}>On to {STEP_WORDS[view.next_step || ""]}</button>}
-          </div>}
-          <div className="muted">Usage — this instance: {usageLine(view.usage.instance)}; this essay: {usageLine(view.usage.essay)}; {view.usage.month_name}: {usageLine(view.usage.month)}</div>
-          {inst.engine === "openai-api" && <div className="muted">openai-api is billed: each turn's dollars are in the usage line.</div>}
+          {inst.engine === "openai-api" && <div className="muted">openai-api is billed: each turn's dollars are under Usage, above.</div>}
           {inst.engine === "openai-api" && inst.step !== "done" && <CostEstimate transport={transport} engine={inst.engine} model={inst.model} id={inst.id} />}
           {inst.step !== "done" && <details className="wf-settings">
             <summary>Switch engine or unit, or skip a step</summary>
