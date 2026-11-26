@@ -65,7 +65,10 @@ def raises(fn, kind=ValueError, needle: str = "") -> str:
 
 
 class FakeEngine:
-    """Answers every turn from a script and remembers what it was sent."""
+    """Answers every turn from a script and remembers what it was sent,
+    and the session_ref it was handed; each send names a fresh ref."""
+
+    refs = 0
 
     def __init__(self, name="claude-headless", model="", usage=None,
                  blurbs=None, requests=None):
@@ -75,9 +78,15 @@ class FakeEngine:
                                "dollars": 0.0, "est_subscription": 0.05}
         self.blurbs = blurbs or []
         self.requests = requests or []
+        self.session_ref = None
+        self.seen_refs: list = []
 
     def send(self, instance_context: dict, message: str) -> dict:
         self.sent.append((instance_context, message))
+        state = instance_context["instance"]["engine_state"] or {}
+        self.seen_refs.append(state.get("session_ref"))
+        FakeEngine.refs += 1
+        self.session_ref = f"{self.name}-ref-{FakeEngine.refs}"
         return {"text": f"reply to {message}", "reason": "tightened it",
                 "proposed": "New paragraph.",
                 "suggested_blurbs": self.blurbs, "usage": self.usage,
@@ -475,6 +484,78 @@ def test_usage_totals() -> None:
         raises(lambda: core.usage(db, ms, month="May"), ValueError)
 
 
+def test_session_ref_is_persisted() -> None:
+    with world() as (db, ms, _ws):
+        inst = core.advance(db, core.start(db, ms, "one", "refine"))
+        first = FakeEngine()
+        core.send_turn(db, ms, inst, "start", "go", engine=first)
+        check("the first send of an instance has no session to resume",
+              first.seen_refs == [None], first.seen_refs)
+        stored = core.get_instance(db, ms, inst["id"])["engine_state"]
+        check("the engine's session_ref is written to engine_state",
+              first.session_ref and stored.get("session_ref")
+              == first.session_ref, stored)
+        # A new engine object (a new process), handed the instance as it was
+        # before the first send: the ref still comes from the record.
+        second = FakeEngine()
+        core.send_turn(db, ms, inst, "reply", "more", engine=second)
+        check("the second send receives the first send's session_ref",
+              second.seen_refs == [first.session_ref], second.seen_refs)
+        inst = core.get_instance(db, ms, inst["id"])
+        check("each send replaces the stored ref with the engine's latest",
+              inst["engine_state"].get("session_ref") == second.session_ref
+              != first.session_ref)
+
+        class Broken(FakeEngine):
+            def send(self, instance_context, message):
+                raise RuntimeError("engine down")
+        raises(lambda: core.send_turn(db, ms, inst, "reply", "x",
+                                      engine=Broken()), RuntimeError)
+        check("a failed send leaves the stored ref and the turns as they were",
+              core.get_instance(db, ms, inst["id"])["engine_state"]
+              == inst["engine_state"] and len(core.turns(db, inst)) == 2)
+        inst = core.set_engine(db, inst, "openai-api", "gpt-5", reason="budget")
+        check("an engine switch clears the stored ref",
+              "session_ref" not in inst["engine_state"], inst["engine_state"])
+        third = FakeEngine("openai-api", "gpt-5")
+        core.send_turn(db, ms, inst, "reply", "again", engine=third)
+        check("the new engine starts without the old engine's ref",
+              third.seen_refs == [None], third.seen_refs)
+
+
+def test_unknown_cost_is_not_zero() -> None:
+    check("normalize_reply keeps an unknown dollar cost as None",
+          contract.normalize_reply({"usage": {"input": 5, "dollars": None}})
+          ["usage"]["dollars"] is None)
+    check("a missing dollar cost is unknown too",
+          contract.normalize_reply({"usage": {"input": 5}})["usage"]["dollars"]
+          is None)
+    check("a known zero stays zero",
+          contract.normalize_reply({"usage": {"dollars": 0.0}})["usage"]["dollars"]
+          == 0.0)
+    with world() as (db, ms, _ws):
+        a = core.advance(db, core.start(db, ms, "one", "refine"))
+        unknown = {"input": 10, "cached": 0, "output": 5, "dollars": None,
+                   "est_subscription": 0}
+        t = core.send_turn(db, ms, a, "start", "go",
+                           engine=FakeEngine(usage=unknown))
+        check("the turn records the cost as unknown", t["usage"]["dollars"] is None,
+              t["usage"])
+        u = core.usage(db, ms)
+        check("with no known cost, the billed total is unknown, not $0",
+              u["total"]["dollars"] is None
+              and u["total"]["dollars_unknown"] == 1, u["total"])
+        core.send_turn(db, ms, a, "reply", "more", engine=FakeEngine(
+            usage={**unknown, "dollars": 0.5}))
+        u = core.usage(db, ms)
+        check("known costs add up and unknown ones are counted apart",
+              u["total"]["dollars"] == 0.5 and u["total"]["dollars_unknown"] == 1
+              and u["total"]["turns"] == 2, u["total"])
+        out = _cli(_ws, "usage")
+        check("the usage lines say how many turns have an unknown cost",
+              "1 turn unknown" in out, out)
+
+
 def _tables(db) -> dict:
     names = [r["name"] for r in db.all(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT "
@@ -594,6 +675,8 @@ def main() -> None:
              test_turns_context_and_blurbs,
              test_protected_register_is_honoured,
              test_usage_totals,
+             test_session_ref_is_persisted,
+             test_unknown_cost_is_not_zero,
              test_cli_end_to_end,
              test_a_rename_carries_the_workflow,
              test_migration_is_additive]

@@ -56,9 +56,17 @@ def _show_lines(db, inst: dict) -> list[str]:
 
 def _usage_lines(totals: dict) -> list[str]:
     def fmt(t: dict) -> str:
+        unknown = t.get("dollars_unknown", 0)
+        plural = "s" if unknown != 1 else ""
+        if t.get("dollars") is None:
+            billed = "unknown" + (f" ({unknown} turn{plural} unknown)"
+                                  if unknown else "")
+        else:
+            billed = f"${t['dollars']:.2f}" + (
+                f" + {unknown} turn{plural} unknown" if unknown else "")
         return (f"{t.get('turns', 0)} turns, in {t.get('input', 0)} "
                 f"(cached {t.get('cached', 0)}), out {t.get('output', 0)}, "
-                f"${t.get('dollars', 0):.2f} billed, "
+                f"{billed} billed, "
                 f"~${t.get('est_subscription', 0):.2f} subscription")
     lines = [f"total: {fmt(totals['total'])}" if totals["total"]
              else "total: no model turns"]

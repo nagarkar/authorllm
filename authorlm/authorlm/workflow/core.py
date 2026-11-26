@@ -640,9 +640,12 @@ def _check_turn(instance: dict, action: str, author_text: str,
 
 def record_turn(db: Database, instance: dict, action: str, *,
                 author_text: str = "", blurbs: list[str] | None = None,
-                unit_label: str = "", reply: dict | None = None) -> dict:
+                unit_label: str = "", reply: dict | None = None,
+                session_ref: str | None = None) -> dict:
     """Append one turn to the instance's session. `reply` is a normalized
-    engine reply (contract.normalize_reply) when the turn asked the model."""
+    engine reply (contract.normalize_reply) when the turn asked the model;
+    `session_ref` the engine's handle after it, stored in the instance's
+    engine_state in the same transaction as the turn."""
     blurbs = list(blurbs or [])
     _check_turn(instance, action, author_text, blurbs)
     reply = reply or {}
@@ -667,7 +670,14 @@ def record_turn(db: Database, instance: dict, action: str, *,
             use_blurbs(db, instance["manuscript_id"], blurbs)
         if reply.get("suggested_blurbs"):
             add_blurbs(db, instance["manuscript_id"], reply["suggested_blurbs"])
-        _touch(db, instance, {})
+        changes = {}
+        if session_ref:
+            state = loads(db.one("SELECT engine_state FROM workflow_instances "
+                                 "WHERE id = ?", (instance["id"],))
+                          ["engine_state"], {})
+            state["session_ref"] = session_ref
+            changes["engine_state"] = json.dumps(state, ensure_ascii=False)
+        _touch(db, instance, changes)
     return _turn(row)
 
 
@@ -686,11 +696,15 @@ def send_turn(db: Database, manuscript: dict, instance: dict, action: str,
     if not needs_model(action, author_text):
         raise ValueError(f"'{action}' is recorded without a model call; "
                          "use record_turn")
+    # The record, not the caller's copy, holds the session ref to resume.
+    instance = _instance(db.one("SELECT * FROM workflow_instances WHERE id = ?",
+                                (instance["id"],)))
     engine = engine or contract.make_engine(instance["engine"], instance["model"])
     ctx = context.instance_context(db, manuscript, instance)
     reply = contract.normalize_reply(engine.send(ctx, message))
     return record_turn(db, instance, action, author_text=author_text,
-                       blurbs=blurbs, unit_label=unit_label, reply=reply)
+                       blurbs=blurbs, unit_label=unit_label, reply=reply,
+                       session_ref=getattr(engine, "session_ref", None))
 
 
 # ------------------------------------------------------------------- blurbs
@@ -745,8 +759,17 @@ def blurb_list(db: Database, manuscript_id: str, hidden: bool = False) -> list[d
 # -------------------------------------------------------------------- usage
 
 def _add(total: dict, usage: dict) -> None:
-    for key in ("input", "cached", "output", "dollars", "est_subscription"):
+    """Add one turn's usage. A turn whose dollar cost is unknown (None) is
+    counted in `dollars_unknown`, never as $0; `dollars` is the sum of the
+    known costs, and None while no turn has a known one."""
+    for key in ("input", "cached", "output", "est_subscription"):
         total[key] = total.get(key, 0) + (usage.get(key) or 0)
+    total.setdefault("dollars", None)
+    total.setdefault("dollars_unknown", 0)
+    if usage.get("dollars") is None:
+        total["dollars_unknown"] += 1
+    else:
+        total["dollars"] = (total["dollars"] or 0) + usage["dollars"]
     total["turns"] = total.get("turns", 0) + 1
 
 
