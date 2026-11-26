@@ -326,9 +326,10 @@ def test_rules_are_selectable() -> None:
     one = proof.proof_text(text, lexicon=lexicon, rules=["footnote"])
     check("a rule runs alone when named",
           {f.code for f in one} == {"footnote"})
-    check("the rule list is the seven proof checks", proof.RULES == (
+    check("the rule list is the eight proof checks", proof.RULES == (
         "spelling", "doubled-word", "spelling-variant", "quote-style",
-        "footnote", "link-tracking", "banned-word"), proof.RULES)
+        "dash-form", "footnote", "link-tracking", "banned-word"),
+        proof.RULES)
     check("findings are lint findings",
           all(isinstance(f, lint.Finding) for f in everything))
 

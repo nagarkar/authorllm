@@ -510,7 +510,7 @@ Registry of every LLM prompt AuthorLM sends, and where each lives.
 
 `authorlm/authorlm/proof.py`
 
-The proof checks: seven deterministic checks a proofreader makes by eye, run by `book lint` beside the nine checks of `lint.py`.
+The proof checks: eight deterministic checks a proofreader makes by eye, run by `book lint` beside the nine checks of `lint.py`.
 
 Never imports: api, cli, db, changes.
 
@@ -1533,6 +1533,12 @@ Doc export can wrap a struck old half in emphasis (`<<*term*>>` for a staged `te
 `authorlm/tests/test_resolve_pointers.py`
 
 `lenses.resolve_pointers` decides which other chapters a lens INPUTS payload may pull in as pointed-to essays.
+
+## `tests.test_retired_roads`
+
+`authorlm/tests/test_retired_roads.py`
+
+The old roads retired as entry points (workflow/roads.py), and lint versus copyedit (§11.9 Q2, U8, U9; §12 row 6).
 
 ## `tests.test_run_all`
 

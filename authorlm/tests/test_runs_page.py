@@ -42,6 +42,7 @@ from authorlm import filters as flt  # noqa: E402
 from authorlm import lenses  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 from authorlm.db import ko_fields  # noqa: E402
+from authorlm.workflow import core as wf_core  # noqa: E402
 
 PASSED = 0
 
@@ -97,6 +98,20 @@ def _world():
         llm.LLMClient = boom
         db = api.open_db(str(ws))
         man = api.get_manuscript(db)
+        # A run asked for here is outside each essay's workflow (workflow/
+        # roads.py; tests/test_retired_roads.py covers the gate): here both
+        # essays stand at their filter step, and the skip for each artifact
+        # these checks ask for is already recorded, so the queue opens with
+        # no second reason.
+        from authorlm.workflow import roads as wf_roads
+        for essay in ("a", "b"):
+            inst = wf_core.start(db, man, essay, "refine")
+            wf_core.skip(db, inst, "The fixture starts at the filters.",
+                         to="filters")
+            for kind, name in (("filter", "own-pass"), ("lens", "own-lens"),
+                               ("filter", "shared-pass")):
+                wf_roads.enter(db, man, f"{essay}.md", kind, name=name,
+                               reason="The fixture asks for this run.")
         # The manuscript's recorded path (init resolves it).
         yield root, ws, Path(man["path"]), db, man
     finally:

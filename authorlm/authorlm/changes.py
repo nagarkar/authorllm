@@ -869,7 +869,8 @@ def _proof_findings(db: Database, manuscript: dict, relpath: str,
         db, manuscript["id"], relpath)]
     return proof.proof_text(text, lexicon=lexicon, rules=wanted,
                             law=proof.quote_law(statements),
-                            bans=proof.ban_terms(statements))
+                            bans=proof.ban_terms(statements),
+                            dash=proof.dash_law(statements))
 
 
 def _finding_row(f) -> dict:
@@ -1002,6 +1003,78 @@ def lint_book(db: Database, manuscript: dict,
              "next": f"authorlm book lint <file> -m {manuscript['name']}"}
     if "spelling-variant" in rules:
         board["variant_words"] = variant_words
+    return board
+
+
+# The conventions lint owns and fixes itself, with no form (§11.9 U8: "code-
+# checkable conventions belong to lint alone"; U9: "lint's mechanical fixes
+# at the end are applied directly and listed"): rule → the Lint view's fix.
+# Spelling by dictionary and footnote anchors are lint's too, but each
+# needs the author's word (the right word, the missing note), so they are
+# reported, never fixed blind.
+MECHANICAL_FIXES = {"quote-style": "curl", "dash-form": "dash",
+                    "link-tracking": "untrack"}
+# What the copyedit filter must never touch because lint owns it: each
+# proof rule a copyeditor could also act on, as the copyedit brief names
+# it (library/workflow/filters/copyedit.md, "Never touch what lint owns").
+# Enforced by: tests/test_retired_roads.py::test_copyedit_leaves_lint_alone.
+LINT_OWNS = {"quote-style": "quotation marks", "dash-form": "dash form",
+             "spelling": "spelling by dictionary",
+             "footnote": "footnote anchors", "doubled-word": "a doubled word"}
+
+
+def lint_fix(db: Database, manuscript: dict, files: list[str],
+             services=None, config: dict | None = None,
+             dry_run: bool = False, only: list[str] | None = None,
+             skip: list[str] | None = None) -> dict:
+    """`book lint --fix`: lint's mechanical fixes (MECHANICAL_FIXES) applied
+    straight into each file, and into its Doc tab through the Lint view's
+    guarded road (lint_page.apply: pull, edit, guarded push; a guard that
+    stops applies nothing to that tab), each changed paragraph logged in
+    `lint_changes` (undo on the Lint view). Returns {tabs: [{file,
+    applied, changes: [{line, before, after}], blocked, message}],
+    applied, blocked, dry_run}. `services` returns (drive, docs) and is
+    asked only when a fix reaches a tab linked to the Doc. `dry_run`
+    counts and writes nothing. `only` and `skip` are `book lint`'s: a
+    mechanical fix runs only when its rule is among the rules chosen."""
+    from . import lint_page
+
+    chosen = set(lint_rules(only, skip))
+    root = Path(manuscript["path"])
+    fixes, planned = [], {}
+    for query in files:
+        rel = docs._resolve_relpath(manuscript, query)
+        text = (root / rel).read_text(encoding="utf-8")
+        for rule, kind in MECHANICAL_FIXES.items():
+            if rule not in chosen:
+                continue
+            fix = {"id": f"{rule}:{rel}", "kind": kind, "file": rel,
+                   "rule": rule}
+            edits = lint_page.edits_for(fix, text, db, manuscript, rel)
+            if edits:
+                fixes.append(fix)
+                planned.setdefault(rel, []).append(
+                    {"rule": rule, "count": len(edits),
+                     "changes": lint_page.changed_paragraphs(text, edits)})
+    board = {"manuscript": manuscript["name"], "dry_run": dry_run,
+             "planned": planned, "tabs": [], "applied": 0, "blocked": 0}
+    if dry_run or not fixes:
+        return board
+    from . import gdocs
+
+    service = docs_service = None
+    links = gdocs.doc_status(db, manuscript)
+    if services is not None and links.get("_master_id") and any(
+            isinstance(links.get(f["file"]), dict)
+            and links[f["file"]].get("tab_id") for f in fixes):
+        try:
+            service, docs_service = services()
+        except Exception:  # noqa: BLE001 — no sign-in: lint_page says so
+            service = docs_service = None
+    out = lint_page.apply(db, manuscript, fixes, service, docs_service,
+                          config or {}, label="book lint --fix")
+    board.update(tabs=out["tabs"], applied=out["applied"],
+                 blocked=out["blocked"], batch=out["batch"])
     return board
 
 

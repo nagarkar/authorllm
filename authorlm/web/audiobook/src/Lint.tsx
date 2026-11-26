@@ -34,16 +34,18 @@ import { recall, remember } from "./remember";
 //                 last run (hidden from the list): results, not choices; a
 //                 reload's lint run reads the files, which hold the fixes,
 //                 and the log and the tabs' Doc state come from the server.
-const PROOF = ["spelling", "doubled-word", "spelling-variant", "quote-style", "footnote", "link-tracking", "banned-word"];
+const PROOF = ["spelling", "doubled-word", "spelling-variant", "quote-style", "dash-form", "footnote", "link-tracking", "banned-word"];
 const STYLE = ["what-opener", "this-not-that", "term-in-definition", "em-dash-stack", "em-dash", "long-sentence",
   "reading-grade", "overlap", "redefinition", "italic-term"];
 const WORDS: Record<string, string> = {
   "spelling": "Spelling", "doubled-word": "Doubled words", "unbalanced-quotes": "Unbalanced quote marks",
   "footnote": "Footnotes", "banned-word": "Banned words", "em-dash-stack": "Stacked em-dashes",
-  "spelling-variant": "Spelling variant", "quote-style": "Quote style", "link-tracking": "Tracking tags in links",
+  "spelling-variant": "Spelling variant", "quote-style": "Quote style", "dash-form": "Dash form", "link-tracking": "Tracking tags in links",
   "em-dash": "Em-dash warnings",
 };
 const ruleName = (r: string) => WORDS[r] || r.replace(/-/g, " ");
+// The fix a bulk rule's Apply sends (lint_page.FIX_KINDS).
+const bulkKind = (r: string): "curl" | "dash" | "untrack" => r === "quote-style" ? "curl" : r === "dash-form" ? "dash" : "untrack";
 
 interface Finding {
   id: string; rule: string; file: string; code: string; severity: string; quote: string; message: string; ref: string;
@@ -56,7 +58,7 @@ interface RunResult {
   quote_laws: Record<string, { id: string; statement: string }>; ignore_file: string; accepted_file: string; error?: string;
   held?: Record<string, string>;
 }
-interface Fix { id?: string; kind: "curl" | "untrack" | "word" | "paragraph"; file: string; rule: string; word?: string; to?: string; old?: string; new?: string; line?: number }
+interface Fix { id?: string; kind: "curl" | "dash" | "untrack" | "word" | "paragraph"; file: string; rule: string; word?: string; to?: string; old?: string; new?: string; line?: number }
 interface Segment { op: "equal" | "delete" | "insert"; text: string }
 interface Preview { count: number; files: Record<string, number>; pairs: { file: string; line: number; segments: Segment[] }[]; error?: string }
 interface TabOut { file: string; applied: string[]; accepted?: string[]; blocked: { id: string; reason: string }[]; doc?: string; restaged: number; warnings: string[]; message: string }
@@ -454,10 +456,10 @@ export function Lint({ transport, manuscript, tabs, ticked, setTicked, filter, o
               </div>;
             })}
           </> : <>
-            <p className="muted">{g.rule === "quote-style" ? "Every quote mark and apostrophe of the other style is changed; code, links and tags are left alone." : "Tracking tags (utm_ and the like) are taken out of each link; the rest of the link is kept."}</p>
+            <p className="muted">{g.rule === "quote-style" ? "Every quote mark and apostrophe of the other style is changed; code, links and tags are left alone." : g.rule === "dash-form" ? "Each hyphen or double hyphen typed for a dash, spaced en dash, and em dash of the other form becomes the house em dash (closed unless a style law says spaced); hyphens in words and ranges are left alone." : "Tracking tags (utm_ and the like) are taken out of each link; the rest of the link is kept."}</p>
             <div className="devedit-actions">
-              {files.map(f => { const k = `bulk:${g.rule}:${f}`; return <button key={f} className="pill" disabled={!!pending[k] || !!pending[`${k}:preview`]} onClick={() => void showPreview(k, `${ruleName(g.rule)} on ${short(f)}`, [{ id: `${g.rule}:${f}`, kind: g.rule === "quote-style" ? "curl" : "untrack", file: f, rule: g.rule }])}>{pending[k] ? "Applying…" : `Apply on ${short(f)}`}</button>; })}
-              {files.length > 1 && <button className="btn take" disabled={!!pending[`bulk:${g.rule}:all`] || !!pending[`bulk:${g.rule}:all:preview`]} onClick={() => void showPreview(`bulk:${g.rule}:all`, `${ruleName(g.rule)} on ${files.length} tabs`, files.map(f => ({ id: `${g.rule}:${f}`, kind: g.rule === "quote-style" ? "curl" : "untrack", file: f, rule: g.rule })))}>{pending[`bulk:${g.rule}:all`] ? "Applying…" : `Apply on all ${files.length} tabs`}</button>}
+              {files.map(f => { const k = `bulk:${g.rule}:${f}`; return <button key={f} className="pill" disabled={!!pending[k] || !!pending[`${k}:preview`]} onClick={() => void showPreview(k, `${ruleName(g.rule)} on ${short(f)}`, [{ id: `${g.rule}:${f}`, kind: bulkKind(g.rule), file: f, rule: g.rule }])}>{pending[k] ? "Applying…" : `Apply on ${short(f)}`}</button>; })}
+              {files.length > 1 && <button className="btn take" disabled={!!pending[`bulk:${g.rule}:all`] || !!pending[`bulk:${g.rule}:all:preview`]} onClick={() => void showPreview(`bulk:${g.rule}:all`, `${ruleName(g.rule)} on ${files.length} tabs`, files.map(f => ({ id: `${g.rule}:${f}`, kind: bulkKind(g.rule), file: f, rule: g.rule })))}>{pending[`bulk:${g.rule}:all`] ? "Applying…" : `Apply on all ${files.length} tabs`}</button>}
             </div>
           </>}
           {preview && preview.key.startsWith(`bulk:${g.rule}:`) && <div className="lint-preview">

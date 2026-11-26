@@ -87,7 +87,18 @@ def _pin_config(workspace: Path) -> None:
     os.environ["AUTHORLM_CONFIG"] = str(workspace / ".authorlm" / "config.toml")
 
 
+# The verbs retired as entry points (workflow/roads.py, §11.9 Q2). These
+# tests exercise the roads' own machinery, which the workflow reuses, so
+# each call goes in outside the workflow with a reason; the gate itself is
+# tested in tests/test_retired_roads.py.
+RETIRED_ROADS = {("filter", "run"), ("filter", "prelude"), ("lens", "run"),
+                 ("write", "start")}
+ROAD_REASON = "An end-to-end test of the road's own machinery."
+
+
 def run(workspace: Path, *argv: str, expect_exit: bool = False) -> str:
+    if tuple(argv[:2]) in RETIRED_ROADS and "--skip-reason" not in argv:
+        argv = (*argv, "--skip-reason", ROAD_REASON)
     _pin_config(workspace)
     buffer = io.StringIO()
     code = 0

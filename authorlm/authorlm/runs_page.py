@@ -53,6 +53,9 @@ KINDS = ("filter", "lens")
 BACKUP_DIR = "prompt-backups"
 # A request is work for a session while it is in one of these states.
 WAITING = ("queued", "drafting")
+# What a pair the workflow holds back says the page can do about it.
+SKIP_HINT = ("To ask anyway, outside the workflow, give one sentence of why "
+             "in the box below; it is recorded on the essay's workflow.")
 
 
 def _sha(text: str) -> str:
@@ -523,11 +526,22 @@ def requests(db: Database, manuscript: dict, runs: list[dict] | None = None,
 
 
 def enqueue(db: Database, manuscript: dict, items: list[dict],
-            files: list[str], dry_run: bool = False) -> dict:
+            files: list[str], dry_run: bool = False,
+            skip_reason: str | None = None) -> dict:
     """Ask for a run of each artifact on each tab. Returns, per pair, one
     of: queued (a new row), already (a request for it is still waiting), or
     blocked (with the reason; nothing is written for it). `dry_run` says
-    what would happen and writes nothing. No model is called either way."""
+    what would happen and writes nothing. No model is called either way.
+
+    A run is asked for through the essay's workflow (workflow/roads.py,
+    §11.9 Q2): a request runs the old machinery, outside the workflow, so
+    it is blocked with `workflow: true` and how to start or continue the
+    workflow, unless `skip_reason` (one sentence) is given, or was given
+    before for that filter or lens on the essay's open instance; then the
+    skip is recorded on the essay's workflow (not on a dry run) and the
+    request is queued. All or nothing: an unknown tab or artifact, or a
+    reason that is not one sentence, writes nothing."""
+    from .workflow import roads
     if not items or not files:
         raise ValueError("choose at least one filter or lens and one tab")
     texts = read_manuscript_files(Path(manuscript["path"]))
@@ -537,24 +551,41 @@ def enqueue(db: Database, manuscript: dict, items: list[dict],
                   for item in lenses.list_lenses(manuscript)})
     waiting = {(r["kind"], r["name"], r["file"])
                for r in requests(db, manuscript) if r["state"] in WAITING}
-    queued, already, blocked = [], [], []
+    # Every tab and artifact is checked before anything is written, and the
+    # writes (instances, skip decisions, requests) go in one transaction:
+    # a page told "error" has had nothing done.
     for file in files:
-        tab = by_file.get(file)
-        if tab is None:
+        if file not in by_file:
             raise LookupError(f"'{file}' is not a tab of "
                               f"{manuscript['name']}")
-        for item in items:
-            kind, name = _kind(str(item.get("kind"))), str(item.get("name"))
-            artifact = known.get((kind, name))
-            if artifact is None:
-                raise LookupError(f"no {kind} '{name}'")
-            row = {"kind": kind, "name": name, "file": file}
-            why = blocker(db, manuscript, kind, artifact, tab, texts[file])
-            if why:
-                blocked.append({**row, "reason": why})
-            elif (kind, name, file) in waiting:
-                already.append(row)
-            else:
+    pairs = []
+    for item in items:
+        kind, name = _kind(str(item.get("kind"))), str(item.get("name"))
+        if (kind, name) not in known:
+            raise LookupError(f"no {kind} '{name}'")
+        pairs.append((kind, name))
+    queued, already, blocked = [], [], []
+    with db.transaction():
+        for file in files:
+            tab = by_file[file]
+            for kind, name in pairs:
+                artifact = known[(kind, name)]
+                row = {"kind": kind, "name": name, "file": file}
+                why = blocker(db, manuscript, kind, artifact, tab, texts[file])
+                if why:
+                    blocked.append({**row, "reason": why})
+                    continue
+                if (kind, name, file) in waiting:
+                    already.append(row)
+                    continue
+                try:
+                    roads.enter(db, manuscript, file, kind, name=name,
+                                reason=skip_reason, via="filters view",
+                                dry_run=dry_run, skip_hint=SKIP_HINT)
+                except roads.SentToWorkflow as err:
+                    blocked.append({**row, "reason": str(err),
+                                    "workflow": True})
+                    continue
                 if not dry_run:
                     fields = ko_fields("rq")
                     fields.update(manuscript_id=manuscript["id"], kind=kind,
@@ -614,7 +645,8 @@ def dispatch(method: str, params: dict[str, Any],
         if method in ("preview", "queue"):
             return enqueue(db, manuscript, params.get("items") or [],
                            [str(f) for f in params.get("files") or []],
-                           dry_run=method == "preview")
+                           dry_run=method == "preview",
+                           skip_reason=params.get("skip_reason") or None)
         if method == "cancel":
             return cancel(db, manuscript, str(params["id"]))
     except (LookupError, ValueError, KeyError) as err:
