@@ -130,6 +130,25 @@ class ShareTest(unittest.TestCase):
         self.assertEqual(drive.sent, [])
         self.assertEqual(report["commenters"], ["ann@example.com"])
 
+    def test_share_removes_other_editors(self):
+        # Writers can always download: leaving one means the review copy
+        # is not confidential (access.ok stays false). share must close
+        # them down with the link sharing.
+        drive = FakeDrive(perms=[
+            {"id": "o", "type": "user", "role": "owner",
+             "emailAddress": "a@x.com"},
+            {"id": "w", "type": "user", "role": "writer",
+             "emailAddress": "editor@x.com"},
+            {"id": "l", "type": "anyone", "role": "reader"},
+        ])
+        report = doc_access.share(drive, "DOC1", "ann@example.com")
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual(report["commenters"], ["ann@example.com"])
+        self.assertNotIn("writer", [p["role"] for p in drive.perms])
+        self.assertNotIn("anyone", [p["type"] for p in drive.perms])
+        self.assertNotIn("editor@x.com",
+                         [p.get("emailAddress") for p in drive.perms])
+
     def test_share_needs_an_email(self):
         with self.assertRaises(ValueError):
             doc_access.share(FakeDrive(), "DOC1", "Ann")

@@ -35,6 +35,22 @@ def export_filename(name: str) -> str:
     return cleaned + ".md"
 
 
+def recipient_slug(recipient: str) -> str:
+    """Filesystem token for one reader's export copy. Distinct recipients
+    stay distinct even when path-unsafe characters would otherwise collapse
+    them onto the same basename (and the same Drive upload key)."""
+    raw = (recipient or "").strip()
+    if not raw:
+        raise ValueError("empty recipient")
+    safe = _UNSAFE.sub("-", raw).strip("-") or "reader"
+    if safe != raw:
+        # Sanitization changed the string: a recipient that was already
+        # safe (or sanitizes the same way) must not share this file.
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:6]
+        safe = f"{safe}-{digest}"
+    return safe
+
+
 _NOTE_LABEL = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
 
 
@@ -849,9 +865,11 @@ def export_published(db: Database, manuscript: dict, fmt: str,
         title = f"{title} - book"  # never overwrites the review copy
     # A copy marked for one reader is its own file (and its own Drive
     # upload): the next reader's copy never overwrites it, nor the clean one.
+    # recipient_slug keeps two recipients that only differ by path-unsafe
+    # characters from collapsing onto one basename.
     recipient = watermark or notice
     if recipient:
-        title = f"{title} - {recipient}"
+        title = f"{title} - {recipient_slug(recipient)}"
     export_dir = root / EXPORT_DIR
     export_dir.mkdir(exist_ok=True)
     md_path = export_dir / export_filename(title)
