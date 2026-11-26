@@ -847,6 +847,58 @@ def test_http_route() -> None:
             server.server_close()
 
 
+def test_phone_navigation_controls() -> None:
+    """The owner's ask of 2026-11-26, on a phone screenshot of the Workflows
+    view: "The UI is too busy for this pager. Use standard UI controls like
+    drop-downs, selection boxes, panels, overlays, menus, etc., to make
+    workflows and tasks easily navigable." Pins the controls that answer it
+    and that every deep link (#<ms>/workflows:<essay>/<instance>/<step>)
+    still parses the same way."""
+    src = Path(__file__).resolve().parents[1] / "web" / "audiobook" / "src"
+    app = (src / "App.tsx").read_text(encoding="utf-8")
+    wf = (src / "Workflows.tsx").read_text(encoding="utf-8")
+    css = (src / "styles.css").read_text(encoding="utf-8")
+    check("the header has no row of page pills; the view's name opens a menu",
+          'className="modes top-nav"' not in app
+          and 'className="view-pick" aria-haspopup="menu"' in app
+          and 'className="sheet" role="menu"' in app)
+    modes = ["chapters", "pron", "devedit", "forms", "runs", "style", "workflows"]
+    check("the menu lists every view, Merge with its count, and Audition",
+          all(f'["{m}", ' in app for m in modes)
+          and "MODES.map(([m, label, about])" in app
+          and 'm === "forms" && formsSummary' in app and "/try-text" in app)
+    check("voice and volume sit in a popover behind the speaker button",
+          'aria-label="Voice and volume" aria-haspopup="dialog"' in app
+          and app.index("<VolumeSlider />") > app.index('className="popover"')
+          and "<WorkflowVoicePicker manuscript={ms} />" in app)
+    check("the manuscript is a drop-down in the bar; the title is not a line of its own",
+          'className="ms-pick"' in app and "<h1" not in app)
+    check("Escape closes the menu and the popover",
+          'e.key === "Escape") { setMenuOpen(false); setSoundOpen(false)' in app)
+    check("the essays are one drop-down, grouped in progress, done, not started",
+          'aria-label="Essay"' in wf and 'className="wf-essays"' not in wf
+          and wf.index('label="In progress"') < wf.index('label="Done"')
+          < wf.index('label="Not started"'))
+    check("with no essay chosen, each workflow under way is one tap to continue",
+          '!route.essay && inProgress.length > 0' in wf and "Continue {short(e.file)}" in wf)
+    check("the instance and the step are drop-downs; unreached steps disabled",
+          'aria-label="Workflow instance"' in wf and 'aria-label="Step"' in wf
+          and "disabled={!reached}" in wf and 'className="devedit-tabs wf-steps"' not in wf)
+    check("starting a workflow is a panel, open when the essay has none",
+          '<details className="wf-start"' in wf and "open={startOpen}" in wf
+          and ">Start workflow</button>" in wf)
+    check("the usage line is behind a Usage panel, not always on screen",
+          '<details className="wf-usage">' in wf and "<summary>Usage</summary>" in wf
+          and 'className="card-head"><span>Workflows</span>' not in wf)
+    check("the removed classes left the stylesheet; the new ones are styled",
+          ".wf-essays" not in css and ".top-nav" not in css
+          and ".sheet-item" in css and ".popover" in css and ".wf-nav" in css)
+    # The route the hash carries is unchanged, so old links open the same place.
+    check("deep links still parse to essay, instance and step",
+          'const [essay = "", instance = "", step = ""] = (item || "").split("/");' in wf
+          and 'h.startsWith("workflows:")' in app and "item: h.slice(10)" in app)
+
+
 def main() -> None:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
