@@ -39,7 +39,7 @@ import authorlm  # noqa: E402
 assert Path(authorlm.__file__).resolve().parent == HERE.parent / "authorlm", (
     f"testing the wrong package: {authorlm.__file__}")
 
-from authorlm import api, docs, register  # noqa: E402
+from authorlm import api, book, docs, register  # noqa: E402
 from authorlm.cli import main as cli_main  # noqa: E402
 
 WORDS = "I want a reader who has never meditated to finish it in a weekend."
@@ -143,6 +143,29 @@ class SettleTests(Workspace):
         with self.assertRaisesRegex(ValueError, "purpose"):
             register.add(self.db, self.manuscript, "mood", "calm")
 
+    def test_success_is_a_brief_kind_and_settles_like_the_others(self):
+        """#435: success is the brief's central entry; without it in
+        KINDS / BRIEF_KINDS the intake interview cannot record what the
+        author argued out, and the pack's `gives = brief` line omits it."""
+        self.assertIn("success", register.KINDS)
+        self.assertEqual(
+            register.BRIEF_KINDS,
+            ("purpose", "reader", "promise", "comparable", "takeaway",
+             "success"))
+        self.assertTrue(set(register.BRIEF_KINDS) <= set(register.KINDS))
+        self.assertIn("success", book.GIVES["brief"])
+        entry = register.add(
+            self.db, self.manuscript, "success", "chapter-and-book",
+            author_words="A chapter succeeds when the reader can restate "
+                         "its one claim in their own words.",
+            reading="Success is the reader's restated claim, not length.")
+        settled = register.settle(self.db, self.manuscript, entry["id"])
+        self.assertEqual(settled["kind"], "success")
+        self.assertEqual(settled["status"], "settled")
+        listed = register.list_entries(self.db, self.manuscript,
+                                       kind="success")
+        self.assertEqual([e["id"] for e in listed], [settled["id"]])
+
     def test_a_key_must_be_a_short_slug(self):
         with self.assertRaisesRegex(ValueError, "key"):
             register.add(self.db, self.manuscript, "reader", "The Newcomer!")
@@ -160,6 +183,33 @@ class SettleTests(Workspace):
         self.assertEqual(entry["scope"], document)
         book_wide = self.settled()
         self.assertIsNone(book_wide["scope"])
+
+
+class InScopeTests(Workspace):
+    def test_none_means_every_live_entry(self):
+        book_wide = self.settled()
+        scoped = register.add(self.db, self.manuscript, "thesis", "one",
+                              author_words=WORDS, reading=READING,
+                              scope="one.md")
+        register.settle(self.db, self.manuscript, scoped["id"])
+        ids = [e["id"] for e in register.in_scope(
+            self.db, self.manuscript, None)]
+        self.assertEqual(sorted(ids), sorted([book_wide["id"], scoped["id"]]))
+
+    def test_a_chapter_sees_book_wide_entries_and_its_own(self):
+        book_wide = self.settled()
+        one = docs.document_id(self.db, self.manuscript, "one.md")
+        two = docs.document_id(self.db, self.manuscript, "two.md")
+        for key, scope in (("one", "one.md"), ("two", "two.md")):
+            entry = register.add(self.db, self.manuscript, "thesis", key,
+                                 author_words=WORDS, reading=READING,
+                                 scope=scope)
+            register.settle(self.db, self.manuscript, entry["id"])
+        handed = register.in_scope(self.db, self.manuscript, [one])
+        self.assertEqual(
+            sorted((e["kind"], e["key"]) for e in handed),
+            [("reader", "newcomer"), ("thesis", "one")])
+        self.assertNotIn(two, [e["scope"] for e in handed])
 
 
 class KeyTests(Workspace):
