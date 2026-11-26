@@ -1216,6 +1216,12 @@ Individual `lint.check_*` helpers encode ratified style laws that `write propose
 
 The Lint view of the Filters page (`lint_page`, the `lint.*` methods of `/api/runs`): lint on chosen tabs, bulk mechanical fixes, one-by-one rulings, direct application through the tab's pull and guarded push, and the log with Undo.
 
+## `tests.test_lint_page_helpers`
+
+`authorlm/tests/test_lint_page_helpers.py`
+
+Pure helpers of the Lint view (`lint_page`): where a pending form sits, how its origin is named, which rule a quote-style finding becomes, and how a spelling-variant rewrite keeps the match's capitals.
+
 ## `tests.test_lint_proof`
 
 `authorlm/tests/test_lint_proof.py`
@@ -1389,6 +1395,12 @@ Regression: spaced CommonMark thematic breaks must survive normalize.
 `authorlm/tests/test_omni_helpers.py`
 
 Pure Omni helpers: model gate, duration clamp, billed USD from token usage, and the edit request body.
+
+## `tests.test_overlapping_form`
+
+`authorlm/tests/test_overlapping_form.py`
+
+`forms_page._overlapping_form`: a widened Merge-forms edit must not rewrite words another open form still owns.
 
 ## `tests.test_own_line_form`
 
@@ -1611,6 +1623,12 @@ Workspace style defaults: `library/style-defaults.toml` is the lowest layer of e
 `authorlm/tests/test_style_page.py`
 
 The Style laws page (`style_page.dispatch`, `/api/style`) and the verbs it shares with the CLI: edit in place, retire with a reason, un-retire, copy, move, history, and the near-duplicate warning on add.
+
+## `tests.test_style_page_levels`
+
+`authorlm/tests/test_style_page_levels.py`
+
+`style_page._parse` / `_target`: the Style laws page's level string is the only door that says where a law is listed, added, moved or copied.
 
 ## `tests.test_style_snapshots`
 
