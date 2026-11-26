@@ -40,10 +40,16 @@ interface Instance {
 }
 interface Form { seq: number; reason: string; proposed: string; text: string; engine: string; model: string; }
 interface Unit { label: string; kind: string; n?: number; beat?: number; before: string; state: string; text?: string; form?: Form; turns?: number; }
-interface Walk { mode: string; unit: string; asked_unit: string; units: Unit[]; next: string | null; end: boolean; fallback: boolean; beat?: number; beat_open?: boolean; beats_before?: number; }
+interface Walk {
+  mode: string; unit: string; asked_unit: string; units: Unit[]; next: string | null; end: boolean; fallback: boolean;
+  beat?: number; beat_open?: boolean; beats_before?: number; concluded?: boolean;
+  earlier: { label: string; kind: string; state: string; text: string; stretch: number }[];
+}
+interface Estimate { engine: string; billed: boolean; model?: string; turns?: number; input_per_turn?: number; output_per_turn?: number; per_turn?: number | null; total?: number | null; why?: string; }
+interface LintRun { at: string; counts: Record<string, number>; total: number; findings: { severity: string; code: string; message: string; quote: string; line?: number | null }[]; }
 interface Finding { item: string; verdict: string | null; reason: string | null; n?: number; title: string; where: string; what: string; why: string; direction: string; tier: string; text: string; }
 interface Letter {
-  drafted: boolean; text: string; findings: Finding[]; keep: string[];
+  drafted: boolean; redraft: boolean; text: string; findings: Finding[]; keep: string[];
   passes: Record<string, { needed: boolean; reason: string }>; notes: string[];
   discussion: { seq: number; action: string; author: string; reply: string; reason: string; at: string }[];
   accepted_without_findings: boolean;
@@ -60,6 +66,7 @@ interface View {
   walk?: Walk; wrapup?: { drafted: boolean; items: Unit[]; principles: { words: string; scope: string }[]; text: string };
   checklist?: { passes: { name: string; stage: string; ticked: boolean; why: string; letter?: { needed: boolean; reason: string } }[]; confirmed: boolean; audiobook: boolean };
   principles: Decision[]; skipped: Decision[];
+  unplaced?: { label: string; kind: string; text: string }[]; lint?: LintRun | null;
   turns: { seq: number; step: string; unit_label: string; action: string; reason: string }[];
 }
 
@@ -203,6 +210,25 @@ function ListenBar({ before, reason, after, manuscript }: { before: string; reas
       {error && <span className="bad">{error}</span>}
     </div>
   );
+}
+
+// -------------------------------------------------------------- estimate
+
+// Q6: "A billed engine shows its estimated cost when chosen". Asked of the
+// server (workflow_page.estimate) whenever a billed engine is picked.
+function CostEstimate({ transport, engine, model, essay, id }: { transport: Transport; engine: string; model: string; essay?: string; id?: string }) {
+  const [e, setE] = useState<Estimate | null>(null);
+  useEffect(() => {
+    let live = true;
+    if (!engine) { setE(null); return; }
+    transport.request<Estimate>("estimate", { engine, model, essay: essay || "", id: id || "" })
+      .then(r => { if (live) setE(r); }).catch(() => { if (live) setE(null); });
+    return () => { live = false; };
+  }, [transport, engine, model, essay, id]);
+  if (!e || !e.billed) return null;
+  return <div className="muted wf-estimate">{e.engine}{e.model ? ` (${e.model})` : ""} is billed. {e.total != null
+    ? `Estimated ${money(e.total)} for the whole walk: about ${e.turns} turns at ~${money(e.per_turn ?? 0)} each (${(e.input_per_turn || 0).toLocaleString()} tokens in, ${e.output_per_turn} out, uncached; a floor).`
+    : `No estimate: ${e.why}.`}</div>;
 }
 
 // ------------------------------------------------------------- unit form
@@ -350,9 +376,15 @@ function LetterStep({ v, run, busy }: { v: View; run: (m: string, p: Record<stri
       <p className="muted">One reading of the whole essay: numbered findings with a tier each, what to keep, which passes the essay needs, and short paragraph notes.</p>
       {here && <div className="devedit-actions">
         <button className="pill on" disabled={busy} onClick={() => void run("letter", {})}>{busy ? "Writing…" : "Write the letter"}</button>
-        {!L.findings.length && <button className="pill" disabled={busy} onClick={() => void run("accept_letter", {})}
+        {v.instance.kind === "new" && <button className="pill" disabled={busy} onClick={() => void run("accept_letter", {})}
           title="A new essay's letter is its beat plan: accept without findings">Accept with no findings</button>}
       </div>}
+    </div>}
+    {L.drafted && here && (L.redraft || !L.findings.length) && <div className="card devedit-actions">
+      {!L.findings.length && <span className="muted">The letter as written has no findings.</span>}
+      {!L.findings.length && <button className="pill on" disabled={busy} onClick={() => void run("accept_letter", {})}>Accept with no findings</button>}
+      {L.redraft && <button className="pill" disabled={busy} onClick={() => void run("letter", {})}
+        title="Nothing is ruled yet: a new draft replaces this one and its findings">{busy ? "Writing…" : "Redraft the letter"}</button>}
     </div>}
     {L.findings.map(f => (
       <div key={f.item} className={`card wf-finding${f.verdict ? " ruled" : ""}`}>
@@ -405,14 +437,23 @@ function WalkStep({ v, run, busy, manuscript, showHidden, setShowHidden }: {
       {w.fallback && ` The essay has no subheadings, so it goes by paragraph.`}
       {inst.step === "construction" && v.letter.notes.length > 0 && ` ${v.letter.notes.length} paragraph note(s) from the letter.`}
     </div>
+    {w.earlier.length > 0 && <details className="card">
+      <summary className="muted">{w.earlier.length} unit(s) ruled before the last switch of unit or mode: their text is carried into this walk</summary>
+      <ul>{w.earlier.map(e => <li key={`${e.stretch}-${e.label}`}><b>{e.label}</b> ({STATE_WORDS[e.state] || e.state}): {e.text || <i className="muted">(empty)</i>}</li>)}</ul>
+    </details>}
+    {inst.step === "filters" && (v.unplaced || []).length > 0 && <div className="card muted">
+      Accepted at the wrap-up but not found in the essay, so not placed: {(v.unplaced || []).map(u => `${u.label} (“${u.text}”)`).join("; ")}.</div>}
     {units.map(u => <UnitForm key={u.label} unit={u} newEssay={newEssay} blurbs={v.blurbs} tags={v.supported_tags}
       manuscript={manuscript} busy={busy} run={run} showHidden={showHidden} setShowHidden={setShowHidden} />)}
-    {(w.end || (w.next && !units.some(u => u.state === "pending")) || (w.mode === "beats" && w.beat_open)) && <div className="card devedit-actions">
+    {(w.end || (w.next && !units.some(u => u.state === "pending")) || (w.mode === "beats" && !w.concluded)) && <div className="card devedit-actions">
       {w.next && !units.some(u => u.state === "pending") &&
         <button className="pill on" disabled={busy} onClick={() => void run("propose", {})}>{busy ? "Asking…" : `Work ${w.next}`}</button>}
       {w.mode === "beats" && w.beat_open && !units.some(u => u.state === "pending") &&
         <button className="pill" disabled={busy} onClick={() => void run("beat_done", {})}>Beat {w.beat} done — next beat</button>}
-      {w.end && <span className="muted">The walk has reached the end of the essay.</span>}
+      {w.mode === "beats" && !w.concluded && inst.step === "construction" && !units.some(u => u.state === "pending") &&
+        <button className="pill" disabled={busy} onClick={() => void run("conclude", {})}
+          title="Construction ends when you conclude it (Q18)">The essay is built — conclude the beats</button>}
+      {w.end && <span className="muted">{w.mode === "beats" ? "The beats are concluded." : "The walk has reached the end of the essay."}</span>}
     </div>}
   </>;
 }
@@ -556,6 +597,7 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
               {ov.engines.map(k => <option key={k} value={k}>{k}{k === "openai-api" ? " (billed)" : ""}</option>)}</select>
             <input className="wf-input" value={startForm.model} placeholder="model (optional)" onChange={e => setStartForm(f => ({ ...f, model: e.target.value }))} />
           </div>
+          <CostEstimate transport={transport} engine={startForm.engine} model={startForm.model} essay={route.essay} />
           <textarea className="devedit-edit" rows={3} value={startForm.brief} placeholder="The brief: what to build or improve, and what you think is wrong"
             onChange={e => setStartForm(f => ({ ...f, brief: e.target.value }))} />
           <button className="pill on" disabled={busy} onClick={async () => {
@@ -586,6 +628,7 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
           </div>}
           <div className="muted">Usage — this instance: {usageLine(view.usage.instance)}; this essay: {usageLine(view.usage.essay)}; {view.usage.month_name}: {usageLine(view.usage.month)}</div>
           {inst.engine === "openai-api" && <div className="muted">openai-api is billed: each turn's dollars are in the usage line.</div>}
+          {inst.engine === "openai-api" && inst.step !== "done" && <CostEstimate transport={transport} engine={inst.engine} model={inst.model} id={inst.id} />}
           {inst.step !== "done" && <details className="wf-settings">
             <summary>Switch engine or unit, or skip a step</summary>
             <div className="devedit-actions">
@@ -597,6 +640,7 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
                 if (await run("engine", { engine: sw.engine || inst.engine, model: sw.model || null, reason: sw.reason })) setSw(s => ({ ...s, engine: "", model: "", reason: "" }));
               }}>Switch engine</button>
             </div>
+            {sw.engine && sw.engine !== inst.engine && <CostEstimate transport={transport} engine={sw.engine} model={sw.model} id={inst.id} />}
             <div className="devedit-actions">
               <select value={sw.unit} onChange={e => setSw(s => ({ ...s, unit: e.target.value }))} aria-label="Unit">
                 <option value="">unit…</option>{ov.units.map(u => <option key={u} value={u}>{u}</option>)}</select>
@@ -631,7 +675,12 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
           <WrapupStep v={view} run={run} busy={busy} manuscript={manuscript} showHidden={showHidden} setShowHidden={setShowHidden} />}
         {shownStep === "lint" && inst.step === "lint" && <div className="card">
           {view.checklist && <p className="muted">Passes run: {inst.filters.join(", ") || "none"}.</p>}
-          <p>Run <code>authorlm book lint -m {manuscript}</code> and the proof checks; the mechanical fixes are applied directly and listed. Then go on.</p></div>}
+          <p className="muted">The deterministic lint and proof checks over the essay as it now stands (<code>authorlm book lint</code>'s rules), with every ruling of this instance applied.</p>
+          <button className="pill on" disabled={busy} onClick={() => void run("lint", {})}>{busy ? "Linting…" : view.lint ? "Run lint again" : "Run lint"}</button>
+          {view.lint && <>
+            <p>{view.lint.total ? `${view.lint.total} finding(s): ${Object.entries(view.lint.counts).map(([k, n]) => `${n} ${k}`).join(", ")}` : "Clean."}</p>
+            <ul>{view.lint.findings.map((f, k) => <li key={k}><b>[{f.severity}] {f.code}</b>: {f.message}{f.quote ? <> — «{f.quote}»</> : null}</li>)}</ul>
+          </>}</div>}
         {shownStep !== inst.step && !["start", "letter"].includes(shownStep) && <div className="card">
           <p className="muted">This step is behind the instance; its turns are on the record:</p>
           <ul>{view.turns.filter(t => t.step === shownStep).map(t => <li key={t.seq}>{t.unit_label || "—"} · {t.action}{t.reason ? ` · ${t.reason}` : ""}</li>)}</ul>

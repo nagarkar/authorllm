@@ -640,9 +640,12 @@ def _check_turn(instance: dict, action: str, author_text: str,
 
 def record_turn(db: Database, instance: dict, action: str, *,
                 author_text: str = "", blurbs: list[str] | None = None,
-                unit_label: str = "", reply: dict | None = None) -> dict:
+                unit_label: str = "", reply: dict | None = None,
+                session_ref: str | None = None) -> dict:
     """Append one turn to the instance's session. `reply` is a normalized
-    engine reply (contract.normalize_reply) when the turn asked the model."""
+    engine reply (contract.normalize_reply) when the turn asked the model;
+    `session_ref` the engine's resume point after it, kept on the instance's
+    engine state in the same transaction as the turn."""
     blurbs = list(blurbs or [])
     _check_turn(instance, action, author_text, blurbs)
     reply = reply or {}
@@ -667,17 +670,25 @@ def record_turn(db: Database, instance: dict, action: str, *,
             use_blurbs(db, instance["manuscript_id"], blurbs)
         if reply.get("suggested_blurbs"):
             add_blurbs(db, instance["manuscript_id"], reply["suggested_blurbs"])
-        _touch(db, instance, {})
+        changes = {}
+        if session_ref:
+            state = dict(instance.get("engine_state") or {})
+            state["session_ref"] = session_ref
+            changes["engine_state"] = json.dumps(state, ensure_ascii=False)
+        _touch(db, instance, changes)
     return _turn(row)
 
 
-def send_turn(db: Database, manuscript: dict, instance: dict, action: str,
-              message: str, *, engine=None, author_text: str | None = None,
-              blurbs: list[str] | None = None, unit_label: str = "") -> dict:
-    """Ask the instance's engine for the next reply and record the turn.
-    `message` is what goes to the engine; `author_text` the author's own
-    words (default: the message). `engine` is for tests and callers that
-    hold one; otherwise the registered engine of the instance is made."""
+def ask(db: Database, manuscript: dict, instance: dict, action: str,
+        message: str, *, engine=None, author_text: str | None = None,
+        blurbs: list[str] | None = None,
+        context_extra: dict | None = None) -> tuple[dict, str | None]:
+    """Ask the instance's engine for its reply and record nothing: (the
+    normalized reply, the engine's session ref after it). `context_extra`
+    is merged over the instance context (a caller's working text of the
+    essay as `essay`, its `workspace` and `manuscript` name). A caller that
+    records more than the turn (a letter's findings) records the turn and
+    the rest in one transaction with `record_turn`."""
     from . import context, contract
 
     author_text = message if author_text is None else author_text
@@ -688,9 +699,28 @@ def send_turn(db: Database, manuscript: dict, instance: dict, action: str,
                          "use record_turn")
     engine = engine or contract.make_engine(instance["engine"], instance["model"])
     ctx = context.instance_context(db, manuscript, instance)
+    if context_extra:
+        ctx.update(context_extra)
     reply = contract.normalize_reply(engine.send(ctx, message))
+    return reply, getattr(engine, "session_ref", None)
+
+
+def send_turn(db: Database, manuscript: dict, instance: dict, action: str,
+              message: str, *, engine=None, author_text: str | None = None,
+              blurbs: list[str] | None = None, unit_label: str = "",
+              context_extra: dict | None = None) -> dict:
+    """Ask the instance's engine for the next reply and record the turn,
+    with the engine's session ref (`ask`, then `record_turn`). `message` is
+    what goes to the engine; `author_text` the author's own words (default:
+    the message). `engine` is for tests and callers that hold one;
+    otherwise the registered engine of the instance is made."""
+    author_text = message if author_text is None else author_text
+    reply, ref = ask(db, manuscript, instance, action, message, engine=engine,
+                     author_text=author_text, blurbs=blurbs,
+                     context_extra=context_extra)
     return record_turn(db, instance, action, author_text=author_text,
-                       blurbs=blurbs, unit_label=unit_label, reply=reply)
+                       blurbs=blurbs, unit_label=unit_label, reply=reply,
+                       session_ref=ref)
 
 
 # ------------------------------------------------------------------- blurbs

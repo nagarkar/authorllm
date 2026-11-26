@@ -28,7 +28,12 @@ What the page shows for an instance, by step:
   their scope (Q23, Q24), each item a form.
 - filters: the checklist of passes in the standard order, pre-ticked from
   the last instance and the letter (Q12), then the walk by the filter unit.
-- lint: `authorlm book lint`, then advance.
+- lint: `authorlm book lint`'s rules over the working text, run and
+  recorded on the instance; then advance.
+
+Every walk works the working text (the file with the record's rulings
+applied), and advancing goes by `page_gate`: the walk at its end, the
+wrap-up ruled, lint run; anything else is a skip with one sentence.
 
 Skips take one sentence of reason; engine and unit switches take a reason
 mid-instance (Q6-Q9). Usage totals per instance, essay and month (Q7).
@@ -36,6 +41,8 @@ mid-instance (Q6-Q9). Usage totals per instance, essay and month (Q7).
 
 from __future__ import annotations
 
+import bisect
+import contextvars
 import json
 import re
 import tomllib
@@ -48,12 +55,12 @@ from .workflow import context, contract, core
 
 METHODS = ("overview", "instance", "start", "recommend", "rec", "list",
            "letter", "letter_reply", "finding", "accept_letter", "propose",
-           "act", "reopen", "beat_done", "wrapup", "principle", "filters",
-           "skip", "advance", "engine", "unit", "blurbs", "blurb_add",
-           "blurb_hide", "usage")
+           "act", "reopen", "beat_done", "conclude", "wrapup", "principle",
+           "filters", "lint", "skip", "advance", "engine", "unit", "blurbs",
+           "blurb_add", "blurb_hide", "usage", "estimate")
 
 # The read-only methods: they write nothing (the page polls none of them).
-READ_ONLY = ("overview", "instance", "blurbs", "usage")
+READ_ONLY = ("overview", "instance", "blurbs", "usage", "estimate")
 
 # Tags the author may put in an edit; any other [...] is an instruction
 # at that spot (Q8a; `.claude/skills/authorlm/SKILL.md`).
@@ -197,40 +204,179 @@ def unit_state(history: list[dict], before: str = "") -> dict:
 
 
 RESOLVED = ("accepted", "rejected", "dropped", "edited", "passed")
+# The states whose text replaces the unit's "before" in the working text.
+CHANGED = ("accepted", "edited")
+# Beat by beat has no end of its own: the author concludes it (Q18).
+CONCLUDE_LABEL = "beats:end"
+LINT_LABEL = "lint"
+
+
+# --------------------------------------------------------- working text
+#
+# The page never writes the essay file; the text the author has accepted
+# lives on the session record. The working text is that record applied to
+# the file: construction's rulings, then the wrap-up's, then the filters'.
+# Every later walk starts from it (Q8: "only the kept text is carried
+# forward"), and it is the essay the engine is sent ("as it now stands").
+
+def _apply_walk(text: str, units: list[dict]) -> str:
+    """The text with each changed unit's "before" replaced by its text, in
+    order (a unit's "before" is found after the previous unit's)."""
+    out, pos = text, 0
+    for u in units:
+        before = u["before"]
+        i = out.find(before, pos) if before else -1
+        if i < 0:
+            continue
+        new = u.get("text", before) if u["state"] in CHANGED else before
+        out = out[:i] + new + out[i + len(before):]
+        pos = i + len(new)
+    return out
+
+
+def _walk_over(text: str, unit: str, mode: str, hist: dict) -> dict:
+    """One walk over `text` by `unit` (or beat by beat), each unit with its
+    state and form from `hist`; `text` in the result is the working text
+    after the walk's rulings."""
+    if mode == "beats":
+        return _beats_walk(text, unit, hist)
+    used, parts = units_of(text, unit)
+    units = []
+    for i, part in enumerate(parts, start=1):
+        label = _label(used, i)
+        units.append({"label": label, "kind": used, "n": i, "before": part,
+                      **unit_state(hist.get(label, []), part)})
+    pending = [u["label"] for u in units if u["state"] == "pending"]
+    nxt = pending[0] if pending else next(
+        (u["label"] for u in units if u["state"] == "open"), None)
+    return {"mode": "walk", "unit": used, "asked_unit": unit, "units": units,
+            "next": nxt, "end": nxt is None, "fallback": used != unit,
+            "text": _apply_walk(text, units)}
+
+
+def _segments(turns: list[dict], decisions: list[dict], step: str,
+              inst: dict) -> list[tuple[dict, list[dict]]]:
+    """The step's turns cut at each unit switch (Q8: the unit "can be
+    changed at any point"), with the unit and mode of each stretch. A
+    label means a different unit under a different size, so each stretch
+    is walked on the text the stretch before it left."""
+    column = "filter_unit" if step == "filters" else "unit"
+    mode_now = inst["construction_mode"] if step == "construction" else "walk"
+    switches = []
+    for d in decisions:
+        det = d.get("detail") or {}
+        frm = det.get("from") or {}
+        if d["kind"] == "unit-switch" and det.get("phase") == step and (
+                column in frm or (step == "construction"
+                                  and "construction_mode" in frm)):
+            switches.append(d)
+    settings = [{"unit": inst[column], "mode": mode_now}]
+    for d in reversed(switches):
+        frm = d["detail"].get("from") or {}
+        prev = dict(settings[0])
+        if column in frm:
+            prev["unit"] = frm[column]
+        if step == "construction" and "construction_mode" in frm:
+            prev["mode"] = frm["construction_mode"]
+        settings.insert(0, prev)
+    bounds = [d["created_at"] for d in switches]
+    stretches: list[list[dict]] = [[] for _ in settings]
+    for t in turns:
+        if t["step"] == step and t["unit_label"]:
+            stretches[bisect.bisect_right(bounds, t["created_at"])].append(t)
+    return list(zip(settings, stretches))
+
+
+def _phase_walk(db: Database, manuscript: dict, inst: dict, step: str,
+                turns: list[dict] | None = None,
+                decisions: list[dict] | None = None) -> dict:
+    turns = core.turns(db, inst) if turns is None else turns
+    decisions = core.decisions(db, inst) if decisions is None else decisions
+    if step == "construction":
+        text = core._files(manuscript).get(inst["file"], "")
+    else:
+        text = _after_wrapup(db, manuscript, inst, turns, decisions)["text"]
+    earlier: list[dict] = []
+    stretches = _segments(turns, decisions, step, inst)
+    view: dict = {}
+    for i, (st, ts) in enumerate(stretches, start=1):
+        base = text
+        view = _walk_over(text, st["unit"], st["mode"], _by_label(ts, step))
+        if i < len(stretches):
+            earlier += [{"label": u["label"], "kind": u.get("kind", ""),
+                         "state": u["state"], "text": u.get("text", ""),
+                         "stretch": i}
+                        for u in view["units"]
+                        if u["state"] in RESOLVED and u["state"] != "passed"]
+            text = view["text"]
+    view["base"] = base
+    view["earlier"] = earlier
+    return view
 
 
 def _walk(db: Database, manuscript: dict, inst: dict, step: str) -> dict:
     """The units of the walk at `step` (construction or filters), each with
-    its state and form, and the next label to work."""
-    files = core._files(manuscript)
-    essay = files.get(inst["file"], "")
-    turns = core.turns(db, inst)
-    hist = _by_label(turns, step)
-    if step == "construction" and inst["construction_mode"] == "beats":
-        return _beats_walk(essay, inst, hist)
-    want = inst["filter_unit"] if step == "filters" else inst["unit"]
-    used, parts = units_of(essay, want)
-    units = []
-    for i, text in enumerate(parts, start=1):
-        label = _label(used, i)
-        units.append({"label": label, "kind": used, "n": i, "before": text,
-                      **unit_state(hist.get(label, []), text)})
-    pending = [u["label"] for u in units if u["state"] == "pending"]
-    nxt = pending[0] if pending else next(
-        (u["label"] for u in units if u["state"] == "open"), None)
-    return {"mode": "walk", "unit": used, "asked_unit": want, "units": units,
-            "next": nxt, "end": nxt is None,
-            "fallback": used != want}
+    its state and form, the next label to work, and the working text."""
+    return _phase_walk(db, manuscript, inst, step)
+
+
+def _after_wrapup(db: Database, manuscript: dict, inst: dict,
+                  turns: list[dict] | None = None,
+                  decisions: list[dict] | None = None) -> dict:
+    """Construction's working text with the wrap-up's accepted items in
+    place: a placeholder or a term is replaced where its text stands. An
+    accepted item whose text is not in the essay (a removed passage placed
+    elsewhere) is listed as unplaced, never guessed at."""
+    turns = core.turns(db, inst) if turns is None else turns
+    text = _phase_walk(db, manuscript, inst, "construction", turns,
+                       decisions)["text"]
+    unplaced = []
+    for it in _wrapup(turns)["items"]:
+        if it["state"] not in CHANGED:
+            continue
+        if it["before"] and it["before"] in text:
+            text = text.replace(it["before"], it.get("text", ""), 1)
+        else:
+            unplaced.append({"label": it["label"], "kind": it["kind"],
+                             "text": it.get("text", "")})
+    return {"text": re.sub(r"\n{3,}", "\n\n", text), "unplaced": unplaced}
+
+
+def working_text(db: Database, manuscript: dict, inst: dict) -> str:
+    """The essay as it now stands for this instance: the file, with every
+    ruling so far applied (construction, wrap-up, filters)."""
+    step = inst["step"]
+    if step in ("start", "letter"):
+        return core._files(manuscript).get(inst["file"], "")
+    if step == "construction":
+        return _walk(db, manuscript, inst, "construction")["text"]
+    if step == "wrapup":
+        return _after_wrapup(db, manuscript, inst)["text"]
+    return _walk(db, manuscript, inst, "filters")["text"]
 
 
 _BEAT = re.compile(r"^b(\d+):(plan|section|done|p(\d+))$")
 
 
-def _beats_walk(essay: str, inst: dict, hist: dict) -> dict:
+def _beat_sections(essay: str) -> tuple[str, list[str]]:
+    """(the title line, the beats' "before" sections). An essay with no
+    subheadings is one section; a new essay has none."""
+    lines = (essay or "").split("\n")
+    title = lines[0] if lines and re.match(r"^#\s", lines[0]) else ""
+    secs = sections(essay)
+    if not secs:
+        body = "\n".join(lines[1:] if title else lines).strip()
+        secs = [body] if body else []
+    return title, secs
+
+
+def _beats_walk(essay: str, unit: str, hist: dict) -> dict:
     """Beat by beat (Q18): for each beat (a section), its plan, then its
     text as a whole section or paragraph by paragraph. An existing
-    essay's sections are the beats' "before"; a new essay has none."""
-    secs = sections(essay) or ([essay.strip()] if essay.strip() else [])
+    essay's sections are the beats' "before"; a new essay has none. A
+    paragraph the engine passes (nothing more to write) completes the
+    beat; the author concludes the walk."""
+    title, secs = _beat_sections(essay)
     beats: dict[int, dict] = {}
     for label, h in hist.items():
         m = _BEAT.match(label)
@@ -245,59 +391,85 @@ def _beats_walk(essay: str, inst: dict, hist: dict) -> dict:
         else:
             k = int(m.group(3)) if m.group(3) else 0
             beats[b]["text"].append((k, label, h))
+    concluded = bool(hist.get(CONCLUDE_LABEL))
     units = []
-    for b in sorted(beats):
+    chunks = []
+    for b in range(1, max([len(secs)] + list(beats)) + 1):
         before_sec = secs[b - 1] if b - 1 < len(secs) else ""
-        if beats[b]["plan"]:
-            label, h = beats[b]["plan"]
+        paras = paragraphs(before_sec)
+        first = before_sec.split("\n")[0] if before_sec else ""
+        heading = first if _HEADING.match(first) else ""
+        beat = beats.get(b)
+        if beat is None:
+            chunks.append(before_sec)
+            continue
+        if beat["plan"]:
+            label, h = beat["plan"]
             units.append({"label": label, "kind": "plan", "beat": b,
                           "before": "", **unit_state(h, "")})
-        paras = paragraphs(before_sec)
-        for k, label, h in sorted(beats[b]["text"]):
+        body = []
+        for k, label, h in sorted(beat["text"]):
             before = before_sec if k == 0 else (paras[k - 1] if k - 1 < len(paras) else "")
+            st = unit_state(h, before)
             units.append({"label": label, "kind": "section" if k == 0 else "paragraph",
-                          "beat": b, "n": k, "before": before,
-                          **unit_state(h, before)})
+                          "beat": b, "n": k, "before": before, **st})
+            piece = st["text"] if st["state"] in CHANGED else before
+            if piece:
+                body.append(piece)
+        if any(k == 0 for k, _l, _h in beat["text"]):
+            chunks.append("\n\n".join(body) or before_sec)
+            continue
+        if not beat["text"]:
+            chunks.append(before_sec)
+            continue
+        last_k = max(k for k, _l, _h in beat["text"])
+        if not beat["done"]:
+            body += paras[last_k:]
+        chunks.append("\n\n".join(([heading] if heading else []) + body))
     pending = [u["label"] for u in units if u["state"] == "pending"]
     cur = max(beats) if beats else 1
     nxt = pending[0] if pending else None
-    if nxt is None:
+    if nxt is None and not concluded:
         if cur not in beats or beats[cur]["done"]:
             cur = cur + 1 if cur in beats else cur
             nxt = f"b{cur}:plan"
         elif not beats[cur]["plan"] or unit_state(beats[cur]["plan"][1])["state"] not in RESOLVED:
             nxt = f"b{cur}:plan"
-        elif inst["unit"] == "section":
+        elif unit == "section":
             done = any(k == 0 and unit_state(h)["state"] in RESOLVED
                        for k, _l, h in beats[cur]["text"])
             nxt = None if done else f"b{cur}:section"
         else:
-            k = max([k for k, _l, _h in beats[cur]["text"]] or [0]) + 1
-            nxt = f"b{cur}:p{k}"
-    return {"mode": "beats", "unit": inst["unit"], "asked_unit": inst["unit"],
+            last = max(beats[cur]["text"], default=None)
+            if last and unit_state(last[2])["state"] == "passed":
+                nxt = None  # the engine has nothing more for this beat
+            else:
+                k = (last[0] if last else 0) + 1
+                nxt = f"b{cur}:p{k}"
+    text = "\n\n".join(c for c in [title] + chunks if c.strip())
+    return {"mode": "beats", "unit": unit, "asked_unit": unit,
             "units": units, "next": nxt, "beat": cur,
-            "beats_before": len(secs), "end": False, "fallback": False,
-            "beat_open": cur in beats and not beats[cur]["done"]}
+            "beats_before": len(secs), "end": concluded and not pending,
+            "concluded": concluded, "fallback": False,
+            "beat_open": not concluded and cur in beats and not beats[cur]["done"],
+            "text": text + ("\n" if text else "")}
 
 
 def _unit_before(db: Database, manuscript: dict, inst: dict, step: str,
-                 label: str) -> str:
+                 label: str, walk: dict | None = None) -> str:
     if step == "wrapup":
         item = next((i for i in _wrapup(core.turns(db, inst))["items"]
                      if i["label"] == label), None)
         if item is None:
             raise LookupError(f"no wrap-up item '{label}'")
         return item["text"]
-    walk = _walk(db, manuscript, inst, step)
+    walk = walk or _walk(db, manuscript, inst, step)
     hit = next((u for u in walk["units"] if u["label"] == label), None)
     if hit is not None:
         return hit["before"]
-    if walk["mode"] == "beats":
+    if walk["mode"] == "beats" and label == walk["next"]:
         m = _BEAT.match(label)
-        if not m:
-            raise LookupError(f"'{label}' is not a beat label")
-        essay = core._files(manuscript).get(inst["file"], "")
-        secs = sections(essay) or ([essay.strip()] if essay.strip() else [])
+        _title, secs = _beat_sections(walk["base"])
         b = int(m.group(1))
         sec = secs[b - 1] if b - 1 < len(secs) else ""
         if m.group(2) == "plan":
@@ -324,20 +496,30 @@ def _engine(inst: dict):
     return contract.make_engine(inst["engine"], inst["model"])
 
 
+# The workspace the page was opened on (`dispatch(..., workspace=)`): the
+# engines look the book up by it (`engines.base.manuscript_of`), so a server
+# run with `-w <other>` reaches its own book, not the default workspace's.
+_WORKSPACE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "workflow_page_workspace", default=None)
+
+
+def _context_extra(db: Database, manuscript: dict, inst: dict) -> dict:
+    """What the page adds to the instance context: the essay as it now
+    stands (the working text, not the untouched file), the workspace and
+    the manuscript's name."""
+    return {"essay": working_text(db, manuscript, inst),
+            "workspace": _WORKSPACE.get(), "manuscript": manuscript["name"]}
+
+
 def _send(db: Database, manuscript: dict, inst: dict, action: str,
           message: str, *, author_text: str | None = None,
           blurbs: list[str] | None = None, unit_label: str = "") -> dict:
-    engine = _engine(inst)
-    turn = core.send_turn(db, manuscript, inst, action, message, engine=engine,
-                          author_text=author_text, blurbs=blurbs,
-                          unit_label=unit_label)
-    ref = getattr(engine, "session_ref", None)
-    if ref:
-        state = dict(inst.get("engine_state") or {})
-        state["session_ref"] = ref
-        db.update("workflow_instances", inst["id"],
-                  {"engine_state": json.dumps(state)})
-    return turn
+    """One model turn, recorded with the engine's session ref in the same
+    transaction (`core.send_turn`)."""
+    return core.send_turn(db, manuscript, inst, action, message,
+                          engine=_engine(inst), author_text=author_text,
+                          blurbs=blurbs, unit_label=unit_label,
+                          context_extra=_context_extra(db, manuscript, inst))
 
 
 # ------------------------------------------------------------- the letter
@@ -345,7 +527,7 @@ def _send(db: Database, manuscript: dict, inst: dict, action: str,
 _SECTION = re.compile(
     r"^\s*(?:#+\s*)?[*_]{0,2}(findings|keep|passes|paragraph notes|blurbs)"
     r"[*_]{0,2}\s*:?[*_]{0,2}\s*(.*)$", re.I)
-_FINDING = re.compile(r"^\s*(?:#{1,4}\s*)?(?:\*\*)?(?:finding\s+)?(\d+)[.):]\s*(.*)$", re.I)
+_FINDING = re.compile(r"^(\s*)(#{1,4}\s*)?(?:\*\*)?(finding\s+)?(\d+)[.):]\s*(.*)$", re.I)
 _FIELD = re.compile(r"^\s*[-*]?\s*\*{0,2}(where|what is wrong|why it matters|"
                     r"direction|tier)\s*:\*{0,2}\s*(.*)$", re.I)
 _FIELD_KEY = {"where": "where", "what is wrong": "what",
@@ -379,7 +561,7 @@ def parse_letter(text: str, pass_names: list[str]) -> dict:
             if isinstance(f, str):
                 f = {"title": f}
             f = dict(f)
-            f.setdefault("n", i)
+            f["n"] = i
             f["tier"] = _tier(str(f.get("tier", "")))
             findings.append(f)
         passes_ = {}
@@ -403,13 +585,31 @@ def parse_letter(text: str, pass_names: list[str]) -> dict:
             continue
         parts.setdefault(cur, []).append(ln)
     findings: list[dict] = []
+    sub = 0  # the last number of a numbered list inside the current finding
+    blank = True  # the line before was blank
     for ln in parts.get("findings", []):
         fm = _FINDING.match(ln)
         field = _FIELD.match(ln)
+        after_blank, blank = blank, not ln.strip()
+        if blank:
+            sub = 0  # a blank line ends a list inside a finding
+        # A finding names itself ("Finding 3", "### 3.") or opens at the
+        # margin with the next number (or any number, after a blank line,
+        # so a repeated number is still a finding). A "1." inside a finding starts a list
+        # of its own, which runs on while its numbers do; an indented or
+        # out-of-sequence numbered line belongs to the finding before it.
+        # Findings are numbered by position, whatever numbers the reply gives.
         if fm and not field:
-            findings.append({"n": int(fm.group(1)),
-                             "title": fm.group(2).strip(" *"), "lines": [ln]})
-            continue
+            n = int(fm.group(4))
+            named = bool(fm.group(2) or fm.group(3))
+            if not named and findings and (fm.group(1) or n == 1
+                                           or (sub and n == sub + 1)):
+                sub = n if not fm.group(1) else sub
+            elif named or n == len(findings) + 1 or (after_blank and not fm.group(1)):
+                sub = 0
+                findings.append({"n": len(findings) + 1,
+                                 "title": fm.group(5).strip(" *"), "lines": [ln]})
+                continue
         if not findings:
             continue
         findings[-1]["lines"].append(ln)
@@ -421,17 +621,17 @@ def parse_letter(text: str, pass_names: list[str]) -> dict:
         f["tier"] = _tier(f.get("tier", ""))
     passes_ = {}
     for ln in parts.get("passes", []):
-        low = ln.lower()
         for name in pass_names:
-            # The pass's name opens the line; a name inside another pass's
-            # reason ("concision: needed — repetition in the middle") is not it.
-            if re.match(rf"^\s*(?:[-*•]|\d+[.)])?\s*[*_`]*{re.escape(name)}[*_`]*\s*[:—–-]",
-                        low) and name not in passes_:
-                needed = "not needed" not in low and "needed" in low
-                reason = re.split(r"not needed|needed", ln, maxsplit=1, flags=re.I)
-                passes_[name] = {"needed": needed,
-                                 "reason": reason[-1].strip(" *:—-–()_,;.")
-                                 if len(reason) > 1 else ""}
+            # The pass's name opens the line and its mark follows it; a
+            # name inside another pass's reason ("concision: needed —
+            # repetition in the middle") is not it, and "not needed" inside
+            # a needed pass's reason does not unmark it.
+            m = re.match(rf"^\s*(?:[-*•]|\d+[.)])?\s*[*_`]*{re.escape(name)}[*_`]*"
+                         r"\s*[:—–-]\s*[*_`]*\s*(not needed|needed)\b[*_`]*(.*)$",
+                         ln, re.I)
+            if m and name not in passes_:
+                passes_[name] = {"needed": m.group(1).lower() == "needed",
+                                 "reason": m.group(2).strip(" *:—-–()_,;.")}
     return {"findings": findings, "keep": _bullets(parts.get("keep", [])),
             "passes": passes_, "notes": _bullets(parts.get("paragraph notes", [])),
             "blurbs": _bullets(parts.get("blurbs", []))}
@@ -453,9 +653,9 @@ def _json_in(text: str) -> Any:
 
 
 def _letter_turn(turns: list[dict]) -> dict | None:
-    """The letter itself: the first model turn labelled letter at the
-    letter step (later ones are the discussion)."""
-    return next((t for t in turns if t["step"] == "letter"
+    """The letter itself: the latest draft, a model turn labelled letter at
+    the letter step with action start (replies are the discussion)."""
+    return next((t for t in reversed(turns) if t["step"] == "letter"
                  and t["unit_label"] == LETTER_LABEL and t["engine"]
                  and t["action"] == "start"), None)
 
@@ -476,8 +676,10 @@ def _letter_view(db: Database, inst: dict, turns: list[dict]) -> dict:
                    "author": t["author_text"], "reply": t["reply"],
                    "reason": t["reason"], "at": t["created_at"]}
                   for t in turns if t["step"] == "letter"
-                  and t["unit_label"] == LETTER_LABEL and t is not lt]
+                  and t["unit_label"] == LETTER_LABEL
+                  and not (t["engine"] and t["action"] == "start")]
     return {"drafted": lt is not None,
+            "redraft": lt is not None and not any(f["verdict"] for f in findings),
             "text": lt["reply"] if lt else "",
             "findings": findings,
             "keep": parsed["keep"] if parsed else [],
@@ -584,7 +786,13 @@ def _filter_checklist(db: Database, manuscript: dict, inst: dict) -> dict:
     letter = _letter_passes(db, inst)
     audiobook = _has_audiobook(manuscript)
     carried = list(inst["filters"])
-    had_last = bool(inst.get("carried_from"))
+    # The last instance's ticks count only when it chose them; one skipped
+    # past its filter step carries [] and is no choice (Q12).
+    had_last = False
+    if inst.get("carried_from"):
+        src = db.one("SELECT filters_confirmed FROM workflow_instances "
+                     "WHERE id = ?", (inst["carried_from"],))
+        had_last = bool(src and src["filters_confirmed"])
     out = []
     for p in order:
         name = p["name"]
@@ -620,7 +828,7 @@ def instance_view(db: Database, manuscript: dict, ref: str) -> dict:
     turns = core.turns(db, inst)
     files = core._files(manuscript)
     out: dict[str, Any] = {
-        "instance": inst, "gate": core.gate(db, inst),
+        "instance": inst, "gate": page_gate(db, manuscript, inst),
         "next_step": None if inst["step"] == "done" else core._next_step(inst["step"]),
         "decisions": core.decisions(db, inst),
         "since_last": core.since_last(db, inst),
@@ -643,6 +851,9 @@ def instance_view(db: Database, manuscript: dict, ref: str) -> dict:
         out["wrapup"] = _wrapup(turns)
     if inst["step"] in ("filters", "lint"):
         out["checklist"] = _filter_checklist(db, manuscript, inst)
+        out["unplaced"] = _after_wrapup(db, manuscript, inst, turns)["unplaced"]
+    if inst["step"] in ("lint", "done"):
+        out["lint"] = _lint_view(turns)
     out["principles"] = [d for d in out["decisions"] if d["kind"] == "principle"]
     out["skipped"] = [d for d in out["decisions"] if d["kind"] == "skip"]
     return out
@@ -738,6 +949,46 @@ def _edit_message(label: str, text: str) -> str:
             f"reason what you did with each note.\n\n{text}")
 
 
+# ------------------------------------------------------------- the gates
+
+def page_gate(db: Database, manuscript: dict, inst: dict) -> str | None:
+    """Why the instance cannot advance from its step, or None: the
+    workflow's own gate (`core.gate`), then what the page knows about the
+    walk (Q18 "Construction is done when the walk reaches the end of the
+    essay and the author concludes it"; Q23 "construction is done only after
+    the wrap-up"). Anything else goes by Skip, with one sentence (Q9)."""
+    why = core.gate(db, inst)
+    if why:
+        return why
+    step = inst["step"]
+    skip = "; skip with a reason if not needed"
+    if step in ("construction", "filters") and (step == "construction"
+                                               or inst["filters"]):
+        w = _walk(db, manuscript, inst, step)
+        nxt = "the wrap-up" if step == "construction" else "lint"
+        pending = [u["label"] for u in w["units"] if u["state"] == "pending"]
+        if pending:
+            return f"{nxt} waits: {pending[0]} has a form waiting for you" + skip
+        if not w["end"]:
+            if w["mode"] == "beats":
+                return (f"{nxt} waits: conclude the beats when the essay is "
+                        "built" + skip)
+            return (f"{nxt} waits: the walk has not reached the end of the "
+                    f"essay (next: {w['next']})" + skip)
+    if step == "wrapup":
+        wu = _wrapup(core.turns(db, inst))
+        if not wu["drafted"]:
+            return "the filters wait for the wrap-up: it is not drafted" + skip
+        open_ = [i["label"] for i in wu["items"] if i["state"] in ("pending", "open")]
+        if open_:
+            return (f"the filters wait for the wrap-up: {len(open_)} item(s) "
+                    f"not yet ruled ({', '.join(open_[:5])})" + skip)
+    if step == "lint" and not any(t["unit_label"] == LINT_LABEL and t["step"] == "lint"
+                                  for t in core.turns(db, inst)):
+        return "done waits for lint: run it" + skip
+    return None
+
+
 # ------------------------------------------------------------- actions
 
 def _step_for(inst: dict, label: str) -> str:
@@ -753,22 +1004,48 @@ def _check_label_step(inst: dict, step: str) -> None:
         raise ValueError(f"the instance is at {inst['step']}, not {step}")
 
 
+def _unit(db: Database, manuscript: dict, inst: dict, step: str,
+          label: str) -> tuple[dict, dict | None]:
+    """(the unit or wrap-up item named `label`, the walk), or LookupError.
+    The walk's next label counts though it has no turn yet."""
+    if step == "wrapup":
+        item = next((i for i in _wrapup(core.turns(db, inst))["items"]
+                     if i["label"] == label), None)
+        if item is None:
+            raise LookupError(f"no wrap-up item '{label}'")
+        return item, None
+    walk = _walk(db, manuscript, inst, step)
+    hit = next((u for u in walk["units"] if u["label"] == label), None)
+    if hit is None and label and label == walk["next"]:
+        hit = {"label": label, "state": "open",
+               "before": _unit_before(db, manuscript, inst, step, label, walk)}
+    if hit is None:
+        raise LookupError(f"no unit '{label}' at {step}")
+    return hit, walk
+
+
 def propose(db: Database, manuscript: dict, inst: dict, label: str | None) -> dict:
     """Ask the engine for the form of a unit: the walk's next unit when no
-    label is given."""
+    label is given; a named unit only when it is not yet worked."""
     step = inst["step"]
     _check_label_step(inst, step)
+    if step == "wrapup":
+        raise ValueError("the wrap-up's items come from the wrap-up itself")
     if step == "filters" and not inst["filters_confirmed"]:
         raise ValueError("choose the filters first (the checklist)")
+    walk = _walk(db, manuscript, inst, step)
     if label is None:
-        walk = _walk(db, manuscript, inst, step)
         label = walk["next"]
         if label is None:
             raise ValueError("the walk has reached the end of the essay; "
                              "advance when you are ready")
-    before = _unit_before(db, manuscript, inst, step, label)
+    unit, walk = _unit(db, manuscript, inst, step, label)
+    if unit["state"] != "open":
+        raise ValueError(f"{label} is {unit['state']}; "
+                         + ("rule its form" if unit["state"] == "pending"
+                            else "reopen it to work it again"))
     return _send(db, manuscript, inst, "start",
-                 _unit_message(db, manuscript, inst, step, label, before),
+                 _unit_message(db, manuscript, inst, step, label, unit["before"]),
                  author_text="", unit_label=label)
 
 
@@ -776,23 +1053,28 @@ def act(db: Database, manuscript: dict, inst: dict, label: str, action: str,
         text: str = "", blurbs: list[str] | None = None, free: str = "") -> dict:
     """The four actions on a unit (Q8a, Q11). Accept and reject, and an
     edit with no bracket, are recorded without a model call; a redo, and
-    an edit with a bracket in it, ask the engine for the next revision."""
+    an edit with a bracket in it, ask the engine for the next revision.
+    Accept and reject rule an open form only; a ruled unit is reopened
+    first, so a stale click never overwrites the author's own text."""
     step = _step_for(inst, label)
     _check_label_step(inst, step)
+    unit, _walk_ = _unit(db, manuscript, inst, step, label)
+    state = unit["state"]
     blurbs = [b for b in (blurbs or []) if b.strip()]
     if action == "accept":
-        hist = _by_label(core.turns(db, inst), step).get(label, [])
-        st = unit_state(hist)
-        if step == "wrapup" and "form" not in st:
-            st = next((i for i in _wrapup(core.turns(db, inst))["items"]
-                       if i["label"] == label), st)
-        proposed = (st.get("form") or {}).get("proposed", "")
-        if not proposed:
-            raise ValueError(f"{label} has no proposal to accept")
+        proposed = (unit.get("form") or {}).get("proposed", "")
+        if state != "pending" or not proposed:
+            raise ValueError(f"{label} has no proposal waiting to accept "
+                             f"(it is {state})")
         return core.record_turn(db, inst, "accept", author_text=proposed,
                                 unit_label=label)
     if action == "reject":
+        if state not in ("pending",) and not (step == "wrapup" and state == "open"):
+            raise ValueError(f"{label} has no proposal waiting to reject "
+                             f"(it is {state})")
         return core.record_turn(db, inst, "reject", unit_label=label)
+    if state in RESOLVED and state != "passed":
+        raise ValueError(f"{label} is {state}; reopen it first")
     if action == "redo":
         if not blurbs and not free.strip():
             raise ValueError("a redo takes a blurb or a few words of what is "
@@ -817,11 +1099,10 @@ def reopen(db: Database, manuscript: dict, inst: dict, label: str) -> dict:
     told so."""
     step = _step_for(inst, label)
     _check_label_step(inst, step)
-    hist = _by_label(core.turns(db, inst), step).get(label, [])
-    if unit_state(hist)["state"] not in RESOLVED:
+    unit, _w = _unit(db, manuscript, inst, step, label)
+    if unit["state"] not in RESOLVED:
         raise ValueError(f"{label} is not ruled yet; nothing to reopen")
-    before = _unit_before(db, manuscript, inst, step, label)
-    kept = unit_state(hist, before).get("text", "")
+    kept = unit.get("text", "")
     return _send(db, manuscript, inst, "reply",
                  f"Reopen {label}: the author goes back to this unit. The units "
                  "after it are kept as they are. Propose it again in the light "
@@ -830,28 +1111,160 @@ def reopen(db: Database, manuscript: dict, inst: dict, label: str) -> dict:
 
 
 def draft_letter(db: Database, manuscript: dict, inst: dict) -> dict:
+    """Write the letter: the turn and its findings are recorded together,
+    or not at all. A letter none of whose findings is ruled yet may be
+    redrafted; the redraft replaces its findings."""
     if inst["step"] != "letter":
         raise ValueError(f"the letter is written at the letter step; the "
                          f"instance is at {inst['step']}")
     turns = core.turns(db, inst)
-    if _letter_turn(turns):
-        raise ValueError("the letter is drafted; discuss it with a reply")
+    old = core.letter_findings(db, inst)
+    if _letter_turn(turns) and any(f["verdict"] for f in old):
+        raise ValueError("the letter is drafted and its findings are being "
+                         "ruled; discuss it with a reply")
     names = [p["name"] for p in passes()]
-    turn = _send(db, manuscript, inst, "start",
-                 "Write the editorial letter on this essay now, in `text`, in "
-                 "the shape your brief's Output asks for (Findings, Keep, "
-                 "Passes, Paragraph notes, Blurbs). The passes, in their fixed "
-                 f"order: {', '.join(names) or '(none)'}.",
-                 author_text="", unit_label=LETTER_LABEL)
-    parsed = parse_letter(turn["reply"], names)
-    for i, f in enumerate(parsed["findings"], start=1):
-        core.add_finding(db, inst, f"F{f.get('n') or i}",
-                         {k: f.get(k, "") for k in ("n", "title", "where", "what",
-                                                    "why", "direction", "tier",
-                                                    "text")})
-    if parsed["blurbs"]:
-        core.add_blurbs(db, manuscript["id"], parsed["blurbs"])
+    message = ("Write the editorial letter on this essay now, in `text`, in "
+               "the shape your brief's Output asks for (Findings, Keep, "
+               "Passes, Paragraph notes, Blurbs). The passes, in their fixed "
+               f"order: {', '.join(names) or '(none)'}.")
+    reply, ref = core.ask(db, manuscript, inst, "start", message,
+                          engine=_engine(inst), author_text="",
+                          context_extra=_context_extra(db, manuscript, inst))
+    parsed = parse_letter(reply.get("text", ""), names)
+    with db.transaction():
+        if old:
+            db.conn.execute("DELETE FROM devedit_items WHERE manuscript_id = ? AND "
+                       "run = ?", (inst["manuscript_id"], core.letter_run(inst)))
+        turn = core.record_turn(db, inst, "start", author_text="",
+                                unit_label=LETTER_LABEL, reply=reply,
+                                session_ref=ref)
+        for i, f in enumerate(parsed["findings"], start=1):
+            core.add_finding(db, inst, f"F{i}",
+                             {k: f.get(k, "") for k in ("n", "title", "where",
+                                                        "what", "why", "direction",
+                                                        "tier", "text")})
+        if parsed["blurbs"]:
+            core.add_blurbs(db, manuscript["id"], parsed["blurbs"])
     return turn
+
+
+def accept_letter(db: Database, inst: dict) -> dict:
+    """A letter with no findings is accepted as it stands: once it is
+    written, or for a new essay, whose letter is its beat plan. Anything
+    else passes the letter only by Skip, with one sentence (Q9)."""
+    if inst["step"] != "letter":
+        raise ValueError(f"the instance is at {inst['step']}, not letter")
+    if core.letter_findings(db, inst):
+        raise ValueError("the letter has findings: rule each of them")
+    if not _letter_turn(core.turns(db, inst)) and inst["kind"] != "new":
+        raise ValueError("write the letter first, or skip it with a reason")
+    return core.record_turn(db, inst, "accept", unit_label=LETTER_LABEL)
+
+
+# ------------------------------------------------------------------ lint
+
+def _lint_text(db: Database, manuscript: dict, file: str, text: str) -> dict:
+    """`authorlm book lint <file>` over the working text instead of the
+    file on disk (`changes.lint_chapter`'s rules): no model call."""
+    from . import changes, critic, docs
+
+    try:
+        relpath = docs._resolve_relpath(manuscript, file)
+    except Exception:  # noqa: BLE001 — a new essay is not on disk yet
+        relpath = file
+    rules = changes.lint_rules(None, None)
+    found = []
+    if any(r in changes.LINT_CODES for r in rules):
+        found += critic.lint_draft(db, manuscript, relpath, text,
+                                   include_self=False).findings
+    found += changes._proof_findings(db, manuscript, relpath, text, rules,
+                                     changes.proof_lexicon(db, manuscript))
+    findings = changes._rows(text, found, rules)
+    counts: dict[str, int] = {}
+    for f in findings:
+        counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+    return {"findings": findings, "counts": counts}
+
+
+def run_lint(db: Database, manuscript: dict, inst: dict) -> dict:
+    """Lint the essay as it now stands and record the run on the instance
+    (the lint step's gate wants one)."""
+    if inst["step"] != "lint":
+        raise ValueError(f"the instance is at {inst['step']}, not lint")
+    board = _lint_text(db, manuscript, inst["file"],
+                       working_text(db, manuscript, inst))
+    keep = [{k: f.get(k) for k in ("severity", "code", "message", "quote", "line")}
+            for f in board["findings"][:200]]
+    return core.record_turn(db, inst, "accept", unit_label=LINT_LABEL,
+                            author_text=json.dumps(
+                                {"counts": board["counts"], "findings": keep,
+                                 "total": len(board["findings"])},
+                                ensure_ascii=False))
+
+
+def _lint_view(turns: list[dict]) -> dict | None:
+    lt = next((t for t in reversed(turns) if t["unit_label"] == LINT_LABEL
+               and t["step"] == "lint"), None)
+    if lt is None:
+        return None
+    return {"at": lt["created_at"], **(_json_in(lt["author_text"]) or {})}
+
+
+# ------------------------------------------------------------- estimate
+
+BILLED_ENGINES = ("openai-api",)
+# Assumptions of the estimate, shown with it: about four characters a token,
+# this many output tokens a turn, and one redo for every four units.
+CHARS_PER_TOKEN = 4
+OUTPUT_TOKENS = 800
+
+
+def estimate(db: Database, manuscript: dict, engine: str, model: str = "",
+             essay: str = "", inst: dict | None = None) -> dict:
+    """The estimated cost of a billed engine for an instance (Q6: "A billed
+    engine shows its estimated cost when chosen"): the standing context and
+    the essay as input on every turn, uncached, times the turns of a whole
+    walk (recommend, letter, each unit at construction and at the filters,
+    the wrap-up, a redo for every four units). A floor: the turns so far
+    and the reads the engine makes add to it."""
+    if engine not in BILLED_ENGINES:
+        return {"engine": engine, "billed": False}
+    from .engines import default_model
+    from .engines.openai_api import price_usd
+
+    model = model or (inst["model"] if inst and inst["engine"] == engine else "") \
+        or default_model(engine) or ""
+    if inst is not None:
+        text = working_text(db, manuscript, inst)
+        standing = sum(len(b.get("text") or "") for b in
+                       context.standing_context(db, manuscript, inst))
+        file = inst["file"]
+    else:
+        files = core._files(manuscript)
+        order = core.reading_order(manuscript, files)
+        try:
+            file = core._book_essay(essay, order)
+        except (ValueError, LookupError):
+            file = essay
+        text = files.get(file, "")
+        lib = context.library_dir()
+        sizes = [len(t or "") for t in (context._read(lib / "charter.md"),)]
+        for sub in ("briefs", "roles"):
+            texts = [x.read_text(encoding="utf-8") for x in (lib / sub).glob("*.md")] \
+                if (lib / sub).is_dir() else []
+            sizes.append(max((len(t) for t in texts), default=0))
+        standing = sum(sizes)
+    n = len(paragraphs(text)) or 4
+    turns = 2 + n + 1 + n + max(1, n // 4)
+    tokens_in = (standing + len(text)) // CHARS_PER_TOKEN
+    per_turn = price_usd(model, tokens_in, 0, OUTPUT_TOKENS) if model else None
+    return {"engine": engine, "billed": True, "model": model, "file": file,
+            "turns": turns, "input_per_turn": tokens_in,
+            "output_per_turn": OUTPUT_TOKENS,
+            "per_turn": per_turn,
+            "total": per_turn * turns if per_turn is not None else None,
+            "why": "" if per_turn is not None else
+            (f"no price known for '{model}'" if model else "no model named")}
 
 
 def start_instance(db: Database, manuscript: dict, p: dict) -> dict:
@@ -867,8 +1280,9 @@ def start_instance(db: Database, manuscript: dict, p: dict) -> dict:
 def recommend(db: Database, manuscript: dict, inst: dict) -> dict:
     """Ask the engine for list recommendations (Q3). On a later instance
     it looks only at what changed since the last one."""
-    if inst["step"] == "done":
-        raise ValueError("the instance is done")
+    if inst["step"] != "start":
+        raise ValueError(f"recommendations are asked at the start step; the "
+                         f"instance is at {inst['step']}")
     since = core.since_last(db, inst)
     order = core.reading_order(manuscript)
     lists = "\n".join(f"- {k}: {', '.join(inst[k]) or '(empty)'}" for k in core.LISTS)
@@ -892,6 +1306,8 @@ def recommend(db: Database, manuscript: dict, inst: dict) -> dict:
 
 
 def answer_rec(db: Database, manuscript: dict, inst: dict, p: dict) -> dict:
+    if inst["step"] != "start":
+        raise ValueError(f"the instance is at {inst['step']}, not start")
     which, essay = str(p.get("list") or ""), str(p.get("essay") or "")
     change = "remove" if p.get("change") == "remove" else "add"
     verdict = p.get("verdict")
@@ -936,6 +1352,7 @@ def dispatch(method: str, params: dict[str, Any],
     manuscript; instance methods name the instance as `id`."""
     if method not in METHODS:
         raise ValueError(f"unknown method '{method}'")
+    _WORKSPACE.set(workspace)
     db = api.open_db(workspace)
     manuscript = api.get_manuscript(db, params.get("manuscript"))
     p = params
@@ -954,6 +1371,11 @@ def dispatch(method: str, params: dict[str, Any],
     if method == "usage":
         return core.usage(db, manuscript, p.get("essay") or None,
                           p.get("month") or None)
+    if method == "estimate":
+        inst = core.get_instance(db, manuscript, str(p["id"])) if p.get("id") else None
+        return estimate(db, manuscript, str(p.get("engine") or ""),
+                        str(p.get("model") or ""), str(p.get("essay") or ""),
+                        inst)
     inst = core.get_instance(db, manuscript, str(p.get("id") or ""))
     if method == "instance":
         return instance_view(db, manuscript, inst["id"])
@@ -969,6 +1391,9 @@ def dispatch(method: str, params: dict[str, Any],
     elif method == "letter":
         draft_letter(db, manuscript, inst)
     elif method == "letter_reply":
+        if inst["step"] != "letter":
+            raise ValueError(f"the letter is discussed at the letter step; "
+                             f"the instance is at {inst['step']}")
         text = str(p.get("text") or "").strip()
         if not text:
             raise ValueError("say something to discuss the letter")
@@ -978,9 +1403,7 @@ def dispatch(method: str, params: dict[str, Any],
                           str(p.get("verdict") or ""),
                           str(p.get("reason") or ""), actor="web")
     elif method == "accept_letter":
-        if core.letter_findings(db, inst):
-            raise ValueError("the letter has findings: rule each of them")
-        core.record_turn(db, inst, "accept", unit_label=LETTER_LABEL)
+        accept_letter(db, inst)
     elif method == "propose":
         propose(db, manuscript, inst, p.get("label") or None)
     elif method == "act":
@@ -991,11 +1414,20 @@ def dispatch(method: str, params: dict[str, Any],
         reopen(db, manuscript, inst, str(p.get("label") or ""))
     elif method == "beat_done":
         walk = _walk(db, manuscript, inst, "construction")
-        if walk["mode"] != "beats":
-            raise ValueError("beat by beat only")
+        if inst["step"] != "construction" or walk["mode"] != "beats":
+            raise ValueError("beat by beat only, at construction")
         if any(u["state"] == "pending" for u in walk["units"]):
             raise ValueError("rule the open form first")
         core.record_turn(db, inst, "accept", unit_label=f"b{walk['beat']}:done")
+    elif method == "conclude":
+        walk = _walk(db, manuscript, inst, "construction")
+        if inst["step"] != "construction" or walk["mode"] != "beats":
+            raise ValueError("the beats are concluded at construction, beat by beat")
+        if any(u["state"] == "pending" for u in walk["units"]):
+            raise ValueError("rule the open form first")
+        core.record_turn(db, inst, "accept", unit_label=CONCLUDE_LABEL)
+    elif method == "lint":
+        run_lint(db, manuscript, inst)
     elif method == "wrapup":
         wrapup(db, manuscript, inst)
     elif method == "principle":
@@ -1012,12 +1444,19 @@ def dispatch(method: str, params: dict[str, Any],
     elif method == "skip":
         core.skip(db, inst, str(p.get("reason") or ""), p.get("to") or None)
     elif method == "advance":
+        why = page_gate(db, manuscript, inst)
+        if why:
+            raise ValueError(why)
         core.advance(db, inst)
     elif method == "engine":
         core.set_engine(db, inst, str(p.get("engine") or ""),
                         p.get("model") if p.get("model") is not None else None,
                         p.get("reason") or None)
     elif method == "unit":
+        if inst["step"] in ("construction", "filters") and any(
+                u["state"] == "pending"
+                for u in _walk(db, manuscript, inst, inst["step"])["units"]):
+            raise ValueError("rule the open form before switching the unit")
         core.set_unit(db, inst, p.get("unit") or None, phase=p.get("phase") or None,
                       mode=p.get("mode") or None, reason=p.get("reason") or None)
     return instance_view(db, manuscript, inst["id"])
