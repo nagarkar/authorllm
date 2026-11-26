@@ -71,9 +71,13 @@ def standard_order() -> list[str]:
     if not text:
         return []
     try:
-        order = tomllib.loads(text).get("order") or []
+        data = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         return []
+    # The library writes `[[pass]]` tables (name, stage, role, default);
+    # an `order = [...]` list is read too.
+    named = [p.get("name") for p in data.get("pass") or [] if isinstance(p, dict)]
+    order = [n for n in named if isinstance(n, str)] or data.get("order") or []
     return [o for o in order if isinstance(o, str)]
 
 

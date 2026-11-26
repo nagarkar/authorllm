@@ -3,7 +3,8 @@ import { VolumeSlider } from "./audioGain";
 import { ParaNav } from "./ParaNav";
 import { recall, remember } from "./remember";
 import { VoicePicker } from "./ListenVoice";
-import { deveditTransport, formsTransport, request, runsTransport, setManuscript, styleTransport, workbenchTransport } from "./transport";
+import { deveditTransport, formsTransport, request, runsTransport, setManuscript, styleTransport, workbenchTransport, workflowTransport } from "./transport";
+import { Workflows, WorkflowVoicePicker, parseRoute, routeItem } from "./Workflows";
 import { StyleLaws } from "./StyleLaws";
 import { Workbench } from "./Workbench";
 import { DevEdit } from "./DevEdit";
@@ -46,10 +47,11 @@ const when = (iso: string | null | undefined) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
 const mmss = (s: number | null | undefined) => s == null ? "" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-type PageMode = "chapters" | "pron" | "devedit" | "forms" | "runs" | "style";
+type PageMode = "chapters" | "pron" | "devedit" | "forms" | "runs" | "style" | "workflows";
 // #<manuscript>/<stem>, #<manuscript>/pron:<term>, #<manuscript>/devedit, #<manuscript>/forms or
 // #<manuscript>/runs[:<filter|lens>:<name>] (Filters & lenses, with the open one),
-// #<manuscript>/style[:<level>] (Style laws: all, guide:<name>, file:<name>, defaults); a bare #<stem> opens
+// #<manuscript>/style[:<level>] (Style laws: all, guide:<name>, file:<name>, defaults),
+// #<manuscript>/workflows[:<essay>/<instance>/<step>] (Workflows); a bare #<stem> opens
 // on the server's -m manuscript.
 const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string; tab?: string; item?: string} => {
   let h = decodeURIComponent(location.hash.replace(/^#/, ""));
@@ -61,6 +63,7 @@ const parseHash = (): {ms: string; mode: PageMode; stem: string; term: string; t
   if (h === "runs" || h.startsWith("runs:")) return {ms, mode: "runs", stem: "", term: "", item: h.slice(5)};
   if (h === "forms" || h.startsWith("forms:")) return {ms, mode: "forms", stem: "", term: "", tab: h.slice(6)};
   if (h === "style" || h.startsWith("style:")) return {ms, mode: "style", stem: "", term: "", item: h.slice(6)};
+  if (h === "workflows" || h.startsWith("workflows:")) return {ms, mode: "workflows", stem: "", term: "", item: h.slice(10)};
   return {ms, mode: "chapters", stem: h, term: ""};
 };
 
@@ -103,6 +106,8 @@ export function App() {
   const [runsItem, setRunsItem] = useState<string>(parseHash().mode === "runs" ? parseHash().item || "" : "");
   // The Style laws level (or essay) names what is looked at: it lives in the hash.
   const [styleLevel, setStyleLevel] = useState<string>(parseHash().mode === "style" ? parseHash().item || "" : "");
+  // The Workflows essay, instance and step name what is looked at: the hash.
+  const [wfItem, setWfItem] = useState<string>(parseHash().mode === "workflows" ? parseHash().item || "" : "");
   const [formsActions, setFormsActions] = useState<FormsActions | null>(null);
   const onFormsTabs = useCallback((tabs: FormsTab[], actions: FormsActions) => {
     setFormsTabs(tabs); setFormsActions(actions);
@@ -146,10 +151,11 @@ export function App() {
     const rest = mode === "pron" ? (term ? `pron:${term}` : "pron") : mode === "devedit" ? mode
       : mode === "forms" ? (formsTab ? `forms:${formsTab}` : "forms")
       : mode === "runs" ? (runsItem ? `runs:${runsItem}` : "runs")
-      : mode === "style" ? (styleLevel ? `style:${styleLevel}` : "style") : stem;
+      : mode === "style" ? (styleLevel ? `style:${styleLevel}` : "style")
+      : mode === "workflows" ? (wfItem ? `workflows:${wfItem}` : "workflows") : stem;
     history.replaceState(null, "", `#${encodeURIComponent(ms)}/${rest}`);
     if (mode === "chapters" && stem) remember(`authorlm.lastStem.${ms}`, stem);
-  }, [ms, stem, mode, term, formsTab, runsItem, styleLevel]);
+  }, [ms, stem, mode, term, formsTab, runsItem, styleLevel, wfItem]);
   const switchManuscript = useCallback((name: string) => {
     audioRef.current?.pause();
     setNow(null);
@@ -160,6 +166,7 @@ export function App() {
     setStem("");
     setRunsItem("");
     setStyleLevel("");
+    setWfItem("");
     setMs(name);
   }, []);
   const openWord = useCallback((t: string) => { setTerm(t); setMode("pron"); window.scrollTo({top: 0}); }, []);
@@ -244,6 +251,8 @@ export function App() {
           <button className={`chip${mode === "runs" ? " on" : ""}`} aria-pressed={mode === "runs"} onClick={() => setMode("runs")}
             title="Browse and edit the filters and lenses, and ask for runs on tabs">Filters</button>
           <button className={`chip${mode === "style" ? " on" : ""}`} aria-pressed={mode === "style"} onClick={() => setMode("style")} title="Style laws: browse, edit, add and retire, by level">Style</button>
+          <button className={`chip${mode === "workflows" ? " on" : ""}`} aria-pressed={mode === "workflows"} onClick={() => setMode("workflows")}
+            title="The per-essay editing workflow: lists, letter, construction, wrap-up, filters">Workflows</button>
           <a className="chip" href={`/try-text${location.hash}`} title="Try things out: read pasted text aloud">Audition</a>
         </nav>
         <div className="title-row">
@@ -282,6 +291,7 @@ export function App() {
             })}
           </select>}
           {(mode === "forms" || mode === "devedit") && <VoicePicker manuscript={ms} />}
+          {mode === "workflows" && <WorkflowVoicePicker manuscript={ms} />}
           <VolumeSlider />
         </div>
         {mode === "forms" && formsTabs.length > 0 && (() => {
@@ -321,6 +331,8 @@ export function App() {
       {mode === "forms" && <MergeForms key={ms} transport={formsTransport} manuscript={ms} tab={formsTab} onTabs={onFormsTabs} />}
       {mode === "style" && <StyleLaws key={ms} transport={styleTransport} manuscript={ms} level={styleLevel}
         onLevel={l => { setStyleLevel(l); window.scrollTo({top: 0}); }} />}
+      {mode === "workflows" && <Workflows key={ms} transport={workflowTransport} manuscript={ms} route={parseRoute(wfItem)}
+        onRoute={r => setWfItem(routeItem(r))} />}
       {mode === "runs" && <FiltersLenses key={ms} transport={runsTransport} manuscript={ms} open={runsItem} onOpen={setRunsItem} />}
       {mode === "chapters" && <JobStrip jobs={jobs} held={status.held || []} onForms={openForms} />}
 
