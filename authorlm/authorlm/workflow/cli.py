@@ -1,11 +1,13 @@
 """`authorlm workflow …`: the per-essay editing workflow from the command
 line. Read-only verbs (list, status, show, turns, usage, filters without
---set, blurbs without a change) write nothing."""
+--set, brief without --set/--file or with --dry-run, blurbs without a
+change) write nothing."""
 
 from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 from . import context, core, landing
 
@@ -48,6 +50,14 @@ def _show_lines(db, inst: dict) -> list[str]:
         lines.append(f"  next: {core._next_step(inst['step'])}"
                      + (f" — waits: {why}" if why else " — ready to advance"))
     for d in core.decisions(db, inst):
+        if d["kind"] == "brief-change":
+            # The texts are on the record (show --json); the board says
+            # only that the brief changed, where, and by how much.
+            lines.append(f"  decision {d['created_at'][:16]} brief-change at "
+                         f"{d['detail'].get('step', '?')} "
+                         f"({len(d['detail'].get('from') or '')} → "
+                         f"{len(d['detail'].get('to') or '')} chars)")
+            continue
         lines.append(f"  decision {d['created_at'][:16]} {d['kind']}: "
                      f"{d['words'] or d['reason'] or '-'} "
                      f"{json.dumps(d['detail'], ensure_ascii=False)}")
@@ -228,6 +238,35 @@ def cmd_workflow(args):
                                    trigger="verb", workspace=getattr(args, "workspace", None))
                 _print(args, out, [f"{inst['file']} [{inst['id']}]"]
                        + _land_lines(out))
+        elif verb == "brief":
+            inst = core.get_instance(db, manuscript, args.instance)
+            text = None
+            if args.file is not None:
+                text = (sys.stdin.read() if args.file == "-" else
+                        Path(args.file).read_text(encoding="utf-8"))
+            elif args.set is not None:
+                text = args.set
+            if text is None or args.dry_run:
+                lines = [_summary_line(inst)]
+                if text is not None:
+                    new = text.strip()
+                    same = new == (inst["brief"] or "").strip()
+                    lines.append(
+                        "  dry run: the brief is unchanged" if same else
+                        f"  dry run: would change the brief from "
+                        f"{len(inst['brief'] or '')} to {len(new)} chars; "
+                        "nothing written")
+                lines.append(f"  brief: {inst['brief'] or '(none)'}")
+                _print(args, {"id": inst["id"], "brief": inst["brief"],
+                              "dry_run": text is not None,
+                              "next": f"authorlm workflow brief {inst['id']} "
+                                      "--set TEXT | --file PATH"}, lines)
+            else:
+                inst = core.set_brief(db, inst, text)
+                _print(args, inst, [_summary_line(inst),
+                                    f"  brief: {inst['brief'] or '(none)'}",
+                                    "  the next model turn reads this brief; "
+                                    "earlier turns keep the one they had"])
         elif verb == "decide":
             inst = core.get_instance(db, manuscript, args.instance)
             d = core.decide(db, inst, args.kind, args.words, args.reason or "")
@@ -346,6 +385,18 @@ def add_parser(sub, common) -> None:
     q.add_argument("--leave", metavar="LABEL",
                    help="settle a unit that needs you as the file has it: "
                         "it is not landed and no longer reported")
+
+    q = leaf("brief", "the author's brief: without --set or --file, show it "
+                      "(read-only); --set TEXT or --file PATH replaces it at "
+                      "any step of an open instance (the next model turn "
+                      "reads it; earlier turns keep theirs)")
+    instance(q)
+    src = q.add_mutually_exclusive_group()
+    src.add_argument("--set", metavar="TEXT", help="the new brief, whole")
+    src.add_argument("--file", metavar="PATH",
+                     help="read the new brief from a file ('-' for stdin)")
+    q.add_argument("--dry-run", action="store_true",
+                   help="say what would change; write nothing (read-only)")
 
     q = leaf("decide", "record a principle the author stated, or a ruling the "
                        "author explicitly marked as one")

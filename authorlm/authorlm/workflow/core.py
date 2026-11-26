@@ -45,7 +45,7 @@ UNITS = ("paragraph", "section")
 MODES = ("beats", "apply-findings")
 LISTS = ("reference", "voice", "aware")
 DECISION_KINDS = ("skip", "engine-switch", "unit-switch", "list-change",
-                  "principle", "ruling")
+                  "brief-change", "principle", "ruling")
 # Q6: claude-headless and openai-api now; claude-api and codex-headless are
 # named so the record can hold them, and are declined until built.
 ENGINES = ("claude-headless", "openai-api", "claude-api", "codex-headless")
@@ -623,6 +623,31 @@ def change_list(db: Database, manuscript: dict, instance: dict, which: str,
                              "change": "add" if add else "remove"})
         return _touch(db, instance, {
             which: json.dumps(current, ensure_ascii=False)})
+
+
+def set_brief(db: Database, instance: dict, brief: str) -> dict:
+    """Change the author's brief of an open instance, at any step (owner,
+    2026-11-26, at the start step of wi-7abca47358e0: "if I have read the
+    recap for sermon 3 and I've read sermon 3 and I have some thoughts
+    about what we should take into account, should I be able to edit the
+    brief and add things there?").
+
+    The brief is the `author-brief` standing block (context.py), read when
+    a model turn starts: the next turn uses the new brief and rebuilds its
+    session (the standing blocks changed, engines/base.py); earlier turns
+    stay as they were. A turn already running keeps the brief it started
+    with. Recorded as a `brief-change` decision with the old and new text,
+    so the record says which brief each turn had."""
+    if instance["step"] == "done":
+        raise ValueError("the instance is done; its brief stays as it was")
+    brief = (brief or "").strip()
+    if brief == (instance["brief"] or "").strip():
+        raise ValueError("the brief is unchanged")
+    with db.transaction():
+        _record_decision(db, instance, "brief-change", detail={
+            "from": instance["brief"] or "", "to": brief,
+            "step": instance["step"]})
+        return _touch(db, instance, {"brief": brief})
 
 
 def set_filters(db: Database, instance: dict, names: list[str],

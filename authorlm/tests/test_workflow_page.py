@@ -237,6 +237,21 @@ def call(ws: str, method: str, **params):
                                   workspace=ws)
 
 
+def turn_started(ws: str, iid: str, timeout: float = 10) -> dict:
+    """The instance view once its running job's engine has been sent the
+    turn (the fake reports progress inside `send`, after the context is
+    built). The job's thread starts on its own schedule; a check made the
+    moment the request returns can run before it (seen 2026-11-26: the
+    job's progress still empty)."""
+    import time
+    end = time.monotonic() + timeout
+    while True:
+        v = call(ws, "instance", id=iid)
+        if (v["job"] or {}).get("progress", {}).get("requests") or time.monotonic() > end:
+            return v
+        time.sleep(0.02)
+
+
 def test_overview_and_start_recommendations() -> None:
     with world() as (ws, _root):
         ov = call(ws, "overview")
@@ -730,7 +745,7 @@ def test_background_turns() -> None:
             raises(lambda: bg(ws, "list", id=iid, list="aware", essay="two",
                               change="add"), "running on this instance")
             raises(lambda: bg(ws, "recommend", id=iid), "running on this instance")
-            v = call(ws, "instance", id=iid)
+            v = turn_started(ws, iid)
             check("a reload sees the running job and its progress",
                   v["job"]["state"] == "running"
                   and v["job"]["progress"].get("requests") == 1, v["job"])
@@ -817,6 +832,87 @@ def test_background_turns() -> None:
         check("act: a redo is a model turn; accept is not",
               workflow_page.is_background("act", {"action": "redo"})
               and not workflow_page.is_background("act", {"action": "accept"}))
+
+
+def test_brief_edit() -> None:
+    """Owner, 2026-11-26, at the start step of wi-7abca47358e0: "should I be
+    able to edit the brief and add things there?" The page's `brief`
+    method changes it at any step of an open instance, even while a model
+    turn runs: that turn keeps the brief it started with, the next turn
+    reads the new one. A done instance keeps its brief."""
+    from authorlm import api
+    from authorlm.workflow import jobs
+
+    def brief_of(ctx):
+        return next(b["text"] for b in ctx["standing"] if b["name"] == "author-brief")
+
+    with world() as (ws, _root):
+        iid = call(ws, "start", essay="one", kind="refine", brief="First run.")["id"]
+        v = call(ws, "brief", id=iid, brief="First run.\n\nMind the recap.")
+        check("brief saves at the start step and returns the instance view",
+              v["instance"]["brief"] == "First run.\n\nMind the recap."
+              and v["decisions"][-1]["kind"] == "brief-change", v["instance"]["brief"])
+        raises(lambda: call(ws, "brief", id=iid, brief="First run.\n\nMind the recap."),
+               "unchanged")
+        FAKE.gate = threading.Event()
+        try:
+            v = workflow_page.dispatch("recommend", {"manuscript": "MS", "id": iid},
+                                       workspace=ws, background=True)
+            job = v["job"]
+            turn_started(ws, iid)
+            v = call(ws, "brief", id=iid, brief="Second thoughts.")
+            check("the brief saves while a turn runs; the turn runs on",
+                  v["instance"]["brief"] == "Second thoughts."
+                  and v["job"]["state"] == "running", v["job"])
+        finally:
+            FAKE.gate.set()
+            FAKE.gate = None
+        jobs.wait(job["id"], 10)
+        check("the running turn used the brief it started with",
+              brief_of(FAKE.contexts[-1]) == "First run.\n\nMind the recap.")
+        check("the turn's record left the new brief in place",
+              call(ws, "instance", id=iid)["instance"]["brief"] == "Second thoughts.")
+        call(ws, "advance", id=iid)
+        call(ws, "letter", id=iid)
+        check("the next turn reads the new brief",
+              brief_of(FAKE.contexts[-1]) == "Second thoughts.")
+        call(ws, "skip", id=iid, to="done", reason="Testing the brief.")
+        raises(lambda: call(ws, "brief", id=iid, brief="late"), "done")
+        db = api.open_db(ws)
+        check("a done instance keeps its brief",
+              db.one("SELECT brief FROM workflow_instances WHERE id = ?",
+                     (iid,))["brief"] == "Second thoughts.")
+
+
+def test_brief_card_controls() -> None:
+    """The brief card on the page (Workflows.tsx): on every step, an Edit
+    button, a roomy textarea with Save and Cancel, the unsaved draft kept
+    per instance across a reload, and one line saying a running turn
+    keeps the brief it started with."""
+    src = Path(__file__).resolve().parents[1] / "web" / "audiobook" / "src"
+    wf = (src / "Workflows.tsx").read_text(encoding="utf-8")
+    check("the card is drawn once for the instance, outside any step",
+          wf.count("<BriefCard ") == 1 and "<BriefCard key={inst.id}" in wf
+          and wf.index("<BriefCard key") < wf.index('{shownStep === "start" && <StartStep'))
+    check("the start step no longer draws its own read-only brief",
+          'StartStep' in wf and "<span>The brief</span></div><p>{inst.brief}</p>" not in wf)
+    card = wf[wf.index("function BriefCard"):wf.index("function StartStep")]
+    check("Edit opens a roomy textarea with Save and Cancel",
+          ">Edit</button>" in card and "<textarea" in card and "rows={Math.min(24, Math.max(8," in card
+          and '"Saving…" : "Save"' in card and ">Cancel</button>" in card
+          and 'run("brief", { brief: draft })' in card)
+    check("no editing on a done instance",
+          'const open = inst.step !== "done";' in card and "const editing = open &&" in card)
+    check("the unsaved draft is kept per manuscript and instance in localStorage",
+          "`authorlm.wf.briefDraft.${manuscript}.${inst.id}`" in card
+          and "remember(key, d ??" in card and "authorlm.wf.briefDraft.<ms>.<instance>" in wf)
+    check("Save is not held back by a running turn, and says so in one line",
+          "disabled={asking || unchanged}" in card
+          and "A turn is running: it uses the brief it started with" in card)
+    check("a draft is cleared by Save and by Cancel",
+          "if (await run(\"brief\", { brief: draft })) setDraft(null);" in card
+          and "onClick={() => setDraft(null)}>Cancel" in card)
+    check("the method is on the server's list", "brief" in workflow_page.METHODS)
 
 
 def test_http_route() -> None:
