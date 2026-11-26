@@ -8,4 +8,7 @@
 - `contract`: the engine contract (`send(instance_context, message)`) and
   the registry the engines package fills.
 - `cli`: `authorlm workflow …`.
+- `roads`: the old roads (filter and lens runs, the beat loop, the Filters
+  view's requests) as entry points that send to the workflow, or run with
+  a skip of one sentence of reason, recorded.
 """

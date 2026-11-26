@@ -289,7 +289,8 @@ def section_beat_draft(ctx: dict) -> None:
     intent_id = run(ws, "intent", "declare",
                     "Rewrite the fields essay").split("[")[1].split("]")[0]
     run_stdin(ws, "The essay explains why a distinction opens a field.",
-              "write", "start", "02-fields.md", "--intent", intent_id)
+              "write", "start", "02-fields.md", "--intent", intent_id,
+              "--skip-reason", "A live test of the beat loop's machinery.")
     run_stdin(ws, json.dumps([
         {"role": "opener", "concepts": ["Choice"], "budget": 60,
          "notes": "claims a single distinction is inert on its own"},

@@ -11220,7 +11220,8 @@ def main_test() -> None:
               and lenses.sweep_order(lm, skip=["xc"]) == ["plain"])
         with contextlib.redirect_stdout(io.StringIO()) as lens_out:
             cli_main(["--workspace", str(lens_root), "lens", "run", "xc",
-                      "02-second.md"])
+                      "02-second.md", "--skip-reason",
+                      "A test of the lens road's own machinery."])
         check("`lens run` without --native prints the payload and calls nothing",
               "no model call was made" in lens_out.getvalue()
               and "block T" in lens_out.getvalue(), lens_out.getvalue()[:300])

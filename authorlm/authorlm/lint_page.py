@@ -22,8 +22,10 @@ Decisions:
 - Bulk is for mechanical standardization only, one click per rule (per
   tab or across the chosen tabs) after a count and five before/after
   pairs: straight to curly quote marks (or the reverse, as the style law
-  sets), tracking tags taken out of links, and a spelling variant PER
-  WORD. Spelling, unbalanced quote marks, doubled words, footnotes,
+  sets), dashes to the house form (`dash-form`: a hyphen or double
+  hyphen typed for a dash, a spaced en dash, an em dash spaced against a
+  closed form), tracking tags taken out of links, and a spelling variant
+  PER WORD. Spelling, unbalanced quote marks, doubled words, footnotes,
   banned words, em-dash stacks and the style checks are ruled one by
   one. Why: the owner (2026-11-25): "I don't want to review each quote
   change or other formatting standardization one at a time; it has to be
@@ -55,7 +57,7 @@ Decisions:
 
 Terms:
 - **fix**: one accepted change as the page sends it: `curl` (quote marks
-  to the file's style), `untrack` (tracking tags out of the links),
+  to the file's style), `dash` (dashes to the file's form), `untrack` (tracking tags out of the links),
   `word` (every use of one word in the file to another), or `paragraph`
   (one paragraph's text replaced, for an inline edit).
 - **ignore list**: `<manuscript>/_lint/ignored-findings.tsv`, the
@@ -96,10 +98,10 @@ ONE_BY_ONE = ("spelling", "doubled-word", "unbalanced-quotes", "footnote",
 STYLE_ONE_BY_ONE = ("what-opener", "this-not-that", "term-in-definition",
                     "long-sentence", "reading-grade", "overlap",
                     "redefinition", "italic-term")
-BULK = ("spelling-variant", "quote-style", "link-tracking")
+BULK = ("spelling-variant", "quote-style", "dash-form", "link-tracking")
 COUNT_ONLY = ("em-dash",)
 ORDER = ONE_BY_ONE + STYLE_ONE_BY_ONE + BULK + COUNT_ONLY
-FIX_KINDS = ("curl", "untrack", "word", "paragraph")
+FIX_KINDS = ("curl", "dash", "untrack", "word", "paragraph")
 PREVIEW_PAIRS = 5
 
 
@@ -214,6 +216,22 @@ def _quote_target(db: Database, manuscript: dict, rel: str,
     if straight and curly:
         return ("straight" if straight > curly else "curly"), None
     return None, None
+
+
+def _dash_target(db: Database, manuscript: dict, rel: str) -> str | None:
+    """The em dash form a style law governing `rel` sets (`closed` or
+    `spaced`), or None (then the file's own majority, closed on a tie:
+    proof.dash_style)."""
+    from . import styles
+
+    return proof.dash_law([r["statement"] for r in styles.effective_style(
+        db, manuscript["id"], rel)])
+
+
+def dash_edits(text: str, law: str | None) -> list[tuple[int, int, str]]:
+    """Every dash of the wrong form as the right one (proof.dash_faults)."""
+    return [(lo, hi, new) for lo, hi, new, _what in
+            proof.dash_faults(text, law)]
 
 
 def run(db: Database, manuscript: dict, files: list[str],
@@ -458,6 +476,8 @@ def edits_for(fix: dict, text: str, db: Database, manuscript: dict,
     if kind == "curl":
         style, _law = _quote_target(db, manuscript, rel, text)
         return curl_edits(text, style)
+    if kind == "dash":
+        return dash_edits(text, _dash_target(db, manuscript, rel))
     if kind == "untrack":
         return untrack_edits(text)
     if kind == "word":
@@ -483,6 +503,9 @@ def string_transform(fix: dict, db: Database, manuscript: dict, rel: str,
     if kind == "curl":
         style, _law = _quote_target(db, manuscript, rel, file_text)
         return lambda t: apply_edits(t, curl_edits(t, style))
+    if kind == "dash":
+        law = _dash_target(db, manuscript, rel) or proof.dash_style(file_text)
+        return lambda t: apply_edits(t, dash_edits(t, law))
     if kind == "untrack":
         return lambda t: apply_edits(t, untrack_edits(t))
     if kind == "word":

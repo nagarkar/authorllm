@@ -2703,6 +2703,42 @@ def cmd_book(args):
                 raise ValueError(
                     "give one chapter file, or --all for the whole book: "
                     f"authorlm book lint --all -m {name}")
+            fixed_lines: list[str] = []
+            if args.fix:
+                # §11.9 U9: lint's mechanical fixes are applied directly
+                # and listed, before the report of what is left.
+                from . import critic, gdocs as _gd
+
+                if args.all:
+                    _files, order = critic.book(manuscript)
+                    targets = [n for n in order if n in _files]
+                else:
+                    targets = [args.file]
+                config = _load_config(args)
+                fixed = changes.lint_fix(
+                    db, manuscript, targets, config=config,
+                    services=lambda: (
+                        _gd.get_service(config, args.workspace,
+                                        interactive=False),
+                        _gd.get_docs_service(config, args.workspace,
+                                             interactive=False)))
+                for tab in fixed["tabs"]:
+                    for change in tab.get("changes") or []:
+                        fixed_lines += [f"fixed {tab['file']}:{change['line']}",
+                                        f"  - {' '.join(change['before'].split())}",
+                                        f"  + {' '.join(change['after'].split())}"]
+                    for b in tab.get("blocked") or []:
+                        fixed_lines.append(ui.yellow(
+                            f"not fixed {tab['file']} ({b['id']}): "
+                            f"{b['reason']}"))
+                    if tab.get("message"):
+                        fixed_lines.append(ui.dim(tab["message"]))
+                fixed_lines.append(
+                    f"lint --fix: {fixed['applied']} mechanical fix(es) "
+                    f"applied, {fixed['blocked']} not"
+                    if fixed["tabs"] else
+                    "lint --fix: no quote mark, dash or link to fix")
+                fixed_lines.append("")
             if args.all:
                 board = changes.lint_book(db, manuscript, only=only,
                                           skip=skip)
@@ -2745,6 +2781,9 @@ def cmd_book(args):
                 if board["rules"]:
                     lines.append("by rule: " + ", ".join(
                         f"{n} {rule}" for rule, n in board["rules"].items()))
+            if args.fix:
+                board["fixed"] = fixed
+                lines = fixed_lines + lines
         elif args.action == "lint-accept":
             from . import changes
 
@@ -3046,7 +3085,7 @@ def _add_book_parser(sub, common) -> None:
                    help="who is putting it back (default: author)")
     q = leaf("lint", "the deterministic lint over one whole chapter: each "
                      "finding with its law and the words quoted; no model "
-                     "call, nothing written",
+                     "call, nothing written unless --fix",
              "authorlm book lint one.md --only spelling,footnote")
     q.add_argument("file", nargs="?", help="the chapter file")
     q.add_argument("--all", action="store_true",
@@ -3060,6 +3099,12 @@ def _add_book_parser(sub, common) -> None:
                         "repeat the flag); an unknown name lists them all")
     q.add_argument("--skip", action="append", metavar="RULES",
                    help="leave these rules out")
+    q.add_argument("--fix", action="store_true",
+                   help="first apply lint's mechanical fixes straight into "
+                        "the file and its Doc tab (quote marks to the house "
+                        "style, dashes to the house form, tracking tags out "
+                        "of links), listing each changed paragraph; logged "
+                        "for undo on the Lint view. Then the report")
     q = leaf("lint-accept", "accept words for this manuscript's spell "
                             "check: appends them to "
                             "_lint/accepted-words.txt in the manuscript "
@@ -5314,6 +5359,8 @@ def cmd_filter(args):
                 raise SystemExit("usage: authorlm filter prelude <name> "
                                  "<essay.md>  (the registry JSON on stdin, "
                                  "or --native)")
+            _through_workflow(db, manuscript, args.file, "filter", args.name,
+                              args.skip_reason)
             result = api.filter_prelude(
                 db, manuscript, config, args.name, args.file,
                 replace=args.replace, native=args.native,
@@ -5378,6 +5425,8 @@ def cmd_filter(args):
             if not (args.name and args.file):
                 raise SystemExit("usage: authorlm filter run <name> "
                                  "<essay.md>")
+            _through_workflow(db, manuscript, args.file, "filter", args.name,
+                              args.skip_reason)
             result = api.filter_run(
                 db, manuscript, config, args.name, args.file,
                 window=args.window, from_unit=getattr(args, "from_unit", None),
@@ -6314,6 +6363,8 @@ def cmd_lens(args):
         raise SystemExit(f"usage: authorlm lens {args.action} <name> <file>")
     session, _ = api.ensure_session(db, manuscript)
     if args.action == "run":
+        _through_workflow(db, manuscript, args.file, "lens", args.name,
+                          args.skip_reason)
         try:
             meta_, _body_ = lenses.load_lens(manuscript, args.name)
         except (LookupError, ValueError) as err:
@@ -7075,6 +7126,35 @@ def cmd_interlocutor(args):
         raise SystemExit(f"error: {err}")
 
 
+def _through_workflow(db, manuscript: dict, essay: str, road: str,
+                      name: str = "", reason: str | None = None) -> dict:
+    """A retired road's entry point (workflow/roads.py, §11.9 Q2): open
+    when the essay's workflow is at the road's own step, or with a skip of
+    one sentence of reason, recorded on the essay's workflow; otherwise
+    stop and say how to start or continue the workflow."""
+    from .workflow import roads
+
+    try:
+        out = roads.enter(db, manuscript, essay, road, name=name,
+                          reason=reason)
+    except roads.SentToWorkflow as err:
+        raise SystemExit(str(err))
+    except (LookupError, ValueError) as err:
+        raise SystemExit(f"error: {err}")
+    inst = out["instance"]
+    if out["how"] == "skip":
+        started = out["decision"]["detail"].get("instance_started")
+        print(ui.dim(
+            f"Outside the workflow: skip recorded on {inst['id']} "
+            f"({inst['kind']} #{inst['number']}, at {inst['step']}"
+            + ("; started for this skip" if started else "")
+            + f"): {out['decision']['reason']}"))
+    elif out["how"] == "skipped-before":
+        print(ui.dim(f"Outside the workflow, as skipped on {inst['id']}: "
+                     f"{out['decision']['reason']}"))
+    return out
+
+
 def _stdin_text() -> str | None:
     """Piped stdin, or None on a TTY / when empty. Prose and plan JSON
     arrive this way — multi-paragraph text as an argument is a quoting
@@ -7317,6 +7397,8 @@ def cmd_write(args):
         if args.action == "start":
             if not args.params:
                 sys.exit("usage: write start <file> [--intent <id>]")
+            _through_workflow(db, manuscript, args.params[0], "beats",
+                              reason=args.skip_reason)
             result = api.write_start(db, manuscript, config,
                                      args.params[0], args.intent,
                                      after=args.after, brief=_stdin_text(),
@@ -10795,7 +10877,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "write",
         help="beat-by-beat co-writing loop: draft → author verdict → append "
-             "(docs/autoregressive-writing-design.md)")
+             "(docs/autoregressive-writing-design.md); 'write start' is the "
+             "construction step of 'authorlm workflow' and opens on its own "
+             "only there (else --skip-reason)")
     p.add_argument("action",
                    choices=["start", "plan", "intents", "status", "draft",
                             "critique", "propose", "show", "landed", "accept",
@@ -10877,6 +10961,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lint-override", metavar="REASON", dest="lint_override",
                    help="propose: register despite lint ERRORs, with a reason "
                         "that is recorded (a refrain, a quotation)")
+    p.add_argument("--skip-reason", dest="skip_reason", metavar="SENTENCE",
+                   help="start: run it outside the essay's workflow; one "
+                        "sentence of why, recorded on the workflow as a skip")
     p.set_defaults(func=cmd_write)
 
     p = sub.add_parser("diff", help="colored diff between collected versions "
@@ -11043,6 +11130,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--defer", action="store_true")
     p.add_argument("--explain", help="the author's reasoning, verbatim — "
                                      "the highest-value evidence")
+    p.add_argument("--skip-reason", dest="skip_reason", metavar="SENTENCE",
+                   help="run: run it outside the essay's workflow; one "
+                        "sentence of why, recorded on the workflow as a skip")
     p.set_defaults(func=cmd_lens)
 
     p = sub.add_parser(
@@ -11131,6 +11221,11 @@ def build_parser() -> argparse.ArgumentParser:
             "The filter pass. A LENS reads one essay whole and reports "
             "findings; a FILTER reads one essay UNIT BY UNIT and proposes "
             "an edit to each unit, conditioned on what came before.\n\n"
+            "THROUGH THE WORKFLOW. `filter run` and `filter prelude` open "
+            "on their own only when the essay's workflow ('authorlm "
+            "workflow') is at its filter step; elsewhere they print how to "
+            "start or continue it, and --skip-reason \"<one sentence>\" "
+            "runs them anyway, recorded on the workflow as a skip.\n\n"
             "NOTE THE FLAG POLARITY, which is the OPPOSITE of 'write "
             "draft'. `filter run` makes NO model call: it prints the "
             "payload for the conversation to draft against. The billed "
@@ -11197,6 +11292,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reason", help="the author's verbatim words for a "
                                     "rejection — the next run reads it")
     p.add_argument("--text", help="the author's own wording for a revision")
+    p.add_argument("--skip-reason", dest="skip_reason", metavar="SENTENCE",
+                   help="run, prelude: run it outside the essay's workflow; one "
+                        "sentence of why, recorded on the workflow as a skip")
     p.set_defaults(func=cmd_filter)
 
     p = sub.add_parser(

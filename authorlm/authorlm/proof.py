@@ -1,4 +1,4 @@
-"""The proof checks: seven deterministic checks a proofreader makes by
+"""The proof checks: eight deterministic checks a proofreader makes by
 eye, run by `book lint` beside the nine checks of `lint.py`.
 
 Invariant: reading only, and no model. Every check takes text and returns
@@ -18,6 +18,9 @@ The rules, by code:
   the reverse (a word the author accepted is left alone).
 - `quote-style`: straight and curly quote marks mixed (against the style
   law when one states the style), and a quote mark with no partner.
+- `dash-form`: a hyphen or double hyphen typed for a dash, a spaced en
+  dash used as a dash, and an em dash of the wrong form (closed or
+  spaced, as the style law sets; the house default is closed).
 - `footnote`: a marker with no definition, a definition with no marker,
   a label defined twice.
 - `link-tracking`: a link that carries tracking tags (utm_source and
@@ -87,7 +90,7 @@ Decisions:
   tests/test_lint_proof.py::test_ban_terms_are_read_from_the_laws.
 
 Terms:
-- **proof check**: one of the seven deterministic rules of this module,
+- **proof check**: one of the eight deterministic rules of this module,
   named by its code (`RULES`).
 - **accepted-words file**: `<manuscript>/_lint/accepted-words.txt`, the
   words the author has accepted for the spell check, one per line.
@@ -110,7 +113,7 @@ from urllib.parse import parse_qsl, urlsplit
 from .lint import Finding
 
 RULES = ("spelling", "doubled-word", "spelling-variant", "quote-style",
-         "footnote", "link-tracking", "banned-word")
+         "dash-form", "footnote", "link-tracking", "banned-word")
 
 ACCEPTED_FILE = "_lint/accepted-words.txt"
 _ACCEPTED_HEADER = (
@@ -934,6 +937,113 @@ def check_footnotes(text: str) -> list[Finding]:
     return out
 
 
+# ------------------------------------------------------------ dash form
+
+_DASH_LAW = re.compile(r"\bdash(?:es)?\b", re.IGNORECASE)
+# A run of dash marks with any spaces or tabs around it, between two
+# characters on the same line. Each match is judged by `_dash_fault`.
+_DASH_RUN = re.compile(r"(?<=\S)[ \t]*(?:-{1,3}|–|—)[ \t]*(?=\S)")
+_NOT_PROSE = set("|-:<>!=*_#+`~")
+
+
+def dash_law(statements: list[str]) -> str | None:
+    """`closed` or `spaced` when a style law states the em dash's form,
+    else None. The nearest law that speaks wins (the caller passes them
+    nearest first). The house default (library/style-defaults.toml):
+    "a closed em dash (—), no spaces"."""
+    for statement in statements:
+        if not _DASH_LAW.search(statement or ""):
+            continue
+        if re.search(r"\bclosed\b|\bno spaces?\b|\bunspaced\b|\bwithout "
+                     r"spaces?\b", statement, re.IGNORECASE):
+            return "closed"
+        if re.search(r"\bspaced\b|\bspaces? (?:on|either|around|both)\b",
+                     statement, re.IGNORECASE):
+            return "spaced"
+    return None
+
+
+def _dash_fault(text: str, m: re.Match, style: str) -> tuple[str, str] | None:
+    """(what is wrong, the dash it should be) for one dash run, or None
+    when it is not a dash fault (a hyphen in a word, a range, a table)."""
+    run = m.group(0)
+    mark = run.strip(" \t")
+    spaced = run != mark
+    left, right = text[m.start() - 1], text[m.end()]
+    if left in _NOT_PROSE or right in _NOT_PROSE:
+        return None
+    want = "—" if style == "closed" else " — "
+    if mark == "-":
+        if not (run.startswith((" ", "\t")) and run.endswith((" ", "\t"))):
+            return None                    # a hyphen: well-known, 3-5
+        if left.isdigit() and right.isdigit():
+            return None                    # arithmetic, left to a reader
+        return "a spaced hyphen typed for a dash", want
+    if mark in ("--", "---"):
+        return "a double hyphen typed for a dash", want
+    if mark == "–":
+        if not spaced or (left.isdigit() and right.isdigit()):
+            return None                    # a range, or a joined pair
+        return "a spaced en dash used for a dash", want
+    if style == "closed" and spaced:
+        return "a spaced em dash (the form is closed: a—b)", want
+    if style == "spaced" and not spaced:
+        return "a closed em dash (the form is spaced: a — b)", want
+    return None
+
+
+def dash_style(text: str, law: str | None = None) -> str:
+    """The em dash form a file is held to: the law's, else the form the
+    file uses more, else closed (the house default)."""
+    if law in ("closed", "spaced"):
+        return law
+    prose = masked(text)
+    spaced = len(re.findall(r"(?<=\S)[ \t]+—[ \t]+(?=\S)", prose))
+    closed = len(re.findall(r"(?<=[^\s—])—(?=[^\s—])", prose))
+    return "spaced" if spaced > closed else "closed"
+
+
+def dash_faults(text: str, law: str | None = None
+                ) -> list[tuple[int, int, str, str]]:
+    """Every dash of the wrong form, in prose only (code, links, math,
+    tags and front matter left alone): (start, end, the dash it should be,
+    what is wrong). A hyphen inside a word, a range (1914–1918) and a
+    joined en dash pair (Smith–Jones) are not faults."""
+    style = dash_style(text, law)
+    prose = masked(text)
+    out = []
+    for m in _DASH_RUN.finditer(prose):
+        fault = _dash_fault(prose, m, style)
+        if fault:
+            out.append((m.start(), m.end(), fault[1], fault[0]))
+    return out
+
+
+def check_dash_form(text: str, law: str | None = None) -> list[Finding]:
+    """Per paragraph: the dashes of the wrong form (`dash_faults`), one
+    finding naming the first and the count. A mechanical fix: `book lint
+    --fix` and the Lint view apply it in bulk."""
+    style = dash_style(text, law)
+    places = _Places(text)
+    by_unit: dict[int, list] = {}
+    for fault in dash_faults(text, law):
+        by_unit.setdefault(places.unit(fault[0]), []).append(fault)
+    why = (f"the style law sets a {style} em dash" if law else
+           f"the house form is a {style} em dash")
+    out = []
+    for unit, faults in sorted(by_unit.items()):
+        lo, hi, _new, what = faults[0]
+        n = len(faults)
+        out.append(Finding(
+            "dash-form", "warning", unit, places.context(lo, hi),
+            what + (f", and {n - 1} more dash"
+                    f"{'es' if n > 2 else ''} of the wrong form"
+                    if n > 1 else "")
+            + f" in this paragraph ({why})", ref=style,
+            line=places.line(lo)))
+    return out
+
+
 # ---------------------------------------------------------- link tracking
 
 _LINK = re.compile(r"https?://[^\s<>\[\]\"“”]+")
@@ -1061,9 +1171,11 @@ def check_rules(rules) -> list[str]:
 
 def proof_text(text: str, *, lexicon: Lexicon, rules=RULES,
                law: str | None = None,
-               bans: list[Ban] | None = None) -> list[Finding]:
+               bans: list[Ban] | None = None,
+               dash: str | None = None) -> list[Finding]:
     """The findings of the named proof rules over one file's text, in
-    line order."""
+    line order. `law` is the quote style a law sets, `dash` the em dash
+    form one sets (`dash_law`)."""
     rules = check_rules(rules)
     out: list[Finding] = []
     if "spelling" in rules:
@@ -1075,6 +1187,8 @@ def proof_text(text: str, *, lexicon: Lexicon, rules=RULES,
                                       lexicon.accepted)
     if "quote-style" in rules:
         out += check_quote_style(text, law)
+    if "dash-form" in rules:
+        out += check_dash_form(text, dash)
     if "footnote" in rules:
         out += check_footnotes(text)
     if "link-tracking" in rules:

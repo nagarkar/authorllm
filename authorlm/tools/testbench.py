@@ -224,7 +224,17 @@ def cli(workspace: Path, *argv: str, scrub_keys: bool = False,
     `stdin_text` is for the verbs whose payload travels on stdin (the
     beat plan). Without it stdin is DEVNULL, which is what every other
     call wants: a command that silently read the operator's terminal
-    would hang the check."""
+    would hang the check.
+
+    The verbs retired as entry points (`write start`, `filter run`,
+    `filter prelude`, `lens run`; workflow/roads.py) go in outside the
+    workflow with a reason: the bench exercises the roads' own machinery,
+    which the per-essay workflow reuses."""
+    verb = tuple(a for a in argv if not a.startswith("-") and a != BENCH)[:2]
+    if verb in {("write", "start"), ("filter", "run"), ("filter", "prelude"),
+                ("lens", "run")} and "--skip-reason" not in argv:
+        argv = (*argv, "--skip-reason",
+                "The testbench exercises the road's own machinery.")
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         p for p in (str(PROJECT), env.get("PYTHONPATH", "")) if p)

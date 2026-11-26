@@ -7,7 +7,7 @@
 - **agent edits** (`authorlm.book`): the manuscript's setting for how an agent's edit reaches a chapter: `forms` (it waits for the author) or `direct` (it lands in the file with a change list).
 - **change** (`authorlm.changes`): one replacement an agent role landed in a chapter file: the words that stood (`old`), the words that replaced them (`new`) and the reason (`note`); a row of `step_changes`, `applied` or `reverted`.
 - **change list** (`authorlm.changes`): the changes of a run, a step, a file or a scope, in reading order, as the author reads them.
-- **fix** (`authorlm.lint_page`): one accepted change as the page sends it: `curl` (quote marks to the file's style), `untrack` (tracking tags out of the links), `word` (every use of one word in the file to another), or `paragraph` (one paragraph's text replaced, for an inline edit).
+- **fix** (`authorlm.lint_page`): one accepted change as the page sends it: `curl` (quote marks to the file's style), `dash` (dashes to the file's form), `untrack` (tracking tags out of the links), `word` (every use of one word in the file to another), or `paragraph` (one paragraph's text replaced, for an inline edit).
 - **grain** (`authorlm.book`): how often a step runs: once for the `book`, once per `part`, or once per `chapter`.
 - **ignore list** (`authorlm.lint_page`): `<manuscript>/_lint/ignored-findings.tsv`, the findings the author marked as a legitimate use; lint on this page leaves them out. One per line: id, rule, file, the words quoted.
 - **independent step** (`authorlm.book`): a step whose reader must judge the text cold: its pack withholds what earlier steps returned.
@@ -15,7 +15,7 @@
 - **landing** (`authorlm.changes`): one call of `land`: a batch of changes to one file, all written or none.
 - **lint change** (`authorlm.lint_page`): one paragraph a fix changed, logged in `lint_changes` with its text before and after; Undo puts the before back through the same road.
 - **pack** (`authorlm.book`): what a role is handed when its run starts: its contract, the register entries in scope, what the steps before it returned, and, on a rerun, the superseded result as reference.
-- **proof check** (`authorlm.proof`): one of the seven deterministic rules of this module, named by its code (`RULES`).
+- **proof check** (`authorlm.proof`): one of the eight deterministic rules of this module, named by its code (`RULES`).
 - **reading** (`authorlm.register`): the machine's restatement, in one to three sentences, of what the author's words settle.
 - **register** (`authorlm.register`): the record of the choices the author has settled for one manuscript, the tables `register_entries` and `register_uses`.
 - **register entry** (`authorlm.register`): one choice: its kind, its key, the author's words, the machine's reading, an optional test, and its scope (the whole book or one document).

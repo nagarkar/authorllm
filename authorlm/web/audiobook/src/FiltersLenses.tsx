@@ -20,7 +20,9 @@ import { Lint } from "./Lint";
 //                 tabs, the find box and the scroll position (personal
 //                 working state, of no use in a shared link); per artifact:
 //                 the unsaved draft of its text with the hash of the file it
-//                 was started from, so a reload never loses typing.
+//                 was started from, so a reload never loses typing. The
+//                 reason typed for asking outside the essay's workflow is
+//                 an unsent draft too, kept per manuscript the same way.
 type Kind = "filter" | "lens";
 interface Artifact {
   kind: Kind; name: string; class: string | null; summary: string; error: string | null;
@@ -43,7 +45,7 @@ interface Shown {
   kind: Kind; name: string; source: "manuscript" | "library"; path: string; text: string; sha: string;
   error: string | null; recovery: string; backup?: string | null; warnings?: string[]; changed?: boolean;
 }
-interface Pair { kind: Kind; name: string; file: string; reason?: string }
+interface Pair { kind: Kind; name: string; file: string; reason?: string; workflow?: boolean }
 interface Asked { queued: Pair[]; already: Pair[]; blocked: Pair[]; requests: Request[]; error?: string }
 
 const STATE_WORDS: Record<string, string> = {
@@ -82,6 +84,9 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
   const [review, setReview] = useState<Asked | null>(null);
   const [asked, setAsked] = useState<Asked | null>(null);
   const [busy, setBusy] = useState(false);
+  // A run outside the essay's workflow takes one sentence of why, recorded
+  // on the workflow as a skip (runs_page.enqueue, workflow/roads.py).
+  const [skipReason, setSkipReason] = useState(() => recall(`${store}.skipReason`));
 
   const load = useCallback(async () => {
     try {
@@ -101,6 +106,7 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
   }, [load]);
 
   useEffect(() => { remember(`${store}.find`, find); }, [store, find]);
+  useEffect(() => { remember(`${store}.skipReason`, skipReason); }, [store, skipReason]);
   useEffect(() => { remember(`${store}.picked`, picked.length ? JSON.stringify(picked) : ""); }, [store, picked]);
   useEffect(() => { remember(`${store}.tabs`, tabs.length ? JSON.stringify(tabs) : ""); }, [store, tabs]);
 
@@ -196,7 +202,8 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
 
   const pickedItems = all.filter(a => picked.includes(keyOf(a)));
   const pickedTabs = cat ? cat.tabs.filter(t => tabs.includes(t.file)) : [];
-  const params = () => ({ items: pickedItems.map(a => ({ kind: a.kind, name: a.name })), files: pickedTabs.map(t => t.file) });
+  const params = () => ({ items: pickedItems.map(a => ({ kind: a.kind, name: a.name })), files: pickedTabs.map(t => t.file),
+    ...(skipReason.trim() ? { skip_reason: skipReason.trim() } : {}) });
   const toggle = (list: string[], set: (v: string[]) => void, key: string) => {
     set(list.includes(key) ? list.filter(k => k !== key) : [...list, key]);
     setReview(null); setAsked(null);
@@ -329,6 +336,11 @@ export function FiltersLenses({ transport, manuscript, open, onOpen }: {
           and the Merge page as usual. {pickedItems.some(a => a.kind === "filter") || !pickedItems.length ? cat.drafting.filter.note : ""}{" "}
           {pickedItems.some(a => a.kind === "lens") ? cat.drafting.lens.note : ""}
         </p>
+        <label className="runs-skip">
+          <span className="muted">Runs go through each essay's workflow (its filter step). To ask outside it, say why in one sentence; it is recorded on the essay's workflow as a skip.</span>
+          <input type="text" value={skipReason} placeholder="Leave empty to go through the workflow"
+            onChange={e => { setSkipReason(e.target.value); setReview(null); setAsked(null); }} />
+        </label>
         <div className="devedit-actions">
           <button className="btn take" disabled={busy || !pickedItems.length || !pickedTabs.length} onClick={() => void preview()}>
             {busy && !review ? "Checking…" : `Review ${pickedItems.length * pickedTabs.length} run${pickedItems.length * pickedTabs.length === 1 ? "" : "s"}`}</button>
