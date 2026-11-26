@@ -22,7 +22,9 @@ The rules, by code:
   dash used as a dash, and an em dash of the wrong form (closed or
   spaced, as the style law sets; the house default is closed).
 - `footnote`: a marker with no definition, a definition with no marker,
-  a label defined twice.
+  a label defined twice, and a bare numeric anchor (`[1]`) where a
+  `[^label]` belongs (a warning; lint alone carries this house rule, no
+  style rule repeats it).
 - `link-tracking`: a link that carries tracking tags (utm_source and
   the like).
 - `banned-word`: a word or phrase a style law bans outright.
@@ -892,6 +894,9 @@ def check_quote_style(text: str, law: str | None = None) -> list[Finding]:
 
 _FN_DEF = re.compile(r"^[ \t]{0,3}\[\^([^\]\s]+)\]:", re.MULTILINE)
 _FN_MARK = re.compile(r"\[\^([^\]\s]+)\](?!:)")
+# A bare numeric anchor ("a claim.[1]"): not after a digit (a citation's
+# "17[55]"), "^", "]" or "!", and not a link's text or a definition.
+_BARE_ANCHOR = re.compile(r"(?<![\d^\]!\[])\[\d{1,3}\](?![(:\[])")
 
 
 def check_footnotes(text: str) -> list[Finding]:
@@ -919,6 +924,16 @@ def check_footnotes(text: str) -> list[Finding]:
                            places.context(at, at + len(label) + 3, 30),
                            message, ref=f"[^{label}]", line=places.line(at)))
 
+    plain = masked(text)
+    for m in _BARE_ANCHOR.finditer(plain):
+        line_start = plain.rfind("\n", 0, m.start()) + 1
+        if _FN_DEF.match(text, line_start):
+            continue            # inside a note: "KSA 11, 38[12]" is a citation
+        out.append(Finding(
+            "footnote", "warning", places.unit(m.start()),
+            places.context(m.start(), m.end(), 30),
+            f"bare numeric anchor {m.group(0)}: a footnote anchor is "
+            f"[^label]", ref=m.group(0), line=places.line(m.start())))
     for label, ats in marks.items():
         if label not in defs:
             add("error", ats[0], label,
