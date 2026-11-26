@@ -39,6 +39,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="authorlm-engine-read")
     parser.add_argument("-w", "--workspace", default=None)
     parser.add_argument("-m", "--manuscript", required=True)
+    parser.add_argument("--refresh", action="store_true",
+                        help="rebuild a stale summary before serving it "
+                             "(catalogue.refresh_in_turns)")
     args = parser.parse_args(argv)
 
     from mcp.server.stdio import stdio_server
@@ -47,7 +50,8 @@ def main(argv: list[str] | None = None) -> None:
     from .catalogue import BookReader
     from .openai_api import _project_config
 
-    reader = BookReader(args.workspace, args.manuscript, config=_project_config(paths))
+    reader = BookReader(args.workspace, args.manuscript,
+                        config=_project_config(paths), refresh=args.refresh)
     server = build_server(reader)
 
     async def run() -> None:

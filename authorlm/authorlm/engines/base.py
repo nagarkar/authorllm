@@ -62,9 +62,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 PROTOCOL_FILE = Path(__file__).resolve().parent.parent / "prompts" / "engine-protocol.md"
 
@@ -107,6 +108,50 @@ class NotConfigured(EngineError):
 
 class NotBuilt(EngineError):
     """A registered engine name the design keeps room for, not built yet."""
+
+
+class TurnTimeout(EngineError):
+    """The turn ran past `[engines] turn_timeout_seconds` and was stopped.
+    Never retried inside the same call (a retry would double the wait)."""
+
+
+DEFAULT_TURN_TIMEOUT = 900.0
+TIMEOUT_KEY = "turn_timeout_seconds"
+
+
+def turn_timeout(config: dict | None = None) -> float:
+    """Seconds one model turn may run: `[engines] turn_timeout_seconds` in
+    authorlm/config.toml (global), default DEFAULT_TURN_TIMEOUT."""
+    if config is None:
+        from . import _config
+
+        config = _config()
+    raw = (config.get("engines") or {}).get(TIMEOUT_KEY)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_TURN_TIMEOUT
+    return value if value > 0 else DEFAULT_TURN_TIMEOUT
+
+
+# Progress of the turn running on this thread: a background turn
+# (workflow/jobs.py) sets a hook; an engine reports each read request as it
+# is made, so the page can show "5 read requests so far". No hook, no-op.
+_PROGRESS = threading.local()
+
+
+def set_progress(hook: Callable[[dict], None] | None) -> None:
+    _PROGRESS.hook = hook
+
+
+def report_progress(**info: Any) -> None:
+    hook = getattr(_PROGRESS, "hook", None)
+    if hook is None:
+        return
+    try:
+        hook(info)
+    except Exception:  # noqa: BLE001 — progress never breaks a turn
+        pass
 
 
 def parse_reply(raw: Any) -> dict:

@@ -69,6 +69,15 @@ interface View {
   unplaced?: { label: string; kind: string; text: string }[]; lint?: LintRun | null;
   turns: { seq: number; step: string; unit_label: string; action: string; reason: string }[];
   landing: Landing; landed?: LandResult | null;
+  job: Job | null; failed_attempts: Job[];
+  summaries?: { total: number; stale: string[]; missing: string[] };
+}
+// A model turn running in the background (workflow/jobs.py), or the last
+// one that failed; the page polls the instance while one runs.
+interface Job {
+  id: string; method: string; params: Record<string, unknown>; state: string; error: string;
+  progress: { requests?: number; last?: string; done?: number; total?: number };
+  started_at: string; finished_at: string | null; elapsed: number;
 }
 interface LandUnit { step: string; stretch: number; label: string; original: string; new: string; reason: string; status?: string; }
 interface Landing {
@@ -390,6 +399,12 @@ function StartStep({ v, run, busy }: { v: View; run: (m: string, p: Record<strin
     <div className="card">
       <div className="card-head"><span>Recommendations</span></div>
       {!recs.asked && <p className="muted">The engine reads the summaries and recommends essays for each list, with a reason each; nothing changes without your word.</p>}
+      {inst.step === "start" && v.summaries && (v.summaries.stale.length + v.summaries.missing.length) > 0 && <div className="devedit-actions">
+        <span className="muted" title={[...v.summaries.stale, ...v.summaries.missing].join(", ")}>
+          {v.summaries.stale.length} of {v.summaries.total} essay summaries are stale{v.summaries.missing.length ? `, ${v.summaries.missing.length} missing` : ""}: Recommend reads them as they stand, marked stale.</span>
+        <button className="pill" disabled={busy} title="Rebuilds each stale or missing summary, billed like authorlm summarize rebuild (about two cents an essay)"
+          onClick={() => void run("summaries", {})}>Bring summaries up to date</button>
+      </div>}
       {recs.text && <p className="muted">{recs.text}</p>}
       {recs.items.map(r => (
         <div key={r.label} className="wf-rec">
@@ -537,6 +552,44 @@ function Checklist({ v, run, busy }: { v: View; run: (m: string, p: Record<strin
   </div>;
 }
 
+// ------------------------------------------------------------------ jobs
+
+const JOB_WORDS: Record<string, string> = {
+  recommend: "Recommending", letter: "Writing the letter", letter_reply: "Answering",
+  propose: "Proposing", act: "Redoing", reopen: "Reopening", wrapup: "Writing the wrap-up",
+  summaries: "Bringing summaries up to date",
+};
+const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+// The running turn with its elapsed time (ticking here between polls) and
+// what it has read so far; or the failed attempt with its error and Retry.
+function JobCard({ job, run, dismiss }: { job: Job; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; dismiss: () => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  const [seen] = useState(() => Date.now());
+  useEffect(() => {
+    if (job.state !== "running") return;
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [job.state]);
+  const elapsed = job.state === "running" ? job.elapsed + Math.max(0, (now - seen) / 1000) : job.elapsed;
+  const p = job.progress || {};
+  const what = JOB_WORDS[job.method] || job.method;
+  if (job.state === "running") return <div className="card wf-job">
+    <span>{what}… {clock(elapsed)}</span>
+    {p.total !== undefined ? <span className="muted"> · {p.done || 0} of {p.total} essays{p.last ? ` (now ${short(p.last)})` : ""}</span>
+      : p.requests ? <span className="muted"> · {p.requests} read request{p.requests === 1 ? "" : "s"} so far{p.last ? ` (last: ${p.last})` : ""}</span> : null}
+    <div className="muted">It runs on the server: you may leave this page and come back.</div>
+  </div>;
+  return <div className="card wf-job">
+    <div className="bad">{what} failed after {clock(elapsed)}: {job.error}</div>
+    <div className="muted">Nothing was recorded from this attempt.</div>
+    <div className="devedit-actions">
+      <button className="pill on" onClick={() => void run(job.method, job.params)}>Retry</button>
+      <button className="pill" onClick={dismiss}>Dismiss</button>
+    </div>
+  </div>;
+}
+
 // --------------------------------------------------------------- the page
 
 export function Workflows({ transport, manuscript, route, onRoute }: {
@@ -545,7 +598,9 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
   const [ov, setOv] = useState<Overview | null>(null);
   const [view, setView] = useState<View | null>(null);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [asking, setBusy] = useState(false);
+  // Busy while a request is out, or while a model turn runs on the server.
+  const busy = asking || view?.job?.state === "running";
   const [showHidden, setShowHiddenState] = useState(() => recall(`authorlm.wf.hiddenBlurbs.${manuscript}`) === "1");
   const setShowHidden = (b: boolean) => { remember(`authorlm.wf.hiddenBlurbs.${manuscript}`, b ? "1" : ""); setShowHiddenState(b); };
   const [startForm, setStartForm] = useState({ kind: "refine", brief: "", engine: "", model: "" });
@@ -565,6 +620,15 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
     catch (err) { setError((err as Error).message); }
   }, [transport, instanceId]);
   useEffect(() => { void loadView(); }, [loadView]);
+
+  // While a model turn runs on the server, poll the instance; the job's
+  // end brings the turn (or its error) onto the page.
+  const jobRunning = view?.job?.state === "running";
+  useEffect(() => {
+    if (!jobRunning) return;
+    const t = window.setInterval(() => { void loadView(); }, 2000);
+    return () => { window.clearInterval(t); void loadOv(); };
+  }, [jobRunning, loadView, loadOv]);
 
   // Back to the place on the page once the instance is there; then keep it.
   const restored = useRef("");
@@ -703,6 +767,8 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
           {view.skipped.length > 0 && <ul className="muted">{view.skipped.map(d => <li key={d.id}>Skipped {(d.detail.skipped || []).join(", ")}: {d.reason}</li>)}</ul>}
         </div>
 
+        {view.job && <JobCard key={view.job.id} job={view.job} run={run}
+          dismiss={() => void run("job_dismiss", { job: view.job!.id })} />}
         <LandingCard v={view} run={run} busy={busy} />
         {shownStep === "start" && <StartStep v={view} run={run} busy={busy} />}
         {shownStep === "letter" && <LetterStep v={view} run={run} busy={busy} />}

@@ -23,9 +23,19 @@ lists); never drafts, exports, `_retired`, profiles' neighbours or anything
 else in the folders. A request outside the book is **declined**, with a
 reason the model sees (`Declined`), and logged like any other request.
 Read-only: nothing here writes the manuscript, the Doc or the style laws.
-The one side effect is the summary refresh Q20b asks for (a stale or
-missing summary is rebuilt before it is served, on the `[critique]` /
-`[summaries]` models, billed like `summarize rebuild`).
+
+**Summaries are served as stored inside a turn** (`refresh_in_turns`).
+Q20b first had a stale or missing summary rebuilt before it was served;
+inside a model turn that made one `essay_summaries` request cost a minute
+or more of summary-model calls, serially, and a Recommend over a book with
+28 stale essays ran past the 900 s turn limit and was lost (2026-11-26:
+108 summary calls, $0.21, no turn recorded). So a turn now gets the stored
+summary, marked `[stale]` with a note to check the text, and the summaries
+are brought up to date ahead of the turn (the Workflows page's "Bring
+summaries up to date", or `authorlm summarize rebuild`). `[engines]
+refresh_summaries = true` in authorlm/config.toml (global; default false)
+brings the rebuild-on-read back, billed like `summarize rebuild` on the
+`[critique]` / `[summaries]` models.
 
 `earlier_instances` reads a function the workflow package provides
 (`authorlm.workflow.earlier_instances(db, manuscript, essay) -> list|str`);
@@ -40,6 +50,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 DECLINED_PREFIX = "DECLINED: "
+REFRESH_KEY = "refresh_summaries"
+
+
+def refresh_in_turns(config: dict) -> bool:
+    """Whether a model turn's `essay_summaries` rebuilds stale summaries
+    before serving them: `[engines] refresh_summaries`, default false (the
+    module docstring says why)."""
+    return bool((config.get("engines") or {}).get(REFRESH_KEY, False))
 
 
 class Declined(LookupError):
@@ -208,6 +226,13 @@ def _essay_summaries(reader: BookReader, args: dict) -> str:
     if note:
         out.append(f"NOTE: {note}")
     essay = got.get("essay")
+    stale = (essay is None or essay.get("state") not in ("fresh", "upstream_stale")
+             or any(s.get("stale") for s in got.get("sections") or [])
+             or any(p.get("stale") for p in got.get("paragraphs") or []))
+    if stale and not reader.refresh:
+        out.append("NOTE: served as stored; marked [stale] or (none) where the "
+                   "essay changed since. A finding that rests on such a part "
+                   "is checked against essay_text or essay_section.")
     out.append("ESSAY: " + (f"[{essay['state']}] {essay['summary']}" if essay
                             else "(none)"))
     if level in ("section", "paragraph"):
@@ -316,9 +341,10 @@ CATALOGUE: tuple[Request, ...] = (
                                   "description": "section number, from 1"}},
             ("file", "section"), _essay_section),
     Request("essay_summaries",
-            "An essay's summaries, brought up to date first: the essay summary, "
-            "or with level 'section' or 'paragraph' the finer ones too. Use it "
-            "to decide whether a whole essay is worth reading.",
+            "An essay's summaries as stored (a part the essay changed since is "
+            "marked [stale]): the essay summary, or with level 'section' or "
+            "'paragraph' the finer ones too. Use it to decide whether a whole "
+            "essay is worth reading.",
             {**_FILE, "level": {"type": "string",
                                 "enum": ["essay", "section", "paragraph"],
                                 "description": "default essay"}},

@@ -100,6 +100,13 @@ claude_model = "opus"
 # ~/.local/bin/claude has it (engines/claude_headless.py find_binary).
 # Unset by default; `authorlm doctor` shows the one in use.
 # claude_binary = "/opt/homebrew/bin/claude"
+# turn_timeout_seconds: how long one model turn may run before it is stopped
+# and recorded as a failed attempt (engines/base.py turn_timeout). Default 900.
+# turn_timeout_seconds = 900
+# refresh_summaries: true rebuilds a stale summary before a turn's read
+# request serves it (billed, a minute or more an essay, inside the turn);
+# default false serves it as stored, marked stale (engines/catalogue.py).
+# refresh_summaries = false
 # openai-api is billed (OPENAI_API_KEY from .env). gpt-5.6-sol accepts a
 # strict json_schema (llmlm MODEL_PROFILES, verified live 2026-10-22).
 openai_model = "gpt-5.6-sol"
