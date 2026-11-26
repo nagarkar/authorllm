@@ -117,13 +117,63 @@ def test_real_defaults_parse() -> None:
           all(r["aspect"] in styles.PROSE_ASPECTS for r in rows))
 
 
+def test_overridden_ids() -> None:
+    check("None and empty are no overrides",
+          styles.overridden_ids(None) == []
+          and styles.overridden_ids("") == [])
+    check("whitespace, empties and duplicates collapse in order",
+          styles.overridden_ids(" a, a ,b,, c ")
+          == ["a", "b", "c"])
+
+
+def test_malformed_defaults_fail_loudly(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "defaults.toml"
+    os.environ[styles.DEFAULTS_ENV] = str(path)
+
+    path.write_text('[[default]]\nkey = "x"\naspect = "formatting"\n',
+                    encoding="utf-8")
+    try:
+        styles.default_laws()
+    except ValueError as exc:
+        check("a row without a statement fails loudly",
+              "needs key, aspect and statement" in str(exc), exc)
+    else:
+        check("a row without a statement fails loudly", False)
+
+    path.write_text(
+        '[[default]]\nkey = "x"\naspect = "nope"\nstatement = "s"\n',
+        encoding="utf-8")
+    try:
+        styles.default_laws()
+    except ValueError as exc:
+        check("an unknown aspect fails loudly",
+              "unknown aspect" in str(exc), exc)
+    else:
+        check("an unknown aspect fails loudly", False)
+
+    path.write_text(
+        '[[default]]\nkey = "x"\naspect = "formatting"\nstatement = "s"\n'
+        '[[default]]\nkey = "x"\naspect = "formatting"\nstatement = "t"\n',
+        encoding="utf-8")
+    try:
+        styles.default_laws()
+    except ValueError as exc:
+        check("a duplicated key fails loudly",
+              "appears twice" in str(exc), exc)
+    else:
+        check("a duplicated key fails loudly", False)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
         test_defaults_are_lowest_layer(base / "1")
         test_one_law_displaces_two_defaults(base / "2")
         test_unknown_default_named(base / "3")
+        test_malformed_defaults_fail_loudly(base / "4")
     test_real_defaults_parse()
+    test_overridden_ids()
     print("test_style_defaults: all checks passed")
 
 
