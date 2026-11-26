@@ -2258,7 +2258,15 @@ the manifest matches the text.
 **The page — the author's surface, on the Mac and the phone.** The launch
 agent `com.nagarkar.authorlm.serve` keeps it running (`scripts/install-launch-agent.sh`;
 restart only with `launchctl kickstart -k gui/$(id -u)/com.nagarkar.authorlm.serve`,
-never `nohup`; if the agent is not loaded, ask the author to load it). Verify
+never `nohup`; if the agent is not loaded, ask the author to load it). That
+restart also deploys the page: at start, before the port opens, the server
+rebuilds `authorlm/audiobook_dist/` when it is older than its sources under
+`authorlm/web/audiobook/` (`npm ci` too when `node_modules/` is missing or
+older than the lockfile; about 20 s). A build that cannot run (no npm on the
+agent's PATH, an npm error) never stops the server: it serves the old page,
+logs why to `~/.authorlm/logs/serve.log`, and `authorlm doctor` (each check
+with its state, detail and fix; `--json`; exit 1 when one fails; needs no
+workspace) shows the page as `stale` or `missing` with the fix. Verify
 `curl -s http://127.0.0.1:8792/health`
 and show `http://127.0.0.1:8792/#<stem>` in the in-app Browser pane. The
 page is one chapter at a time with a dropdown, under a manuscript

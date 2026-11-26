@@ -264,8 +264,21 @@ def make_handler(workspace: str | None, manuscript: str | None):
     return Handler
 
 
+def rebuild_page(log=print) -> dict:
+    """Rebuild the compiled page when a merge left it older than its
+    sources (web_pages.py says why here, at start, before the port opens).
+    Whatever happens, the server goes on to serve what is built."""
+    from . import web_pages
+    try:
+        return web_pages.rebuild_if_stale("audiobook", log=log)
+    except Exception as err:  # noqa: BLE001 — a failed build never stops the server
+        log(f"  audiobook page not rebuilt: {type(err).__name__}: {err}")
+        return {"page": "audiobook", "state": "failed", "detail": str(err)}
+
+
 def run(workspace: str | None, manuscript: str | None, host: str = "127.0.0.1",
         port: int = 8792, open_browser: bool = True) -> None:
+    rebuild_page()
     server = ThreadingHTTPServer((host, port), make_handler(workspace, manuscript))
     url = f"http://{host}:{server.server_port}/"
     # Open the session (and its worker) now, so the first request is
