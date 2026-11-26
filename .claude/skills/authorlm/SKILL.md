@@ -1271,6 +1271,16 @@ page for all of these is the Style chip of the audiobook page
 (`#<manuscript>/style:<level>`, `style_page.py`), the same functions with
 the road "web" in each law's history.
 
+A named set: `style snapshot <name> [--note "..."]` records every active
+law of the manuscript (id, version, words and scope) under a name taken
+once (`style_snapshots.py`); `style snapshot list`, `style snapshot show
+<name>` (each law's status now and what changed since). `style snapshot
+restore <name> [--dry-run]` is a write verb: it brings back exactly that
+set (un-retires and puts back the recorded words and scope of the laws in
+it, retires the active laws not in it, each change in the law's history
+citing the snapshot); proposed or rejected laws are left alone and listed.
+Run `--dry-run` first and show the owner the list.
+
 ## The knobs table (every new filter, lens, or interlocutor)
 **Author ruling 2026-09-06: "Whenever I ask you to create a filter or
 interlocutor or a lens, always give me a table like this of all the

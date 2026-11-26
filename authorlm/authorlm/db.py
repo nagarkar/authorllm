@@ -698,6 +698,35 @@ CREATE TABLE IF NOT EXISTS step_changes (
 
 CREATE INDEX IF NOT EXISTS idx_step_changes_run
     ON step_changes (manuscript_id, run_id, seq);
+
+-- A named snapshot of a manuscript's style laws (style_snapshots.py):
+-- the set in force at a moment, under a name the author gives it, so the
+-- set can be brought back. One row per snapshot; never edited, never
+-- deleted.
+CREATE TABLE IF NOT EXISTS style_snapshots (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    name TEXT NOT NULL,           -- e.g. v1-2026-full-on-style-laws
+    note TEXT NOT NULL DEFAULT '',
+    UNIQUE (manuscript_id, name)
+);
+
+-- One row per law active when the snapshot was taken: its id, its
+-- version then, and its words and scope then (a restore puts these back).
+CREATE TABLE IF NOT EXISTS style_snapshot_laws (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    manuscript_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,    -- style_snapshots.id
+    law_id TEXT NOT NULL,         -- style_laws.id
+    law_version INTEGER NOT NULL, -- style_laws.version at the snapshot
+    aspect TEXT NOT NULL,
+    statement TEXT NOT NULL,
+    notes TEXT,
+    overrides TEXT,
+    guide_id TEXT,
+    file TEXT,                    -- carried on a rename, as style_laws.file
+    UNIQUE (snapshot_id, law_id)
+);
 CREATE INDEX IF NOT EXISTS idx_triage_runs_lookup
     ON triage_runs (manuscript_id, triage_type, profile_id, profile_version, created_at);
 CREATE INDEX IF NOT EXISTS idx_triage_assessments_lookup

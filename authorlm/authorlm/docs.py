@@ -86,6 +86,9 @@ _UNSAFE = re.compile(r'[\\/:*?"<>|#]')
 NAME_COLUMNS = (
     ("style_attachments", "file"),
     ("style_laws", "file"),
+    # A snapshot's law keeps the name its law has, so a restore after a
+    # rename does not move the law back to a name that no longer exists.
+    ("style_snapshot_laws", "file"),
     ("declared_intents", "scope"),
     ("writeups", "file"),
     ("essay_summaries", "file"),
