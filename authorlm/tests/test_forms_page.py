@@ -391,6 +391,49 @@ def widened_edit_lands(root: Path) -> None:
           fake.tab_text("solo.md"))
 
 
+def widened_edit_survives_a_rewrapped_reedit(root: Path) -> None:
+    """After a widen, the page may re-edit before the listing refresh marks
+    the card widened: the edit box then re-wraps the whole passage with the
+    original prefix/suffix. That must not drop context, or Merge leaves the
+    old surroundings in the file (2026-11-22)."""
+    print("merge, widened edit re-saved with a re-wrapped passage:")
+    ws, db, manuscript, ms, fake = _staged(root, "rewiden-ws")
+    forms = _by_note(_call(ws, fake, "list"))
+    alpha = forms["r-alpha"]
+    r = _call(ws, fake, "decide", id=alpha["id"], verdict="edit",
+              seen=alpha["current"], text="Alpha drifts as it was.",
+              prefix=alpha["prefix"], suffix=alpha["suffix"])
+    assert "error" not in r and r["ruling"].get("context"), r
+    # What the client sent before it treated ruling.context as widened.
+    rewrapped = (alpha["prefix"] + r["ruling"]["text"] + alpha["suffix"])
+    r = _call(ws, fake, "decide", id=alpha["id"], verdict="edit",
+              seen=alpha["current"], text=rewrapped,
+              prefix=alpha["prefix"], suffix=alpha["suffix"])
+    check("a re-wrapped re-edit of a widened ruling keeps its context",
+          r["ruling"]["text"] == "Alpha drifts as it was."
+          and r["ruling"].get("context") == {"head": "", "tail": " as it is."},
+          r)
+    # Same path with a changed middle inside the accidental wrap.
+    r = _call(ws, fake, "decide", id=alpha["id"], verdict="edit",
+              seen=alpha["current"],
+              text=alpha["prefix"] + "Alpha drifts, rewritten." + alpha["suffix"],
+              prefix=alpha["prefix"], suffix=alpha["suffix"])
+    check("a re-wrapped change still widens",
+          r["ruling"]["text"] == "Alpha drifts, rewritten."
+          and r["ruling"].get("context") == {"head": "", "tail": " as it is."},
+          r)
+    _rule_all(ws, fake, {"r-beta": ("accept", None),
+                         "r-gamma": ("decline", None),
+                         "r-add": ("decline", None)})
+    r = _call(ws, fake, "merge", file="solo.md")
+    text = (ms / "solo.md").read_text()
+    check("Merge lands the re-edited widened passage once, with no leftover "
+          "surroundings",
+          r["stopped"] is None and r["pushed"] is True
+          and "Alpha drifts, rewritten.\n" in text
+          and "as it is." not in text and text.count("Alpha") == 1, (r, text))
+
+
 def widened_edit_over_another_form(root: Path) -> None:
     print("decide, widened edit over another form:")
     essay = ("# Topic\n\nAlpha stays and Omega waits as it is.\n\n"
@@ -1025,6 +1068,7 @@ def main() -> None:
     for fn in (word_diff_segments, rulings_on_marked_text, list_shows_the_doc_as_it_stands,
                list_sorts_gone_forms_as_invalid, decide_holds_rulings,
                merge_lands_the_rulings, widened_edit_lands,
+               widened_edit_survives_a_rewrapped_reedit,
                widened_edit_over_another_form,
                widened_edit_after_accepting_a_neighbour,
                summary_counts_open_and_ruled, merge_declines_everything,

@@ -439,6 +439,9 @@ def decide(db: Database, manuscript: dict, thread_id: str, verdict: str,
         raise ValueError("this form is not in the tab, so the tab decides it "
                          "at merge; it takes no ruling here")
     context = None
+    prev = meta.get(RULING_KEY) or {}
+    prev_ctx = (prev.get("context")
+                if prev.get("verdict") == "edit" else None)
     if verdict == "edit":
         text = (text or "").strip()
         if not text:
@@ -447,11 +450,24 @@ def decide(db: Database, manuscript: dict, thread_id: str, verdict: str,
         if "\n" in text:
             raise ValueError("the new text is one paragraph on one line")
         if prefix is not None or suffix is not None:
-            text, context = _span_of_passage(text, prefix or "", suffix or "")
+            # A form already widened keeps its surroundings as context: the
+            # edit box holds the whole passage. A client that has not yet
+            # marked the card widened may re-wrap that passage with the
+            # original prefix/suffix; peel the accidental wrap, keep widen.
+            if prev_ctx:
+                head, tail = (prefix or "").lstrip(), (suffix or "").rstrip()
+                if (head or tail) and text.startswith(head) \
+                        and text[len(head):].endswith(tail):
+                    rest = text[len(head):]
+                    text = (rest[:len(rest) - len(tail)] if tail else rest)
+                context = prev_ctx
+            else:
+                text, context = _span_of_passage(
+                    text, prefix or "", suffix or "")
             if not text.strip():
                 raise ValueError("an edit needs text; to turn the form down, "
                                  "Decline it")
-            if context:
+            if context and context is not prev_ctx:
                 other = _overlapping_form(db, thread, context)
                 if other:
                     raise ValueError(
