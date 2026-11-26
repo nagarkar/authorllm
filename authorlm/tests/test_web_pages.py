@@ -210,7 +210,8 @@ def test_doctor_verb() -> None:
         board = None
     check("`authorlm doctor --json` prints its checks", board is not None
           and {"web page: audiobook", "web page: triage-app",
-               "web page: workbench"} <= {c["name"] for c in board["checks"]},
+               "web page: workbench", "engine: claude-headless binary"}
+          <= {c["name"] for c in board["checks"]},
           r.stdout + r.stderr)
     check("its exit code follows the checks",
           r.returncode == (0 if board["ok"] else 1), (r.returncode, board["ok"]))

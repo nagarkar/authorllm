@@ -88,12 +88,32 @@ DISALLOWED = ("Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Read",
               "Glob", "Grep", "Task", "Agent") + tuple(
     f"Bash(authorlm {v}:*)" for v in WRITE_VERBS)
 
-Runner = Callable[[list[str], str, Path, float], tuple[int, str, str]]
+Runner = Callable[[list[str], str, Path, float, dict], tuple[int, str, str]]
+
+# Variables that make Claude Code bill or route elsewhere than its own
+# sign-in. authorlm loads authorlm/.env into os.environ, and that file sets
+# ANTHROPIC_API_KEY (and ANTHROPIC_BASE_URL) for LiteLLM's API calls; passed
+# on, `claude -p` uses that key instead of the subscription login and the
+# turn fails ("Invalid API key", seen live 2026-11-26). So the child gets
+# no ANTHROPIC_* variable at all, nor the switches to Bedrock, Vertex or
+# Foundry: headless Claude runs on the CLI's own sign-in, as designed.
+AUTH_PREFIX = "ANTHROPIC_"
+AUTH_SWITCHES = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                 "CLAUDE_CODE_USE_FOUNDRY")
 
 
-def _run(argv: list[str], stdin: str, cwd: Path, timeout: float) -> tuple[int, str, str]:
+def child_env(environ: dict | None = None) -> dict:
+    """The environment for the `claude` child: ours without AUTH_PREFIX
+    variables and AUTH_SWITCHES."""
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items()
+            if not k.startswith(AUTH_PREFIX) and k not in AUTH_SWITCHES}
+
+
+def _run(argv: list[str], stdin: str, cwd: Path, timeout: float,
+         env: dict) -> tuple[int, str, str]:
     proc = subprocess.run(argv, input=stdin, capture_output=True, text=True,
-                          cwd=str(cwd), timeout=timeout)
+                          cwd=str(cwd), timeout=timeout, env=env)
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -108,6 +128,64 @@ def mcp_config(workspace: str, manuscript: str) -> dict:
         "env": env}}}
 
 
+# Claude Code's installer puts `claude` here. A launch agent's PATH need not
+# include it (the served app's did not, 2026-11-26), so it is tried after PATH.
+DEFAULT_BINARY = "~/.local/bin/claude"
+CONFIG_BINARY_KEY = "claude_binary"
+DOCTOR_NAME = "engine: claude-headless binary"
+
+
+def _executable(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def find_binary(config: dict | None = None,
+                which: Callable[[str], str | None] = shutil.which,
+                default: str = DEFAULT_BINARY) -> tuple[str | None, list[str]]:
+    """The `claude` to run (None when none is found) and every place looked,
+    in order: `[engines] claude_binary` in authorlm/config.toml when set,
+    and then only there (a wrong setting is reported, never passed over);
+    else PATH; else DEFAULT_BINARY."""
+    if config is None:
+        from . import _config
+
+        config = _config()
+    setting = str((config.get("engines") or {}).get(CONFIG_BINARY_KEY) or "").strip()
+    if setting:
+        path = os.path.expanduser(setting)
+        where = f"[engines] {CONFIG_BINARY_KEY} = {setting} in authorlm/config.toml"
+        return (path if _executable(path) else None), [where]
+    found = which("claude")
+    if found:
+        return found, ["PATH"]
+    path = os.path.expanduser(default)
+    return (path if _executable(path) else None), ["PATH", path]
+
+
+def not_found_message(looked: list[str]) -> str:
+    return ("the Claude Code CLI ('claude') was not found; looked in: "
+            + "; ".join(looked) + f". Install it, or set [engines] "
+            f"{CONFIG_BINARY_KEY} in authorlm/config.toml to its full path")
+
+
+def doctor_check(config: dict | None = None,
+                 which: Callable[[str], str | None] = shutil.which,
+                 default: str = DEFAULT_BINARY) -> dict:
+    """`authorlm doctor`'s check that claude-headless finds `claude`:
+    {name, ok, state, detail, fix}, as web_pages.doctor_checks."""
+    found, looked = find_binary(config, which, default)
+    if found:
+        return {"name": DOCTOR_NAME, "ok": True, "state": "found",
+                "detail": found, "fix": ""}
+    return {"name": DOCTOR_NAME, "ok": False, "state": "missing",
+            "detail": not_found_message(looked),
+            "fix": ("install Claude Code; for the served app put the folder of "
+                    "`command -v claude` on its PATH (rerun "
+                    "scripts/install-launch-agent.sh <manuscript>, then launchctl "
+                    "kickstart -k gui/$(id -u)/com.nagarkar.authorlm.serve), or set "
+                    f"[engines] {CONFIG_BINARY_KEY} in authorlm/config.toml")}
+
+
 class ClaudeHeadlessEngine(Engine):
     name = "claude-headless"
 
@@ -120,9 +198,11 @@ class ClaudeHeadlessEngine(Engine):
 
     @property
     def binary(self) -> str:
-        found = self._binary or shutil.which("claude")
+        if self._binary:
+            return self._binary
+        found, looked = find_binary()
         if not found:
-            raise NotConfigured("the Claude Code CLI ('claude') is not on PATH")
+            raise NotConfigured(not_found_message(looked))
         return found
 
     def command(self, *, workspace: str, manuscript: str, session_id: str,
@@ -177,7 +257,7 @@ class ClaudeHeadlessEngine(Engine):
             argv = self.command(workspace=workspace, manuscript=manuscript,
                                 session_id=ref.handle, resume=True)
             code, out, err = self._runner(argv, ref.catch_up(turn, message), cwd,
-                                          self.timeout)
+                                          self.timeout, child_env())
             result = _result_event(out)
             if code == 0 and result and not result.get("is_error"):
                 return self._reply(turn, ref.handle, out, result)
@@ -186,7 +266,7 @@ class ClaudeHeadlessEngine(Engine):
         argv = self.command(workspace=workspace, manuscript=manuscript,
                             session_id=session_id, resume=False)
         code, out, err = self._runner(argv, self.first_message(turn, message),
-                                      cwd, self.timeout)
+                                      cwd, self.timeout, child_env())
         result = _result_event(out)
         if result is None or code != 0 or result.get("is_error"):
             detail = (result or {}).get("result") or err.strip()[-500:] or f"exit {code}"

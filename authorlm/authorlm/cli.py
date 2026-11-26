@@ -10040,8 +10040,9 @@ def cmd_doctor(args):
     """Each check with its state, detail and fix; exit 1 when one fails.
     Needs no workspace, so it runs before `setup` too."""
     from . import web_pages
+    from .engines import claude_headless
 
-    checks = web_pages.doctor_checks()
+    checks = web_pages.doctor_checks() + [claude_headless.doctor_check()]
     ok = all(c["ok"] for c in checks)
     if getattr(args, "as_json", False):
         print(json.dumps({"ok": ok, "checks": checks}, indent=2))
@@ -12230,7 +12231,8 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="check the install: each check with its state, detail and fix; "
              "exit 1 when one fails (now: each web page is built and not "
-             "older than its sources). Example: authorlm doctor --json")
+             "older than its sources, and the claude-headless engine finds "
+             "`claude`). Example: authorlm doctor --json")
     p.add_argument("--json", action="store_true", dest="as_json",
                    help="print the checks as JSON")
     p.set_defaults(func=cmd_doctor)
