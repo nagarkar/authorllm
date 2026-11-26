@@ -1378,6 +1378,12 @@ Regression: spaced CommonMark thematic breaks must survive normalize.
 
 Pure Omni helpers: model gate, duration clamp, billed USD from token usage, and the edit request body.
 
+## `tests.test_open_run`
+
+`authorlm/tests/test_open_run.py`
+
+`changes._open_run`, `book._find_run` and `book._require_document_ids` are the who-may-write gates every `book land` / `book draft` walks before touching a chapter file.
+
 ## `tests.test_own_line_form`
 
 `authorlm/tests/test_own_line_form.py`
@@ -1491,6 +1497,12 @@ The register of settled choices (register.py): every choice the author settles i
 `authorlm/tests/test_reply_records.py`
 
 Paragraph-record reply unwrap (`_reply_records`) and JSON schema shape.
+
+## `tests.test_require_writable`
+
+`authorlm/tests/test_require_writable.py`
+
+`changes._require_writable` is the Doc-side gate every land / draft / revert walks before rewriting a chapter file.
 
 ## `tests.test_resolve_emphasized_old`
 
@@ -1689,6 +1701,12 @@ _No docstring._
 `authorlm/tests/test_usage_money.py`
 
 `usage._money` formats the cost column on every usage report row.
+
+## `tests.test_validate_chapter_config`
+
+`authorlm/tests/test_validate_chapter_config.py`
+
+`audio._validate_chapter_config` and `_validate_voice_key` are the gates on every `[[chapter]]` override in audiobook.toml.
 
 ## `tests.test_validate_reply`
 
