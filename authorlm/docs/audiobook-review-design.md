@@ -442,6 +442,27 @@ stamps `pushed_at` on the tab's entry, which the line reads back. This
 narrows the 2026-09-26 ruling: the page still never *pulls* or
 reconciles — that stays in chat — but it may push what is on disk.
 
+**2026-11-03. Try text.** `/try-text` on the same `audio serve` host
+pastes arbitrary Markdown and plays it through the Mac preview voice.
+`POST /api/try-text` returns the MP3 directly and keeps the bytes
+outside the manuscript (no take, no state entry). Same-origin /
+`X-AuthorLM: 1` only; body capped at 64 KiB. Use it to hear a passage
+before it is filed, not as a substitute for paragraph previews keyed
+by section id.
+
+**2026-11-06. Dev edit mode.** The developmental-edit review surface
+is another mode of this page (`#<ms>/devedit`, `POST /api/devedit` →
+`devedit.dispatch`): letter and argument map, letter decisions, and
+one review item at a time with accept / reject / defer. Push/pull for
+accepted files reuse the page's Doc session (push still guarded). The
+run folder and chat verbs stay in `devedit.py` / `authorlm devedit`;
+this mode does not start a run.
+
+**2026-11-03. `--live` / `--dry-run` only on spend verbs.** Paid or
+send audio actions (`audition`, `dictionary`, `generate`, `retake`,
+`say`) preview unless `--live`; `--dry-run` is the same preview.
+Passing either flag on a free audio action is a usage error.
+
 ## 11. Open questions
 
 - Whether the served page should also host the pronunciation workbench
