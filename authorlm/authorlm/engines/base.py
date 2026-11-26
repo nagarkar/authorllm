@@ -2,22 +2,27 @@
 
 An **engine** is the thing that makes a model turn for a per-essay workflow
 instance (docs/plans/filter-lens-consolidation.md 11.9 Q6). The workflow
-package (`authorlm.workflow`, built separately) owns the session record; an
-engine is fed from that record and keeps nothing the record cannot rebuild:
+package (`authorlm.workflow`) owns the session record; an engine is fed from
+that record and keeps nothing the record cannot rebuild:
 
     engine = get_engine("openai-api", model)        # engines/__init__.py
     reply = engine.send(instance_context, message)
-    instance.session_ref = engine.session_ref        # persisted by the caller
+    engine_state["session_ref"] = engine.session_ref  # persisted by the caller
 
-`instance_context` is a dict:
+The engines also register themselves with the workflow's registry
+(`workflow.contract.register_engine`), so `contract.make_engine(name,
+model)` returns them.
 
-    {"standing":    [str, ...],   # stable blocks in stable order (charter,
-                                  # role, style rules, exemplars, the essay)
-     "turns":       [dict, ...],  # the instance's earlier turns
-     "session_ref": str | None,   # what the last send left in session_ref
-     "manuscript":  str,          # manuscript name
-     "essay":       str,          # the essay's file name
-     "workspace":   str | None}   # optional; default AUTHORLM_WORKSPACE
+`instance_context` comes in either of two shapes (`Turn.of` reads both):
+
+- the workflow's (`workflow.context.instance_context`):
+  `{"instance": {"id", "file", "engine_state", ...}, "standing": [{"name",
+  "text", ...}, ...], "essay": <the essay's text>, "turns": [...]}`; the
+  session ref is read from `instance.engine_state["session_ref"]`, the
+  manuscript from the instance's row;
+- the plain one (`authorlm engine try`, tests): `{"standing": [str, ...],
+  "turns": [...], "session_ref": str | None, "manuscript": name, "essay":
+  file, "workspace": str | None}`.
 
 The reply is a dict, the same for every engine (11.9 Q8b, Q16): the
 reason, the proposed text and the suggested blurbs arrive as structured
@@ -35,13 +40,17 @@ engine was charged (None when the price is unknown, never guessed);
 `est_subscription` is a headless engine's API-list-price equivalent of the
 turn, the estimate of subscription drawdown (11.9 "Cost against quality").
 
-**The session ref is a speed-up, never the continuity** (Q5, Q7). Each
-engine's ref names the engine, its own session handle, a hash of the
-standing blocks and the number of turns it has seen. When any of those no
-longer matches the context it is given (another engine's ref, standing
-blocks changed, turns the session never saw), the engine rebuilds its
-conversation from `instance_context`: the standing part first, so a
-provider's prompt cache reads it back cheaply (11.3, 11.6).
+**The session ref is a speed-up, never the continuity** (Q5, Q7). A ref
+names the engine, its session handle, a hash of the standing blocks, a hash
+of the essay text and the number of turns the session has seen. A send:
+
+- **rebuilds** from the context when there is no ref, it is another
+  engine's, the standing blocks changed, or the record holds fewer turns
+  than the session saw: the standing part first (so a provider's prompt
+  cache reads it back), the essay, the earlier turns, the message;
+- otherwise **resumes**, sending first what the session has not seen: the
+  turns recorded since (accepts, rejects, edits made without a model call)
+  and the essay as it now stands if it changed, then the message.
 
 Terms:
 - **standing**: the blocks that do not change from turn to turn.
@@ -148,58 +157,134 @@ def protocol_text(catalogue_listing: str) -> str:
     return text.replace("{catalogue}", catalogue_listing)
 
 
-def standing_sha(standing: list[str]) -> str:
+def _sha(parts: list[str]) -> str:
     h = hashlib.sha256()
-    for block in standing:
-        h.update(block.encode("utf-8"))
+    for part in parts:
+        h.update(part.encode("utf-8"))
         h.update(b"\x00")
     return h.hexdigest()[:12]
 
 
+def standing_sha(standing: list[str]) -> str:
+    return _sha(list(standing))
+
+
+# ------------------------------------------------------------ the context
+
+@dataclass
+class Turn:
+    """One send's view of the instance context, whichever shape it came
+    in (see the module docstring)."""
+
+    standing: list[str]
+    essay_file: str
+    essay_text: str | None
+    turns: list[dict]
+    session_ref: str | None
+    manuscript: str | None
+    instance_id: str | None
+    workspace: str | None
+
+    @staticmethod
+    def of(context: dict) -> "Turn":
+        instance = context.get("instance")
+        standing = []
+        for block in context.get("standing") or []:
+            if isinstance(block, dict):
+                text = block.get("text") or ""
+                if text.strip():
+                    standing.append(f"## {block.get('name', 'block')}\n\n{text}")
+            elif str(block).strip():
+                standing.append(str(block))
+        if isinstance(instance, dict):
+            state = instance.get("engine_state") or {}
+            if isinstance(state, str):
+                try:
+                    state = json.loads(state)
+                except json.JSONDecodeError:
+                    state = {}
+            return Turn(standing, instance.get("file") or "", context.get("essay"),
+                        list(context.get("turns") or []),
+                        context.get("session_ref") or state.get("session_ref"),
+                        context.get("manuscript"), instance.get("id"),
+                        context.get("workspace"))
+        return Turn(standing, context.get("essay") or "", None,
+                    list(context.get("turns") or []), context.get("session_ref"),
+                    context.get("manuscript"), None, context.get("workspace"))
+
+    def essay_block(self) -> str | None:
+        if self.essay_text is None:
+            return None
+        return f"THE ESSAY BEING EDITED, {self.essay_file}, as it now stands:\n\n{self.essay_text}"
+
+    def essay_sha(self) -> str:
+        return _sha([self.essay_text or ""])
+
+
 @dataclass(frozen=True)
 class SessionRef:
-    """`<engine>:<handle>:<standing sha>:<turns seen>`, the opaque string
-    the caller persists. `turns` counts the turns the session holds after
-    the send that wrote it (the caller appends that turn)."""
+    """`<engine>:<handle>:<standing sha>:<essay sha>:<turns seen>`, the
+    opaque string the caller persists. `turns` counts the turns the
+    session holds after the send that wrote it (the caller records that
+    turn)."""
 
     engine: str
     handle: str
     sha: str
+    essay: str
     turns: int
 
     def __str__(self) -> str:
-        return f"{self.engine}:{self.handle}:{self.sha}:{self.turns}"
+        return f"{self.engine}:{self.handle}:{self.sha}:{self.essay}:{self.turns}"
 
     @staticmethod
     def parse(ref: str | None) -> "SessionRef | None":
         if not ref:
             return None
-        parts = ref.rsplit(":", 2)
-        if len(parts) != 3:
+        parts = ref.rsplit(":", 3)
+        if len(parts) != 4:
             return None
-        head, sha, turns = parts
+        head, sha, essay, turns = parts
         engine, _, handle = head.partition(":")
         if not engine or not handle or not turns.isdigit():
             return None
-        return SessionRef(engine, handle, sha, int(turns))
+        return SessionRef(engine, handle, sha, essay, int(turns))
 
-    def fits(self, engine: str, context: dict) -> bool:
-        """Whether this session can carry the next turn of `context`:
-        same engine, same standing blocks, and it has seen every turn."""
+    @staticmethod
+    def after(engine: str, handle: str, turn: Turn) -> "SessionRef":
+        return SessionRef(engine, handle, standing_sha(turn.standing),
+                          turn.essay_sha(), len(turn.turns) + 1)
+
+    def resumable(self, engine: str, turn: Turn) -> bool:
+        """Whether this session can carry the next turn: same engine, same
+        standing blocks, and the record holds every turn it saw."""
         return (self.engine == engine
-                and self.sha == standing_sha(context.get("standing") or [])
-                and self.turns == len(context.get("turns") or []))
+                and self.sha == standing_sha(turn.standing)
+                and self.turns <= len(turn.turns))
+
+    def catch_up(self, turn: Turn, message: str) -> str:
+        """The message for a resumed session: what it has not seen yet
+        (turns recorded since, the essay if it changed), then the message."""
+        parts = []
+        unseen = rebuild_transcript(turn.turns[self.turns:])
+        if unseen:
+            parts.append("TURNS RECORDED SINCE YOUR LAST REPLY:\n\n" + unseen)
+        if turn.essay_text is not None and self.essay != turn.essay_sha():
+            parts.append("THE ESSAY HAS CHANGED; IT NOW STANDS AS:\n\n" + turn.essay_text)
+        if not parts:
+            return message
+        parts.append("THIS TURN:\n\n" + message)
+        return "\n\n=====\n\n".join(parts)
 
 
 def turn_messages(turns: list[dict]) -> list[tuple[str, str]]:
     """The instance's earlier turns as (role, text) pairs, role "user"
     (the author's side) or "assistant" (the model's side).
 
-    Lenient about the turn's shape so the workflow's record can feed it
-    directly: a turn with `role` and `text`/`content`; or one carrying the
-    author's words (`message`, `author`, `words`) and the model's
-    `reply` (a dict with the reply keys, or a string). Any `decision`
-    (accept, reject, redo, edit) is said on the author's side."""
+    Reads the workflow's turn rows (`action`, `author_text`, `reply` as
+    text with `reason` and `proposed` beside it) as well as `{role, text}`
+    and `{message, reply: {...}, decision}`. The action (accept, reject,
+    redo, edit, reply) is said on the author's side."""
     out: list[tuple[str, str]] = []
     for turn in turns or []:
         if not isinstance(turn, dict):
@@ -213,16 +298,24 @@ def turn_messages(turns: list[dict]) -> list[tuple[str, str]]:
             side = "assistant" if role in ("assistant", "model", "engine") else "user"
             out.append((side, str(text)))
             continue
-        words = turn.get("message") or turn.get("author") or turn.get("words")
-        decision = turn.get("decision")
-        if decision:
-            words = f"[{decision}] {words or ''}".strip()
+        words = (turn.get("message") or turn.get("author_text") or turn.get("author")
+                 or turn.get("words") or "")
+        action = turn.get("decision") or turn.get("action")
+        blurbs = turn.get("blurbs") or []
+        if blurbs:
+            words = f"{words} (ticked: {', '.join(map(str, blurbs))})".strip()
+        if action:
+            label = turn.get("unit_label")
+            words = f"[{action}{' ' + label if label else ''}] {words}".strip()
         if words:
             out.append(("user", str(words)))
         reply = turn.get("reply")
-        if reply:
-            out.append(("assistant",
-                        _reply_text(reply) if isinstance(reply, dict) else str(reply)))
+        if isinstance(reply, dict):
+            out.append(("assistant", _reply_text(reply)))
+        elif reply or turn.get("proposed") or turn.get("reason"):
+            out.append(("assistant", _reply_text({
+                "text": reply or "", "reason": turn.get("reason") or "",
+                "proposed": turn.get("proposed") or None})))
     return out
 
 
@@ -232,13 +325,29 @@ def _reply_text(reply: dict) -> str:
 
 
 def rebuild_transcript(turns: list[dict]) -> str:
-    """Earlier turns as one block of text, for an engine that rebuilds a
-    lost session in a single message (claude-headless)."""
+    """Turns as one block of text, for a message that carries them."""
     lines = []
     for role, text in turn_messages(turns):
         who = "AUTHOR" if role == "user" else "YOU (earlier reply)"
         lines.append(f"--- {who}\n{text}")
     return "\n\n".join(lines)
+
+
+def manuscript_of(turn: Turn) -> tuple[str | None, str]:
+    """(workspace, manuscript name) for the turn's book: the context's own,
+    or the workflow instance's row."""
+    if turn.manuscript:
+        return turn.workspace, turn.manuscript
+    if not turn.instance_id:
+        raise EngineError("the instance context names no manuscript")
+    from .. import api
+
+    db = api.open_db(turn.workspace)
+    row = db.one("SELECT m.name FROM workflow_instances i JOIN manuscripts m "
+                 "ON m.id = i.manuscript_id WHERE i.id = ?", (turn.instance_id,))
+    if not row:
+        raise EngineError(f"no workflow instance '{turn.instance_id}'")
+    return turn.workspace, row["name"]
 
 
 class Engine:

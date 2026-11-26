@@ -10854,6 +10854,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_devedit)
 
+    from .workflow import cli as _workflow_cli
+    _workflow_cli.add_parser(sub, common)
+    # The engines fill the workflow's registry (workflow/contract.py) on
+    # import; the workflow never imports them itself.
+    from . import engines as _engines  # noqa: F401
+
     _add_register_parser(sub, common)
     _add_book_parser(sub, common)
     _add_engine_parser(sub, common)

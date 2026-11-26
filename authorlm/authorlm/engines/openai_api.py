@@ -36,8 +36,8 @@ from typing import Any
 
 from . import catalogue as cat
 from .base import (REPLY_SCHEMA, Engine, EngineError, NotConfigured,
-                   SessionRef, empty_usage, parse_reply, protocol_text,
-                   standing_sha, turn_messages)
+                   SessionRef, Turn, empty_usage, manuscript_of, parse_reply,
+                   protocol_text, turn_messages)
 
 MAX_ROUNDS = 8
 
@@ -82,46 +82,52 @@ class OpenAIEngine(Engine):
     def tools(self) -> list[dict]:
         return [{"type": "web_search"}] + [r.function_tool() for r in cat.CATALOGUE]
 
-    def first_input(self, context: dict, message: str) -> list[dict]:
+    def first_input(self, turn: Turn, message: str) -> list[dict]:
         """The rebuilt conversation, stable part first."""
         items = [{"role": "developer", "content": protocol_text(cat.listing())}]
-        for block in context.get("standing") or []:
+        for block in turn.standing:
             items.append({"role": "developer", "content": block})
-        for role, text in turn_messages(context.get("turns") or []):
+        essay = turn.essay_block()
+        if essay:
+            items.append({"role": "developer", "content": essay})
+        for role, text in turn_messages(turn.turns):
             items.append({"role": role, "content": text})
         items.append({"role": "user", "content": message})
         return items
 
-    def _reader(self, context: dict):
+    def _reader(self, turn: Turn):
         if self._reader_factory:
-            return self._reader_factory(context)
+            return self._reader_factory(turn)
         from .. import paths
 
-        return cat.BookReader(context.get("workspace"), context["manuscript"],
-                              config=_project_config(paths))
+        workspace, manuscript = manuscript_of(turn)
+        return cat.BookReader(workspace, manuscript, config=_project_config(paths))
 
     def send(self, instance_context: dict, message: str) -> dict:
-        ref = SessionRef.parse(instance_context.get("session_ref"))
-        previous = ref.handle if ref and ref.fits(self.name, instance_context) else None
+        turn = Turn.of(instance_context)
+        ref = SessionRef.parse(turn.session_ref)
+        resume = ref if ref and ref.resumable(self.name, turn) else None
         try:
-            return self._send(instance_context, message, previous)
+            return self._send(turn, message, resume)
         except EngineError:
             raise
         except Exception as err:  # noqa: BLE001 - one rebuild on a lost chain
-            if previous and "previous response" in str(err).lower().replace("_", " "):
-                return self._send(instance_context, message, None)
+            if resume and "previous response" in str(err).lower().replace("_", " "):
+                return self._send(turn, message, None)
             raise EngineError(f"openai-api: {type(err).__name__}: {err}") from err
 
-    def _send(self, context: dict, message: str, previous: str | None) -> dict:
+    def _send(self, turn: Turn, message: str, resume: SessionRef | None) -> dict:
         reader = None
         usage = empty_usage()
         usage["dollars"] = 0.0
         requests: list[dict] = []
-        if previous:
-            inputs: list[dict] = [{"role": "user", "content": message}]
+        previous = resume.handle if resume else None
+        if resume:
+            inputs: list[dict] = [{"role": "user",
+                                   "content": resume.catch_up(turn, message)}]
         else:
-            inputs = self.first_input(context, message)
-        cache_key = f"authorlm:{context.get('manuscript')}:{context.get('essay')}"[:64]
+            inputs = self.first_input(turn, message)
+        cache_key = f"authorlm:{turn.instance_id or turn.manuscript}:{turn.essay_file}"[:64]
         response = None
         for _round in range(MAX_ROUNDS + 1):
             kwargs = dict(model=self.model, input=inputs, tools=self.tools(),
@@ -149,7 +155,7 @@ class OpenAIEngine(Engine):
                 raise EngineError(f"openai-api: still asking for material after "
                                   f"{MAX_ROUNDS} rounds; stopped")
             if reader is None:
-                reader = self._reader(context)
+                reader = self._reader(turn)
             inputs = []
             for call in calls:
                 try:
@@ -167,9 +173,7 @@ class OpenAIEngine(Engine):
         parsed = parse_reply(_output_text(response))
         usage["dollars"] = self._pricer(self.model, usage["input"], usage["cached"],
                                         usage["output"])
-        self.session_ref = str(SessionRef(
-            self.name, str(previous), standing_sha(context.get("standing") or []),
-            len(context.get("turns") or []) + 1))
+        self.session_ref = str(SessionRef.after(self.name, str(previous), turn))
         return self._finish(parsed, usage, requests)
 
     @staticmethod

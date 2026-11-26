@@ -61,3 +61,20 @@ def get_engine(name: str, model: str | None) -> Engine:
     from .claude_headless import ClaudeHeadlessEngine
 
     return ClaudeHeadlessEngine(model)
+
+
+def register_with_workflow() -> list[str]:
+    """Fill the workflow's engine registry (`workflow.contract`), which the
+    workflow never fills itself: every name here, each made through
+    `get_engine` (so a not-built one says so when the instance uses it).
+    Returns the names registered; none when the workflow is absent."""
+    try:
+        from ..workflow import contract
+    except ImportError:
+        return []
+    for name in ENGINES:
+        contract.register_engine(name, lambda model, _n=name: get_engine(_n, model))
+    return list(ENGINES)
+
+
+register_with_workflow()

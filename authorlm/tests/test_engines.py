@@ -104,17 +104,73 @@ def check_parse_reply() -> None:
 
 
 def check_session_ref() -> None:
+    T = base.Turn.of
     ctx = {"standing": ["a", "b"], "turns": [{"role": "user", "text": "x"}]}
-    ref = base.SessionRef("openai-api", "resp_1:with:colons", base.standing_sha(["a", "b"]), 1)
+    ref = base.SessionRef("openai-api", "resp_1:with:colons", base.standing_sha(["a", "b"]),
+                          base.Turn.of(ctx).essay_sha(), 1)
     back = base.SessionRef.parse(str(ref))
     check("ref: round trip, handle may hold colons", back == ref, (str(ref), back))
-    check("ref: fits same engine, standing, turns", ref.fits("openai-api", ctx))
-    check("ref: another engine's ref does not fit", not ref.fits("claude-headless", ctx))
-    check("ref: changed standing does not fit",
-          not ref.fits("openai-api", {**ctx, "standing": ["a", "c"]}))
-    check("ref: turns it never saw do not fit",
-          not ref.fits("openai-api", {**ctx, "turns": ctx["turns"] * 2}))
+    check("ref: resumable on same engine, standing, turns", ref.resumable("openai-api", T(ctx)))
+    check("ref: another engine's ref is not", not ref.resumable("claude-headless", T(ctx)))
+    check("ref: changed standing is not",
+          not ref.resumable("openai-api", T({**ctx, "standing": ["a", "c"]})))
+    check("ref: fewer turns than it saw is not",
+          not ref.resumable("openai-api", T({**ctx, "turns": []})))
+    more = T({**ctx, "turns": ctx["turns"] + [{"action": "accept", "author_text": "",
+                                               "unit_label": "P2"}]})
+    check("ref: turns recorded since are resumable and caught up",
+          ref.resumable("openai-api", more)
+          and "[accept P2]" in ref.catch_up(more, "next") and
+          ref.catch_up(more, "next").endswith("next"), ref.catch_up(more, "next"))
+    check("ref: nothing unseen sends the message as is",
+          ref.catch_up(T(ctx), "next") == "next")
     check("ref: junk parses to None", base.SessionRef.parse("nonsense") is None)
+
+
+def check_workflow_context(ws: str) -> None:
+    """The workflow's own instance_context shape (workflow/context.py)."""
+    ctx = {"instance": {"id": "wi-1", "file": "one.md",
+                        "engine_state": {"session_ref": "claude-headless:s:x:y:0"}},
+           "standing": [{"name": "charter", "text": "CHARTER"},
+                        {"name": "filters", "text": ""},
+                        {"name": "style-rules", "text": "RULES"}],
+           "essay": "ESSAY TEXT",
+           "turns": [{"seq": 1, "action": "start", "author_text": "write the letter",
+                      "blurbs": [], "reply": "Here is the letter.", "reason": "",
+                      "proposed": "", "unit_label": ""},
+                     {"seq": 2, "action": "redo", "author_text": "shorter",
+                      "blurbs": ["too wordy"], "reply": "", "reason": "",
+                      "proposed": "", "unit_label": "P1"}]}
+    t = base.Turn.of(ctx)
+    check("workflow ctx: dict blocks rendered, empty ones skipped",
+          t.standing == ["## charter\n\nCHARTER", "## style-rules\n\nRULES"], t.standing)
+    check("workflow ctx: file from the instance, essay text beside it",
+          t.essay_file == "one.md" and t.essay_text == "ESSAY TEXT"
+          and "ESSAY TEXT" in t.essay_block())
+    check("workflow ctx: session ref from engine_state",
+          t.session_ref == "claude-headless:s:x:y:0")
+    msgs = base.turn_messages(t.turns)
+    check("workflow ctx: turn rows read (action, blurbs, reply)", msgs == [
+        ("user", "[start] write the letter"),
+        ("assistant", json.dumps({"text": "Here is the letter.", "reason": "",
+                                  "proposed": None})),
+        ("user", "[redo P1] shorter (ticked: too wordy)")], msgs)
+    try:
+        base.manuscript_of(t)
+        check("workflow ctx: an unknown instance id raises", False)
+    except Exception as err:  # noqa: BLE001
+        check("workflow ctx: an unknown instance id raises",
+              isinstance(err, base.EngineError), err)
+    from authorlm.workflow import contract
+
+    made = contract.make_engine("openai-api", "gpt-x")
+    check("workflow registry: the engines are registered",
+          isinstance(made, OpenAIEngine) and made.model == "gpt-x", made)
+    try:
+        contract.make_engine("codex-headless", "m")
+        check("workflow registry: a planned engine says not built", False)
+    except engines.NotBuilt:
+        check("workflow registry: a planned engine says not built", True)
 
 
 # ------------------------------------------------------------ the catalogue
@@ -369,6 +425,45 @@ def check_claude_headless(ws: str) -> None:
     check("headless: changed standing starts a rebuilt session",
           "--session-id" in calls[4]["argv"] and "FILTERS" in calls[4]["stdin"])
 
+    # The workflow's own context: manuscript from the instance row, the
+    # essay text beside the standing blocks, the ref from engine_state.
+    from authorlm import api
+    from authorlm.workflow import context as wf_context, core as wf_core
+
+    db = api.open_db(ws)
+    ms = dict(db.one("SELECT * FROM manuscripts WHERE name = 'Book'"))
+    inst = wf_core.start(db, ms, "one", "refine", engine="claude-headless", model="opus")
+    wctx = wf_context.instance_context(db, ms, inst)
+    wctx["workspace"] = ws
+    script.append((0, _stream("wf-session", reply), ""))
+    n = len(calls)
+    eng.send(wctx, "Write the letter.")
+    argv, stdin = calls[n]["argv"], calls[n]["stdin"]
+    mcp = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]["authorlm-read"]
+    check("headless/workflow: manuscript found from the instance row",
+          mcp["args"][-2:] == ["-m", "Book"], mcp["args"])
+    check("headless/workflow: the essay text is sent after the standing blocks",
+          "THE ESSAY BEING EDITED, one.md" in stdin and "The second cup" in stdin
+          and stdin.rstrip().endswith("Write the letter."), stdin[-400:])
+    # Next turn: the essay changed and an accept was recorded without a model.
+    wctx2 = {**wctx, "essay": wctx["essay"] + "\nA new last line.\n",
+             "turns": wctx["turns"] + [
+                 {"action": "start", "author_text": "Write the letter.", "blurbs": [],
+                  "reply": "t", "reason": "", "proposed": "", "unit_label": ""},
+                 {"action": "accept", "author_text": "", "blurbs": [], "reply": "",
+                  "reason": "", "proposed": "", "unit_label": "P1"}]}
+    wctx2["instance"] = {**wctx["instance"],
+                         "engine_state": {"session_ref": eng.session_ref}}
+    script.append((0, _stream("wf-session", reply), ""))
+    eng.send(wctx2, "Next unit.")
+    argv, stdin = calls[n + 1]["argv"], calls[n + 1]["stdin"]
+    check("headless/workflow: resumes from engine_state's ref",
+          argv[argv.index("--resume") + 1] == "wf-session")
+    check("headless/workflow: catches up the unseen accept and the changed essay",
+          "[accept P1]" in stdin and "A new last line." in stdin
+          and "Write the letter." not in stdin.split("TURNS RECORDED SINCE")[0]
+          and stdin.endswith("Next unit."), stdin)
+
     script.append((1, "", "boom"))
     try:
         eng.send({**ctx, "session_ref": None}, "x")
@@ -424,7 +519,7 @@ def check_openai(ws: str) -> None:
         return 0.0123
 
     eng = OpenAIEngine("gpt-test", client=SimpleNamespace(responses=fake),
-                       reader_factory=lambda ctx: cat.BookReader(ws, ctx["manuscript"],
+                       reader_factory=lambda turn: cat.BookReader(ws, turn.manuscript,
                                                                  refresh=False),
                        pricer=pricer)
     ctx = {"standing": ["CHARTER", "ESSAY one.md text"], "turns": [], "session_ref": None,
@@ -509,6 +604,7 @@ def main() -> int:
         ws, _ms = fixture(tmp)
         check_parse_reply()
         check_session_ref()
+        check_workflow_context(ws)
         check_catalogue(ws)
         check_cli(ws)
         check_get_engine()

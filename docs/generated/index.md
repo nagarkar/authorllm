@@ -676,6 +676,12 @@ The pronunciation workbench — a local page for settling how the book's hard wo
 
 Dependency-free local HTTP shell for the compiled pronunciation workbench.
 
+## `authorlm.workflow`
+
+`authorlm/authorlm/workflow/__init__.py`
+
+The per-essay editing workflow (design: docs/plans/filter-lens-consolidation.md §11.9 and §12 row 1).
+
 ## `authorlm.writing`
 
 `authorlm/authorlm/writing.py`
@@ -1713,6 +1719,12 @@ _No docstring._
 `authorlm/tests/test_verse_poem_level.py`
 
 `verse.poem_level` and `verse.heading_levels` decide where poems sit in a verse file and what the collect report warns about.
+
+## `tests.test_workflow`
+
+`authorlm/tests/test_workflow.py`
+
+The per-essay editing workflow's record (authorlm/workflow/): the step gates, carry-over between instances, engine and unit switches with their reasons, the turns recorded from an engine, blurbs, usage totals, the standing context's stable order, the protected register, no file special-cased, and the CLI.
 
 ## `tests.test_write_accept_idempotent`
 

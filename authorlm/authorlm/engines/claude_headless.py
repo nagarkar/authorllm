@@ -64,8 +64,8 @@ from typing import Callable
 
 from . import catalogue as cat
 from .base import (REPLY_SCHEMA, Engine, EngineError, NotConfigured,
-                   SessionRef, empty_usage, parse_reply, protocol_text,
-                   rebuild_transcript, standing_sha)
+                   SessionRef, Turn, empty_usage, manuscript_of, parse_reply,
+                   protocol_text, rebuild_transcript)
 
 MCP_NAME = "authorlm-read"
 MCP_PREFIX = f"mcp__{MCP_NAME}__"
@@ -147,10 +147,13 @@ class ClaudeHeadlessEngine(Engine):
         return argv
 
     @staticmethod
-    def first_message(context: dict, message: str) -> str:
+    def first_message(turn: Turn, message: str) -> str:
         parts = ["STANDING CONTEXT (stable for this workflow instance):"]
-        parts += list(context.get("standing") or [])
-        earlier = rebuild_transcript(context.get("turns") or [])
+        parts += list(turn.standing)
+        essay = turn.essay_block()
+        if essay:
+            parts.append(essay)
+        earlier = rebuild_transcript(turn.turns)
         if earlier:
             parts.append("EARLIER TURNS OF THIS INSTANCE (rebuilt from the record):\n\n"
                          + earlier)
@@ -165,30 +168,32 @@ class ClaudeHeadlessEngine(Engine):
     def send(self, instance_context: dict, message: str) -> dict:
         from .. import api
 
-        workspace = str(api.resolve_workspace(instance_context.get("workspace"))[0])
-        manuscript = instance_context["manuscript"]
+        turn = Turn.of(instance_context)
+        workspace, manuscript = manuscript_of(turn)
+        workspace = str(api.resolve_workspace(workspace)[0])
         cwd = self.workdir(workspace)
-        ref = SessionRef.parse(instance_context.get("session_ref"))
-        if ref and ref.fits(self.name, instance_context):
+        ref = SessionRef.parse(turn.session_ref)
+        if ref and ref.resumable(self.name, turn):
             argv = self.command(workspace=workspace, manuscript=manuscript,
                                 session_id=ref.handle, resume=True)
-            code, out, err = self._runner(argv, message, cwd, self.timeout)
+            code, out, err = self._runner(argv, ref.catch_up(turn, message), cwd,
+                                          self.timeout)
             result = _result_event(out)
             if code == 0 and result and not result.get("is_error"):
-                return self._reply(instance_context, ref.handle, out, result)
+                return self._reply(turn, ref.handle, out, result)
             # A lost or broken session: rebuild from the record below.
         session_id = str(uuid.uuid4())
         argv = self.command(workspace=workspace, manuscript=manuscript,
                             session_id=session_id, resume=False)
-        code, out, err = self._runner(argv, self.first_message(instance_context, message),
+        code, out, err = self._runner(argv, self.first_message(turn, message),
                                       cwd, self.timeout)
         result = _result_event(out)
         if result is None or code != 0 or result.get("is_error"):
             detail = (result or {}).get("result") or err.strip()[-500:] or f"exit {code}"
             raise EngineError(f"claude-headless: the turn failed: {detail}")
-        return self._reply(instance_context, session_id, out, result)
+        return self._reply(turn, session_id, out, result)
 
-    def _reply(self, context: dict, session_id: str, out: str, result: dict) -> dict:
+    def _reply(self, turn: Turn, session_id: str, out: str, result: dict) -> dict:
         raw = result.get("structured_output")
         if raw is None:
             raw = result.get("result")
@@ -200,10 +205,8 @@ class ClaudeHeadlessEngine(Engine):
         usage["output"] = u.get("output_tokens") or 0
         usage["dollars"] = 0.0
         usage["est_subscription"] = float(result.get("total_cost_usd") or 0.0)
-        self.session_ref = str(SessionRef(
-            self.name, result.get("session_id") or session_id,
-            standing_sha(context.get("standing") or []),
-            len(context.get("turns") or []) + 1))
+        self.session_ref = str(SessionRef.after(
+            self.name, result.get("session_id") or session_id, turn))
         return self._finish(parsed, usage, requests_from_stream(out))
 
 

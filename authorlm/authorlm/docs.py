@@ -101,6 +101,8 @@ NAME_COLUMNS = (
     ("concept_nodes", "introduced_in"),
     ("devedit_items", "file"),
     ("edit_events", "file"),
+    ("workflows", "file"),
+    ("workflow_instances", "file"),
 )
 _DEVEDIT_TABLES = ("devedit_items", "edit_events")
 
@@ -119,6 +121,10 @@ NAME_JSON_COLUMNS = (
     ("critique_passes", "pinned_versions"),
     ("guidance_history", "metadata"),     # file, target_file, dedupe_key
     ("manuscripts", "metadata"),          # gdocs links, by gdocs.rename_link
+    ("workflow_instances", "reference"),  # the workflow's three lists, and
+    ("workflow_instances", "voice"),      # the reading order at its start
+    ("workflow_instances", "aware"),
+    ("workflow_instances", "toc_order"),
 )
 
 # Recorded history: keeps the name it was recorded under.
@@ -694,6 +700,20 @@ def _carry_rows(db: Database, mid: str, old: str, new: str,
             moved("guidance_history", "metadata", db.conn.execute(
                 "UPDATE guidance_history SET metadata = ? WHERE id = ?",
                 (json.dumps(renamed), row["id"])))
+
+
+    # workflow_instances: JSON lists of essay files.
+    lists = ("reference", "voice", "aware", "toc_order")
+    for row in db.all(
+            "SELECT id, reference, voice, aware, toc_order FROM "
+            "workflow_instances WHERE manuscript_id = ?", (mid,)):
+        for column in lists:
+            value = loads(row[column], [])
+            if old in value and new not in value:
+                moved("workflow_instances", column, db.conn.execute(
+                    f"UPDATE workflow_instances SET {column} = ? WHERE id = ?",
+                    (json.dumps([new if v == old else v for v in value],
+                                ensure_ascii=False), row["id"])))
 
 
 def _carry_audio(root: Path, old: str, new: str, changes: DiskChanges,
