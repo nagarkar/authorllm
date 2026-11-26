@@ -11,7 +11,7 @@ A copy of the author's standing rules, kept in the repo so a cloud session can r
 - "Persistence" for the continuation of a locus's last act, never "echo", except inside a quotation from the book.
 - "Gradient" is always the gradient of a potential, or the derivative of a named total; never a loose slope.
 - A term the book lacks is marked "this series' term" at first use.
-- Citations to the book as (Metaphysic, page) or (Sermon One, page), never a bare number.
+- Citations to the book as (Which Nothing, page) or (Sermon One, page), never a bare number.
 
 ## Form
 

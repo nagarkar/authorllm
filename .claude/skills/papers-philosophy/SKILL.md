@@ -14,7 +14,7 @@ Everything in `papers/SKILL.md` applies. This file lists only the differences. I
 | **paper** | a journal paper in philosophy | all of the core's | the paper's tab, as for physics |
 | **commentary** | a chapter of the book itself (a recap, an essay) | B to G; no A, C2 or H | the chapter's own tab, as green forms (below) |
 
-A commentary is judged against two sources at once: the primary text it comments on (for a recap, the sermon) and the book's formal account (the Metaphysic). The primary text decides what the commentary may attribute to it; the formal account is binding as the book's position, so a referee may object to it, but the commentary is not at fault for agreeing with it.
+A commentary is judged against two sources at once: the primary text it comments on (for a recap, the sermon) and the book's formal account (the Appendix: Which Nothing, Measure and Experience, The Two Fields, Qualities, Persistence, The Logic of Choice). The primary text decides what the commentary may attribute to it; the formal account is binding as the book's position, so a referee may object to it, but the commentary is not at fault for agreeing with it.
 
 ## Stages the core leaves to the field
 

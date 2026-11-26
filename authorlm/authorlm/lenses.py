@@ -466,8 +466,8 @@ def _order(files: dict[str, str]) -> tuple[list[str], dict[str, dict],
 
 def _is_card(files: dict[str, str], matter: dict[str, str], name: str) -> bool:
     """A card is a chapter too short to be a chapter (a part opener, a
-    title page). Matter alone does not make one: the Metaphysic is back
-    matter and eleven thousand words, and a proportion judged against it
+    title page). Matter alone does not make one: an Appendix essay is back
+    matter and thousands of words, and a proportion judged against it
     is a real judgment. The reading order still shows the matter."""
     return _words(files.get(name, "")) < CARD_WORDS
 
