@@ -688,6 +688,12 @@ Dependency-free local HTTP shell for the compiled pronunciation workbench.
 
 The per-essay editing workflow (design: docs/plans/filter-lens-consolidation.md §11.9 and §12 row 1).
 
+## `authorlm.workflow_page`
+
+`authorlm/authorlm/workflow_page.py`
+
+The Workflows page: the per-essay editing workflow in the app.
+
 ## `authorlm.writing`
 
 `authorlm/authorlm/writing.py`
@@ -1743,6 +1749,12 @@ The per-essay editing workflow's record (authorlm/workflow/): the step gates, ca
 `authorlm/tests/test_workflow_library.py`
 
 The per-essay workflow's briefs as library files: `authorlm/library/workflow/`.
+
+## `tests.test_workflow_page`
+
+`authorlm/tests/test_workflow_page.py`
+
+The Workflows page (`workflow_page.dispatch`, `/api/workflow`): an essay's workflow driven from the app on a fake engine, step by step.
 
 ## `tests.test_write_accept_idempotent`
 
