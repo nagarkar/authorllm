@@ -778,6 +778,12 @@ Offline checks for tools/author_watch.py: the one watcher for the Dev edit and M
 
 Beat-by-beat repetition: the drafter is shown what earlier essays already say about the beat's concepts, the critic and the lint read only the book (never the files toc.toml declares outside), and a borrowed term set in italics once stays italic.
 
+## `tests.test_board_cell`
+
+`authorlm/tests/test_board_cell.py`
+
+`book._cell`, `waited_on` and `_start_command` are the one source of step state for the status board and the diagram.
+
 ## `tests.test_book_changes`
 
 `authorlm/tests/test_book_changes.py`
@@ -1354,6 +1360,12 @@ Pure helpers behind Veo clip generation: duration buckets, day spend, prompt com
 
 `loop.similarity` / `loop.near_duplicate` are the deterministic proposal firewall (Common Core §8.9 / loop invariant “never re-ask”).
 
+## `tests.test_next_hint_and_handover`
+
+`authorlm/tests/test_next_hint_and_handover.py`
+
+`changes._next_hint` is the land result's "what next" line; `book._handed_over` is the pack section that either withholds earlier results (independent reads) or pastes them in.
+
 ## `tests.test_normalize_fences`
 
 `authorlm/tests/test_normalize_fences.py`
@@ -1564,6 +1576,12 @@ The [Signature: uri] tag: plain text in the files, a signature block (image, aut
 
 `generation._silent` — the say-preview silence door (#304).
 
+## `tests.test_span_of_passage`
+
+`authorlm/tests/test_span_of_passage.py`
+
+`forms_page._span_of_passage` turns a whole-passage edit (prefix + span + suffix, as the Merge forms card shows) into the form's own words.
+
 ## `tests.test_split_tabbed_export`
 
 `authorlm/tests/test_split_tabbed_export.py`
@@ -1647,6 +1665,12 @@ Margin-thread reply law and Doc-export strike peel.
 `authorlm/tests/test_timestamp_seconds.py`
 
 `media.timestamp_seconds` turns a clip's `start:` / `end:` field into seconds for the end-after-start check and still-vs-video gate.
+
+## `tests.test_tiny_and_diff_sides`
+
+`authorlm/tests/test_tiny_and_diff_sides.py`
+
+`forms_page._tiny` decides when a short equal run between two word-diff changes is folded into them; `_diff_sides` builds the Conflict card's doc/local diffs from a three-way view.
 
 ## `tests.test_toc_ancestors`
 
