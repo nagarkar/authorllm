@@ -2913,6 +2913,114 @@ def _add_register_parser(sub, common) -> None:
     q.add_argument("entry", help="the entry: kind/key or its id")
 
 
+def cmd_engine(args):
+    """`authorlm engine`: the per-essay workflow's engines, by hand
+    (authorlm/authorlm/engines/). `try` sends one turn on an essay and
+    prints the structured reply and its usage; `read` serves one read
+    request as an engine would get it; `catalogue` lists the requests."""
+    from . import engines
+    from .engines import catalogue as cat
+
+    if args.action == "catalogue":
+        for r in cat.CATALOGUE:
+            print(f"{r.name}: {r.when}")
+            print(ui.dim(f"  {r.verb}"))
+        return
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    config = _load_config(args)
+    if args.action == "read":
+        reader = cat.BookReader(args.workspace, manuscript["name"], config=config,
+                                _db=db, _manuscript=manuscript)
+        params: dict = {}
+        for pair in args.arg or []:
+            key, sep, value = pair.partition("=")
+            if not sep:
+                sys.exit(f"error: --arg takes key=value, not '{pair}'")
+            params[key] = int(value) if value.isdigit() else value
+        text, entry = cat.run(reader, args.request, params)
+        print(text)
+        if entry["declined"]:
+            sys.exit(1)
+        return
+    # try: the essay must be in the book; its summaries are not refreshed
+    reader = cat.BookReader(args.workspace, manuscript["name"], config=config,
+                            _db=db, _manuscript=manuscript, refresh=False)
+    try:
+        file, text = reader.essay(args.essay)
+    except cat.Declined as err:
+        sys.exit(f"error: {err}")
+    try:
+        engine = engines.get_engine(args.name, args.model)
+    except (LookupError, engines.EngineError) as err:
+        sys.exit(f"error: {err}")
+    context = {"standing": [f"THE ESSAY BEING EDITED, {file}, as it now stands:\n\n{text}"],
+               "turns": [], "session_ref": args.session_ref,
+               "manuscript": manuscript["name"], "essay": file,
+               "workspace": args.workspace}
+    try:
+        reply = engine.send(context, args.message)
+    except engines.EngineError as err:
+        sys.exit(f"error: {err}")
+    if args.json:
+        print(json.dumps({**reply, "session_ref": engine.session_ref},
+                         ensure_ascii=False, indent=1))
+        return
+    print(ui.bold("text: ") + reply["text"])
+    print(ui.bold("reason: ") + (reply["reason"] or "(none)"))
+    print(ui.bold("proposed:"))
+    print(reply["proposed"] if reply["proposed"] is not None else "(none)")
+    print(ui.bold("suggested blurbs: ")
+          + (", ".join(reply["suggested_blurbs"]) or "(none)"))
+    for req in reply["requests"]:
+        status = f" DECLINED: {req['declined']}" if req["declined"] else ""
+        print(ui.dim(f"  request {req['name']} {json.dumps(req['args'])} "
+                     f"-> {req['chars']} chars{status}"))
+    u = reply["usage"]
+    dollars = "unknown" if u["dollars"] is None else f"${u['dollars']:.4f}"
+    print(ui.dim(f"usage: {reply['engine']} {reply['model']}: {u['input']} in, "
+                 f"{u['cached']} cached, {u['output']} out; billed {dollars}; "
+                 f"subscription est ${u['est_subscription']:.4f}"))
+    print(ui.dim(f"session_ref: {engine.session_ref}"))
+
+
+def _add_engine_parser(sub, common) -> None:
+    """`authorlm engine <verb>`: try, read, catalogue."""
+    p = sub.add_parser(
+        "engine",
+        help="the per-essay workflow's engines: send one turn by hand, serve "
+             "a read request, list the read catalogue")
+    verbs = p.add_subparsers(dest="action", required=True)
+    q = verbs.add_parser(
+        "try", parents=[common],
+        help="send one turn on an essay to an engine and print the "
+             "structured reply and its usage (claude-headless uses the "
+             "subscription; openai-api is billed)",
+        epilog='example: authorlm engine try openai-api --essay one.md '
+               '--message "Tighten the first paragraph."')
+    q.add_argument("name", help="engine: claude-headless, openai-api "
+                                "(claude-api, codex-headless: not built yet)")
+    q.add_argument("--model", help="model (default: [engines] in config.toml)")
+    q.add_argument("--essay", required=True, help="the essay's file name")
+    q.add_argument("--message", required=True, help="the turn's message")
+    q.add_argument("--session-ref", dest="session_ref",
+                   help="resume: the session_ref a previous try printed")
+    q.add_argument("--json", action="store_true", help="print the reply as JSON")
+    q.set_defaults(func=cmd_engine)
+    q = verbs.add_parser(
+        "read", parents=[common],
+        help="serve one read request from the catalogue, as an engine gets "
+             "it (outside the book: declined, exit 1)",
+        epilog="example: authorlm engine read essay_summaries --arg file=one.md")
+    q.add_argument("request", help="the request's name ('engine catalogue')")
+    q.add_argument("--arg", action="append", metavar="KEY=VALUE",
+                   help="a parameter, repeatable")
+    q.set_defaults(func=cmd_engine)
+    q = verbs.add_parser("catalogue", parents=[common],
+                         help="list the read requests every engine may make")
+    q.set_defaults(func=cmd_engine)
+
+
 def _add_book_parser(sub, common) -> None:
     """`authorlm book <verb>`: one leaf parser per verb."""
     p = sub.add_parser(
@@ -10827,9 +10935,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     from .workflow import cli as _workflow_cli
     _workflow_cli.add_parser(sub, common)
+    # The engines fill the workflow's registry (workflow/contract.py) on
+    # import; the workflow never imports them itself.
+    from . import engines as _engines  # noqa: F401
 
     _add_register_parser(sub, common)
     _add_book_parser(sub, common)
+    _add_engine_parser(sub, common)
 
     p = sub.add_parser(
         "prompts",
