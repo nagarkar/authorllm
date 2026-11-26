@@ -38,6 +38,15 @@ wrap-up ruled, lint run; anything else is a skip with one sentence.
 
 Skips take one sentence of reason; engine and unit switches take a reason
 mid-instance (Q6-Q9). Usage totals per instance, essay and month (Q7).
+
+Model turns (`MODEL_TURNS`, a redo or bracketed edit in `act`) run as
+background jobs when the page asks (`dispatch(background=True)`,
+workflow/jobs.py): the request returns at once, the page polls the
+instance and shows the job's elapsed time and read requests, and a failed
+or timed-out turn stays on the instance with its error and Retry.
+Recommend carries the book's essay summaries in its message
+(`book_summaries`), as stored; the start step says how many are stale and
+offers to bring them up to date first (`refresh_summaries`, a job too).
 """
 
 from __future__ import annotations
@@ -58,7 +67,8 @@ METHODS = ("overview", "instance", "start", "recommend", "rec", "list",
            "letter", "letter_reply", "finding", "accept_letter", "propose",
            "act", "reopen", "beat_done", "conclude", "wrapup", "principle",
            "filters", "lint", "skip", "advance", "engine", "unit", "blurbs",
-           "blurb_add", "blurb_hide", "usage", "estimate", "land", "leave")
+           "blurb_add", "blurb_hide", "usage", "estimate", "land", "leave",
+           "summaries", "job_dismiss")
 
 # The read-only methods: they write nothing (the page polls none of them).
 READ_ONLY = ("overview", "instance", "blurbs", "usage", "estimate")
@@ -883,7 +893,59 @@ def instance_view(db: Database, manuscript: dict, ref: str) -> dict:
     out["landing"] = landing.status(db, manuscript, inst)
     out["principles"] = [d for d in out["decisions"] if d["kind"] == "principle"]
     out["skipped"] = [d for d in out["decisions"] if d["kind"] == "skip"]
+    from .workflow import jobs
+    out["job"] = jobs.current(db, inst["id"])
+    out["failed_attempts"] = [j for j in jobs.jobs(db, inst["id"])
+                              if j["state"] in ("failed", "dismissed")]
+    if inst["step"] == "start":
+        out["summaries"] = summary_freshness(db, manuscript, inst)
     return out
+
+
+# ------------------------------------------------------------- summaries
+
+def summary_freshness(db: Database, manuscript: dict, inst: dict) -> dict:
+    """The book's essay summaries a Recommend reads: {total, stale: [file],
+    missing: [file]} over the reading order, the instance's own essay left
+    out. A turn serves them as stored (engines/catalogue.py says why); the
+    page offers to bring them up to date first (`refresh_summaries`)."""
+    from . import summaries as sums
+
+    rows = [r for r in sums.status(db, manuscript) if r["file"] != inst["file"]]
+    return {"total": len(rows),
+            "stale": [r["file"] for r in rows if r["state"] == "stale"],
+            "missing": [r["file"] for r in rows if r["state"] == "missing"]}
+
+
+def refresh_summaries(db: Database, manuscript: dict, inst: dict) -> dict:
+    """Bring every stale or missing essay summary of the book up to date
+    (`summaries.rebuild_one` per essay, its lower levels first; billed like
+    `authorlm summarize rebuild` on the [critique] / [summaries] models),
+    reporting each essay as it starts. Returns {rebuilt, failed}."""
+    from . import paths
+    from . import summaries as sums
+    from .engines import base
+    from .engines.openai_api import _project_config
+
+    fresh = summary_freshness(db, manuscript, inst)
+    todo = fresh["stale"] + fresh["missing"]
+    llms = sums.clients(_project_config(paths))
+    if not llms["essay"].enabled:
+        raise ValueError("the summary model is off ([llm] enabled = false)")
+    rebuilt, failed = [], []
+    for n, file in enumerate(todo, 1):
+        base.report_progress(done=n - 1, total=len(todo), last=file)
+        try:
+            sums.rebuild_one(db, manuscript, file, llms,
+                             echo=lambda *_a, **_k: None)
+            rebuilt.append(file)
+        except Exception as err:  # noqa: BLE001 — one essay never stops the rest
+            failed.append(f"{file}: {type(err).__name__}: {err}")
+    base.report_progress(done=len(todo), total=len(todo), last="")
+    if failed:
+        raise RuntimeError(f"{len(failed)} of {len(todo)} summaries not rebuilt: "
+                           + "; ".join(failed[:5]))
+    return {"rebuilt": rebuilt, "failed": failed}
 
 
 def _recommendations(turns: list[dict], inst: dict) -> dict:
@@ -1315,9 +1377,36 @@ def start_instance(db: Database, manuscript: dict, p: dict) -> dict:
     return {"id": inst["id"], "carry": inst.get("carry")}
 
 
+def book_summaries(db: Database, manuscript: dict, inst: dict,
+                   order: list[str]) -> str:
+    """The essay summary of every other essay of the book, as stored, in
+    reading order: what a Recommend needs, in the message itself, so the
+    turn makes no read request for them (a turn that asked for every
+    summary one by one, each rebuilt first, ran past its limit; see
+    engines/catalogue.py). A summary the essay moved past is marked."""
+    from . import summaries as sums
+
+    have = sums.all_summaries(db, manuscript["id"])
+    states = {r["file"]: r["state"] for r in sums.status(db, manuscript)}
+    lines = []
+    for file in order:
+        if file == inst["file"]:
+            continue
+        row = have.get(file)
+        state = states.get(file, "missing")
+        text = " ".join((row or {}).get("summary", "").split()) \
+            if state not in ("deprecated", "unwritten") else ""
+        mark = "" if state in ("fresh", "upstream_stale", "rewriting") else \
+            f" [{state}: the essay changed since; check its text before a finding rests on it]" \
+            if text else f" [{state}]"
+        lines.append(f"- {file}{mark}: {text or '(no summary)'}")
+    return "The essays of the book, with their summaries:\n" + "\n".join(lines)
+
+
 def recommend(db: Database, manuscript: dict, inst: dict) -> dict:
     """Ask the engine for list recommendations (Q3). On a later instance
-    it looks only at what changed since the last one."""
+    it looks only at what changed since the last one. The book's essay
+    summaries go in the message (`book_summaries`)."""
     if inst["step"] != "start":
         raise ValueError(f"recommendations are asked at the start step; the "
                          f"instance is at {inst['step']}")
@@ -1329,14 +1418,15 @@ def recommend(db: Database, manuscript: dict, inst: dict) -> dict:
               f"{', '.join(since['removed']) or 'none'}), and recommend "
               "additions or removals.")
              if inst.get("carried_from") else
-             "Read every summary (essay, section, paragraph); open an essay's "
-             "text only when its summary says it matters.")
+             "Recommend from the essay summaries below. Ask for an essay's "
+             "section summaries or text only where a summary leaves the "
+             "choice open, and for a few essays at most.")
     return _send(db, manuscript, inst, "start",
                  "Recommend essays for this essay's three lists: reference "
                  "(content binds; never imitated for style), voice (style), "
                  "aware (summaries; keep in mind). " + scope
-                 + f"\n\nThe lists now:\n{lists}\n\nThe essays of the book: "
-                 + ", ".join(e for e in order if e != inst["file"])
+                 + f"\n\nThe lists now:\n{lists}\n\n"
+                 + book_summaries(db, manuscript, inst, order)
                  + '\n\nPut in `text` only a JSON object: {"recommendations": '
                  '[{"list": "reference|voice|aware", "essay": "<file>", '
                  '"change": "add|remove", "reason": "<one sentence>"}]}.',
@@ -1394,10 +1484,35 @@ def _blurb_list(p: dict) -> list[str]:
     return [str(b) for b in raw]
 
 
+# The page methods that ask the engine for a turn (a redo, and an edit with
+# a bracket, in `act`). The page runs them as background jobs
+# (workflow/jobs.py); `summaries` (bring the book's summaries up to date
+# ahead of a turn) runs the same way.
+MODEL_TURNS = ("recommend", "letter", "letter_reply", "propose", "reopen", "wrapup")
+BACKGROUND = MODEL_TURNS + ("summaries",)
+
+
+def is_background(method: str, p: dict) -> bool:
+    if method in BACKGROUND:
+        return True
+    if method == "act":
+        action = p.get("action")
+        return action == "redo" or (action == "edit" and core.needs_model(
+            "edit", str(p.get("text") or "")))
+    return False
+
+
 def dispatch(method: str, params: dict[str, Any],
-             workspace: str | None = None) -> Any:
+             workspace: str | None = None, background: bool = False) -> Any:
     """The page's API (`/api/workflow`). Every method names the
-    manuscript; instance methods name the instance as `id`."""
+    manuscript; instance methods name the instance as `id`.
+
+    `background` (the page's server passes it): a model turn starts as a
+    job and the instance view comes back at once, with the job on it
+    (`job`); the page polls `instance` until the job ends. Without it (the
+    CLI, tests) the turn runs here and its result comes back."""
+    from .workflow import jobs
+
     if method not in METHODS:
         raise ValueError(f"unknown method '{method}'")
     _WORKSPACE.set(workspace)
@@ -1427,6 +1542,33 @@ def dispatch(method: str, params: dict[str, Any],
     inst = core.get_instance(db, manuscript, str(p.get("id") or ""))
     if method == "instance":
         return instance_view(db, manuscript, inst["id"])
+    if method == "job_dismiss":
+        jobs.dismiss(db, inst["id"], str(p.get("job") or ""))
+        return instance_view(db, manuscript, inst["id"])
+    run = jobs.running(db, inst["id"])
+    if run:
+        raise ValueError(jobs.busy_message(run))
+    if background and is_background(method, p):
+        name, inst_id = manuscript["name"], inst["id"]
+        kept = {k: v for k, v in p.items() if k not in ("manuscript", "id")}
+
+        def work(jdb: Database) -> None:
+            _WORKSPACE.set(workspace)
+            m = api.get_manuscript(jdb, name)
+            _apply(jdb, m, core.get_instance(jdb, m, inst_id), method, p)
+
+        jobs.start(workspace, inst_id, method, kept, work, api.open_db)
+        return instance_view(db, manuscript, inst_id)
+    out = _apply(db, manuscript, inst, method, p)
+    return out if out is not None else instance_view(db, manuscript, inst["id"])
+
+
+def _apply(db: Database, manuscript: dict, inst: dict, method: str,
+           p: dict[str, Any]) -> Any:
+    """One instance method; returns a result to send instead of the
+    instance view, or None."""
+    if method == "summaries":
+        return refresh_summaries(db, manuscript, inst)
     if method == "recommend":
         recommend(db, manuscript, inst)
     elif method == "rec":
@@ -1529,4 +1671,4 @@ def dispatch(method: str, params: dict[str, Any],
             raise ValueError("rule the open form before switching the unit")
         core.set_unit(db, inst, p.get("unit") or None, phase=p.get("phase") or None,
                       mode=p.get("mode") or None, reason=p.get("reason") or None)
-    return instance_view(db, manuscript, inst["id"])
+    return None

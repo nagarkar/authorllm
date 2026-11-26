@@ -46,6 +46,15 @@ starts a new session rebuilt from the instance context: protocol in the
 system prompt, then the standing blocks, the earlier turns and the message
 in one first message.
 
+**Running a turn** (`_run`): stdout is read as it streams, so each read
+request reaches the progress hook (`base.report_progress`; the Workflows
+page shows "5 read requests so far"); past `[engines] turn_timeout_seconds`
+(default 900) the child is killed and `TurnTimeout` says how far it got.
+A timeout is never retried as a fresh session (that would double the
+wait). The read server serves summaries as stored unless `[engines]
+refresh_summaries` (catalogue.py says why: the live 900 s Recommend of
+2026-11-26 spent the turn rebuilding summaries one request at a time).
+
 Usage: Claude Code reports tokens and `total_cost_usd`, the API list-price
 equivalent of the turn; that is `est_subscription`. `dollars` is 0: the
 subscription is not billed per call.
@@ -58,14 +67,16 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Callable
 
 from . import catalogue as cat
-from .base import (REPLY_SCHEMA, Engine, EngineError, NotConfigured,
-                   SessionRef, Turn, empty_usage, manuscript_of, parse_reply,
-                   protocol_text, rebuild_transcript)
+from .base import (REPLY_SCHEMA, TIMEOUT_KEY, Engine, EngineError,
+                   NotConfigured, SessionRef, Turn, TurnTimeout, empty_usage,
+                   manuscript_of, parse_reply, protocol_text,
+                   rebuild_transcript, report_progress, turn_timeout)
 
 MCP_NAME = "authorlm-read"
 MCP_PREFIX = f"mcp__{MCP_NAME}__"
@@ -110,22 +121,96 @@ def child_env(environ: dict | None = None) -> dict:
             if not k.startswith(AUTH_PREFIX) and k not in AUTH_SWITCHES}
 
 
+class StreamWatch:
+    """Reads the stream-json events as they come and reports each read
+    request to the running turn's progress hook (`base.report_progress`):
+    {requests: n, last: name}."""
+
+    def __init__(self) -> None:
+        self.requests = 0
+        self.last = ""
+
+    def line(self, line: str) -> None:
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            return
+        if not isinstance(event, dict) or event.get("type") != "assistant":
+            return
+        for block in (event.get("message") or {}).get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name") or ""
+                self.requests += 1
+                self.last = name[len(MCP_PREFIX):] if name.startswith(MCP_PREFIX) else name
+                report_progress(requests=self.requests, last=self.last)
+
+
 def _run(argv: list[str], stdin: str, cwd: Path, timeout: float,
          env: dict) -> tuple[int, str, str]:
-    proc = subprocess.run(argv, input=stdin, capture_output=True, text=True,
-                          cwd=str(cwd), timeout=timeout, env=env)
-    return proc.returncode, proc.stdout, proc.stderr
+    """Run one turn, reading stdout as it streams (so progress shows while
+    it runs); past `timeout` seconds the child is killed and TurnTimeout
+    says how far it got."""
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, cwd=str(cwd),
+                            env=env)
+    err_parts: list[str] = []
+
+    def feed() -> None:
+        try:
+            proc.stdin.write(stdin)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+
+    def drain() -> None:
+        err_parts.append(proc.stderr.read())
+
+    timed_out = threading.Event()
+
+    def kill() -> None:
+        timed_out.set()
+        proc.kill()
+
+    threads = [threading.Thread(target=feed, daemon=True),
+               threading.Thread(target=drain, daemon=True)]
+    for t in threads:
+        t.start()
+    timer = threading.Timer(timeout, kill)
+    timer.daemon = True
+    timer.start()
+    watch = StreamWatch()
+    out: list[str] = []
+    try:
+        for line in proc.stdout:
+            out.append(line)
+            watch.line(line)
+        proc.wait()
+    finally:
+        timer.cancel()
+    for t in threads:
+        t.join(timeout=5)
+    if timed_out.is_set():
+        raise TurnTimeout(
+            f"claude-headless: the turn ran past {timeout:.0f} s and was stopped "
+            f"([engines] {TIMEOUT_KEY} in authorlm/config.toml); "
+            f"{watch.requests} read request(s) made"
+            + (f", the last {watch.last}" if watch.last else ""))
+    return proc.returncode, "".join(out), "".join(err_parts)
 
 
-def mcp_config(workspace: str, manuscript: str) -> dict:
+def mcp_config(workspace: str, manuscript: str, refresh: bool = False) -> dict:
+    """The read server for one turn; `refresh` passes `--refresh`
+    (`catalogue.refresh_in_turns`: stale summaries rebuilt before they are
+    served; off by default)."""
     package_root = str(Path(__file__).resolve().parents[2])
     env = {"PYTHONPATH": package_root}
     if os.environ.get("AUTHORLM_CONFIG"):
         env["AUTHORLM_CONFIG"] = os.environ["AUTHORLM_CONFIG"]
+    args = ["-m", "authorlm.engines.mcp_read", "-w", workspace, "-m", manuscript]
+    if refresh:
+        args.append("--refresh")
     return {"mcpServers": {MCP_NAME: {
-        "command": sys.executable,
-        "args": ["-m", "authorlm.engines.mcp_read", "-w", workspace, "-m", manuscript],
-        "env": env}}}
+        "command": sys.executable, "args": args, "env": env}}}
 
 
 # Claude Code's installer puts `claude` here. A launch agent's PATH need not
@@ -190,11 +275,26 @@ class ClaudeHeadlessEngine(Engine):
     name = "claude-headless"
 
     def __init__(self, model: str, *, runner: Runner | None = None,
-                 binary: str | None = None, timeout: float = 900.0):
+                 binary: str | None = None, timeout: float | None = None,
+                 refresh: bool | None = None):
         super().__init__(model)
         self._runner = runner or _run
         self._binary = binary
-        self.timeout = timeout
+        self._timeout = timeout
+        self._refresh = refresh
+
+    @property
+    def timeout(self) -> float:
+        """Seconds a turn may run (`base.turn_timeout`)."""
+        return self._timeout if self._timeout is not None else turn_timeout()
+
+    @property
+    def refresh(self) -> bool:
+        if self._refresh is None:
+            from . import _config
+
+            self._refresh = cat.refresh_in_turns(_config())
+        return self._refresh
 
     @property
     def binary(self) -> str:
@@ -217,7 +317,8 @@ class ClaudeHeadlessEngine(Engine):
                 "--append-system-prompt", protocol_text(cat.listing()),
                 "--restricted",
                 "--tools", BUILTIN_TOOLS,
-                "--mcp-config", json.dumps(mcp_config(workspace, manuscript)),
+                "--mcp-config", json.dumps(mcp_config(workspace, manuscript,
+                                                      self.refresh)),
                 "--strict-mcp-config",
                 "--permission-mode", "dontAsk",
                 "--permission-prompts", "none",
@@ -261,7 +362,8 @@ class ClaudeHeadlessEngine(Engine):
             result = _result_event(out)
             if code == 0 and result and not result.get("is_error"):
                 return self._reply(turn, ref.handle, out, result)
-            # A lost or broken session: rebuild from the record below.
+            # A lost or broken session: rebuild from the record below. A
+            # timeout is not that: _run raises TurnTimeout, which goes up.
         session_id = str(uuid.uuid4())
         argv = self.command(workspace=workspace, manuscript=manuscript,
                             session_id=session_id, resume=False)

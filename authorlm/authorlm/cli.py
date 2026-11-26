@@ -2971,7 +2971,8 @@ def cmd_engine(args):
     config = _load_config(args)
     if args.action == "read":
         reader = cat.BookReader(args.workspace, manuscript["name"], config=config,
-                                _db=db, _manuscript=manuscript)
+                                _db=db, _manuscript=manuscript,
+                                refresh=cat.refresh_in_turns(config))
         params: dict = {}
         for pair in args.arg or []:
             key, sep, value = pair.partition("=")

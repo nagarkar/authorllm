@@ -810,6 +810,25 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
     detail TEXT NOT NULL DEFAULT '{{}}'    -- JSON: from, to, list, essay, ...
 );
 
+-- A model turn the Workflows page runs in the background (workflow/jobs.py):
+-- one row per attempt. A failed attempt stays, with its error, so the page
+-- can show it with Retry; a turn that succeeded is on session_turns.
+CREATE TABLE IF NOT EXISTS workflow_jobs (
+    {KNOWLEDGE_OBJECT_COLUMNS},
+    instance_id TEXT NOT NULL,
+    method TEXT NOT NULL,         -- the page method: recommend, letter, ...
+    params TEXT NOT NULL DEFAULT '{{}}',   -- JSON: what Retry sends again
+    state TEXT NOT NULL,          -- running | done | failed | dismissed
+    error TEXT NOT NULL DEFAULT '',
+    progress TEXT NOT NULL DEFAULT '{{}}', -- JSON: requests so far, last, ...
+    owner TEXT NOT NULL DEFAULT '',        -- "<pid>:<token>" of the server
+                                  -- process running it
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_jobs_instance
+    ON workflow_jobs (instance_id, started_at);
+
 -- Short reasons ticked on a redo (Q8b, Q11): one list per manuscript, most
 -- recently used first; a blurb can be hidden, never deleted.
 CREATE TABLE IF NOT EXISTS blurbs (

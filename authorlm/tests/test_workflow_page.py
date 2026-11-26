@@ -129,8 +129,16 @@ class FakeEngine:
         self.session_ref: str | None = None
         self.letter = LETTER
 
+    gate: threading.Event | None = None
+    fail: str | None = None
+
     def send(self, instance_context: dict, message: str) -> dict:
         from authorlm.engines import base
+        base.report_progress(requests=1, last="essay_summaries")
+        if self.gate is not None:
+            self.gate.wait(10)
+        if self.fail:
+            raise base.EngineError(self.fail)
         self.sent.append(message)
         self.contexts.append(instance_context)
         # What a real engine does to find its book (engines.base.manuscript_of).
@@ -688,6 +696,127 @@ def test_estimate() -> None:
         e = call(ws, "estimate", engine="openai-api", model="no-such-model-zz", essay="one")
         check("an unknown price is said, never guessed",
               e["total"] is None and "no price" in e["why"], e)
+
+
+def test_background_turns() -> None:
+    """The page's model turns run as jobs (workflow/jobs.py): the request
+    returns at once with the job running and its progress; the instance
+    is held while it runs; a failed turn is kept as an attempt with its
+    error, shown until retried or dismissed; an orphan is reaped."""
+    from authorlm import api
+    from authorlm.db import ko_fields, now_iso
+    from authorlm.workflow import jobs
+
+    def settle(ws, iid):
+        """Wait for the instance's latest job (it may end before the
+        request's own view is built)."""
+        last = jobs.jobs(api.open_db(ws), iid)[-1]
+        jobs.wait(last["id"], 10)
+
+    def bg(ws, method, **params):
+        return workflow_page.dispatch(method, {"manuscript": "MS", **params},
+                                      workspace=ws, background=True)
+
+    with world() as (ws, _root):
+        iid = call(ws, "start", essay="one", kind="refine")["id"]
+        sent = len(FAKE.sent)
+        FAKE.gate = threading.Event()
+        try:
+            v = bg(ws, "recommend", id=iid)
+            job = v["job"]
+            check("the request returns at once with the job running",
+                  job and job["state"] == "running" and job["method"] == "recommend"
+                  and not v["recommendations"]["asked"], job)
+            raises(lambda: bg(ws, "list", id=iid, list="aware", essay="two",
+                              change="add"), "running on this instance")
+            raises(lambda: bg(ws, "recommend", id=iid), "running on this instance")
+            v = call(ws, "instance", id=iid)
+            check("a reload sees the running job and its progress",
+                  v["job"]["state"] == "running"
+                  and v["job"]["progress"].get("requests") == 1, v["job"])
+        finally:
+            FAKE.gate.set()
+            FAKE.gate = None
+        jobs.wait(job["id"], 10)
+        v = call(ws, "instance", id=iid)
+        check("a finished job leaves the turn recorded and no job shown",
+              v["job"] is None and v["recommendations"]["asked"]
+              and len(FAKE.sent) == sent + 1, v["job"])
+        msg = FAKE.sent[-1]
+        check("Recommend carries the book's essay summaries in the message",
+              "The essays of the book, with their summaries:" in msg
+              and "- preface.md" in msg and "- one.md" not in msg
+              and "Read every summary" not in msg, msg[-600:])
+        check("the start step shows how many summaries are stale or missing",
+              v["summaries"]["total"] == 2 and set(v["summaries"]["missing"])
+              == {"preface.md", "two.md"}, v["summaries"])
+
+        FAKE.fail = "claude-headless: the turn ran past 900 s and was stopped"
+        try:
+            v = bg(ws, "recommend", id=iid)
+            settle(ws, iid)
+        finally:
+            FAKE.fail = None
+        v = call(ws, "instance", id=iid)
+        check("a failed turn is kept with its error, nothing recorded",
+              v["job"]["state"] == "failed" and "ran past 900 s" in v["job"]["error"]
+              and len(FAKE.sent) == sent + 1
+              and v["job"]["params"] == {}, v["job"])
+        check("the failed attempt is listed on the instance",
+              len(v["failed_attempts"]) == 1)
+        failed_id = v["job"]["id"]
+        v = bg(ws, v["job"]["method"], id=iid, **v["job"]["params"])
+        settle(ws, iid)
+        v = call(ws, "instance", id=iid)
+        check("Retry runs it again; the retried turn is recorded",
+              v["job"] is None and len(FAKE.sent) == sent + 2, v["job"])
+        check("the failed attempt stays in the record",
+              [j["id"] for j in v["failed_attempts"]] == [failed_id])
+
+        FAKE.fail = "boom"
+        try:
+            v = bg(ws, "recommend", id=iid)
+            settle(ws, iid)
+        finally:
+            FAKE.fail = None
+        v = call(ws, "job_dismiss", id=iid, job=call(ws, "instance", id=iid)["job"]["id"])
+        check("Dismiss hides a failed attempt", v["job"] is None
+              and len(v["failed_attempts"]) == 2)
+
+        db = api.open_db(ws)
+        db.insert("workflow_jobs", {**ko_fields("wj"), "instance_id": iid,
+                                    "method": "letter", "params": "{}",
+                                    "state": "running", "error": "", "progress": "{}",
+                                    "owner": "999999999:dead", "started_at": now_iso(),
+                                    "finished_at": None})
+        v = call(ws, "instance", id=iid)
+        check("a job whose server is gone is marked interrupted",
+              v["job"]["state"] == "failed" and "interrupted" in v["job"]["error"],
+              v["job"])
+
+        v = bg(ws, "list", id=iid, list="aware", essay="two", change="add")
+        check("a method with no model call still answers at once, in the request",
+              v["instance"]["aware"] == ["two.md"])
+        from types import SimpleNamespace
+        from authorlm import summaries as sums
+        saved = sums.rebuild_one, sums.clients
+        built: list[str] = []
+        sums.clients = lambda config: {k: SimpleNamespace(enabled=True)
+                                       for k in ("paragraph", "section", "essay")}
+        sums.rebuild_one = lambda db, m, file, llms, echo=None: built.append(file)
+        try:
+            bg(ws, "summaries", id=iid)
+            settle(ws, iid)
+        finally:
+            sums.rebuild_one, sums.clients = saved
+        last = jobs.jobs(api.open_db(ws), iid)[-1]
+        check("Bring summaries up to date: each stale or missing essay, as a job",
+              last["method"] == "summaries" and last["state"] == "done"
+              and sorted(built) == ["preface.md", "two.md"]
+              and last["progress"] == {"done": 2, "total": 2, "last": ""}, last)
+        check("act: a redo is a model turn; accept is not",
+              workflow_page.is_background("act", {"action": "redo"})
+              and not workflow_page.is_background("act", {"action": "accept"}))
 
 
 def test_http_route() -> None:

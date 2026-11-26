@@ -245,10 +245,12 @@ def make_handler(workspace: str | None, manuscript: str | None):
                 elif self.path == "/api/workflow":
                     # Workflows: the per-essay editing workflow, one
                     # instance at a time (workflow_page.py); model turns go
-                    # through the engine contract.
+                    # through the engine contract, as background jobs
+                    # (workflow/jobs.py), so this request returns at once.
                     from . import workflow_page
                     result = workflow_page.dispatch(body.get("method", ""), params,
-                                                    workspace=workspace)
+                                                    workspace=workspace,
+                                                    background=True)
                 else:
                     result = audiobook.dispatch(body.get("method", ""), params,
                                                 workspace=workspace)

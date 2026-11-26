@@ -670,6 +670,100 @@ def check_find_binary(tmp: Path) -> None:
           and "claude_binary" in bad["fix"], bad)
 
 
+FAKE_CLAUDE = r'''#!{python}
+import json, sys, time
+sys.stdin.read()
+def say(e):
+    print(json.dumps(e), flush=True)
+say({{"type": "system", "subtype": "init", "session_id": "s"}})
+for i in range(2):
+    say({{"type": "assistant", "message": {{"content": [{{"type": "tool_use", "id": f"t{{i}}",
+        "name": "mcp__authorlm-read__essay_summaries", "input": {{"file": "one.md"}}}}]}}}})
+time.sleep({sleep})
+say({{"type": "result", "subtype": "success", "is_error": False, "session_id": "s",
+     "structured_output": {{"text": "done", "reason": "", "proposed": None,
+                           "suggested_blurbs": []}}, "total_cost_usd": 0, "usage": {{}}}})
+'''
+
+
+def check_turn_run_and_timeout(tmp: Path) -> None:
+    """The real runner streams: each read request reaches the progress
+    hook while the turn runs; past the timeout the child is killed and
+    TurnTimeout says how far it got (the live failure of 2026-11-26 was a
+    900 s turn lost with nothing said)."""
+    from authorlm.engines import claude_headless as ch
+
+    fast, slow = tmp / "claude-fast", tmp / "claude-slow"
+    for path, sleep in ((fast, 0), (slow, 30)):
+        path.write_text(FAKE_CLAUDE.format(python=sys.executable, sleep=sleep))
+        path.chmod(0o755)
+    seen: list[dict] = []
+    base.set_progress(lambda info: seen.append(dict(info)))
+    try:
+        code, out, _err = ch._run([str(fast)], "message", tmp, 30, dict(os.environ))
+        check("run: the turn's stream comes back whole",
+              code == 0 and ch._result_event(out)["structured_output"]["text"] == "done",
+              out[-300:])
+        check("run: each read request reported as it is made",
+              [s["requests"] for s in seen] == [1, 2]
+              and seen[-1]["last"] == "essay_summaries", seen)
+        seen.clear()
+        import time as _t
+        started = _t.monotonic()
+        try:
+            ch._run([str(slow)], "message", tmp, 1.5, dict(os.environ))
+            raised = None
+        except base.TurnTimeout as err:
+            raised = str(err)
+        check("run: past the timeout the turn is stopped with TurnTimeout",
+              raised is not None and "2 read request(s)" in raised
+              and "turn_timeout_seconds" in raised
+              and _t.monotonic() - started < 10, raised)
+    finally:
+        base.set_progress(None)
+    eng = ClaudeHeadlessEngine("opus", binary=str(slow), timeout=1.0, refresh=False)
+    ctx = {"standing": [], "turns": [], "session_ref": None, "manuscript": "Book",
+           "essay": "one.md", "workspace": str(tmp)}
+    try:
+        eng.send(ctx, "x")
+        got = None
+    except base.TurnTimeout as err:
+        got = err
+    check("headless: a timed-out turn raises, never retried", isinstance(got, base.TurnTimeout), got)
+    check("timeout: [engines] turn_timeout_seconds, default 900",
+          base.turn_timeout({"engines": {"turn_timeout_seconds": 120}}) == 120
+          and base.turn_timeout({}) == 900 and base.turn_timeout(
+              {"engines": {"turn_timeout_seconds": "junk"}}) == 900)
+
+
+def check_summaries_as_stored(ws: str) -> None:
+    """A turn's essay_summaries serves the stored summary: no rebuild (a
+    rebuild per request ran the live Recommend past its limit)."""
+    check("refresh: off unless [engines] refresh_summaries",
+          not cat.refresh_in_turns({}) and cat.refresh_in_turns(
+              {"engines": {"refresh_summaries": True}}))
+    rebuilt: list = []
+    reader = cat.BookReader(ws, "Book", config={}, refresh=False)
+    from authorlm import summaries as sums
+    saved = sums.rebuild_one, sums.ensure
+    sums.rebuild_one = lambda *a, **k: rebuilt.append(a)
+    sums.ensure = lambda *a, **k: rebuilt.append(a)
+    try:
+        text, entry = cat.run(reader, "essay_summaries", {"file": "one.md", "level": "section"})
+    finally:
+        sums.rebuild_one, sums.ensure = saved
+    check("refresh off: nothing rebuilt, the stored state said",
+          not rebuilt and entry["declined"] is None and "served as stored" in text, text)
+    eng = ClaudeHeadlessEngine("opus", binary="/bin/claude-fake", refresh=False)
+    argv = eng.command(workspace=ws, manuscript="Book", session_id="s", resume=False)
+    args = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]["authorlm-read"]["args"]
+    check("headless: the read server gets no --refresh by default", "--refresh" not in args, args)
+    eng = ClaudeHeadlessEngine("opus", binary="/bin/claude-fake", refresh=True)
+    argv = eng.command(workspace=ws, manuscript="Book", session_id="s", resume=False)
+    args = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]["authorlm-read"]["args"]
+    check("headless: refresh_summaries = true passes --refresh", "--refresh" in args, args)
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp())
     try:
@@ -683,6 +777,8 @@ def main() -> int:
         check_claude_headless(ws)
         check_find_binary(tmp)
         check_openai(ws)
+        check_turn_run_and_timeout(tmp)
+        check_summaries_as_stored(ws)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILS:

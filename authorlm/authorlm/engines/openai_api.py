@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 from . import catalogue as cat
 from .base import (REPLY_SCHEMA, Engine, EngineError, NotConfigured,
                    SessionRef, Turn, empty_usage, manuscript_of, parse_reply,
-                   protocol_text, turn_messages)
+                   TurnTimeout, protocol_text, report_progress,
+                   turn_messages, turn_timeout)
 
 MAX_ROUNDS = 8
 
@@ -76,7 +78,7 @@ class OpenAIEngine(Engine):
                 raise NotConfigured("OPENAI_API_KEY is not set (authorlm/.env)")
             import openai
 
-            self._client = openai.OpenAI()
+            self._client = openai.OpenAI(timeout=turn_timeout())
         return self._client
 
     def tools(self) -> list[dict]:
@@ -101,7 +103,9 @@ class OpenAIEngine(Engine):
         from .. import paths
 
         workspace, manuscript = manuscript_of(turn)
-        return cat.BookReader(workspace, manuscript, config=_project_config(paths))
+        config = _project_config(paths)
+        return cat.BookReader(workspace, manuscript, config=config,
+                              refresh=cat.refresh_in_turns(config))
 
     def send(self, instance_context: dict, message: str) -> dict:
         turn = Turn.of(instance_context)
@@ -129,7 +133,13 @@ class OpenAIEngine(Engine):
             inputs = self.first_input(turn, message)
         cache_key = f"authorlm:{turn.instance_id or turn.manuscript}:{turn.essay_file}"[:64]
         response = None
+        limit = turn_timeout()
+        deadline = time.monotonic() + limit
         for _round in range(MAX_ROUNDS + 1):
+            if time.monotonic() > deadline:
+                raise TurnTimeout(f"openai-api: the turn ran past {limit:.0f} s "
+                                  f"([engines] turn_timeout_seconds); "
+                                  f"{len(requests)} read request(s) made")
             kwargs = dict(model=self.model, input=inputs, tools=self.tools(),
                           text={"format": {"type": "json_schema", "name": "editor_reply",
                                            "schema": REPLY_SCHEMA, "strict": True}},
@@ -164,6 +174,7 @@ class OpenAIEngine(Engine):
                     args = {}
                 text, entry = cat.run(reader, _get(call, "name"), args)
                 requests.append(entry)
+                report_progress(requests=len(requests), last=entry.get("name", ""))
                 inputs.append({"type": "function_call_output",
                                "call_id": _get(call, "call_id"), "output": text})
         status = _get(response, "status")
