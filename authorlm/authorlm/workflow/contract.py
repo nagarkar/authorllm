@@ -10,7 +10,13 @@ text, the form; "" when nothing is proposed), `suggested_blurbs` (short
 reject reasons for the redo checklist, Q8b), `usage` (input, cached,
 output, dollars, est_subscription; Q7 "cost against quality") and
 `requests` (what the model asked for through the read catalogue, each
-`{name, args, chars}`, Q20).
+`{name, args, chars}`, Q20). `usage.dollars` is None when the engine does
+not know what the turn cost (absent counts as unknown); it is never turned
+into $0.
+
+After a send, an engine may expose `session_ref`, the handle its next send
+resumes from; `core.send_turn` stores it in the instance's
+`engine_state["session_ref"]`, in the same transaction as the turn.
 
 `instance_context` is built by `workflow.context.instance_context`: the
 standing blocks first, in a stable order so an engine can cache them, then
@@ -71,7 +77,10 @@ def normalize_reply(reply: Any) -> dict:
     if not all(isinstance(b, str) for b in out["suggested_blurbs"]):
         raise ValueError("engine reply: suggested_blurbs must be text")
     usage = {k: out["usage"].get(k) or 0 for k in USAGE_KEYS}
+    usage["dollars"] = out["usage"].get("dollars")  # None: cost unknown
     for key, value in usage.items():
+        if key == "dollars" and value is None:
+            continue
         if not isinstance(value, (int, float)):
             raise ValueError(f"engine reply: usage.{key} must be a number")
     out["usage"] = usage
