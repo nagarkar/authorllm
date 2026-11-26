@@ -68,7 +68,14 @@ interface View {
   principles: Decision[]; skipped: Decision[];
   unplaced?: { label: string; kind: string; text: string }[]; lint?: LintRun | null;
   turns: { seq: number; step: string; unit_label: string; action: string; reason: string }[];
+  landing: Landing; landed?: LandResult | null;
 }
+interface LandUnit { step: string; stretch: number; label: string; original: string; new: string; reason: string; status?: string; }
+interface Landing {
+  landed: number; waiting: number; left?: number; needs_owner: LandUnit[]; file_changed: boolean;
+  last: { created_at: string; trigger: string; landed: number; pushed: number; note: string } | null;
+}
+interface LandResult { dry_run: boolean; note: string; written: boolean; pushed: boolean; units: LandUnit[]; }
 
 export interface WorkflowRoute { essay: string; instance: string; step: string; }
 export const parseRoute = (item: string): WorkflowRoute => {
@@ -95,6 +102,38 @@ const money = (n?: number) => `$${(n || 0).toFixed(2)}`;
 const usageLine = (u: Usage) => !u || !u.turns ? "no model turns" :
   `${u.turns} turns · in ${(u.input || 0).toLocaleString()} (cached ${(u.cached || 0).toLocaleString()}) · out ${(u.output || 0).toLocaleString()} · ${money(u.dollars)} billed · ~${money(u.est_subscription)} subscription`;
 const short = (f: string) => f.replace(/\.md$/, "");
+
+// ------------------------------------------------------------------ landing
+
+// Landing: the ruled units written into the essay file and pushed to its
+// Doc tab (workflow/landing.py). They land when a step that rules text
+// ends, or on Land; a unit whose original text is gone from the file
+// waits for the author here, with both texts.
+function LandingCard({ v, run, busy }: { v: View; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
+  const L = v.landing;
+  if (!L || (!L.landed && !L.waiting && !L.needs_owner.length && !L.last && !v.landed)) return null;
+  const preview = v.landed && v.landed.dry_run ? v.landed.units.filter(u => u.status === "land") : [];
+  return <div className="card">
+    <div className="card-head"><span>Landing in {short(v.instance.file)}</span>
+      <span className="muted">{L.landed} landed · {L.waiting} wait for the step's end · {L.needs_owner.length} need you</span></div>
+    {L.file_changed && <p className="muted">The file has changed since construction began; units are matched by their own text, so your edits stay.</p>}
+    {v.landed && !v.landed.dry_run && <p>{v.landed.note}</p>}
+    {!v.landed && L.last && <p className="muted">Last landing ({L.last.trigger}, {L.last.created_at.slice(0, 16).replace("T", " ")}): {L.last.note}</p>}
+    <div className="devedit-actions">
+      <button className="pill on" disabled={busy || !L.waiting} onClick={() => void run("land", {})}>Land now</button>
+      <button className="pill" disabled={busy || !L.waiting} onClick={() => void run("land", { dry_run: true })}>Preview</button>
+    </div>
+    {preview.length > 0 && <>
+      <p className="muted">Would land:</p>
+      {preview.map(u => <div key={`${u.step}${u.stretch}${u.label}`}><b>{STEP_WORDS[u.step]} {u.label}</b><Diff before={u.original} after={u.new} /></div>)}
+    </>}
+    {L.needs_owner.map(u => <div key={`${u.step}${u.stretch}${u.label}`} className="card muted">
+      <b>{STEP_WORDS[u.step]} {u.label} — not landed:</b> {u.reason}.
+      <Diff before={u.original} after={u.new} />
+      <button className="pill" disabled={busy} onClick={() => void run("leave", { label: u.label })}>Leave as the file has it</button>
+    </div>)}
+  </div>;
+}
 
 // ------------------------------------------------------------------ diff
 
@@ -664,6 +703,7 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
           {view.skipped.length > 0 && <ul className="muted">{view.skipped.map(d => <li key={d.id}>Skipped {(d.detail.skipped || []).join(", ")}: {d.reason}</li>)}</ul>}
         </div>
 
+        <LandingCard v={view} run={run} busy={busy} />
         {shownStep === "start" && <StartStep v={view} run={run} busy={busy} />}
         {shownStep === "letter" && <LetterStep v={view} run={run} busy={busy} />}
         {(shownStep === "construction" || shownStep === "filters") && shownStep === inst.step && view.walk && <>

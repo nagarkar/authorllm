@@ -135,6 +135,8 @@ NAME_HISTORY_COLUMNS = (
     ("manuscript_versions", "files"),
     ("illustration_prompt_versions", "files"),
     ("editorial_transitions", "location"),
+    # A landing run records the file as it was landed, with its text.
+    ("workflow_land_runs", "file"),
 )
 
 
