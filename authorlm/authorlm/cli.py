@@ -2913,6 +2913,114 @@ def _add_register_parser(sub, common) -> None:
     q.add_argument("entry", help="the entry: kind/key or its id")
 
 
+def cmd_engine(args):
+    """`authorlm engine`: the per-essay workflow's engines, by hand
+    (authorlm/authorlm/engines/). `try` sends one turn on an essay and
+    prints the structured reply and its usage; `read` serves one read
+    request as an engine would get it; `catalogue` lists the requests."""
+    from . import engines
+    from .engines import catalogue as cat
+
+    if args.action == "catalogue":
+        for r in cat.CATALOGUE:
+            print(f"{r.name}: {r.when}")
+            print(ui.dim(f"  {r.verb}"))
+        return
+    db = _open_db(args)
+    manuscript = _manuscript(db, args)
+    config = _load_config(args)
+    if args.action == "read":
+        reader = cat.BookReader(args.workspace, manuscript["name"], config=config,
+                                _db=db, _manuscript=manuscript)
+        params: dict = {}
+        for pair in args.arg or []:
+            key, sep, value = pair.partition("=")
+            if not sep:
+                sys.exit(f"error: --arg takes key=value, not '{pair}'")
+            params[key] = int(value) if value.isdigit() else value
+        text, entry = cat.run(reader, args.request, params)
+        print(text)
+        if entry["declined"]:
+            sys.exit(1)
+        return
+    # try: the essay must be in the book; its summaries are not refreshed
+    reader = cat.BookReader(args.workspace, manuscript["name"], config=config,
+                            _db=db, _manuscript=manuscript, refresh=False)
+    try:
+        file, text = reader.essay(args.essay)
+    except cat.Declined as err:
+        sys.exit(f"error: {err}")
+    try:
+        engine = engines.get_engine(args.name, args.model)
+    except (LookupError, engines.EngineError) as err:
+        sys.exit(f"error: {err}")
+    context = {"standing": [f"THE ESSAY BEING EDITED, {file}, as it now stands:\n\n{text}"],
+               "turns": [], "session_ref": args.session_ref,
+               "manuscript": manuscript["name"], "essay": file,
+               "workspace": args.workspace}
+    try:
+        reply = engine.send(context, args.message)
+    except engines.EngineError as err:
+        sys.exit(f"error: {err}")
+    if args.json:
+        print(json.dumps({**reply, "session_ref": engine.session_ref},
+                         ensure_ascii=False, indent=1))
+        return
+    print(ui.bold("text: ") + reply["text"])
+    print(ui.bold("reason: ") + (reply["reason"] or "(none)"))
+    print(ui.bold("proposed:"))
+    print(reply["proposed"] if reply["proposed"] is not None else "(none)")
+    print(ui.bold("suggested blurbs: ")
+          + (", ".join(reply["suggested_blurbs"]) or "(none)"))
+    for req in reply["requests"]:
+        status = f" DECLINED: {req['declined']}" if req["declined"] else ""
+        print(ui.dim(f"  request {req['name']} {json.dumps(req['args'])} "
+                     f"-> {req['chars']} chars{status}"))
+    u = reply["usage"]
+    dollars = "unknown" if u["dollars"] is None else f"${u['dollars']:.4f}"
+    print(ui.dim(f"usage: {reply['engine']} {reply['model']}: {u['input']} in, "
+                 f"{u['cached']} cached, {u['output']} out; billed {dollars}; "
+                 f"subscription est ${u['est_subscription']:.4f}"))
+    print(ui.dim(f"session_ref: {engine.session_ref}"))
+
+
+def _add_engine_parser(sub, common) -> None:
+    """`authorlm engine <verb>`: try, read, catalogue."""
+    p = sub.add_parser(
+        "engine",
+        help="the per-essay workflow's engines: send one turn by hand, serve "
+             "a read request, list the read catalogue")
+    verbs = p.add_subparsers(dest="action", required=True)
+    q = verbs.add_parser(
+        "try", parents=[common],
+        help="send one turn on an essay to an engine and print the "
+             "structured reply and its usage (claude-headless uses the "
+             "subscription; openai-api is billed)",
+        epilog='example: authorlm engine try openai-api --essay one.md '
+               '--message "Tighten the first paragraph."')
+    q.add_argument("name", help="engine: claude-headless, openai-api "
+                                "(claude-api, codex-headless: not built yet)")
+    q.add_argument("--model", help="model (default: [engines] in config.toml)")
+    q.add_argument("--essay", required=True, help="the essay's file name")
+    q.add_argument("--message", required=True, help="the turn's message")
+    q.add_argument("--session-ref", dest="session_ref",
+                   help="resume: the session_ref a previous try printed")
+    q.add_argument("--json", action="store_true", help="print the reply as JSON")
+    q.set_defaults(func=cmd_engine)
+    q = verbs.add_parser(
+        "read", parents=[common],
+        help="serve one read request from the catalogue, as an engine gets "
+             "it (outside the book: declined, exit 1)",
+        epilog="example: authorlm engine read essay_summaries --arg file=one.md")
+    q.add_argument("request", help="the request's name ('engine catalogue')")
+    q.add_argument("--arg", action="append", metavar="KEY=VALUE",
+                   help="a parameter, repeatable")
+    q.set_defaults(func=cmd_engine)
+    q = verbs.add_parser("catalogue", parents=[common],
+                         help="list the read requests every engine may make")
+    q.set_defaults(func=cmd_engine)
+
+
 def _add_book_parser(sub, common) -> None:
     """`authorlm book <verb>`: one leaf parser per verb."""
     p = sub.add_parser(
@@ -9727,8 +9835,87 @@ def cmd_style(args):
             print(ui.green("moved") + f" [{result['id'][:8]}] → "
                   + (f"guide '{result['guide']}'" if result.get("guide")
                      else f"file {result['file']}"))
+        elif args.action == "snapshot":
+            _style_snapshot(db, manuscript, args)
     except (LookupError, ValueError) as err:
         sys.exit(str(err))
+
+
+def _style_snapshot(db, manuscript: dict, args) -> None:
+    """`style snapshot <name>` takes one; `snapshot list`, `snapshot show
+    <name>`, `snapshot restore <name> [--dry-run]` (style_snapshots.py).
+    Restore is a write verb; --dry-run prints the same list and changes
+    nothing."""
+    from . import style_snapshots as ss
+
+    mid = manuscript["id"]
+    params = args.params
+    verb = params[0] if params and params[0] in ss.VERBS else "take"
+    if verb == "list":
+        snaps = ss.list_snapshots(db, mid)
+        if not snaps:
+            print('No style-law snapshots yet. Take one: '
+                  'style snapshot <name> --note "..."')
+            return
+        for s in snaps:
+            print(f"  {s['name']} — {s['laws']} law(s), "
+                  f"{s['created_at'][:16].replace('T', ' ')} by {s['created_by']}")
+            if s["note"]:
+                print(ui.dim(f"      {s['note']}"))
+        return
+    if verb == "take":
+        if len(params) != 1:
+            sys.exit('usage: style snapshot <name> [--note "..."] | snapshot list '
+                     "| snapshot show <name> | snapshot restore <name> [--dry-run]")
+        snap = ss.take(db, mid, params[0], note=args.note or "")
+        print(ui.green("snapshot") + f" '{snap['name']}': {snap['laws']} active "
+              f"law(s) of {manuscript['name']} recorded")
+        return
+    if len(params) != 2:
+        sys.exit(f"usage: style snapshot {verb} <name>"
+                 + (" [--dry-run]" if verb == "restore" else ""))
+    name = params[1]
+    if verb == "show":
+        snap = ss.show(db, mid, name)
+        print(ui.bold(f"Snapshot '{snap['name']}' of {manuscript['name']}: "
+                      f"{len(snap['laws'])} law(s), taken "
+                      f"{snap['created_at'][:16].replace('T', ' ')} by "
+                      f"{snap['created_by']}"))
+        if snap["note"]:
+            print(ui.dim(f"  {snap['note']}"))
+        counts: dict[str, int] = {}
+        for law in snap["laws"]:
+            counts[law["status_now"]] = counts.get(law["status_now"], 0) + 1
+            now = ("" if law["status_now"] == "active" and not law["changed"]
+                   else f" — now {law['status_now']}"
+                   + (f", changed: {', '.join(law['changed'])}"
+                      if law["changed"] else ""))
+            print(f"  [{law['id'][:11]}] v{law['version']} ({law['aspect']}) "
+                  f"{law['statement'][:90]}{now}")
+        print(ui.dim("  now: " + ", ".join(
+            f"{n} {k}" for k, n in sorted(counts.items()))))
+        return
+    out = ss.restore(db, mid, name, dry_run=args.dry_run)
+    head = "would change" if args.dry_run else "changed"
+    total = sum(len(out[k]) for k in ("unretire", "edit", "move", "retire"))
+    print(ui.bold(f"Restore of '{name}': {head} {total} law(s)"))
+    for law in out["unretire"]:
+        print(f"  back in force [{law['id'][:11]}] {law['statement'][:80]}")
+    for law in out["edit"]:
+        print(f"  words put back [{law['id'][:11]}]: {', '.join(law['diff'])}")
+        for key, (now, then) in law["diff"].items():
+            print(ui.dim(f"      {key} now: {now}"))
+            print(ui.dim(f"      {key} then: {then}"))
+    for law in out["move"]:
+        print(f"  moved back [{law['id'][:11]}] {law['from']} → {law['to']}")
+    for law in out["retire"]:
+        print(f"  retired [{law['id'][:11]}] (not in the snapshot) "
+              f"{law['statement'][:80]}")
+    for law in out["left"]:
+        print(ui.dim(f"  left alone [{law['id'][:11]}] now {law['status_now']}: "
+                     f"{law['statement'][:80]}"))
+    if args.dry_run and total:
+        print(ui.dim("  dry run: nothing changed; run without --dry-run to restore"))
 
 
 def _style_provenance(db, manuscript: dict, element: dict) -> str:
@@ -10748,9 +10935,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     from .workflow import cli as _workflow_cli
     _workflow_cli.add_parser(sub, common)
+    # The engines fill the workflow's registry (workflow/contract.py) on
+    # import; the workflow never imports them itself.
+    from . import engines as _engines  # noqa: F401
 
     _add_register_parser(sub, common)
     _add_book_parser(sub, common)
+    _add_engine_parser(sub, common)
 
     p = sub.add_parser(
         "prompts",
@@ -11864,13 +12055,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action",
                    choices=["guides", "guide", "attach", "add", "show", "retire",
                             "unretire", "edit", "history", "move", "copy",
-                            "guide-move", "guide-rename"])
+                            "guide-move", "guide-rename", "snapshot"])
     p.add_argument("params", nargs="*",
                    help="guide: <name>; attach: <file> <guide>; "
                         "add: <aspect> \"statement\"; show: <file>; "
                         "retire/unretire/edit/history/move/copy: <id>; "
                         "guide-move: <guide>; "
-                        "guide-rename: <guide> \"<new name>\"")
+                        "guide-rename: <guide> \"<new name>\"; "
+                        "snapshot: <name> | list | show <name> | "
+                        "restore <name>")
+    p.add_argument("--note", help="snapshot: a note kept with the snapshot")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="snapshot restore: print what would change, change nothing")
     p.add_argument("--parent", help="guide / guide-move: parent guide name")
     p.add_argument("--guide", help="add/move/copy: owning guide name")
     p.add_argument("--file", help="add/move/copy: file for a file-local element")
@@ -11991,7 +12187,8 @@ def _dispatch(argv: list[str] | None = None) -> None:
             sys.exit("usage: concept merge <canonical> <duplicate>")
     if args.command == "style":
         required = {"guide": 1, "attach": 2, "add": 2, "show": 1, "retire": 1,
-                    "unretire": 1, "edit": 1, "history": 1, "move": 1, "copy": 1}
+                    "unretire": 1, "edit": 1, "history": 1, "move": 1, "copy": 1,
+                    "snapshot": 1}
         if len(args.params) < required.get(args.action, 0):
             sys.exit(f"usage: style {args.action} — see 'style --help'")
         if args.action == "add" and bool(args.guide) == bool(args.file):

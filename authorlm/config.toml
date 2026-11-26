@@ -79,6 +79,20 @@ extraction_max_chars = 24000
 # above that is false, so restoring this section buys no caching — said plainly,
 # because a saving that does not exist is worse than no saving.
 
+[engines]
+# The per-essay workflow's engines (authorlm/authorlm/engines/; design
+# docs/plans/filter-lens-consolidation.md 11.9 Q6). The model is chosen per
+# workflow instance; these are the defaults when an instance names none.
+# The owner on cost (2026-11-25, 11.9 "Cost against quality and time"):
+# "as long as we are transparent about the usage costs ... I think it's
+# okay"; every turn reports its usage.
+# claude-headless runs on the subscription (Claude Code `claude -p`); the
+# value is Claude Code's --model (an alias or a full name).
+claude_model = "opus"
+# openai-api is billed (OPENAI_API_KEY from .env). gpt-5.6-sol accepts a
+# strict json_schema (llmlm MODEL_PROFILES, verified live 2026-10-22).
+openai_model = "gpt-5.6-sol"
+
 [critique]
 # Essay summaries and the critique editor on GPT-5.6 Luna (author rulings
 # 2026-08-30: "I actually rather like 5.6 luna. Lets try that for

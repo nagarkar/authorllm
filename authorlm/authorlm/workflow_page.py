@@ -69,21 +69,20 @@ TIERS = ("must", "should", "could")
 
 def passes() -> list[dict]:
     """The standard order of the filter passes (library/workflow/order.toml):
-    `[[pass]]` entries with name, stage, default; an older `order = [...]`
-    list is read too. [] when the library has none."""
+    the order is `context.standard_order()` (`order = [...]`); each pass's
+    stage and starting tick come from its `[pass.<name>]` table. [] when
+    the library has none."""
     path = context.library_dir() / "order.toml"
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):
-        return []
+        data = {}
+    meta = data.get("pass") if isinstance(data.get("pass"), dict) else {}
     out = []
-    for p in data.get("pass") or []:
-        if isinstance(p, dict) and isinstance(p.get("name"), str):
-            out.append({"name": p["name"], "stage": p.get("stage", ""),
-                        "default": p.get("default", "ticked")})
-    if not out:
-        out = [{"name": n, "stage": "", "default": "ticked"}
-               for n in data.get("order") or [] if isinstance(n, str)]
+    for name in context.standard_order():
+        m = meta.get(name) if isinstance(meta.get(name), dict) else {}
+        out.append({"name": name, "stage": m.get("stage", ""),
+                    "default": m.get("default", "ticked")})
     return out
 
 
@@ -313,47 +312,22 @@ def _unit_before(db: Database, manuscript: dict, inst: dict, step: str,
 
 # --------------------------------------------------------------- engines
 
-class _EnginesAdapter:
-    """Feeds the engines package (`authorlm.engines.get_engine`, build plan
-    §12 row 2) from the workflow's instance context when no engine is
-    registered on the contract: standing blocks as text, the session ref
-    kept on the instance's engine_state."""
-
-    def __init__(self, engine, manuscript: dict, inst: dict):
-        self._engine, self._ms, self._inst = engine, manuscript, inst
-        self.name, self.model = inst["engine"], inst["model"]
-
-    def send(self, instance_context: dict, message: str) -> dict:
-        standing = [f"## {b['name']}\n\n{b['text']}"
-                    for b in instance_context["standing"] if b.get("text")]
-        standing.append(f"## the essay as it stands\n\n{instance_context['essay']}")
-        ctx = {"standing": standing, "turns": instance_context["turns"],
-               "session_ref": (self._inst.get("engine_state") or {}).get("session_ref"),
-               "manuscript": self._ms["name"], "essay": self._inst["file"],
-               "workspace": None}
-        reply = self._engine.send(ctx, message)
-        self.session_ref = getattr(self._engine, "session_ref", None)
-        return reply
-
-
-def _engine(manuscript: dict, inst: dict):
+def _engine(inst: dict):
+    """The instance's engine, from the contract's registry. Importing the
+    engines package fills the registry (`engines.register_with_workflow`);
+    a test registers its fake first, and a later import does not undo it
+    because the package registers only once, at its first import."""
     try:
-        return contract.make_engine(inst["engine"], inst["model"])
-    except LookupError:
-        try:
-            from .engines import get_engine  # type: ignore[attr-defined]
-        except ImportError as err:
-            raise LookupError(
-                f"engine '{inst['engine']}' is not available in this build "
-                "(the engines package is not installed)") from err
-        return _EnginesAdapter(get_engine(inst["engine"], inst["model"] or None),
-                               manuscript, inst)
+        from . import engines  # noqa: F401
+    except ImportError:
+        pass
+    return contract.make_engine(inst["engine"], inst["model"])
 
 
 def _send(db: Database, manuscript: dict, inst: dict, action: str,
           message: str, *, author_text: str | None = None,
           blurbs: list[str] | None = None, unit_label: str = "") -> dict:
-    engine = _engine(manuscript, inst)
+    engine = _engine(inst)
     turn = core.send_turn(db, manuscript, inst, action, message, engine=engine,
                           author_text=author_text, blurbs=blurbs,
                           unit_label=unit_label)

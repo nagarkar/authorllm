@@ -408,7 +408,9 @@ def test_turns_context_and_blurbs() -> None:
         raises(lambda: contract.normalize_reply("nope"), ValueError)
         raises(lambda: contract.normalize_reply({"usage": {"input": "x"}}),
                ValueError)
-        raises(lambda: contract.make_engine("openai-api", "gpt-5"), LookupError)
+        # The engines package registers the real engines (engines/__init__.py);
+        # a name nobody registered still raises.
+        raises(lambda: contract.make_engine("no-such-engine", "m"), LookupError)
 
 
 def test_protected_register_is_honoured() -> None:

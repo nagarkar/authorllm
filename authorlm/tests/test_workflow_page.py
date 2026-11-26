@@ -59,21 +59,13 @@ FILES = {"preface.md": "# Preface\n\nWhy this book.\n", "one.md": ONE,
          "two.md": "# Two\n\n## A\n\nIn A.\n\n## B\n\nIn B.\n"}
 
 ORDER = '''
-[[pass]]
-name = "cross-references"
+order = ["cross-references", "concision", "audio-friendly", "copyedit"]
+
+[pass.cross-references]
 default = "ticked"
 
-[[pass]]
-name = "concision"
-default = "ticked"
-
-[[pass]]
-name = "audio-friendly"
+[pass.audio-friendly]
 default = "audiobook"
-
-[[pass]]
-name = "copyedit"
-default = "ticked"
 '''
 
 LETTER = """The essay holds; two problems.
@@ -184,6 +176,9 @@ class FakeEngine:
 
 
 FAKE = FakeEngine()
+# The engines package registers the real engines when it is first imported;
+# import it first so the fake registered after it is the one the page gets.
+import authorlm.engines  # noqa: E402,F401
 contract.register_engine("claude-headless", lambda model: FAKE)
 contract.register_engine("openai-api", lambda model: FAKE)
 
