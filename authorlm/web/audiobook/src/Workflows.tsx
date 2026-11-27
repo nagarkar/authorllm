@@ -32,10 +32,16 @@ import { recall, remember } from "./remember";
 //   <instance>`, `authorlm.wf.findingDraft.<ms>.<instance>.<item>`), as
 //   JSON: half-made edits, personal, not worth a link; a reload reopens the
 //   editor with them, and Save or Cancel clears them;
+// - an unsent note for "Revise the letter" → localStorage per manuscript
+//   and instance (`authorlm.wf.reviseNote.<ms>.<instance>`), half-written
+//   text like the brief's draft; sending or Cancel clears it;
+// - the reason and brief of an unsent "Start over from here" →
+//   localStorage per manuscript and instance (`authorlm.wf.restartDraft.
+//   <ms>.<instance>`, JSON), cleared when the new instance starts;
 // - whether hidden blurbs are shown → localStorage per manuscript.
 
 interface Usage { turns?: number; input?: number; cached?: number; output?: number; dollars?: number; est_subscription?: number; }
-interface InstRow { id: string; kind: string; number: number; step: string; engine: string; model: string; created: string; finished: string | null; }
+interface InstRow { id: string; kind: string; number: number; step: string; engine: string; model: string; created: string; finished: string | null; abandoned?: boolean; }
 interface Essay { file: string; instances: InstRow[]; open: string | null; new?: boolean; }
 interface Overview {
   manuscript: string; essays: Essay[]; kinds: string[]; steps: string[]; engines: string[]; planned_engines: string[];
@@ -53,18 +59,22 @@ interface Walk {
   mode: string; unit: string; asked_unit: string; units: Unit[]; next: string | null; end: boolean; fallback: boolean;
   beat?: number; beat_open?: boolean; beats_before?: number; concluded?: boolean;
   earlier: { label: string; kind: string; state: string; text: string; stretch: number }[];
+  reopen?: { label: string; finding: string; title: string; quote: string }[];
 }
 interface Estimate { engine: string; billed: boolean; model?: string; turns?: number; input_per_turn?: number; output_per_turn?: number; per_turn?: number | null; total?: number | null; why?: string; }
 interface LintRun { at: string; counts: Record<string, number>; total: number; findings: { severity: string; code: string; message: string; quote: string; line?: number | null }[]; }
 interface Finding {
   item: string; verdict: string | null; reason: string | null; n?: number; title: string; where: string; what: string; why: string; direction: string; tier: string; text: string;
   edited: string[]; original: Record<string, string>;
+  continues?: { item: string; title: string; verdict: string | null; reason: string | null } | null;
 }
+interface EarlierLetter { revision: number; step: string; note: string; at: string; seq: number; findings: Finding[]; }
 interface Letter {
   drafted: boolean; redraft: boolean; text: string; findings: Finding[]; keep: string[]; keep_letter: string[]; keep_edited: boolean;
   passes: Record<string, { needed: boolean; reason: string }>; notes: string[];
-  discussion: { seq: number; action: string; author: string; reply: string; reason: string; at: string }[];
+  discussion: { seq: number; action: string; author: string; reply: string; reason: string; at: string; earlier?: boolean }[];
   accepted_without_findings: boolean;
+  revise: boolean; open: boolean; revision: number; earlier: EarlierLetter[]; revised_at: string; note: string; unruled: string[];
 }
 interface Rec { list: string; essay: string; change: string; reason: string; label: string; answer: string; }
 interface Decision { id: string; kind: string; reason: string; words: string; detail: Record<string, any>; created_at: string; }
@@ -76,13 +86,15 @@ interface View {
   blurbs: Blurb[]; supported_tags: string[];
   letter: Letter; recommendations: { asked: boolean; items: Rec[]; text: string };
   walk?: Walk; wrapup?: { drafted: boolean; items: Unit[]; principles: { words: string; scope: string }[]; text: string };
-  checklist?: { passes: { name: string; stage: string; ticked: boolean; why: string; letter?: { needed: boolean; reason: string } }[]; confirmed: boolean; audiobook: boolean };
+  checklist?: { passes: { name: string; stage: string; ticked: boolean; why: string; letter?: { needed: boolean; reason: string } }[]; confirmed: boolean; audiobook: boolean; revised_here?: boolean };
   principles: Decision[]; skipped: Decision[];
   unplaced?: { label: string; kind: string; text: string }[]; lint?: LintRun | null;
   turns: { seq: number; step: string; unit_label: string; action: string; reason: string }[];
   landing: Landing; landed?: LandResult | null;
   job: Job | null; failed_attempts: Job[];
   summaries?: { total: number; stale: string[]; missing: string[] };
+  abandoned: { reason: string; at: string; step: string; successor: string | null } | null;
+  restarted_from: { id: string; reason: string } | null;
 }
 // A model turn running in the background (workflow/jobs.py), or the last
 // one that failed; the page polls the instance while one runs.
@@ -115,6 +127,9 @@ const STEP_WORDS: Record<string, string> = {
   start: "Start", letter: "Letter", construction: "Construction", wrapup: "Wrap-up",
   filters: "Filters", lint: "Lint", done: "Done",
 };
+// The steps at which the letter in force is revised, ruled and edited
+// (core.LETTER_STEPS, with the owner's words).
+const LETTER_STEPS = ["letter", "construction", "wrapup", "filters"];
 const STATE_WORDS: Record<string, string> = {
   open: "not yet worked", pending: "waiting for you", passed: "no change needed",
   accepted: "accepted", rejected: "kept the original", dropped: "dropped", edited: "your text",
@@ -605,13 +620,17 @@ type FindingDraft = Record<string, string>;
 // well, that would be ideal. So I can tweak it in minor ways"). Editable
 // before and after the verdict while the letter step is open; Save goes to
 // workflow_page `finding_edit` (core.edit_finding) with the changed fields.
-function FindingCard({ f, here, run, busy, asking, manuscript, inst, reason, setReason }: {
+const VERDICT_WORDS: Record<string, string> = { accept: "accepted", reject: "rejected", defer: "deferred" };
+const VERDICT_LABEL: Record<string, string> = { accept: "Accepted", reject: "Rejected", defer: "Deferred" };
+
+function FindingCard({ f, here, run, busy, asking, manuscript, inst, reason, setReason, revised = false }: {
   f: Finding; here: boolean; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; busy: boolean; asking: boolean;
-  manuscript: string; inst: string; reason: string; setReason: (s: string) => void;
+  manuscript: string; inst: string; reason: string; setReason: (s: string) => void; revised?: boolean;
 }) {
   const [draft, setDraft] = useJsonDraft<FindingDraft>(`authorlm.wf.findingDraft.${manuscript}.${inst}.${f.item}`);
   const editing = here && draft !== null;
-  const now: FindingDraft = { title: f.title, where: f.where, what: f.what, why: f.why, direction: f.direction, tier: f.tier };
+  const [already, setAlready] = useState(false);
+  const now: FindingDraft ={ title: f.title, where: f.where, what: f.what, why: f.why, direction: f.direction, tier: f.tier };
   const changed = editing ? Object.fromEntries(Object.entries(draft!).filter(([k, s]) => s.trim() !== (now[k] || ""))) : {};
   return (
     <div className={`card wf-finding${f.verdict ? " ruled" : ""}`}>
@@ -620,7 +639,14 @@ function FindingCard({ f, here, run, busy, asking, manuscript, inst, reason, set
         {f.verdict && <span className="state done">{f.verdict}{f.reason ? `: ${f.reason}` : ""}</span>}
         {here && !editing && <button className="pill wf-edit" onClick={() => setDraft(now)}>Edit</button>}</div>
       {!editing && <>
+        {f.continues && <p className="muted wf-continues">Continues {f.continues.item} of the earlier letter ({f.continues.title}): {f.continues.verdict
+          ? <>you {VERDICT_WORDS[f.continues.verdict] || f.continues.verdict} it{f.continues.reason ? ` — ${f.continues.reason}` : ""}.</> : "not ruled there."}</p>}
+        {revised && !f.continues && <p className="muted wf-continues">New in this letter.</p>}
         <p><b>{f.title}</b></p>
+        {/* The verdict, unmistakable (owner, 2026-11-26: he pressed Accept on a
+            finding already accepted and thought it was "not taking my accept"). */}
+        <p className={`wf-verdict ${f.verdict || "open"}`}>{f.verdict
+          ? <>{VERDICT_LABEL[f.verdict] || f.verdict} ✓{f.reason ? ` — ${f.reason}` : ""}</> : "Not yet decided"}</p>
         {f.where && <p><span className="muted">Where:</span> {f.where}</p>}
         {f.what && <p><span className="muted">What is wrong:</span> {f.what}</p>}
         {f.why && <p><span className="muted">Why it matters:</span> {f.why}</p>}
@@ -647,13 +673,56 @@ function FindingCard({ f, here, run, busy, asking, manuscript, inst, reason, set
         </div>
       </div>}
       {here && !editing && <div className="devedit-actions">
+        {/* Re-ruling a continued finding is one tap: the earlier verdict and reason. */}
+        {!f.verdict && f.continues?.verdict && <button className="pill on wf-again" disabled={busy}
+          onClick={() => void run("finding", { item: f.item, verdict: f.continues!.verdict, reason: f.continues!.reason || "" })}>
+          {f.continues.verdict[0].toUpperCase() + f.continues.verdict.slice(1)} again</button>}
         <input className="wf-input" placeholder="reason (optional)" value={reason} onChange={e => setReason(e.target.value)} />
-        {(["accept", "reject", "defer"] as const).map(verdict => (
-          <button key={verdict} className={`pill${f.verdict === verdict ? " on" : ""}`} disabled={busy}
-            onClick={() => void run("finding", { item: f.item, verdict, reason })}>{verdict[0].toUpperCase() + verdict.slice(1)}</button>))}
+        {/* The chosen verdict reads "Accepted ✓" (filled); pressing it again
+            sends nothing and says it is already chosen. */}
+        {(["accept", "reject", "defer"] as const).map(verdict => {
+          const chosen = f.verdict === verdict;
+          return <button key={verdict} className={`pill${chosen ? " on wf-chosen" : ""}`} disabled={busy} aria-pressed={chosen}
+            onClick={() => { if (chosen) { setAlready(true); return; } setAlready(false); void run("finding", { item: f.item, verdict, reason }); }}>
+            {chosen ? `${VERDICT_LABEL[verdict]} ✓` : verdict[0].toUpperCase() + verdict.slice(1)}</button>;
+        })}
+        {already && f.verdict && <span className="muted wf-already">Already {VERDICT_WORDS[f.verdict]}.</span>}
       </div>}
     </div>
   );
+}
+
+// "Revise the letter" with the author's optional note on what to look at
+// differently (owner, 2026-11-26: "Even if I accept the findings, it need
+// not necessarily cause me to not be able to redraft"). From the letter
+// step to the filters; it runs as a background turn (`revise_letter`, a
+// job like the others). The unsent note survives a reload (header).
+function RevisePanel({ v, run, busy, manuscript }: {
+  v: View; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; busy: boolean; manuscript: string;
+}) {
+  const key = `authorlm.wf.reviseNote.${manuscript}.${v.instance.id}`;
+  const [note, setNoteState] = useState<string | null>(() => { const d = recall(key); return d ? d : null; });
+  const setNote = (d: string | null) => { remember(key, d ?? ""); setNoteState(d); };
+  useEffect(() => { const d = recall(key); setNoteState(d ? d : null); }, [key]);
+  const step = v.instance.step;
+  if (!v.letter.revise) return null;
+  const after = step === "letter" ? "" : step === "filters"
+    ? " Its passes re-tick the filter list; units already filtered keep theirs."
+    : " Units you accepted stay accepted; the walk goes on from where it is.";
+  if (note === null) return <div className="devedit-actions wf-revise">
+    <button className="pill" disabled={busy} onClick={() => setNote(" ")}>Revise the letter…</button>
+  </div>;
+  return <div className="wf-revise">
+    <textarea className="devedit-edit" rows={3} value={note.trimStart()} autoFocus aria-label="What to look at differently"
+      placeholder="Optional: what to look at differently this time" onChange={e => setNote(e.target.value || " ")} />
+    <div className="muted">A new letter on the essay as it now stands replaces this one, which stays on the record.{after}</div>
+    <div className="devedit-actions">
+      <button className="pill on" disabled={busy} onClick={async () => {
+        if (await run("revise_letter", { note: note.trim() })) setNote(null);
+      }}>{busy ? "Revising…" : "Revise the letter"}</button>
+      <button className="pill" disabled={busy} onClick={() => setNote(null)}>Cancel</button>
+    </div>
+  </div>;
 }
 
 function LetterStep({ v, run, busy, asking, manuscript }: {
@@ -662,24 +731,33 @@ function LetterStep({ v, run, busy, asking, manuscript }: {
   const L = v.letter;
   const [reasons, setReasons] = useState<Record<string, string>>({});
   const [reply, setReply] = useState("");
-  const here = v.instance.step === "letter";
+  // The letter in force is ruled, edited and discussed from the letter step
+  // to the filters (LETTER_STEPS); it is first written at the letter step.
+  const here = LETTER_STEPS.includes(v.instance.step);
+  const drafting = v.instance.step === "letter";
   return <>
     {!L.drafted && <div className="card">
       <p className="muted">One reading of the whole essay: numbered findings with a tier each, what to keep, which passes the essay needs, and short paragraph notes.</p>
-      {here && <div className="devedit-actions">
+      {drafting && <div className="devedit-actions">
         <button className="pill on" disabled={busy} onClick={() => void run("letter", {})}>{busy ? "Writing…" : "Write the letter"}</button>
         {v.instance.kind === "new" && <button className="pill" disabled={busy} onClick={() => void run("accept_letter", {})}
           title="A new essay's letter is its beat plan: accept without findings">Accept with no findings</button>}
       </div>}
     </div>}
-    {L.drafted && here && (L.redraft || !L.findings.length) && <div className="card devedit-actions">
-      {!L.findings.length && <span className="muted">The letter as written has no findings.</span>}
-      {!L.findings.length && <button className="pill on" disabled={busy} onClick={() => void run("accept_letter", {})}>Accept with no findings</button>}
-      {L.redraft && <button className="pill" disabled={busy} onClick={() => void run("letter", {})}
-        title="Nothing is ruled yet: a new draft replaces this one and its findings">{busy ? "Writing…" : "Redraft the letter"}</button>}
+    {L.drafted && <div className="card">
+      {/* When every finding is ruled, say so and point at the next step's
+          button (the gate bar at the top of the page). */}
+      {L.findings.length > 0 && !L.unruled.length && <p className="wf-all-decided">{v.instance.step === "letter"
+        ? <>All {L.findings.length} findings decided — next: <b>On to Construction</b>, at the top of the page.</>
+        : <>All {L.findings.length} findings decided — the walk goes on.</>}</p>}
+      {L.revision > 0 && <p className="muted">Revision {L.revision} of the letter, asked at the {STEP_WORDS[L.revised_at] || L.revised_at} step{L.note ? `: “${L.note}”` : ""}. The earlier letter is kept below.</p>}
+      {L.unruled.length > 0 && v.instance.step !== "letter" && <p>{L.unruled.length} finding(s) wait for your verdict before the walk goes on.</p>}
+      {drafting && !L.findings.length && <div className="devedit-actions"><span className="muted">The letter as written has no findings.</span>
+        <button className="pill on" disabled={busy} onClick={() => void run("accept_letter", {})}>Accept with no findings</button></div>}
+      <RevisePanel v={v} run={run} busy={busy} manuscript={manuscript} />
     </div>}
     {L.findings.map(f => <FindingCard key={f.item} f={f} here={here} run={run} busy={busy} asking={asking}
-      manuscript={manuscript} inst={v.instance.id} reason={reasons[f.item] ?? ""}
+      manuscript={manuscript} inst={v.instance.id} reason={reasons[f.item] ?? ""} revised={L.revision > 0}
       setReason={s => setReasons(r => ({ ...r, [f.item]: s }))} />)}
     {L.drafted && <KeepCard L={L} here={here} run={run} busy={busy} asking={asking} manuscript={manuscript} inst={v.instance.id} />}
     {L.drafted && <div className="card">
@@ -690,14 +768,42 @@ function LetterStep({ v, run, busy, asking, manuscript }: {
         <ul>{L.notes.map((n, i) => <li key={i}>{n}</li>)}</ul></>}
       <details><summary className="muted">The letter as written</summary><pre className="wf-pre">{L.text}</pre></details>
     </div>}
+    {L.earlier.length > 0 && <details className="card wf-earlier">
+      <summary className="muted">{L.earlier.length} earlier letter(s), superseded: kept on the record, no longer in force</summary>
+      {[...L.earlier].reverse().map(e => <div key={e.revision} className="wf-turn">
+        <p className="muted">Replaced at the {STEP_WORDS[e.step] || e.step} step{e.note ? `: “${e.note}”` : ""}</p>
+        <ul>{e.findings.map(f => <li key={f.item}><b>{f.item}</b>{f.tier ? ` (${f.tier})` : ""}: {f.title} — {f.verdict ? VERDICT_WORDS[f.verdict] || f.verdict : "not ruled"}{f.reason ? `: ${f.reason}` : ""}</li>)}</ul>
+      </div>)}
+    </details>}
     {(L.drafted || L.discussion.length > 0) && <div className="card">
       <div className="card-head"><span>Discussion</span></div>
-      {L.discussion.map(d => <div key={d.seq} className="wf-turn">
+      {L.discussion.map(d => <div key={d.seq} className={`wf-turn${d.earlier ? " muted" : ""}`}>
+        {d.earlier && <span className="muted">(about an earlier letter) </span>}
         {d.author && <p><b>You:</b> {d.author}</p>}{d.reply && <p><b>Editor:</b> {d.reply}</p>}</div>)}
       {here && <><textarea className="devedit-edit" rows={3} value={reply} placeholder="Debate a finding, ask a question…" onChange={e => setReply(e.target.value)} />
         <button className="pill on" disabled={busy || !reply.trim()} onClick={async () => { if (await run("letter_reply", { text: reply })) setReply(""); }}>{busy ? "…" : "Send"}</button></>}
     </div>}
   </>;
+}
+
+// The letter in force, above the walk at construction, the wrap-up and the
+// filters: its findings waiting for a verdict (the walk waits for them), a
+// way to the Letter step to rule them, and Revise the letter.
+function LetterInForce({ v, run, busy, manuscript, toLetter }: {
+  v: View; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; busy: boolean; manuscript: string; toLetter: () => void;
+}) {
+  const L = v.letter;
+  if (!L.drafted) return null;
+  const ruled = L.findings.filter(f => f.verdict).length;
+  return <div className="card wf-in-force">
+    <div className="card-head"><span>The letter in force</span>
+      <span className="muted">{L.revision ? `revision ${L.revision} · ` : ""}{L.findings.length} finding(s), {ruled} ruled</span></div>
+    {L.unruled.length > 0 && <div className="devedit-actions">
+      <span>{L.unruled.length} new finding(s) wait for your verdict; the walk goes on once they are ruled.</span>
+      <button className="pill on" onClick={toLetter}>Rule them at the Letter step</button>
+    </div>}
+    <RevisePanel v={v} run={run} busy={busy} manuscript={manuscript} />
+  </div>;
 }
 
 function WalkStep({ v, run, busy, manuscript, showHidden, setShowHidden }: {
@@ -719,6 +825,17 @@ function WalkStep({ v, run, busy, manuscript, showHidden, setShowHidden }: {
       <summary className="muted">{w.earlier.length} unit(s) ruled before the last switch of unit or mode: their text is carried into this walk</summary>
       <ul>{w.earlier.map(e => <li key={`${e.stretch}-${e.label}`}><b>{e.label}</b> ({STATE_WORDS[e.state] || e.state}): {e.text || <i className="muted">(empty)</i>}</li>)}</ul>
     </details>}
+    {(w.reopen || []).length > 0 && <div className="card wf-reopen">
+      <div className="card-head"><span>The revised letter touches units you accepted</span></div>
+      <p className="muted">Reopen one to work it again under the new letter; the rest of the walk stays as it is.</p>
+      {w.reopen!.map(r => <div key={r.label} className="wf-rec">
+        <div><b>{r.finding}</b> ({r.title}) quotes <b>{r.label}</b>: “{r.quote}”</div>
+        <div className="devedit-actions">
+          <button className="pill on" disabled={busy} onClick={() => void run("reopen", { label: r.label })}>Reopen {r.label}</button>
+          <button className="pill" disabled={busy} onClick={() => void run("reopen_decline", { label: r.label })}>Leave {r.label} as accepted</button>
+        </div>
+      </div>)}
+    </div>}
     {inst.step === "filters" && (v.unplaced || []).length > 0 && <div className="card muted">
       Accepted at the wrap-up but not found in the essay, so not placed: {(v.unplaced || []).map(u => `${u.label} (“${u.text}”)`).join("; ")}.</div>}
     {units.map(u => <UnitForm key={u.label} unit={u} newEssay={newEssay} blurbs={v.blurbs} tags={v.supported_tags}
@@ -767,6 +884,7 @@ function Checklist({ v, run, busy }: { v: View; run: (m: string, p: Record<strin
   return <div className="card">
     <div className="card-head"><span>Filter passes</span>{c.confirmed && <span className="state done">chosen</span>}</div>
     <p className="muted">Ticking only includes a pass; they always run in this standard order.</p>
+    {c.revised_here && <p className="wf-revised-line">The letter was revised here: its passes re-tick this list, and the passes you choose now apply only to the units still ahead.</p>}
     {c.passes.map(p => <div key={p.name} className="wf-check">
       <label><input type="checkbox" checked={!!ticks[p.name]} disabled={!here || busy}
         onChange={e => setTicks(t => ({ ...t, [p.name]: e.target.checked }))} /> <b>{p.name}</b></label>
@@ -776,12 +894,48 @@ function Checklist({ v, run, busy }: { v: View; run: (m: string, p: Record<strin
   </div>;
 }
 
+// "Start over from here" (owner, 2026-11-26: "abandoning the workflow
+// instance... copying the selections of voice and reference and
+// everything that's already there and starting from scratch, but then
+// changing the brief as you want it and regenerating the letter"). One
+// sentence of reason and the brief (the instance's, editable); the server
+// closes this instance as abandoned and starts the new one (core.restart).
+function RestartForm({ v, transport, manuscript, onStarted, busy }: {
+  v: View; transport: Transport; manuscript: string; busy: boolean; onStarted: (id: string) => Promise<void>;
+}) {
+  const inst = v.instance;
+  const [draft, setDraft] = useJsonDraft<{ reason: string; brief: string }>(`authorlm.wf.restartDraft.${manuscript}.${inst.id}`);
+  const [error, setError] = useState("");
+  const [sending, setSending] = useState(false);
+  if (!draft) return <div className="devedit-actions">
+    <button className="pill" disabled={busy} onClick={() => setDraft({ reason: "", brief: inst.brief || "" })}>Start over from here…</button>
+  </div>;
+  return <div className="wf-restart">
+    <div className="muted">Closes {inst.kind} #{inst.number} as abandoned (kept on the record; nothing more lands) and starts #{inst.number + 1} with the same lists, engine, units, filters and this brief. Its letter can read this one's.</div>
+    <input className="wf-input wide" placeholder="one sentence: why start over" value={draft.reason}
+      onChange={e => setDraft({ ...draft, reason: e.target.value })} aria-label="Why start over" />
+    <textarea className="devedit-edit" rows={rowsFor(draft.brief, 4)} value={draft.brief} aria-label="The new instance's brief"
+      placeholder="The brief for the new instance" onChange={e => setDraft({ ...draft, brief: e.target.value })} />
+    {error && <div className="bad">{error}</div>}
+    <div className="devedit-actions">
+      <button className="pill on" disabled={busy || sending || !draft.reason.trim()} onClick={async () => {
+        setSending(true);
+        try {
+          const r = await transport.request<{ id: string }>("restart", { id: inst.id, reason: draft.reason, brief: draft.brief });
+          setDraft(null); setError(""); await onStarted(r.id);
+        } catch (err) { setError((err as Error).message); } finally { setSending(false); }
+      }}>{sending ? "Starting…" : "Start over"}</button>
+      <button className="pill" disabled={sending} onClick={() => setDraft(null)}>Cancel</button>
+    </div>
+  </div>;
+}
+
 // ------------------------------------------------------------------ jobs
 
 const JOB_WORDS: Record<string, string> = {
   recommend: "Recommending", letter: "Writing the letter", letter_reply: "Answering",
   propose: "Proposing", act: "Redoing", reopen: "Reopening", wrapup: "Writing the wrap-up",
-  summaries: "Bringing summaries up to date",
+  summaries: "Bringing summaries up to date", revise_letter: "Revising the letter",
 };
 const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
@@ -933,7 +1087,7 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
         {essay && essay.instances.length > 0 && <div className="wf-nav-row">
           <label className="wf-field">Workflow
             <select value={instanceId} aria-label="Workflow instance" onChange={e => onRoute({ essay: route.essay, instance: e.target.value, step: "" })}>
-              {essay.instances.map(i => <option key={i.id} value={i.id}>{i.kind} #{i.number} · {STEP_WORDS[i.step]}</option>)}
+              {essay.instances.map(i => <option key={i.id} value={i.id}>{i.kind} #{i.number} · {i.abandoned ? "abandoned" : STEP_WORDS[i.step]}</option>)}
             </select>
           </label>
           {here && inst && <label className="wf-field">Step
@@ -994,7 +1148,7 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
           {inst.engine === "openai-api" && <div className="muted">openai-api is billed: each turn's dollars are under Usage, above.</div>}
           {inst.engine === "openai-api" && inst.step !== "done" && <CostEstimate transport={transport} engine={inst.engine} model={inst.model} id={inst.id} />}
           {inst.step !== "done" && <details className="wf-settings">
-            <summary>Switch engine or unit, or skip a step</summary>
+            <summary>Switch engine or unit, skip a step, or start over</summary>
             <div className="devedit-actions">
               <select value={sw.engine || inst.engine} onChange={e => setSw(s => ({ ...s, engine: e.target.value }))} aria-label="Engine">
                 {ov.engines.map(k => <option key={k} value={k}>{k}</option>)}</select>
@@ -1024,7 +1178,12 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
                 if (await run("skip", { reason: sw.skipReason, to: sw.skipTo || null })) setSw(s => ({ ...s, skipReason: "", skipTo: "" }));
               }}>Skip</button>
             </div>
+            <RestartForm v={view} transport={transport} manuscript={manuscript} busy={busy}
+              onStarted={async id => { await loadOv(); onRoute({ essay: inst.file, instance: id, step: "" }); }} />
           </details>}
+          {view.abandoned && <div className="wf-abandoned">Abandoned at the {STEP_WORDS[view.abandoned.step] || view.abandoned.step} step: {view.abandoned.reason}
+            {view.abandoned.successor && <> <button className="pill" onClick={() => onRoute({ essay: inst.file, instance: view.abandoned!.successor!, step: "" })}>Open the instance that replaced it</button></>}</div>}
+          {view.restarted_from && <div className="muted">Started over from an abandoned instance: {view.restarted_from.reason}</div>}
           {view.skipped.length > 0 && <ul className="muted">{view.skipped.map(d => <li key={d.id}>Skipped {(d.detail.skipped || []).join(", ")}: {d.reason}</li>)}</ul>}
         </div>
 
@@ -1034,6 +1193,8 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
         <LandingCard v={view} run={run} busy={busy} />
         {shownStep === "start" && <StartStep v={view} run={run} busy={busy} />}
         {shownStep === "letter" && <LetterStep v={view} run={run} busy={busy} asking={asking} manuscript={manuscript} />}
+        {["construction", "wrapup", "filters"].includes(shownStep) && shownStep === inst.step &&
+          <LetterInForce v={view} run={run} busy={busy} manuscript={manuscript} toLetter={() => setStep("letter")} />}
         {(shownStep === "construction" || shownStep === "filters") && shownStep === inst.step && view.walk && <>
           {shownStep === "filters" && view.checklist && <Checklist v={view} run={run} busy={busy} />}
           {(shownStep === "construction" || inst.filters_confirmed) &&

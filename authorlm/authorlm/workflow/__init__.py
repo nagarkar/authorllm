@@ -21,4 +21,13 @@
 - `roads`: the old roads (filter and lens runs, the beat loop, the Filters
   view's requests) as entry points that send to the workflow, or run with
   a skip of one sentence of reason, recorded.
+- `history`: an essay's earlier (closed) instances, their letters, verdicts
+  and discussion: `earlier_instances`, which the engines' read catalogue
+  serves as the `earlier_instances` request.
 """
+
+
+def earlier_instances(db, manuscript: dict, essay: str):
+    """The essay's earlier workflow instances (workflow/history.py)."""
+    from .history import earlier_instances as read
+    return read(db, manuscript, essay)

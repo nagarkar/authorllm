@@ -46,10 +46,11 @@ refresh_summaries = true` in authorlm/config.toml (global; default false)
 brings the rebuild-on-read back, billed like `summarize rebuild` on the
 `[critique]` / `[summaries]` models.
 
-`earlier_instances` reads a function the workflow package provides
-(`authorlm.workflow.earlier_instances(db, manuscript, essay) -> list|str`);
-it is imported when asked for, and answers "not available yet" while that
-package or function does not exist.
+`earlier_instances` reads the workflow package's
+`authorlm.workflow.earlier_instances(db, manuscript, essay) -> list|str`
+(workflow/history.py): the essay's closed instances, their letters (in
+force and superseded), the author's verdicts, edits and discussion. A new
+essay not yet in the reading order is served when it has instances.
 """
 
 from __future__ import annotations
@@ -374,15 +375,18 @@ def _essay_version(reader: BookReader, args: dict) -> str:
 
 
 def _earlier_instances(reader: BookReader, args: dict) -> str:
-    file, _text = reader.essay(args.get("file"))
-    try:
-        from .. import workflow  # the workflow package (built separately)
+    from .. import workflow
+    from ..workflow import core as wcore
 
-        fn = getattr(workflow, "earlier_instances")
-    except (ImportError, AttributeError):
-        return ("Earlier workflow instances are not available yet "
-                "(the workflow package does not provide them).")
-    got = fn(reader.db, reader.manuscript, file)
+    try:
+        file, _text = reader.essay(args.get("file"))
+    except Declined:
+        # A new essay's workflow names a file the toc does not list yet.
+        file = str(args.get("file") or "").strip()
+        if not file or "/" in file or "\\" in file or file.startswith(".") \
+                or not wcore.instances(reader.db, reader.manuscript, file):
+            raise
+    got = workflow.earlier_instances(reader.db, reader.manuscript, file)
     if isinstance(got, str):
         return got
     return json.dumps(got, ensure_ascii=False, indent=1, default=str)

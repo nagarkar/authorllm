@@ -1,8 +1,9 @@
 """`authorlm workflow …`: the per-essay editing workflow from the command
 line. Read-only verbs (list, status, show, turns, usage, filters without
 --set, brief without --set/--file or with --dry-run, finding without --set
-or with --dry-run, keep without --file/--item or with --dry-run, blurbs
-without a change) write nothing."""
+or with --dry-run, keep without --file/--item or with --dry-run,
+revise-letter and restart with --dry-run, blurbs without a change) write
+nothing."""
 
 from __future__ import annotations
 
@@ -194,6 +195,84 @@ def _keep_verb(db, inst: dict, args) -> None:
               "stays on the record"])
 
 
+def _revise_verb(db, manuscript, inst: dict, args) -> None:
+    """`workflow revise-letter <i> [--note TEXT] [--dry-run]`: one model
+    turn, run here (billed on a billed engine)."""
+    from .. import workflow_page as page
+
+    note = (args.note or "").strip()
+    findings = [core.finding_view(f) for f in core.letter_findings(db, inst)]
+    k = len(core.revisions(db, inst)) + 1
+    head = (f"{inst['id']}  {inst['file']}  at {inst['step']}: revision {k} of "
+            f"the letter on {inst['engine']}"
+            + (f" ({inst['model']})" if inst["model"] else ""))
+    nxt = f"authorlm workflow show {inst['id']}"
+    if args.dry_run:
+        if inst["step"] not in core.LETTER_STEPS:
+            raise ValueError("the letter is revised from the letter step to the "
+                             f"filters; the instance is at {inst['step']}")
+        if page._letter_turn(core.turns(db, inst)) is None:
+            raise ValueError("the letter is not written yet; write it first")
+        ruled = sum(1 for f in findings if f["verdict"])
+        _print(args, {"id": inst["id"], "dry_run": True, "revision": k,
+                      "step": inst["step"], "engine": inst["engine"],
+                      "findings_in_force": len(findings), "ruled": ruled,
+                      "note": note, "next": f"authorlm workflow revise-letter "
+                                            f"{inst['id']}"},
+               [head, f"  the letter in force: {len(findings)} finding(s), "
+                      f"{ruled} ruled; it would be kept as superseded",
+                f"  note: {note or '(none)'}",
+                "  dry run: no model call, nothing written"])
+        return
+    # The engines find the book by the workspace the page would name.
+    page._WORKSPACE.set(getattr(args, "workspace", None))
+    page.revise_letter(db, manuscript, inst, note)
+    after = [core.finding_view(f) for f in core.letter_findings(db, inst)]
+    lines = [head, f"  the new letter is in force: {len(after)} finding(s), "
+                   "none ruled yet; the earlier one is kept as superseded"]
+    for f in after:
+        lines.append(f"  {f['item']}" + (f" ({f['tier']})" if f["tier"] else "")
+                     + f": {_clip(f['title'])}")
+    lines.append(f"  next: rule each finding on the Workflows page, or "
+                 f"{nxt} --json")
+    _print(args, {"id": inst["id"], "revision": k,
+                  "findings": after, "next": nxt}, lines)
+
+
+def _restart_verb(db, manuscript, inst: dict, args) -> None:
+    """`workflow restart <i> --reason TEXT [--brief TEXT | --brief-file
+    PATH] [--dry-run]`."""
+    brief = None
+    if args.brief_file is not None:
+        brief = (sys.stdin.read() if args.brief_file == "-" else
+                 Path(args.brief_file).read_text(encoding="utf-8"))
+    elif args.brief is not None:
+        brief = args.brief
+    if args.dry_run:
+        core._one_sentence(args.reason, "starting over")
+        if inst["step"] == "done":
+            raise ValueError("the instance is done; start a new one instead")
+        kept = inst["brief"] if brief is None else brief.strip()
+        _print(args, {"id": inst["id"], "dry_run": True, "brief": kept,
+                      "next": f"authorlm workflow restart {inst['id']} "
+                              "--reason TEXT"},
+               [_summary_line(inst),
+                f"  dry run: would close it as abandoned ({args.reason}) and "
+                f"start {inst['kind']} #{inst['number'] + 1} of {inst['file']} "
+                "with its lists, engine, units, filters and "
+                + ("its brief" if brief is None else "the new brief")
+                + "; nothing written"])
+        return
+    new = core.restart(db, manuscript, inst, args.reason, brief=brief)
+    carry = new.pop("carry")
+    _print(args, {**new, "carry": carry,
+                  "next": f"authorlm workflow brief {new['id']} --set TEXT"},
+           [f"abandoned {inst['id']}: {args.reason.strip()}"]
+           + _show_lines(db, new)
+           + ["  the brief is editable before the first turn: authorlm "
+              f"workflow brief {new['id']} --set TEXT"])
+
+
 def _road(db, manuscript, args):
     return landing.make_road(db, manuscript, getattr(args, "workspace", None))
 
@@ -357,6 +436,12 @@ def cmd_workflow(args):
         elif verb == "keep":
             inst = core.get_instance(db, manuscript, args.instance)
             _keep_verb(db, inst, args)
+        elif verb == "revise-letter":
+            inst = core.get_instance(db, manuscript, args.instance)
+            _revise_verb(db, manuscript, inst, args)
+        elif verb == "restart":
+            inst = core.get_instance(db, manuscript, args.instance)
+            _restart_verb(db, manuscript, inst, args)
         elif verb == "decide":
             inst = core.get_instance(db, manuscript, args.instance)
             d = core.decide(db, inst, args.kind, args.words, args.reason or "")
@@ -517,6 +602,39 @@ def add_parser(sub, common) -> None:
                      help="one item of the new list (repeat for each)")
     q.add_argument("--dry-run", action="store_true",
                    help="say what would change; write nothing (read-only)")
+
+    q = leaf("revise-letter", "revise the letter from the letter step to the "
+                              "filters, even after verdicts: a new letter on "
+                              "the essay as it now stands becomes the letter "
+                              "in force (its findings unruled, each naming "
+                              "the earlier one it continues); the earlier "
+                              "letter is kept as superseded; accepted units "
+                              "stay accepted. One model turn, billed on a "
+                              "billed engine (openai-api)",
+             "authorlm workflow revise-letter wi-123 --note 'look again at "
+             "the second example'")
+    instance(q)
+    q.add_argument("--note", metavar="TEXT",
+                   help="what to look at differently (optional)")
+    q.add_argument("--dry-run", action="store_true",
+                   help="say what would be revised; no model call, nothing "
+                        "written (read-only)")
+
+    q = leaf("restart", "start over from here: close the instance as "
+                        "abandoned (kept on record) with one sentence of "
+                        "reason, and start a new instance of the essay with "
+                        "its lists, engine, units, filters and brief",
+             "authorlm workflow restart wi-123 --reason 'the brief missed "
+             "the point' --brief 'Tighten the argument for X'")
+    instance(q)
+    q.add_argument("--reason", required=True, help="one sentence: why start over")
+    src = q.add_mutually_exclusive_group()
+    src.add_argument("--brief", metavar="TEXT",
+                     help="the new instance's brief (default: the old one)")
+    src.add_argument("--brief-file", metavar="PATH",
+                     help="read the new brief from a file ('-' for stdin)")
+    q.add_argument("--dry-run", action="store_true",
+                   help="say what would happen; write nothing (read-only)")
 
     q = leaf("decide", "record a principle the author stated, or a ruling the "
                        "author explicitly marked as one")

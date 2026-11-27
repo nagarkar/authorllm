@@ -45,7 +45,16 @@ UNITS = ("paragraph", "section")
 MODES = ("beats", "apply-findings")
 LISTS = ("reference", "voice", "aware")
 DECISION_KINDS = ("skip", "engine-switch", "unit-switch", "list-change",
-                  "brief-change", "principle", "ruling")
+                  "brief-change", "principle", "ruling", "letter-revision",
+                  "abandon", "reopen-declined")
+# The steps at which the letter in force may be revised, ruled and edited
+# (owner, 2026-11-26: "if you have an existing workflow and you have a
+# letter and you've done the construction either partly or fully, and you
+# want to redraft the letter because you want the rest of the construction
+# or the rest of the filtering to take that letter into account, then I
+# think it should be allowed"). Lint and done have nothing left for a
+# letter to steer.
+LETTER_STEPS = ("letter", "construction", "wrapup", "filters")
 # Q6: claude-headless and openai-api now; claude-api and codex-headless are
 # named so the record can hold them, and are declined until built.
 ENGINES = ("claude-headless", "openai-api", "claude-api", "codex-headless")
@@ -360,9 +369,13 @@ def add_finding(db: Database, instance: dict, item_id: str, body: dict) -> str:
 # the letter step (`letter:<item>`), so every later model turn reads the
 # edited version from the record: an engine that rebuilds its session
 # sends every turn, one that resumes sends the turns it has not seen.
-# Edits are made only while the instance is at the letter step: once
-# construction has worked from a finding, changing it would leave the
-# units ruled on the old words.
+# Edits are made on the letter in force from the letter step to the
+# filters (`LETTER_STEPS`): an edit after construction began steers the
+# units still ahead; units already ruled keep the words they were ruled
+# on, as with a revised letter. Every letter turn (the letter, its
+# revisions, the discussion, the edits) is recorded at the letter step
+# (`letter_turn_instance`), whatever step the instance is at, so a walk's
+# turns stay the walk's.
 FINDING_FIELDS = ("title", "where", "what", "why", "direction", "tier")
 FINDING_WORDS = {"title": "Title", "where": "Where", "what": "What is wrong",
                  "why": "Why it matters", "direction": "Direction",
@@ -393,9 +406,14 @@ def finding_view(row) -> dict:
 
 
 def _check_letter_step(instance: dict) -> None:
-    if instance["step"] != "letter":
-        raise ValueError("the letter is edited at the letter step; the "
-                         f"instance is at {instance['step']}")
+    if instance["step"] not in LETTER_STEPS:
+        raise ValueError("the letter in force is edited from the letter step "
+                         f"to the filters; the instance is at {instance['step']}")
+
+
+def letter_turn_instance(instance: dict) -> dict:
+    """The instance as a letter turn records it: at the letter step."""
+    return {**instance, "step": "letter"}
 
 
 def finding_turn_text(item_id: str, f: dict) -> str:
@@ -410,8 +428,8 @@ def finding_turn_text(item_id: str, f: dict) -> str:
 def edit_finding(db: Database, instance: dict, item_id: str, fields: dict,
                  actor: str = "chat") -> dict:
     """The author's version of some of a finding's fields (title, where,
-    what, why, direction, tier), before or after its verdict, while the
-    instance is at the letter step. A field set back to the model's words
+    what, why, direction, tier), before or after its verdict, from the
+    letter step to the filters (`LETTER_STEPS`). A field set back to the model's words
     is no longer an edit. The model's words stay on the record. Returns
     the finding as it now stands."""
     _check_letter_step(instance)
@@ -455,7 +473,8 @@ def edit_finding(db: Database, instance: dict, item_id: str, fields: dict,
             "item_id": item_id, "file": instance["file"], "event": "edit",
             "detail": json.dumps({"fields": changed}, ensure_ascii=False),
             "at": at, "actor": actor})
-        record_turn(db, instance, "edit", unit_label=f"letter:{item_id}",
+        record_turn(db, letter_turn_instance(instance), "edit",
+                    unit_label=f"letter:{item_id}",
                     author_text=finding_turn_text(item_id, after))
     return finding_view(db.one("SELECT * FROM devedit_items WHERE id = ?",
                                (row["id"],)))
@@ -484,7 +503,7 @@ def keep_turn_text(items: list[str]) -> str:
 def set_keep(db: Database, instance: dict, items: list[str],
              current: list[str], actor: str = "chat") -> list[str]:
     """Replace the letter's Keep list with the author's (`current` is the
-    list as it now stands), while the instance is at the letter step. Blank
+    list as it now stands), from the letter step to the filters. Blank
     items are dropped; the letter's own list stays in its text."""
     _check_letter_step(instance)
     items = [" ".join(str(k).split()) for k in items]
@@ -499,7 +518,8 @@ def set_keep(db: Database, instance: dict, items: list[str],
             "detail": json.dumps({"from": list(current), "to": items},
                                  ensure_ascii=False),
             "at": now_iso(), "actor": actor})
-        record_turn(db, instance, "edit", unit_label=f"letter:{KEEP_ITEM}",
+        record_turn(db, letter_turn_instance(instance), "edit",
+                    unit_label=f"letter:{KEEP_ITEM}",
                     author_text=keep_turn_text(items))
     return items
 
@@ -527,6 +547,78 @@ def rule_finding(db: Database, instance: dict, item_id: str, verdict: str,
             "at": at, "actor": actor})
 
 
+# ------------------------------------------------------ the letter in force
+#
+# A letter may be revised at any of `LETTER_STEPS` (the owner's words are
+# there). The new letter becomes the letter in force: its findings take the
+# instance's letter run (`letter_run`), with no verdicts, and the findings of
+# the letter it replaces move to a superseded run of their own
+# (`superseded_run`), verdicts, reasons and edits kept. Each revision is a
+# `letter-revision` decision naming the step, the author's note, the
+# superseded run and both letters' turns. The superseded letters reach a
+# model only as history (context.py marks them, and its `letter-in-force`
+# block names the letter in force, so the engine's session is rebuilt once
+# when the letter in force changes and never holds two live letters).
+
+def superseded_run(instance: dict, k: int) -> str:
+    """The run that holds the findings of the k-th superseded letter."""
+    return f"{letter_run(instance)}/superseded/{k}"
+
+
+def revisions(db: Database, instance: dict) -> list[dict]:
+    """The instance's letter revisions, oldest first."""
+    return [d for d in decisions(db, instance) if d["kind"] == "letter-revision"]
+
+
+def findings_of_run(db: Database, instance: dict, run: str) -> list[dict]:
+    return [dict(r) for r in db.all(
+        "SELECT item_id, file, body, verdict, reason_given, decided "
+        "FROM devedit_items WHERE manuscript_id = ? AND run = ? ORDER BY ord",
+        (instance["manuscript_id"], run))]
+
+
+def open_findings(db: Database, instance: dict) -> list[str]:
+    """The findings of the letter in force with no verdict yet."""
+    return [f["item_id"] for f in letter_findings(db, instance) if not f["verdict"]]
+
+
+def revised_letter_gate(db: Database, instance: dict) -> str | None:
+    """Why the walk past the letter waits for a revised letter, or None:
+    once the letter is revised after the letter step, its new findings are
+    ruled before the next unit is worked or the step advances."""
+    if instance["step"] not in LETTER_STEPS[1:] or not revisions(db, instance):
+        return None
+    open_ = open_findings(db, instance)
+    if not open_:
+        return None
+    return (f"the revised letter's {len(open_)} finding(s) are not yet ruled "
+            f"({', '.join(open_[:5])}{'…' if len(open_) > 5 else ''}); rule "
+            "them at the letter step")
+
+
+def supersede_letter(db: Database, instance: dict, *, note: str,
+                     superseded_seq: int | None, letter_seq: int,
+                     findings: int) -> dict:
+    """Record a revision: the findings of the letter in force move to the
+    next superseded run, and a `letter-revision` decision says so. Called
+    inside the caller's transaction, before the new findings are added.
+    At the filters, the selection is opened again: the new letter's passes
+    re-tick the checklist, and the choice made then applies to the units
+    still ahead."""
+    k = len(revisions(db, instance)) + 1
+    run = superseded_run(instance, k)
+    db.conn.execute("UPDATE devedit_items SET run = ? WHERE manuscript_id = ? "
+                    "AND run = ?", (run, instance["manuscript_id"],
+                                    letter_run(instance)))
+    d = _record_decision(db, instance, "letter-revision", words=note, detail={
+        "step": instance["step"], "revision": k, "note": note,
+        "superseded_run": run, "superseded_seq": superseded_seq,
+        "letter_seq": letter_seq, "findings": findings})
+    if instance["step"] == "filters":
+        _touch(db, instance, {"filters_confirmed": 0})
+    return d
+
+
 def _step_turns(db: Database, instance: dict, step: str,
                 actions: tuple = ACTIONS) -> int:
     marks = ", ".join("?" for _ in actions)
@@ -551,6 +643,9 @@ def gate(db: Database, instance: dict) -> str | None:
         if not findings and not _step_turns(db, instance, "letter", ("accept",)):
             return ("construction waits for the letter: it has no findings "
                     "and no accepted letter turn")
+    revised = revised_letter_gate(db, instance)
+    if revised:
+        return revised
     if step == "construction" and not _step_turns(db, instance, "construction"):
         return ("the wrap-up waits for construction: no unit has been "
                 "worked; skip with a reason if construction is not needed")
@@ -839,6 +934,54 @@ def decide(db: Database, instance: dict, kind: str, words: str,
                             detail={"step": instance["step"]})
 
 
+# ------------------------------------------------------------- start over
+
+def abandoned(db: Database, instance: dict) -> dict | None:
+    """The instance's `abandon` decision, or None."""
+    return next((d for d in decisions(db, instance) if d["kind"] == "abandon"),
+                None)
+
+
+def abandoned_ids(db: Database, manuscript: dict) -> dict[str, dict]:
+    """{instance id: its abandon decision} over the manuscript."""
+    return {r["instance_id"]: _decision(r) for r in db.all(
+        "SELECT d.* FROM workflow_decisions d JOIN workflow_instances i "
+        "ON i.id = d.instance_id WHERE i.manuscript_id = ? AND d.kind = "
+        "'abandon'", (manuscript["id"],))}
+
+
+def restart(db: Database, manuscript: dict, instance: dict, reason: str,
+            brief: str | None = None) -> dict:
+    """Start over from here (owner, 2026-11-26: "abandoning the workflow
+    instance... copying the selections of voice and reference and
+    everything that's already there and starting from scratch, but then
+    changing the brief as you want it and regenerating the letter").
+
+    The instance is closed as abandoned, with one sentence of reason (an
+    `abandon` decision; step done, `finished_at` left empty, so it never
+    counts as a finished instance): nothing is deleted, and nothing more
+    is landed (what landed at an earlier step's end stays in the file). A
+    new instance of the same essay and kind starts at once, carrying what
+    `start` carries (lists, engine, units, filters) plus the brief: the
+    one given, else the abandoned instance's. The brief stays editable
+    before the first turn (and after). The new instance's letter reads the
+    abandoned one through the `earlier_instances` request. Returns the new
+    instance, with `carry` and `abandoned` (the old id)."""
+    reason = _one_sentence(reason, "starting over")
+    if instance["step"] == "done":
+        raise ValueError("the instance is done; start a new one instead")
+    with db.transaction():
+        d = _record_decision(db, instance, "abandon", reason=reason,
+                             words=reason, detail={"step": instance["step"]})
+        _touch(db, instance, {"step": "done"})
+        new = start(db, manuscript, instance["file"], instance["kind"],
+                    brief=instance["brief"] if brief is None else brief)
+        db.update("workflow_decisions", d["id"], {"detail": json.dumps(
+            {**d["detail"], "successor": new["id"]}, ensure_ascii=False)})
+    new["abandoned"] = instance["id"]
+    return new
+
+
 # -------------------------------------------------------------------- turns
 
 def _bracketed(text: str) -> bool:
@@ -917,13 +1060,16 @@ def record_turn(db: Database, instance: dict, action: str, *,
 def ask(db: Database, manuscript: dict, instance: dict, action: str,
         message: str, *, engine=None, author_text: str | None = None,
         blurbs: list[str] | None = None,
-        context_extra: dict | None = None) -> tuple[dict, str | None]:
+        context_extra: dict | None = None,
+        as_step: str | None = None) -> tuple[dict, str | None]:
     """Ask the instance's engine for its reply and record nothing: (the
     normalized reply, the engine's session ref after it). `context_extra`
     is merged over the instance context (a caller's working text of the
     essay as `essay`, its `workspace` and `manuscript` name). A caller that
     records more than the turn (a letter's findings) records the turn and
-    the rest in one transaction with `record_turn`."""
+    the rest in one transaction with `record_turn`. `as_step` sends the
+    turn with another step's role and brief (a letter revised at
+    construction is written under the letter's brief)."""
     from . import context, contract
 
     author_text = message if author_text is None else author_text
@@ -935,6 +1081,8 @@ def ask(db: Database, manuscript: dict, instance: dict, action: str,
     # The record, not the caller's copy, holds the session ref to resume.
     instance = _instance(db.one("SELECT * FROM workflow_instances WHERE id = ?",
                                 (instance["id"],)))
+    if as_step:
+        instance = {**instance, "step": as_step}
     engine = engine or contract.make_engine(instance["engine"], instance["model"])
     ctx = context.instance_context(db, manuscript, instance)
     if context_extra:

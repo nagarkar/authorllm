@@ -465,3 +465,18 @@ header .popover select{width:100%;max-width:none;flex:none;background:var(--grou
 .wf-walk{display:grid;gap:6px;margin-top:8px}
 .wf .wf-nav .wf-walk select{font-weight:400;text-overflow:ellipsis}
 .wf-walk .devedit-actions .pill{min-height:44px}
+/* Revise the letter, the letter in force, start over (Workflows.tsx). */
+.wf-revise textarea,.wf-restart textarea{width:100%;box-sizing:border-box;line-height:1.45;resize:vertical;font-size:16px}
+.wf-revise .pill,.wf-restart .pill,.wf-in-force .pill,.wf-reopen .pill,.wf-again{min-height:44px;padding:8px 18px}
+.wf-restart{display:flex;flex-direction:column;gap:8px;margin:8px 0}
+.wf-restart .wf-input{flex:none;font-size:16px;min-height:44px}
+.wf-continues{margin:2px 0 6px}
+.wf-revised-line{margin:6px 0;font-weight:600}
+.wf-abandoned{margin:6px 0;color:var(--muted)}
+/* A finding's verdict, unmistakable: a filled line and a filled, ticked button. */
+.wf-verdict{display:inline-block;margin:4px 0;padding:4px 10px;border-radius:8px;font-weight:700;border:1.5px solid var(--line)}
+.wf-verdict.accept{background:var(--good);color:var(--panel);border-color:var(--good)}
+.wf-verdict.reject,.wf-verdict.defer{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+.wf-verdict.open{color:var(--muted);font-weight:600}
+.pill.wf-chosen{font-weight:700;background:var(--good);color:var(--panel);border-color:var(--good)}
+.wf-all-decided{font-weight:700;margin:4px 0 8px}
