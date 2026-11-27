@@ -259,6 +259,20 @@ def plan(db: Database, manuscript: dict, inst: dict,
         hit = find(text, u["original"], cursor)
         if hit is not None:
             i, j, how = hit
+            # An insert's pair keeps the anchor as `original` and the
+            # anchor-plus-new-text as `new`. Once that `new` already stands
+            # in the file (the author applied it by hand, or a prior land
+            # wrote the file but did not record the row), `original` is
+            # still found — as a proper subspan of `new` — and a blind
+            # splice would duplicate the inserted paragraphs. Treat that
+            # as already landed; do not rewrite.
+            if u["new"] and (held := find(text, u["new"], cursor)) is not None:
+                hs, he, _ = held
+                if hs <= i and j <= he and (hs < i or j < he):
+                    cursors[cur_key] = he
+                    u.update(status="already",
+                             reason="the file already has it")
+                    continue
             text = text[:i] + u["new"] + text[j:]
             cursors[cur_key] = i + len(u["new"])
             u.update(status="land", reason="" if how == "exact"
