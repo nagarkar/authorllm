@@ -400,7 +400,11 @@ def test_turns_context_and_blurbs() -> None:
                                       engine=engine), ValueError, "record_turn")
         check("a plain edit needs no model; a bracketed one does",
               not core.needs_model("edit", "My own words.")
-              and core.needs_model("edit", "My words [improve this]."))
+              and core.needs_model("edit", "My words [improve this].")
+              and not core.needs_model("edit", "Crucified.[^RT3] Then more.")
+              and not core.needs_model("edit", "[^RT3]: Gellius, II.18.")
+              and not core.needs_model("edit", "See [the essay](x.md).")
+              and core.needs_model("edit", "Crucified.[^RT3] [fix this]"))
         core.record_turn(db, inst, "edit", author_text="My own words.")
         core.send_turn(db, ms, inst, "edit", "My words [improve this].",
                        engine=engine)

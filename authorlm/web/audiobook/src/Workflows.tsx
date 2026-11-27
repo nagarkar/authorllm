@@ -529,7 +529,10 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
   const resolved = ["accepted", "rejected", "dropped", "edited", "passed"].includes(unit.state);
   const after = pending ? (form?.proposed || "") : (unit.text ?? "");
   const noOriginal = !unit.before.trim();
-  const bracket = /\[[^\]]*\]/.test(text);
+  // Footnote markers ([^RT3]) and links ([text](url)) are essay text,
+  // not notes to the engine (matches core._bracketed).
+  const bracket = /\[[^\]]*\]/.test(
+    text.replace(/\[\^[^\]\s]+\]:?|\[[^\]]*\]\([^)]*\)/g, ""));
   const visible = blurbs.filter(b => showHidden || !b.hidden);
   // The discussion since the form the author sees: what "Redo with this
   // discussion" hands the engine (workflow_page.act, with_discussion).
