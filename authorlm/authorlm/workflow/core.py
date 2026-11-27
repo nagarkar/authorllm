@@ -351,6 +351,159 @@ def add_finding(db: Database, instance: dict, item_id: str, body: dict) -> str:
     return db.insert("devedit_items", row)
 
 
+# The author's edits to the letter (owner, 2026-11-26, at the letter step of
+# wi-7abca47358e0: "if I can edit the recommendation as well, that would be
+# ideal. So I can tweak it in minor ways"). A finding's body keeps the
+# model's fields as written; the author's version of a field goes under
+# `author` beside them, and `finding_view` gives the effective finding.
+# Each edit is also an `edit_events` row (from, to) and a session turn at
+# the letter step (`letter:<item>`), so every later model turn reads the
+# edited version from the record: an engine that rebuilds its session
+# sends every turn, one that resumes sends the turns it has not seen.
+# Edits are made only while the instance is at the letter step: once
+# construction has worked from a finding, changing it would leave the
+# units ruled on the old words.
+FINDING_FIELDS = ("title", "where", "what", "why", "direction", "tier")
+FINDING_WORDS = {"title": "Title", "where": "Where", "what": "What is wrong",
+                 "why": "Why it matters", "direction": "Direction",
+                 "tier": "Tier"}
+TIERS = ("must", "should", "could")
+KEEP_ITEM = "keep"
+
+
+def _body(row) -> dict:
+    body = row["body"]
+    return loads(body, {}) if isinstance(body, str) else dict(body or {})
+
+
+def finding_view(row) -> dict:
+    """One letter finding as it now stands: the model's fields with the
+    author's edits over them; `edited` names the fields the author changed
+    and `original` holds the model's words for each."""
+    body = _body(row)
+    author = body.get("author") or {}
+    out = {k: body.get(k, "") for k in ("n", "text") + FINDING_FIELDS}
+    out.update({k: v for k, v in author.items() if k in FINDING_FIELDS})
+    out.update(item=row["item_id"], verdict=row["verdict"],
+               reason=row["reason_given"], decided=row["decided"],
+               edited=[k for k in FINDING_FIELDS if k in author],
+               original={k: body.get(k, "") for k in FINDING_FIELDS
+                         if k in author})
+    return out
+
+
+def _check_letter_step(instance: dict) -> None:
+    if instance["step"] != "letter":
+        raise ValueError("the letter is edited at the letter step; the "
+                         f"instance is at {instance['step']}")
+
+
+def finding_turn_text(item_id: str, f: dict) -> str:
+    """What the model is told when the author edits a finding."""
+    lines = [f"The author edited finding {item_id} of the letter. From now on "
+             "it reads as below; work from this version, not the one first "
+             "written."]
+    lines += [f"{FINDING_WORDS[k]}: {f.get(k) or '-'}" for k in FINDING_FIELDS]
+    return "\n".join(lines)
+
+
+def edit_finding(db: Database, instance: dict, item_id: str, fields: dict,
+                 actor: str = "chat") -> dict:
+    """The author's version of some of a finding's fields (title, where,
+    what, why, direction, tier), before or after its verdict, while the
+    instance is at the letter step. A field set back to the model's words
+    is no longer an edit. The model's words stay on the record. Returns
+    the finding as it now stands."""
+    _check_letter_step(instance)
+    unknown = sorted(set(fields) - set(FINDING_FIELDS))
+    if unknown:
+        raise ValueError(f"a finding has no field {', '.join(unknown)} "
+                         f"(fields: {', '.join(FINDING_FIELDS)})")
+    fields = {k: str(v).strip() for k, v in fields.items()}
+    if "tier" in fields:
+        fields["tier"] = fields["tier"].lower()
+        if fields["tier"] not in TIERS + ("",):
+            raise ValueError(f"tier is one of {', '.join(TIERS)}")
+    if "title" in fields and not fields["title"]:
+        raise ValueError("a finding keeps a title")
+    row = db.one("SELECT * FROM devedit_items WHERE manuscript_id = ? AND "
+                 "run = ? AND item_id = ?", (instance["manuscript_id"],
+                                             letter_run(instance), item_id))
+    if row is None:
+        raise LookupError(f"no finding '{item_id}' on {instance['id']}")
+    now = finding_view(row)
+    changed = {k: {"from": now[k], "to": v} for k, v in fields.items()
+               if v != now[k]}
+    if not changed:
+        raise ValueError(f"{item_id} is unchanged")
+    body = _body(row)
+    author = dict(body.get("author") or {})
+    for k, ch in changed.items():
+        if ch["to"] == body.get(k, ""):
+            author.pop(k, None)
+        else:
+            author[k] = ch["to"]
+    body["author"] = author
+    after = {**now, **{k: ch["to"] for k, ch in changed.items()}}
+    at = now_iso()
+    with db.transaction():
+        db.update("devedit_items", row["id"],
+                  {"body": json.dumps(body, ensure_ascii=False)})
+        db.insert("edit_events", {
+            **ko_fields("eev"), "manuscript_id": instance["manuscript_id"],
+            "source": "workflow", "run": letter_run(instance),
+            "item_id": item_id, "file": instance["file"], "event": "edit",
+            "detail": json.dumps({"fields": changed}, ensure_ascii=False),
+            "at": at, "actor": actor})
+        record_turn(db, instance, "edit", unit_label=f"letter:{item_id}",
+                    author_text=finding_turn_text(item_id, after))
+    return finding_view(db.one("SELECT * FROM devedit_items WHERE id = ?",
+                               (row["id"],)))
+
+
+def keep_edit(db: Database, instance: dict, since: str = "") -> list[str] | None:
+    """The author's Keep list, from the latest Keep edit made after `since`
+    (the letter's time), or None when the letter's own list stands."""
+    row = db.one("SELECT detail FROM edit_events WHERE manuscript_id = ? AND "
+                 "run = ? AND item_id = ? AND event = 'edit' AND at >= ? "
+                 "ORDER BY at DESC LIMIT 1",
+                 (instance["manuscript_id"], letter_run(instance), KEEP_ITEM,
+                  since))
+    if row is None:
+        return None
+    return list(loads(row["detail"], {}).get("to") or [])
+
+
+def keep_turn_text(items: list[str]) -> str:
+    return ("The author edited the letter's Keep list. From now on it reads "
+            "as below; keep these, not the list first written.\n"
+            + ("\n".join(f"- {k}" for k in items) if items
+               else "(empty: the author names nothing to keep)"))
+
+
+def set_keep(db: Database, instance: dict, items: list[str],
+             current: list[str], actor: str = "chat") -> list[str]:
+    """Replace the letter's Keep list with the author's (`current` is the
+    list as it now stands), while the instance is at the letter step. Blank
+    items are dropped; the letter's own list stays in its text."""
+    _check_letter_step(instance)
+    items = [" ".join(str(k).split()) for k in items]
+    items = [k for k in items if k]
+    if items == list(current):
+        raise ValueError("the Keep list is unchanged")
+    with db.transaction():
+        db.insert("edit_events", {
+            **ko_fields("eev"), "manuscript_id": instance["manuscript_id"],
+            "source": "workflow", "run": letter_run(instance),
+            "item_id": KEEP_ITEM, "file": instance["file"], "event": "edit",
+            "detail": json.dumps({"from": list(current), "to": items},
+                                 ensure_ascii=False),
+            "at": now_iso(), "actor": actor})
+        record_turn(db, instance, "edit", unit_label=f"letter:{KEEP_ITEM}",
+                    author_text=keep_turn_text(items))
+    return items
+
+
 def rule_finding(db: Database, instance: dict, item_id: str, verdict: str,
                  reason: str = "", actor: str = "chat") -> None:
     """The author's verdict on a letter finding: accept, reject or defer."""

@@ -27,6 +27,11 @@ import { recall, remember } from "./remember";
 //   instance (`authorlm.wf.briefDraft.<ms>.<instance>`), half-written text
 //   that is personal and not worth a link; a reload reopens the editor
 //   with it, and Save or Cancel clears it;
+// - an unsaved edit of the letter's Keep list or of one finding →
+//   localStorage per manuscript and instance (`authorlm.wf.keepDraft.<ms>.
+//   <instance>`, `authorlm.wf.findingDraft.<ms>.<instance>.<item>`), as
+//   JSON: half-made edits, personal, not worth a link; a reload reopens the
+//   editor with them, and Save or Cancel clears them;
 // - whether hidden blurbs are shown → localStorage per manuscript.
 
 interface Usage { turns?: number; input?: number; cached?: number; output?: number; dollars?: number; est_subscription?: number; }
@@ -51,9 +56,12 @@ interface Walk {
 }
 interface Estimate { engine: string; billed: boolean; model?: string; turns?: number; input_per_turn?: number; output_per_turn?: number; per_turn?: number | null; total?: number | null; why?: string; }
 interface LintRun { at: string; counts: Record<string, number>; total: number; findings: { severity: string; code: string; message: string; quote: string; line?: number | null }[]; }
-interface Finding { item: string; verdict: string | null; reason: string | null; n?: number; title: string; where: string; what: string; why: string; direction: string; tier: string; text: string; }
+interface Finding {
+  item: string; verdict: string | null; reason: string | null; n?: number; title: string; where: string; what: string; why: string; direction: string; tier: string; text: string;
+  edited: string[]; original: Record<string, string>;
+}
 interface Letter {
-  drafted: boolean; redraft: boolean; text: string; findings: Finding[]; keep: string[];
+  drafted: boolean; redraft: boolean; text: string; findings: Finding[]; keep: string[]; keep_letter: string[]; keep_edited: boolean;
   passes: Record<string, { needed: boolean; reason: string }>; notes: string[];
   discussion: { seq: number; action: string; author: string; reply: string; reason: string; at: string }[];
   accepted_without_findings: boolean;
@@ -472,7 +480,122 @@ function StartStep({ v, run, busy }: { v: View; run: (m: string, p: Record<strin
   </>;
 }
 
-function LetterStep({ v, run, busy }: { v: View; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; busy: boolean }) {
+// A draft kept in localStorage as JSON (see the header: unsaved letter
+// edits survive a reload); null when no edit is open.
+function useJsonDraft<T>(key: string): [T | null, (d: T | null) => void] {
+  const read = () => { try { const s = recall(key); return s ? JSON.parse(s) as T : null; } catch { return null; } };
+  const [draft, setState] = useState<T | null>(read);
+  useEffect(() => { setState(read()); }, [key]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (d: T | null) => { remember(key, d === null ? "" : JSON.stringify(d)); setState(d); };
+  return [draft, set];
+}
+
+const rowsFor = (s: string, min = 2) => Math.min(14, Math.max(min, s.split("\n").length + Math.ceil(s.length / 48)));
+
+// The letter's Keep list, editable while the instance is at the letter step
+// (owner, 2026-11-26: "the keep section in the letter output cannot be
+// edited ... so that I can change it before we move to the next stage").
+// Save goes to workflow_page `keep` (core.set_keep): the whole list; the
+// letter's own list stays in its text and on the record.
+function KeepCard({ L, here, run, busy, asking, manuscript, inst }: {
+  L: Letter; here: boolean; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; busy: boolean; asking: boolean; manuscript: string; inst: string;
+}) {
+  const [draft, setDraft] = useJsonDraft<string[]>(`authorlm.wf.keepDraft.${manuscript}.${inst}`);
+  const editing = here && draft !== null;
+  if (!editing && !L.keep.length && !here) return null;
+  const clean = (draft || []).map(k => k.trim()).filter(Boolean);
+  const unchanged = editing && JSON.stringify(clean) === JSON.stringify(L.keep);
+  const put = (i: number, s: string) => setDraft((draft || []).map((k, j) => j === i ? s : k));
+  return (
+    <div className="card wf-keep">
+      <div className="card-head"><span>Keep</span>
+        {L.keep_edited && <span className="wf-edited">edited</span>}
+        {here && !editing && <button className="pill" onClick={() => setDraft(L.keep.length ? [...L.keep] : [""])}>Edit</button>}</div>
+      {!editing && (L.keep.length ? <ul>{L.keep.map((k, i) => <li key={i}>{k}</li>)}</ul>
+        : <p className="muted">Nothing named to keep.</p>)}
+      {!editing && L.keep_edited && <details><summary className="muted">The letter's list</summary>
+        <ul className="muted">{L.keep_letter.map((k, i) => <li key={i}>{k}</li>)}</ul></details>}
+      {editing && <>
+        {draft!.map((k, i) => <div key={i} className="wf-keep-item">
+          <textarea className="devedit-edit" rows={rowsFor(k)} value={k} aria-label={`Keep item ${i + 1}`}
+            placeholder="What to keep" onChange={e => put(i, e.target.value)} />
+          <button className="wf-x" aria-label={`Remove keep item ${i + 1}`} onClick={() => setDraft(draft!.filter((_, j) => j !== i))}>×</button>
+        </div>)}
+        <button className="pill" onClick={() => setDraft([...draft!, ""])}>+ Add an item</button>
+        <div className="muted">Construction and every later turn keep the list you save; the letter's own stays on the record.</div>
+        <div className="devedit-actions">
+          <button className="pill on" disabled={busy || unchanged} onClick={async () => {
+            if (await run("keep", { items: clean })) setDraft(null);
+          }}>{asking ? "Saving…" : "Save"}</button>
+          <button className="pill" disabled={asking} onClick={() => setDraft(null)}>Cancel</button>
+        </div>
+      </>}
+    </div>
+  );
+}
+
+const FIELDS = [["title", "Title"], ["where", "Where"], ["what", "What is wrong"], ["why", "Why it matters"], ["direction", "Direction"]] as const;
+type FindingDraft = Record<string, string>;
+
+// One finding of the letter, with its verdict buttons and an Edit control
+// for small tweaks (owner, 2026-11-26: "if I can edit the recommendation as
+// well, that would be ideal. So I can tweak it in minor ways"). Editable
+// before and after the verdict while the letter step is open; Save goes to
+// workflow_page `finding_edit` (core.edit_finding) with the changed fields.
+function FindingCard({ f, here, run, busy, asking, manuscript, inst, reason, setReason }: {
+  f: Finding; here: boolean; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; busy: boolean; asking: boolean;
+  manuscript: string; inst: string; reason: string; setReason: (s: string) => void;
+}) {
+  const [draft, setDraft] = useJsonDraft<FindingDraft>(`authorlm.wf.findingDraft.${manuscript}.${inst}.${f.item}`);
+  const editing = here && draft !== null;
+  const now: FindingDraft = { title: f.title, where: f.where, what: f.what, why: f.why, direction: f.direction, tier: f.tier };
+  const changed = editing ? Object.fromEntries(Object.entries(draft!).filter(([k, s]) => s.trim() !== (now[k] || ""))) : {};
+  return (
+    <div className={`card wf-finding${f.verdict ? " ruled" : ""}`}>
+      <div className="card-head"><span>{f.item}</span>{f.tier && <span className={`wf-tier ${f.tier}`}>{f.tier}</span>}
+        {f.edited.length > 0 && <span className="wf-edited" title={`You changed: ${f.edited.join(", ")}`}>edited</span>}
+        {f.verdict && <span className="state done">{f.verdict}{f.reason ? `: ${f.reason}` : ""}</span>}
+        {here && !editing && <button className="pill wf-edit" onClick={() => setDraft(now)}>Edit</button>}</div>
+      {!editing && <>
+        <p><b>{f.title}</b></p>
+        {f.where && <p><span className="muted">Where:</span> {f.where}</p>}
+        {f.what && <p><span className="muted">What is wrong:</span> {f.what}</p>}
+        {f.why && <p><span className="muted">Why it matters:</span> {f.why}</p>}
+        {f.direction && <p><span className="muted">Direction:</span> {f.direction}</p>}
+        {!f.what && !f.direction && f.text && <pre className="wf-pre">{f.text}</pre>}
+        {f.edited.length > 0 && <details><summary className="muted">The letter's words</summary>
+          {f.edited.map(k => <p key={k} className="muted"><span>{(FIELDS.find(x => x[0] === k) || [k, "Tier"])[1]}:</span> {f.original[k] || "—"}</p>)}</details>}
+      </>}
+      {editing && <div className="wf-finding-edit">
+        {FIELDS.map(([k, label]) => <label key={k}><span className="muted">{label}</span>
+          <textarea className="devedit-edit" rows={rowsFor(draft![k] || "", k === "title" ? 1 : 2)} value={draft![k] || ""}
+            onChange={e => setDraft({ ...draft!, [k]: e.target.value })} /></label>)}
+        <label><span className="muted">Tier</span>
+          <select value={draft!.tier || ""} onChange={e => setDraft({ ...draft!, tier: e.target.value })}>
+            {!draft!.tier && <option value="">(none)</option>}
+            {["must", "should", "could"].map(t => <option key={t} value={t}>{t}</option>)}
+          </select></label>
+        <div className="muted">Construction and every later turn work from your version; the letter's words stay on the record.</div>
+        <div className="devedit-actions">
+          <button className="pill on" disabled={busy || !Object.keys(changed).length || !(draft!.title || "").trim()} onClick={async () => {
+            if (await run("finding_edit", { item: f.item, fields: changed })) setDraft(null);
+          }}>{asking ? "Saving…" : "Save"}</button>
+          <button className="pill" disabled={asking} onClick={() => setDraft(null)}>Cancel</button>
+        </div>
+      </div>}
+      {here && !editing && <div className="devedit-actions">
+        <input className="wf-input" placeholder="reason (optional)" value={reason} onChange={e => setReason(e.target.value)} />
+        {(["accept", "reject", "defer"] as const).map(verdict => (
+          <button key={verdict} className={`pill${f.verdict === verdict ? " on" : ""}`} disabled={busy}
+            onClick={() => void run("finding", { item: f.item, verdict, reason })}>{verdict[0].toUpperCase() + verdict.slice(1)}</button>))}
+      </div>}
+    </div>
+  );
+}
+
+function LetterStep({ v, run, busy, asking, manuscript }: {
+  v: View; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; busy: boolean; asking: boolean; manuscript: string;
+}) {
   const L = v.letter;
   const [reasons, setReasons] = useState<Record<string, string>>({});
   const [reply, setReply] = useState("");
@@ -492,25 +615,11 @@ function LetterStep({ v, run, busy }: { v: View; run: (m: string, p: Record<stri
       {L.redraft && <button className="pill" disabled={busy} onClick={() => void run("letter", {})}
         title="Nothing is ruled yet: a new draft replaces this one and its findings">{busy ? "Writing…" : "Redraft the letter"}</button>}
     </div>}
-    {L.findings.map(f => (
-      <div key={f.item} className={`card wf-finding${f.verdict ? " ruled" : ""}`}>
-        <div className="card-head"><span>{f.item}</span>{f.tier && <span className={`wf-tier ${f.tier}`}>{f.tier}</span>}
-          {f.verdict && <span className="state done">{f.verdict}{f.reason ? `: ${f.reason}` : ""}</span>}</div>
-        <p><b>{f.title}</b></p>
-        {f.where && <p><span className="muted">Where:</span> {f.where}</p>}
-        {f.what && <p><span className="muted">What is wrong:</span> {f.what}</p>}
-        {f.why && <p><span className="muted">Why it matters:</span> {f.why}</p>}
-        {f.direction && <p><span className="muted">Direction:</span> {f.direction}</p>}
-        {!f.what && !f.direction && f.text && <pre className="wf-pre">{f.text}</pre>}
-        {here && <div className="devedit-actions">
-          <input className="wf-input" placeholder="reason (optional)" value={reasons[f.item] ?? ""} onChange={e => setReasons(r => ({ ...r, [f.item]: e.target.value }))} />
-          {(["accept", "reject", "defer"] as const).map(verdict => (
-            <button key={verdict} className={`pill${f.verdict === verdict ? " on" : ""}`} disabled={busy}
-              onClick={() => void run("finding", { item: f.item, verdict, reason: reasons[f.item] || "" })}>{verdict[0].toUpperCase() + verdict.slice(1)}</button>))}
-        </div>}
-      </div>))}
+    {L.findings.map(f => <FindingCard key={f.item} f={f} here={here} run={run} busy={busy} asking={asking}
+      manuscript={manuscript} inst={v.instance.id} reason={reasons[f.item] ?? ""}
+      setReason={s => setReasons(r => ({ ...r, [f.item]: s }))} />)}
+    {L.drafted && <KeepCard L={L} here={here} run={run} busy={busy} asking={asking} manuscript={manuscript} inst={v.instance.id} />}
     {L.drafted && <div className="card">
-      {L.keep.length > 0 && <><div className="card-head"><span>Keep</span></div><ul>{L.keep.map((k, i) => <li key={i}>{k}</li>)}</ul></>}
       {Object.keys(L.passes).length > 0 && <><div className="card-head"><span>Passes</span></div>
         <ul>{Object.entries(L.passes).map(([name, p]) => <li key={name}><b>{name}</b>: {p.needed ? "needed" : "not needed"}{p.reason ? ` — ${p.reason}` : ""}</li>)}</ul></>}
       {L.notes.length > 0 && <><div className="card-head"><span>Paragraph notes</span></div>
@@ -857,7 +966,7 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
           dismiss={() => void run("job_dismiss", { job: view.job!.id })} />}
         <LandingCard v={view} run={run} busy={busy} />
         {shownStep === "start" && <StartStep v={view} run={run} busy={busy} />}
-        {shownStep === "letter" && <LetterStep v={view} run={run} busy={busy} />}
+        {shownStep === "letter" && <LetterStep v={view} run={run} busy={busy} asking={asking} manuscript={manuscript} />}
         {(shownStep === "construction" || shownStep === "filters") && shownStep === inst.step && view.walk && <>
           {shownStep === "filters" && view.checklist && <Checklist v={view} run={run} busy={busy} />}
           {(shownStep === "construction" || inst.filters_confirmed) &&
