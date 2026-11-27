@@ -464,3 +464,126 @@ def _version_text(db: Database, version_id: str | None,
 
     return snapshot_text(db, row["manuscript_id"], loads(row["files"], {}),
                          file)
+
+
+# ------------------------------------------------------------ as of a date
+
+# Words too common to say which essay a heading belongs to.
+_TITLE_STOPWORDS = frozenset(
+    "the and for with from that this into upon what when where which who "
+    "why how its our your their not but are was were has have had about "
+    "recap".split())
+
+
+def parse_as_of(value: str) -> str:
+    """The cutoff for `file_as_of`, as a UTC timestamp in the format
+    `created_at` is stored in (`db.now_iso`), so the two compare as text.
+
+    Takes `YYYY-MM-DD` (through the end of that day), `YYYY-MM-DD HH:MM`
+    or `YYYY-MM-DDTHH:MM[:SS]`, with an optional `Z` or UTC offset. A date
+    or time without a zone is this machine's local time: the author's
+    "October 10" means their October 10. Raises ValueError naming the
+    accepted forms."""
+    from datetime import datetime, time, timezone
+
+    raw = (value or "").strip()
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            moment = datetime.combine(datetime.fromisoformat(raw).date(),
+                                      time(23, 59, 59, 999999))
+        else:
+            moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(
+            f"'{value}' is not a date; use YYYY-MM-DD (the whole day) or "
+            f"YYYY-MM-DDTHH:MM (local time unless it ends in Z or an offset)")
+    if moment.tzinfo is None:
+        moment = moment.astimezone()  # naive: this machine's local time
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def title_words(text: str | None, file: str) -> list[str]:
+    """The words that say which essay `file` is: its first heading's and
+    its file name's, lowercased, common words left out."""
+    heading = next((line for line in (text or "").splitlines()
+                    if line.startswith("#")), "")
+    stem = Path(file).stem
+    words: list[str] = []
+    for word in re.findall(r"[a-z0-9]+", f"{heading} {stem}".lower()):
+        if len(word) >= 3 and word not in _TITLE_STOPWORDS and word not in words:
+            words.append(word)
+    return words
+
+
+def file_as_of(db: Database, manuscript: dict, file: str, as_of: str,
+               current_text: str | None = None) -> dict:
+    """A manuscript file's text in the latest snapshot collected at or
+    before `as_of` (`parse_as_of`). Read-only.
+
+    The snapshot's book is its own reading order (its toc.toml, minus the
+    files that toc never lists), as `engines.catalogue` limits the current
+    book; a file outside it is not served. `file` is looked up under every
+    name the document has carried (`docs.names_of`), then as a name the
+    snapshot itself holds (a file since split off or retired, such as an
+    old recapitulation.md). `current_text` is the file's text now, when
+    the caller has it (for its title words and to say whether it changed).
+    Returns
+
+        {version_no, created_at, cutoff, requested, file (the snapshot's
+         name, or None), text (or None), book (the snapshot's files in
+         reading order), title_words, matches: [{file, section, heading,
+         words}]}
+
+    `matches`, when the file is absent, are the snapshot's section
+    headings that share the most title words (whole words, a plural
+    allowed; at least half of them): where the essay's text most likely
+    stood then.
+    Raises LookupError when no snapshot is that old, ValueError for a
+    date it cannot read."""
+    from . import docs, structure
+    from .summaries import sections_of
+
+    cutoff = parse_as_of(as_of)
+    row = db.one(
+        "SELECT version_no, created_at, files FROM manuscript_versions "
+        "WHERE manuscript_id = ? AND created_at <= ? "
+        "ORDER BY created_at DESC, version_no DESC LIMIT 1",
+        (manuscript["id"], cutoff))
+    if not row:
+        first = db.one(
+            "SELECT version_no, created_at FROM manuscript_versions "
+            "WHERE manuscript_id = ? ORDER BY version_no LIMIT 1",
+            (manuscript["id"],))
+        raise LookupError(
+            f"no snapshot was collected at or before {as_of}"
+            + (f"; the first is v{first['version_no']} of {first['created_at']}"
+               if first else "; none has been collected yet"))
+    files = loads(row["files"], {})
+    order, unlisted = structure.reading_order(files)
+    book = [name for name in order if name not in set(unlisted)]
+    requested = (file or "").strip()
+    found = next((name for name in docs.names_of(db, manuscript["id"], requested)
+                  if name in book), None)
+    if found is None and f"{requested}.md" in book:
+        found = f"{requested}.md"
+    words = title_words(current_text if current_text is not None
+                        else (files.get(found) if found else None), requested)
+    matches: list[dict] = []
+    if found is None and words:
+        need = max(1, (len(words) + 1) // 2)
+        for name in book:
+            for n, sec in enumerate(sections_of(files[name]), 1):
+                heading = (sec["heading"] or "").lower()
+                shared = [w for w in words
+                          if re.search(rf"\b{re.escape(w)}s?\b", heading)]
+                if len(shared) >= need:
+                    matches.append({"file": name, "section": n,
+                                    "heading": sec["heading"], "words": shared})
+        # Only the best: "## The Second Cup" for second-cup.md, not every
+        # heading that says "cup".
+        best = max((len(m["words"]) for m in matches), default=0)
+        matches = [m for m in matches if len(m["words"]) == best]
+    return {"version_no": row["version_no"], "created_at": row["created_at"],
+            "cutoff": cutoff, "requested": requested, "file": found,
+            "text": files[found] if found else None, "book": book,
+            "title_words": words, "matches": matches[:10]}

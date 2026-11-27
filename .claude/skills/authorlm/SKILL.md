@@ -1274,10 +1274,28 @@ built. Code: `authorlm/authorlm/engines/`. Every engine replies with a
 structured reason, proposed text and suggested blurbs, and reads the book
 only through the **read catalogue** (`authorlm engine catalogue`): essays
 in toc.toml's reading order, their summaries (refreshed first), the style
-rules for a file, concept notes, profiles, earlier workflow instances.
+rules for a file, concept notes, profiles, earlier workflow instances,
+and **`essay_version(file, as_of, section?)`**: a file as it stood at a
+past date (the latest collected snapshot at or before it; a bare date is
+the whole day, local time). When the file did not exist then (an essay
+split out of another, as SMSTTD's recap-sermon-three.md was out of
+recapitulation.md), the reply lists the files that did and the old
+sections whose headings match its title, and the model asks again for
+that file and section. A brief that says "check the version of <date>"
+is answered this way on both engines.
 Anything outside the book comes back DECLINED with its reason; every
 request is listed on the reply. By hand:
 - `authorlm engine read <request> --arg file=<essay>`: what an engine gets.
+- `authorlm history file <file> --as-of <YYYY-MM-DD[THH:MM]> [--section N]
+  -m <ms>`: the same essay_version read, for the author ("what did this
+  say on 10 October?"); prints the old text or where it stood then.
+
+**What a turn is sent of the other essays.** Each essay on the
+instance's reference or voice list goes in once, whole, labelled
+`[reference]` (content binds, style never imitated), `[voice]` (style
+only) or `[reference and voice]`; one also on the aware list is labelled
+"also aware" and gets no summary. Aware-only essays go as summaries
+(`authorlm/authorlm/workflow/context.py`, `ESSAY_LABEL_LEGEND`).
 - `authorlm engine try <engine> [--model M] --essay <file> --message "…"`:
   one turn on the essay; prints the reply, the requests and the usage
   (billed dollars, or the subscription estimate). Say the cost to the

@@ -1,6 +1,11 @@
 """What an engine is given for a turn: the standing blocks, the essay as it
 stands, and the turns so far (design §11.3, §11.9 Q5, Q13, Q15).
 
+Each other essay goes in at most once: whole and labelled with its roles
+(`essays` block) when it is on the reference or voice list, as a summary
+(`aware` block) when it is only on the aware list (`ESSAY_LABEL_LEGEND`
+says why).
+
 The standing blocks come first and in a fixed order, so an engine can keep
 them in its prompt cache; only the essay and the turns change from turn to
 turn. The record is the continuity: any engine rebuilds its whole context
@@ -34,8 +39,21 @@ LIBRARY_ENV = "AUTHORLM_WORKFLOW_LIBRARY"
 # The order of the standing blocks. Never reorder casually: a change here
 # invalidates every engine's cached prefix.
 BLOCK_ORDER = ("charter", "role", "brief", "author-brief", "filters",
-               "style-rules", "protected-register", "reference", "voice",
-               "aware")
+               "style-rules", "protected-register", "essays", "aware")
+# Owner, 2026-11-26: "if an essay is in more than one list, reference and
+# voice, we should be sending the essay and then saying whether this essay
+# should apply to reference or reference and voice, or just voice." So an
+# essay on the reference or voice list (or both) is sent whole once, in
+# the `essays` block, labelled with its roles; an aware essay already sent
+# whole gets no summary (its label says "also aware"). This line opens the
+# block so the model can read the labels; the briefs use the same words.
+ESSAY_LABEL_LEGEND = (
+    "Other essays of the book, each sent once and whole, labelled with the "
+    "roles the author gave it: [reference] its content binds (claims, "
+    "facts, terms, what it already says) and its style is never imitated; "
+    "[voice] a model of the author's style only, its content does not bind; "
+    "[reference and voice] both. \"also aware\" means it is on the aware "
+    "list too (keep it in mind); it is not sent again as a summary.")
 # Owner, 2026-11-26: `register = "protected"` is a generic toc attribute and
 # every workflow honours it strongly. Driven by the flag only, never by a
 # file name. Used when the library file is not there.
@@ -130,31 +148,47 @@ def standing_context(db: Database, manuscript: dict, instance: dict,
         blocks.append(_block("protected-register", "", protected=False))
 
     def ordered(names):
-        return sorted(names, key=lambda n: order.index(n) if n in order
-                      else len(order))
+        # Name breaks ties (files gone from the toc), so a set in gives
+        # the same bytes out every time.
+        return sorted(names, key=lambda n: (order.index(n) if n in order
+                                            else len(order), n))
 
-    for which in ("reference", "voice"):
-        parts = []
-        for name in ordered(instance[which]):
-            text = _essay_text(files, name)
-            parts.append(f"=== {name} ===\n\n"
-                         + (text if text is not None else "(missing on disk)"))
-        blocks.append(_block(which, "\n\n".join(parts),
-                             essays=ordered(instance[which])))
+    whole = ordered(set(instance["reference"]) | set(instance["voice"]))
+    roles = {name: [r for r in core.LISTS if name in instance[r]] for name in whole}
+    parts = []
+    for name in whole:
+        text = _essay_text(files, name)
+        parts.append(f"=== {name} [{essay_label(roles[name])}] ===\n\n"
+                     + (text if text is not None else "(missing on disk)"))
+    blocks.append(_block("essays", (ESSAY_LABEL_LEGEND + "\n\n" + "\n\n".join(parts))
+                         if parts else "", essays=whole, roles=roles))
     summaries = {r["file"]: r["summary"] for r in db.all(
         "SELECT file, summary FROM essay_summaries WHERE manuscript_id = ? "
         "AND status = 'current'", (manuscript["id"],))}
     parts, no_summary = [], []
-    for name in ordered(instance["aware"]):
+    aware = ordered(instance["aware"])
+    for name in aware:
+        if name in roles:
+            continue  # sent whole above; its label says it is also aware
         if name in summaries:
             parts.append(f"=== {name} ===\n\n{summaries[name]}")
         else:
             no_summary.append(name)
-    blocks.append(_block("aware", "\n\n".join(parts),
-                         essays=ordered(instance["aware"]),
+    blocks.append(_block("aware", "\n\n".join(parts), essays=aware,
+                         sent_whole=[n for n in aware if n in roles],
                          no_summary=no_summary))
     assert tuple(b["name"] for b in blocks) == BLOCK_ORDER
     return blocks
+
+
+def essay_label(roles: list[str]) -> str:
+    """The label an essay sent whole carries: the roles it plays, from
+    the instance's lists, in one fixed wording (ESSAY_LABEL_LEGEND explains it)."""
+    binding = [r for r in ("reference", "voice") if r in roles]
+    label = " and ".join(binding)
+    if "aware" in roles:
+        label += ", also aware"
+    return label
 
 
 def instance_context(db: Database, manuscript: dict, instance: dict) -> dict:
