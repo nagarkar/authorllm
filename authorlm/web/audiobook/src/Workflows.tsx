@@ -119,6 +119,69 @@ const STATE_WORDS: Record<string, string> = {
   open: "not yet worked", pending: "waiting for you", passed: "no change needed",
   accepted: "accepted", rejected: "kept the original", dropped: "dropped", edited: "your text",
 };
+// How construction walks the essay: the construction mode × the unit, in
+// plain words (owner, 2026-11-26, at the letter step: "I didn't see any
+// option to change from the default to section by section in the UI.").
+// The choice lives on the server (the instance's construction_mode and
+// unit), so nothing of it goes into browser storage.
+const WALKS: { mode: string; unit: string; label: string }[] = [
+  { mode: "apply-findings", unit: "paragraph", label: "Apply the findings, paragraph by paragraph" },
+  { mode: "apply-findings", unit: "section", label: "Apply the findings, section by section" },
+  { mode: "beats", unit: "section", label: "Rebuild section by section: plan each section, then write it whole" },
+  { mode: "beats", unit: "paragraph", label: "Rebuild section by section: plan each section, then write it paragraph by paragraph" },
+];
+const MODE_WORDS: Record<string, string> = {
+  "apply-findings": "Apply the findings",
+  beats: "Rebuild section by section: plan each section, then write it",
+};
+const UNIT_WORDS: Record<string, string> = { paragraph: "paragraph by paragraph", section: "section by section" };
+const walkLabel = (mode: string, unit: string) =>
+  WALKS.find(w => w.mode === mode && w.unit === unit)?.label || `${MODE_WORDS[mode] || mode}, ${UNIT_WORDS[unit] || unit}`;
+// Before construction a choice needs no reason of the author's (the server
+// asks for one once the instance has turns, so it gets this one);
+// mid-construction the author gives one.
+const BEFORE_CONSTRUCTION = "chosen before construction";
+
+function WalkChoice({ inst, ov, run, busy }: {
+  inst: Instance; ov: Overview; busy: boolean;
+  run: (m: string, p: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const [pending, setPending] = useState<{ mode: string; unit: string } | null>(null);
+  const [reason, setReason] = useState("");
+  // A new essay has no findings to apply: it is built beat by beat only.
+  const walks = WALKS.filter(w => ov.modes.includes(w.mode) && ov.units.includes(w.unit)
+    && (inst.kind !== "new" || w.mode === "beats"));
+  const current = `${inst.construction_mode}/${inst.unit}`;
+  const mid = inst.step === "construction";
+  const choose = (mode: string, unit: string, why: string) =>
+    run("unit", { phase: "construction", mode, unit, reason: why });
+  return (
+    <div className="wf-walk">
+      <label className="wf-field">How construction will walk
+        <select value={pending ? `${pending.mode}/${pending.unit}` : current} aria-label="How construction will walk" disabled={busy}
+          onChange={async e => {
+            const [mode, unit] = e.target.value.split("/");
+            if (`${mode}/${unit}` === current) { setPending(null); return; }
+            if (mid) { setPending({ mode, unit }); return; }
+            await choose(mode, unit, BEFORE_CONSTRUCTION);
+          }}>
+          {!walks.some(w => `${w.mode}/${w.unit}` === current) &&
+            <option value={current}>{walkLabel(inst.construction_mode, inst.unit)}</option>}
+          {walks.map(w => <option key={`${w.mode}/${w.unit}`} value={`${w.mode}/${w.unit}`}>{w.label}</option>)}
+        </select>
+      </label>
+      {pending && <div className="devedit-actions">
+        <input className="wf-input wide" placeholder="Why switch now?" value={reason}
+          aria-label="Why switch how construction walks" onChange={e => setReason(e.target.value)} />
+        <button className="pill on" disabled={busy || !reason.trim()} onClick={async () => {
+          if (await choose(pending.mode, pending.unit, reason)) { setPending(null); setReason(""); }
+        }}>Switch</button>
+        <button className="pill" disabled={busy} onClick={() => { setPending(null); setReason(""); }}>Cancel</button>
+      </div>}
+    </div>
+  );
+}
+
 const money = (n?: number) => `$${(n || 0).toFixed(2)}`;
 const usageLine = (u: Usage) => !u || !u.turns ? "no model turns" :
   `${u.turns} turns · in ${(u.input || 0).toLocaleString()} (cached ${(u.cached || 0).toLocaleString()}) · out ${(u.output || 0).toLocaleString()} · ${money(u.dollars)} billed · ~${money(u.est_subscription)} subscription`;
@@ -886,6 +949,10 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
         {here && view && inst && inst.step !== "done" && <div className="wf-gate">
           {view.gate ? <span className="muted">Next ({STEP_WORDS[view.next_step || ""]}) waits: {view.gate}</span>
             : <button className="pill on" disabled={busy} onClick={() => void run("advance", {})}>On to {STEP_WORDS[view.next_step || ""]}</button>}
+          {/* Always in sight from the start to the end of construction, beside
+              the button that moves on, not inside the switch panel below. */}
+          {["start", "letter", "construction"].includes(inst.step) &&
+            <WalkChoice key={inst.id} inst={inst} ov={ov} run={run} busy={busy} />}
         </div>}
         {route.essay && essay && !essay.open && <details className="wf-start" key={route.essay} open={startOpen}>
           <summary>{startOpen ? "Start a workflow on this essay" : "Start a new workflow on this essay"}</summary>
@@ -922,7 +989,7 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
       {here && view && inst && <>
         <div className="card wf-head">
           <div className="card-head"><span>{short(inst.file)} · {inst.kind} #{inst.number}</span>
-            <span className="muted">{inst.engine}{inst.model ? ` (${inst.model})` : ""} · {inst.construction_mode}, by {inst.unit}; filters by {inst.filter_unit}</span>
+            <span className="muted">{inst.engine}{inst.model ? ` (${inst.model})` : ""} · {walkLabel(inst.construction_mode, inst.unit)}; filters {UNIT_WORDS[inst.filter_unit] || `by ${inst.filter_unit}`}</span>
             {view.protected && <span className="wf-tier must" title="register = &quot;protected&quot; in the toc">protected register</span>}</div>
           {inst.engine === "openai-api" && <div className="muted">openai-api is billed: each turn's dollars are under Usage, above.</div>}
           {inst.engine === "openai-api" && inst.step !== "done" && <CostEstimate transport={transport} engine={inst.engine} model={inst.model} id={inst.id} />}
@@ -940,9 +1007,9 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
             {sw.engine && sw.engine !== inst.engine && <CostEstimate transport={transport} engine={sw.engine} model={sw.model} id={inst.id} />}
             <div className="devedit-actions">
               <select value={sw.unit} onChange={e => setSw(s => ({ ...s, unit: e.target.value }))} aria-label="Unit">
-                <option value="">unit…</option>{ov.units.map(u => <option key={u} value={u}>{u}</option>)}</select>
+                <option value="">unit: no change</option>{ov.units.map(u => <option key={u} value={u}>{UNIT_WORDS[u] || u}</option>)}</select>
               {inst.kind !== "new" && <select value={sw.mode} onChange={e => setSw(s => ({ ...s, mode: e.target.value }))} aria-label="Construction mode">
-                <option value="">construction mode…</option>{ov.modes.map(u => <option key={u} value={u}>{u}</option>)}</select>}
+                <option value="">how construction walks: no change</option>{ov.modes.map(u => <option key={u} value={u}>{MODE_WORDS[u] || u}</option>)}</select>}
               <input className="wf-input" placeholder="why switch" value={sw.unitReason} onChange={e => setSw(s => ({ ...s, unitReason: e.target.value }))} />
               <button className="pill" disabled={busy || (!sw.unit && !sw.mode)} onClick={async () => {
                 if (await run("unit", { unit: sw.unit || null, mode: sw.mode || null, reason: sw.unitReason })) setSw(s => ({ ...s, unit: "", mode: "", unitReason: "" }));
