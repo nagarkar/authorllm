@@ -99,9 +99,26 @@ def check_parse_reply() -> None:
         except base.EngineError:
             check(f"reply: {label} raises", True)
     schema = base.REPLY_SCHEMA
-    check("schema: strict, the four keys required",
+    check("schema: strict, every key required (changes and placement nullable)",
           schema["additionalProperties"] is False
-          and schema["required"] == ["text", "reason", "proposed", "suggested_blurbs"], schema)
+          and schema["required"] == ["text", "reason", "proposed", "suggested_blurbs",
+                                     "changes", "placement"], schema)
+    ok = base.parse_reply({"text": "", "reason": "r", "proposed": None,
+                           "suggested_blurbs": [], "changes": [
+                               {"kind": "cut", "original": "Old.", "where": "",
+                                "quote": "", "text": ""}], "placement": None})
+    check("reply: changes are kept, an explicit cut among them",
+          ok["changes"][0]["kind"] == "cut" and "placement" not in ok, ok)
+    old = base.parse_reply({"text": "", "reason": "", "proposed": None,
+                            "suggested_blurbs": []})
+    check("reply: a reply without changes or placement still parses",
+          "changes" not in old, old)
+    try:
+        base.parse_reply({"text": "", "reason": "", "proposed": None,
+                          "suggested_blurbs": [], "changes": [{"kind": "swap"}]})
+        check("reply: an unknown change kind raises", False)
+    except base.EngineError:
+        check("reply: an unknown change kind raises", True)
 
 
 def check_session_ref() -> None:

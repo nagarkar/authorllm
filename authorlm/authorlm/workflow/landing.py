@@ -29,11 +29,16 @@ The rules of this module:
   page) settles it as the file has it. Finding the unit's new text
   somewhere in the file is not taken as landed: the same words may stand
   elsewhere, and a false "landed" is worse than asking.
-- **Beat by beat.** A beat walk builds text that has no original to match
-  (a new paragraph, a new essay), so it lands whole: the stretch's text
-  replaces the file only while the file still is the text the stretch
-  started from (or the text its last landing wrote); otherwise the whole
-  stretch needs the owner.
+- **Each change on its own text.** A ruling is a list of changes
+  (`workflow.edits`: replace, insert, cut, move), resolved by the walk
+  into text pairs at paragraph grain; each pair lands where its original
+  stands, as one ruled unit (a ruling's second pair is labelled
+  `<label>~2`, and so on). An insert lands at its anchor, the paragraph
+  next to it being its original. Beat by beat lands the same way: a
+  beat's new text is an insert, the old text stays until its leftovers
+  are ruled, and a beats stretch never replaces the file whole. The one
+  pair with no original is a new essay's first text, which lands only
+  in an empty file.
 - **The Doc.** Nothing is written while the Doc road says no: a linked tab
   with edits not in the file (pull first), forms pending in it, or no
   Google sign-in. After the file is written the tab is pushed with the
@@ -54,16 +59,14 @@ from __future__ import annotations
 
 import contextlib
 import io
-import unicodedata
 from pathlib import Path
 from typing import Any
 
 from .. import structure
 from ..db import Database, ko_fields, now_iso
-from . import core
+from . import core, edits
 
 TEXT_STEPS = ("construction", "wrapup", "filters")
-WHOLE = "beats"
 CHANGED = ("accepted", "edited")
 
 
@@ -142,73 +145,12 @@ def make_road(db: Database, manuscript: dict, workspace: str | None = None):
 
 
 # ---------------------------------------------------------------- matching
+#
+# The matching is the change kinds' (workflow.edits): exact, else after
+# normalizing whitespace, quote marks and dashes.
 
-_QUOTES = str.maketrans({"‘": "'", "’": "'", "‚": "'",
-                         "‛": "'", "“": '"', "”": '"',
-                         "„": '"', "‟": '"', "–": "-",
-                         "—": "-", " ": " "})
-
-
-def _normalized(text: str) -> tuple[str, list[tuple[int, int]]]:
-    """The text with whitespace runs collapsed to one space, curly quotes
-    straightened and dashes made hyphens, and for each of its characters
-    the span of the original it came from."""
-    out: list[str] = []
-    spans: list[tuple[int, int]] = []
-    i, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch.isspace():
-            j = i
-            while j < n and text[j].isspace():
-                j += 1
-            if out and out[-1] != " ":
-                out.append(" ")
-                spans.append((i, j))
-            i = j
-            continue
-        ch = unicodedata.normalize("NFC", ch).translate(_QUOTES)
-        out.append(ch)
-        spans.append((i, i + 1))
-        i += 1
-    while out and out[-1] == " ":
-        out.pop()
-        spans.pop()
-    return "".join(out), spans
-
-
-def norm(text: str) -> str:
-    return _normalized(text or "")[0]
-
-
-def _all(hay: str, needle: str) -> list[int]:
-    out, i = [], hay.find(needle)
-    while i >= 0:
-        out.append(i)
-        i = hay.find(needle, i + 1)
-    return out
-
-
-def find(hay: str, needle: str, cursor: int = 0) -> tuple[int, int, str] | None:
-    """(start, end, how) of `needle` in `hay`: exact, else normalized.
-    Between equal matches, the first at or after `cursor`."""
-    if not needle.strip():
-        return None
-    hits = _all(hay, needle)
-    if hits:
-        i = next((h for h in hits if h >= cursor), hits[0])
-        return i, i + len(needle), "exact"
-    nh, spans = _normalized(hay)
-    nn = norm(needle)
-    if not nn:
-        return None
-    hits = _all(nh, nn)
-    if not hits:
-        return None
-    starts = [spans[h][0] for h in hits]
-    k = next((j for j, s in enumerate(starts) if s >= cursor), 0)
-    h = hits[k]
-    return spans[h][0], spans[h + len(nn) - 1][1], "normalized"
+find = edits.find
+norm = edits.norm
 
 
 # -------------------------------------------------------------------- plan
@@ -225,7 +167,7 @@ def _reached(inst: dict, step: str) -> bool:
 def ruled_units(db: Database, manuscript: dict, inst: dict) -> list[dict]:
     """Every ruling of the instance that changes text, in landing order:
     construction's walks, the wrap-up's items, the filters' walks. Each:
-    step, stretch, label, seq, kind (part | whole), original, new, and a
+    step, stretch, label, seq, kind (part | item), original, new, and a
     `moved` reason when the text it was ruled on is not the walk's now."""
     page = _page()
     turns = core.turns(db, inst)
@@ -236,27 +178,27 @@ def ruled_units(db: Database, manuscript: dict, inst: dict) -> list[dict]:
         views = page.phase_stretches(db, manuscript, inst, step, turns,
                                      decisions)
         for k, view in enumerate(views, start=1):
-            if view["mode"] == "beats":
-                ruled = [u for u in view["units"] if u.get("seq")
-                         and u["state"] in page.RESOLVED]
-                if not ruled or norm(view["text"]) == norm(view["base"]):
-                    continue
-                out.append({"step": step, "stretch": k, "label": WHOLE,
-                            "seq": max(u["seq"] for u in ruled),
-                            "kind": "whole", "original": view["base"],
-                            "new": view["text"], "moved": ""})
-                continue
             for u in view["units"]:
-                if u["state"] not in CHANGED or u.get("text", "") == u["before"]:
+                if u["state"] not in CHANGED:
                     continue
                 ruled_on = u.get("ruled_before") or u["before"]
                 moved = ("the text this unit was ruled on is not the walk's "
-                         "text now" if norm(ruled_on) != norm(u["before"])
+                         "text now" if u["before"] and norm(ruled_on) != norm(u["before"])
                          else "")
-                out.append({"step": step, "stretch": k, "label": u["label"],
-                            "seq": u["seq"], "kind": "part",
-                            "original": ruled_on, "new": u.get("text", ""),
-                            "moved": moved})
+                if u.get("unapplied"):
+                    out.append({"step": step, "stretch": k, "label": u["label"],
+                                "seq": u["seq"], "kind": "part",
+                                "original": ruled_on, "new": u.get("text", ""),
+                                "moved": u["unapplied"]})
+                    continue
+                for n, pair in enumerate(u.get("pairs") or [], start=1):
+                    if pair["original"] == pair["new"]:
+                        continue
+                    out.append({"step": step, "stretch": k,
+                                "label": u["label"] if n == 1 else f"{u['label']}~{n}",
+                                "seq": u["seq"], "kind": "part",
+                                "original": pair["original"], "new": pair["new"],
+                                "moved": moved})
 
     if _reached(inst, "construction"):
         walk_units("construction")
@@ -285,15 +227,6 @@ def _rows(db: Database, inst: dict) -> dict[tuple, dict]:
                             "instance_id = ?", (inst["id"],))}
 
 
-def _whole_originals(rows: dict, u: dict) -> list[str]:
-    """What the file may hold for a whole stretch: the text its last
-    landing wrote, then the text it started from."""
-    landed = sorted((r for k, r in rows.items()
-                     if k[:3] == _key(u)[:3] and r["state"] == "landed"),
-                    key=lambda r: r["seq"], reverse=True)
-    return [r["new"] for r in landed] + [u["original"]]
-
-
 def plan(db: Database, manuscript: dict, inst: dict,
          text: str | None = None) -> tuple[str, list[dict]]:
     """(the file's text with every landable unit landed, each ruled unit
@@ -311,16 +244,15 @@ def plan(db: Database, manuscript: dict, inst: dict,
         if u["moved"]:
             u.update(status="needs-owner", reason=u["moved"])
             continue
-        if u["kind"] == "whole":
-            if any(norm(text) == norm(o) for o in _whole_originals(rows, u)):
-                text = u["new"]
+        if not u["original"]:
+            # A new essay's first text: it lands only in an empty file.
+            if not text.strip():
+                text = u["new"].rstrip("\n") + "\n"
                 u.update(status="land", reason="")
-            elif norm(text) == norm(u["new"]):
-                u.update(status="already", reason="the file already has it")
             else:
                 u.update(status="needs-owner", reason=(
-                    "the essay file has changed since this beat walk "
-                    "started, so its text cannot be landed whole"))
+                    "this is the essay's first text, and the file is no "
+                    "longer empty"))
             continue
         cur_key = (u["step"], u["stretch"])
         cursor = cursors.get(cur_key, 0) if u["kind"] == "part" else 0
@@ -522,21 +454,33 @@ def revert(db: Database, manuscript: dict, inst: dict, step: str, label: str,
     replaced by its original, matched by text. None when it never landed.
     When its landed text is gone from the file it is marked needs-owner
     and the file is left alone."""
-    rows = [r for r in _rows(db, inst).values() if r["step"] == step
-            and r["label"] == label and r["state"] == "landed"]
+    def mine(r: str) -> bool:
+        # The ruling's own pairs (`label~2`...) and, for a unit split into
+        # changes, its changes' (`label:c1`...).
+        return (r == label or r.startswith(label + "~")
+                or r.startswith(label + ":c"))
+
+    rows = sorted((r for r in _rows(db, inst).values() if r["step"] == step
+                   and mine(r["label"]) and r["state"] == "landed"),
+                  key=lambda r: (r["stretch"], r["seq"], r["label"]),
+                  reverse=True)
     if not rows:
         return None
-    row = max(rows, key=lambda r: (r["stretch"], r["seq"]))
     rel = inst["file"]
     pre = core.file_text(manuscript, rel) or ""
-    hit = find(pre, row["new"]) if row["new"] else None
+    text = pre
     at = now_iso()
-    if hit is None:
-        db.update("workflow_landings", row["id"], {
-            "state": "needs-owner", "updated_at": at,
-            "reason": "reopened, but its landed text is no longer in the "
-                      "essay; the file was left as it is"})
-        return {"reverted": False, "note": "landed text not found"}
+    for row in rows:
+        hit = find(text, row["new"]) if row["new"] else None
+        if hit is None:
+            for r in rows:
+                db.update("workflow_landings", r["id"], {
+                    "state": "needs-owner", "updated_at": at,
+                    "reason": "reopened, but its landed text is no longer in "
+                              "the essay; the file was left as it is"})
+            return {"reverted": False, "note": "landed text not found"}
+        i, j, _how = hit
+        text = text[:i] + row["original"] + text[j:]
     road = road or make_road(db, manuscript, workspace)
     why = road.check(db, manuscript, rel)
     if why:
@@ -545,8 +489,6 @@ def revert(db: Database, manuscript: dict, inst: dict, step: str, label: str,
                 inst, "reopen", actor, pre, None, 0, False,
                 f"{label} was not taken back out: {why}"))
         return {"reverted": False, "note": why}
-    i, j, _how = hit
-    text = pre[:i] + row["original"] + pre[j:]
     _write(manuscript, rel, text)
     try:
         pushed = road.push(db, manuscript, rel)
@@ -562,9 +504,10 @@ def revert(db: Database, manuscript: dict, inst: dict, step: str, label: str,
                    f"{label} taken back out for a reopen")
     with db.transaction():
         db.insert("workflow_land_runs", run)
-        db.update("workflow_landings", row["id"], {
-            "state": "reverted", "run_id": run["id"], "updated_at": at,
-            "reason": "reopened: the original is back in the essay"})
+        for row in rows:
+            db.update("workflow_landings", row["id"], {
+                "state": "reverted", "run_id": run["id"], "updated_at": at,
+                "reason": "reopened: the original is back in the essay"})
     _collect(db, manuscript, workspace)
     return {"reverted": True, "pushed": bool(pushed.get("pushed"))}
 

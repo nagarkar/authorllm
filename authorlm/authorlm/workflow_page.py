@@ -36,7 +36,14 @@ What the page shows for an instance, by step:
 - construction: the walk, one unit at a time (paragraph or section; Q8,
   Q19), or beat by beat with a plan step per beat (Q18). Each unit's form:
   before, the reason, after; accept / reject / redo / edit (Q8a, Q11);
-  reopen an accepted unit.
+  reopen an accepted unit. A proposal is changes of the kinds in
+  `workflow.edits` (replace, insert, cut, move), several at one unit each
+  their own form (`<label>:c<k>`); the author also keeps, cuts or moves a
+  unit himself (`act` keep, cut, move). Beat by beat inserts each beat's
+  text where its plan says and leaves the old text standing, then puts
+  each paragraph the beat supersedes to the author (`b<n>:x<k>`) and,
+  before the beats conclude, each old paragraph no beat claimed
+  (`beats:cover:p<k>`; `_beats_walk`).
 - wrapup: removed passages, placeholders, terms to check, principles with
   their scope (Q23, Q24), each item a form.
 - filters: the checklist of passes in the standard order, pre-ticked from
@@ -84,7 +91,7 @@ from typing import Any
 
 from . import api
 from .db import Database
-from .workflow import context, contract, core
+from .workflow import context, contract, core, edits
 
 METHODS = ("overview", "instance", "start", "recommend", "rec", "list",
            "letter", "letter_reply", "finding", "accept_letter", "propose",
@@ -229,37 +236,120 @@ def _since_form(db: Database, inst: dict, step: str, label: str) -> list[dict]:
     return [d for d in threads(turns).get((step, label), []) if d["seq"] > last]
 
 
-def unit_state(history: list[dict], before: str = "") -> dict:
+def _turn_changes(turn: dict | None) -> list[dict]:
+    return list(((turn or {}).get("edits") or {}).get("changes") or [])
+
+
+def _with_text(changes: list[dict], text: str) -> list[dict]:
+    """The form's changes with the author's (or the engine's) text in
+    place of the new text: one change keeps its kind and anchor (a cut
+    with text becomes a replace of what it cut); anything else becomes a
+    replace of the whole unit."""
+    text = (text or "").strip("\n")
+    if len(changes) == 1:
+        c = dict(changes[0])
+        if c["kind"] == "cut":
+            c["kind"] = "replace"
+        c["text"] = text
+        return [c]
+    return [{"kind": "replace", "original": "", "where": "", "quote": "",
+             "text": text}]
+
+
+WHOLE_UNIT = [{"kind": "replace", "original": "", "where": "", "quote": "",
+               "text": ""}]
+
+
+def _form_changes(turn: dict, base: list[dict]) -> list[dict]:
+    """A model turn's changes: its own list (`changes`), else its
+    `proposed` text as the unit's base change (the whole unit, for a unit
+    of the walk), else none (it passes)."""
+    ch = _turn_changes(turn)
+    if ch:
+        return ch
+    if (turn.get("proposed") or "").strip():
+        return _with_text(base, turn["proposed"])
+    return []
+
+
+def _display_text(changes: list[dict], before: str) -> str:
+    """The unit's text after its changes, for the form and the record:
+    the new text of a lone replace or insert, "" for a cut."""
+    if len(changes) == 1 and changes[0]["kind"] in ("replace", "insert"):
+        c = changes[0]
+        if c["kind"] == "replace" and c["original"] and before:
+            hit = edits.find(before, c["original"])
+            if hit:
+                return before[:hit[0]] + c["text"] + before[hit[1]:]
+        return c["text"]
+    if len(changes) == 1 and changes[0]["kind"] in ("cut", "move") and (
+            not changes[0]["original"] or edits.norm(changes[0]["original"])
+            == edits.norm(before)):
+        return "" if changes[0]["kind"] == "cut" else before
+    return before
+
+
+def unit_state(history: list[dict], before: str = "",
+               default: dict | None = None,
+               base: list[dict] | None = None) -> dict:
     """Where one unit stands, from its turns in order.
 
-    - pending: the model's last turn proposes text; the form is open.
+    - pending: the model's last turn proposes changes; the form is open.
     - passed: the model's last turn proposes nothing (a unit with no
-      change passes without stopping, Q8).
+      change passes without stopping, Q8). A cut is its own change kind
+      (workflow/edits.py), never an empty proposal.
     - accepted / rejected / edited: the author ruled. Rejecting keeps the
       original; with no original (a new essay) it drops the unit (Q11).
     - open: no turn yet.
+
+    `default` is a form the walk makes without a model turn (a leftover
+    after a beat: {changes, reason}): the unit is pending on it until the
+    author rules it or the engine proposes again. Each state carries the
+    form's `changes` and, once ruled in, the changes `applied`. `base` is
+    the change a proposal of whole text makes (default: it replaces the
+    whole unit; a beat's new text is an insert at its anchor).
     """
-    if not history:
-        return {"state": "open", "text": before}
-    last = history[-1]
+    base = (default or {}).get("changes") or base or WHOLE_UNIT
     model_turns = [t for t in history if t["engine"]]
     form = model_turns[-1] if model_turns else None
-    out: dict[str, Any] = {"turns": len(history), "seq": last["seq"],
-                           "ruled_before": last.get("unit_before") or next(
-                               (t.get("unit_before") for t in reversed(history)
-                                if t.get("unit_before")), "")}
+    out: dict[str, Any] = {}
     if form:
         out["form"] = {"seq": form["seq"], "reason": form["reason"],
                        "proposed": form["proposed"], "text": form["reply"],
-                       "engine": form["engine"], "model": form["model"]}
+                       "engine": form["engine"], "model": form["model"],
+                       "changes": _form_changes(form, base),
+                       "placement": (form.get("edits") or {}).get("placement")}
+    elif default:
+        out["form"] = {"seq": default.get("seq", 0), "reason": default.get("reason", ""),
+                       "proposed": _display_text(base, before), "text": "",
+                       "engine": "", "model": "", "changes": base,
+                       "placement": None, "mechanical": True}
+    changes = (out.get("form") or {}).get("changes") or []
+    if not history:
+        if default:
+            return {**out, "state": "pending", "text": before, "changes": changes}
+        return {"state": "open", "text": before}
+    last = history[-1]
+    out.update({"turns": len(history), "seq": last["seq"],
+                "ruled_before": last.get("unit_before") or next(
+                    (t.get("unit_before") for t in reversed(history)
+                     if t.get("unit_before")), ""),
+                "changes": changes})
     if last["action"] == "accept":
-        out.update(state="accepted",
-                   text=last["author_text"] or (form or {}).get("proposed", ""))
+        applied = (_turn_changes(last) or changes
+                   or _with_text(base, last["author_text"]))
+        text = (last["author_text"] if not _turn_changes(last) and last["author_text"]
+                else _display_text(applied, before))
+        out.update(state="accepted", text=text, applied=applied)
     elif last["action"] == "reject":
         out.update(state="rejected" if before else "dropped", text=before)
     elif last["action"] == "edit" and not last["engine"]:
-        out.update(state="edited", text=last["author_text"])
-    elif last["engine"] and last["proposed"]:
+        applied = _turn_changes(last) or _with_text(changes or base,
+                                                    last["author_text"])
+        out.update(state="edited", applied=applied,
+                   text=(last["author_text"] if not _turn_changes(last)
+                         else _display_text(applied, before)))
+    elif last["engine"] and changes:
         out.update(state="pending", text=before)
     elif last["engine"]:
         out.update(state="passed", text=before)
@@ -268,11 +358,19 @@ def unit_state(history: list[dict], before: str = "") -> dict:
     return out
 
 
-RESOLVED = ("accepted", "rejected", "dropped", "edited", "passed")
-# The states whose text replaces the unit's "before" in the working text.
+# "split": a unit whose form is several changes, each its own form (its
+# children, `<label>:c<k>`). "gone": a unit not yet worked whose text an
+# earlier change took out of the essay (a cut or a move).
+RESOLVED = ("accepted", "rejected", "dropped", "edited", "passed", "split",
+            "gone")
+# The states whose changes are in the working text.
 CHANGED = ("accepted", "edited")
 # Beat by beat has no end of its own: the author concludes it (Q18).
 CONCLUDE_LABEL = "beats:end"
+# Before concluding, what the beats left standing that no beat claimed is
+# put to the author, one form per old paragraph (`beats:cover:p<k>`).
+COVER_LABEL = "beats:cover"
+_COVER = re.compile(r"^beats:cover:p(\d+)$")
 LINT_LABEL = "lint"
 
 
@@ -284,39 +382,74 @@ LINT_LABEL = "lint"
 # Every later walk starts from it (Q8: "only the kept text is carried
 # forward"), and it is the essay the engine is sent ("as it now stands").
 
-def _apply_walk(text: str, units: list[dict]) -> str:
-    """The text with each changed unit's "before" replaced by its text, in
-    order (a unit's "before" is found after the previous unit's)."""
-    out, pos = text, 0
-    for u in units:
-        before = u["before"]
-        i = out.find(before, pos) if before else -1
-        if i < 0:
-            continue
-        new = u.get("text", before) if u["state"] in CHANGED else before
-        out = out[:i] + new + out[i + len(before):]
-        pos = i + len(new)
+def _apply_unit(text: str, u: dict, cursor: int = 0) -> str:
+    """The unit's applied changes in `text` (workflow/edits.py), its pairs
+    on the unit for landing; a change whose original or anchor is gone is
+    not applied, and the unit says why (`unapplied`)."""
+    if u["state"] not in CHANGED:
+        return text
+    try:
+        out, pairs, _pos = edits.apply_all(text, u.get("applied") or [],
+                                           cursor=cursor, unit=u.get("before", ""))
+    except edits.NotApplied as err:
+        u["unapplied"] = str(err)
+        return text
+    u["pairs"] = pairs
     return out
 
 
 def _walk_over(text: str, unit: str, mode: str, hist: dict) -> dict:
     """One walk over `text` by `unit` (or beat by beat), each unit with its
     state and form from `hist`; `text` in the result is the working text
-    after the walk's rulings."""
+    after the walk's rulings, applied in order, each by its text (a unit's
+    "before" is found in the text the units before it left)."""
     if mode == "beats":
         return _beats_walk(text, unit, hist)
     used, parts = units_of(text, unit)
     units = []
+    out = text
     for i, part in enumerate(parts, start=1):
         label = _label(used, i)
-        units.append({"label": label, "kind": used, "n": i, "before": part,
-                      **unit_state(hist.get(label, []), part)})
+        h = hist.get(label, [])
+        st = unit_state(h, part)
+        u = {"label": label, "kind": used, "n": i, "before": part, **st}
+        hit = edits.find(out, part)
+        if hit is None and not h:
+            u["state"] = "gone"
+            units.append(u)
+            continue
+        cursor = hit[0] if hit else 0
+        form = st.get("form") or {}
+        if len(form.get("changes") or []) >= 2 and st["state"] not in (
+                "accepted", "edited", "rejected", "dropped"):
+            # Several changes: each is its own form (owner, 2026-11-27:
+            # "forms are for what have you deleted, what have you removed,
+            # what have you changed").
+            u["state"] = "split"
+            kids = []
+            for k, c in enumerate(form["changes"], start=1):
+                cl = f"{label}:c{k}"
+                ch = [t for t in hist.get(cl, []) if t["seq"] > form["seq"]]
+                cst = unit_state(ch, part, default={
+                    "changes": [c], "reason": form["reason"], "seq": form["seq"]})
+                cu = {"label": cl, "kind": "change", "parent": label, "n": k,
+                      "before": part, **cst}
+                if not any(t["engine"] for t in ch):
+                    cu["form"].update(engine=form["engine"], model=form["model"],
+                                      mechanical=False, text=form["text"])
+                out = _apply_unit(out, cu, cursor)
+                kids.append(cu)
+            u["children"] = [c["label"] for c in kids]
+            units += [u] + kids
+            continue
+        out = _apply_unit(out, u, cursor)
+        units.append(u)
     pending = [u["label"] for u in units if u["state"] == "pending"]
     nxt = pending[0] if pending else next(
         (u["label"] for u in units if u["state"] == "open"), None)
     return {"mode": "walk", "unit": used, "asked_unit": unit, "units": units,
             "next": nxt, "end": nxt is None, "fallback": used != unit,
-            "text": _apply_walk(text, units)}
+            "text": out}
 
 
 def _segments(turns: list[dict], decisions: list[dict], step: str,
@@ -362,7 +495,8 @@ def _phase_walk(db: Database, manuscript: dict, inst: dict, step: str,
                      "state": u["state"], "text": u.get("text", ""),
                      "stretch": i}
                     for u in v["units"]
-                    if u["state"] in RESOLVED and u["state"] != "passed"]
+                    if u["state"] in RESOLVED
+                    and u["state"] not in ("passed", "split", "gone")]
     view = views[-1]
     view["earlier"] = earlier
     return view
@@ -432,90 +566,162 @@ def working_text(db: Database, manuscript: dict, inst: dict) -> str:
     return _walk(db, manuscript, inst, "filters")["text"]
 
 
-_BEAT = re.compile(r"^b(\d+):(plan|section|done|p(\d+))$")
+# A beat's labels: its plan; its new text whole (`insert`; `section` on
+# records from before beats were inserted, read the same way) or paragraph
+# by paragraph (`p<k>`); a leftover form per old paragraph it supersedes
+# (`x<k>`, k the paragraph's number in the stretch's base text); done.
+_BEAT = re.compile(r"^b(\d+):(plan|section|insert|done|p(\d+)|x(\d+))$")
 
 
-def _beat_sections(essay: str) -> tuple[str, list[str]]:
-    """(the title line, the beats' "before" sections). An essay with no
-    subheadings is one section; a new essay has none."""
-    lines = (essay or "").split("\n")
-    title = lines[0] if lines and re.match(r"^#\s", lines[0]) else ""
-    secs = sections(essay)
-    if not secs:
-        body = "\n".join(lines[1:] if title else lines).strip()
-        secs = [body] if body else []
-    return title, secs
+def _last_block(text: str) -> str:
+    bl = edits.blocks(text or "")
+    return text[bl[-1][0]:bl[-1][1]] if bl else ""
+
+
+def _plan_placement(units: list[dict], label: str) -> dict | None:
+    u = next((x for x in units if x["label"] == label), None)
+    return ((u or {}).get("form") or {}).get("placement")
 
 
 def _beats_walk(essay: str, unit: str, hist: dict) -> dict:
-    """Beat by beat (Q18): for each beat (a section), its plan, then its
-    text as a whole section or paragraph by paragraph. An existing
-    essay's sections are the beats' "before"; a new essay has none. A
-    paragraph the engine passes (nothing more to write) completes the
-    beat; the author concludes the walk."""
-    title, secs = _beat_sections(essay)
+    """Beat by beat (Q18), each beat inserted, the old text left standing
+    (owner, 2026-11-27: "it makes more sense to insert the beat at the
+    beginning of the essay and leave the rest of the essay intact").
+
+    For each beat: its plan, which says where its new text goes in and
+    which old paragraphs it takes the place of (`placement`); then its new
+    text, whole or paragraph by paragraph, inserted there (an insert,
+    never a replacement of anything); then, once the text is in, one
+    leftover form per paragraph it supersedes: cut (the form's proposal),
+    keep, merge into the beat or move it (owner: "after insertion of a
+    beat, you remove the lines from the essay that don't belong"). Beats
+    come from the plans, never from the essay's headings. Before the
+    author concludes, one coverage form per old paragraph still standing
+    that no beat claimed: keep, cut or move (owner: "at the end ...
+    whatever we've left over, have we covered everything correctly?").
+    A paragraph the engine passes (nothing more to write) completes a
+    beat written paragraph by paragraph; the author concludes the walk."""
+    base_paras = paragraphs(essay)
     beats: dict[int, dict] = {}
     for label, h in hist.items():
         m = _BEAT.match(label)
         if not m:
             continue
         b = int(m.group(1))
-        beats.setdefault(b, {"plan": None, "text": [], "done": False})
+        beat = beats.setdefault(b, {"plan": None, "text": [], "done": False,
+                                    "left": {}})
         if m.group(2) == "plan":
-            beats[b]["plan"] = (label, h)
+            beat["plan"] = (label, h)
         elif m.group(2) == "done":
-            beats[b]["done"] = True
+            beat["done"] = True
+        elif m.group(4):
+            beat["left"][int(m.group(4))] = h
         else:
             k = int(m.group(3)) if m.group(3) else 0
-            beats[b]["text"].append((k, label, h))
+            beat["text"].append((k, label, h))
     concluded = bool(hist.get(CONCLUDE_LABEL))
-    units = []
-    chunks = []
-    for b in range(1, max([len(secs)] + list(beats)) + 1):
-        before_sec = secs[b - 1] if b - 1 < len(secs) else ""
-        paras = paragraphs(before_sec)
-        first = before_sec.split("\n")[0] if before_sec else ""
-        heading = first if _HEADING.match(first) else ""
-        beat = beats.get(b)
-        if beat is None:
-            chunks.append(before_sec)
-            continue
+    cover_asked = bool(hist.get(COVER_LABEL))
+    text = essay
+    units: list[dict] = []
+    claimed: set[int] = set()
+    prev: dict | None = None  # after the previous beat's new text
+    complete: dict[int, bool] = {}
+    for b in sorted(beats):
+        beat = beats[b]
+        placement = None
         if beat["plan"]:
             label, h = beat["plan"]
+            st = unit_state(h, "")
+            placement = (st.get("form") or {}).get("placement")
             units.append({"label": label, "kind": "plan", "beat": b,
-                          "before": "", **unit_state(h, "")})
-        body = []
+                          "before": "", "placement": placement, **st})
+        if placement and placement.get("where"):
+            anchor = {"where": placement["where"], "quote": placement.get("quote", "")}
+        else:
+            anchor = prev or {"where": "start", "quote": ""}
+        whole = any(k == 0 for k, _l, _h in beat["text"])
+        last_state = ""
         for k, label, h in sorted(beat["text"]):
-            before = before_sec if k == 0 else (paras[k - 1] if k - 1 < len(paras) else "")
-            st = unit_state(h, before)
-            units.append({"label": label, "kind": "section" if k == 0 else "paragraph",
-                          "beat": b, "n": k, "before": before, **st})
-            piece = st["text"] if st["state"] in CHANGED else before
-            if piece:
-                body.append(piece)
-        if any(k == 0 for k, _l, _h in beat["text"]):
-            chunks.append("\n\n".join(body) or before_sec)
-            continue
-        if not beat["text"]:
-            chunks.append(before_sec)
-            continue
-        last_k = max(k for k, _l, _h in beat["text"])
-        if not beat["done"]:
-            body += paras[last_k:]
-        chunks.append("\n\n".join(([heading] if heading else []) + body))
+            ins = [{"kind": "insert", "original": "", "where": anchor["where"],
+                    "quote": anchor.get("quote", ""), "text": ""}]
+            st = unit_state(h, "", base=ins)
+            u = {"label": label, "kind": "insert" if k == 0 else "paragraph",
+                 "beat": b, "n": k, "before": "", "anchor": dict(anchor), **st}
+            last_state = st["state"]
+            if st["state"] in CHANGED and (st.get("text") or "").strip():
+                # Always an insert at the beat's anchor, whatever the record
+                # holds (an old `b<n>:section` ruling included): a beat
+                # never replaces the old text (owner, 2026-11-27).
+                ch = {**ins[0], "text": st["text"]}
+                try:
+                    text, pairs, _p = edits.apply(text, ch)
+                except edits.NotApplied:
+                    # The anchor is gone (an earlier ruling took it out):
+                    # after the previous beat, else at the start.
+                    ch.update(prev or {"where": "start", "quote": ""})
+                    u["anchor"] = {"where": ch["where"], "quote": ch["quote"]}
+                    text, pairs, _p = edits.apply(text, ch)
+                u.update(applied=[ch], pairs=pairs)
+                anchor = {"where": "after", "quote": _last_block(st["text"])}
+            units.append(u)
+        if beat["text"] and anchor.get("where") == "after":
+            prev = anchor
+        done_text = (any(k == 0 and unit_state(h, "")["state"] in RESOLVED
+                         for k, _l, h in beat["text"]) if whole
+                     else beat["done"] or last_state == "passed")
+        complete[b] = done_text
+        sup = (placement or {}).get("supersedes") or []
+        for quote in sup:
+            k = edits.opening_match(base_paras, quote)
+            if k is None or k in claimed:
+                continue
+            claimed.add(k)
+            if not (done_text or cover_asked or concluded):
+                continue
+            label, para = f"b{b}:x{k + 1}", base_paras[k]
+            h = beat["left"].get(k + 1, [])
+            if not h and edits.find(text, para) is None:
+                continue  # already taken out by an earlier ruling
+            st = unit_state(h, para, default={
+                "changes": [{"kind": "cut", "original": "", "where": "",
+                             "quote": "", "text": ""}],
+                "reason": (f"Beat {b}'s plan says its new text takes the place "
+                           "of this paragraph. Cut it, keep it, merge it into "
+                           "the beat, or move it.")})
+            u = {"label": label, "kind": "leftover", "beat": b, "n": k + 1,
+                 "before": para, **st}
+            text = _apply_unit(text, u)
+            units.append(u)
+    # What the beats left standing that no beat claimed (computed from the
+    # base paragraphs, mechanically).
+    unclaimed = [k for k, para in enumerate(base_paras)
+                 if k not in claimed and edits.find(text, para) is not None]
+    if cover_asked:
+        for k, para in enumerate(base_paras):
+            if k in claimed:
+                continue
+            label = f"{COVER_LABEL}:p{k + 1}"
+            h = hist.get(label, [])
+            if not h and k not in unclaimed:
+                continue
+            st = unit_state(h, para)
+            u = {"label": label, "kind": "cover", "n": k + 1, "before": para, **st}
+            text = _apply_unit(text, u)
+            units.append(u)
     pending = [u["label"] for u in units if u["state"] == "pending"]
     cur = max(beats) if beats else 1
     nxt = pending[0] if pending else None
     if nxt is None and not concluded:
-        if cur not in beats or beats[cur]["done"]:
+        if cover_asked:
+            nxt = next((u["label"] for u in units if u["kind"] == "cover"
+                        and u["state"] == "open"), None)
+        elif cur not in beats or beats[cur]["done"]:
             cur = cur + 1 if cur in beats else cur
             nxt = f"b{cur}:plan"
         elif not beats[cur]["plan"] or unit_state(beats[cur]["plan"][1])["state"] not in RESOLVED:
             nxt = f"b{cur}:plan"
         elif unit == "section":
-            done = any(k == 0 and unit_state(h)["state"] in RESOLVED
-                       for k, _l, h in beats[cur]["text"])
-            nxt = None if done else f"b{cur}:section"
+            nxt = None if complete.get(cur) else f"b{cur}:insert"
         else:
             last = max(beats[cur]["text"], default=None)
             if last and unit_state(last[2])["state"] == "passed":
@@ -523,13 +729,17 @@ def _beats_walk(essay: str, unit: str, hist: dict) -> dict:
             else:
                 k = (last[0] if last else 0) + 1
                 nxt = f"b{cur}:p{k}"
-    text = "\n\n".join(c for c in [title] + chunks if c.strip())
+    if text.strip() and not text.endswith("\n"):
+        text += "\n"
     return {"mode": "beats", "unit": unit, "asked_unit": unit,
             "units": units, "next": nxt, "beat": cur,
-            "beats_before": len(secs), "end": concluded and not pending,
+            "paragraphs_before": len(base_paras),
+            "unclaimed": [k + 1 for k in unclaimed],
+            "cover_asked": cover_asked,
+            "end": concluded and not pending,
             "concluded": concluded, "fallback": False,
             "beat_open": not concluded and cur in beats and not beats[cur]["done"],
-            "text": text + ("\n" if text else "")}
+            "text": text}
 
 
 def _unit_before(db: Database, manuscript: dict, inst: dict, step: str,
@@ -545,17 +755,9 @@ def _unit_before(db: Database, manuscript: dict, inst: dict, step: str,
     if hit is not None:
         return hit["before"]
     if walk["mode"] == "beats" and label == walk["next"]:
-        m = _BEAT.match(label)
-        _title, secs = _beat_sections(walk["base"])
-        b = int(m.group(1))
-        sec = secs[b - 1] if b - 1 < len(secs) else ""
-        if m.group(2) == "plan":
-            return ""
-        if m.group(3):
-            paras = paragraphs(sec)
-            k = int(m.group(3))
-            return paras[k - 1] if k - 1 < len(paras) else ""
-        return sec
+        # A beat's plan and its new text have no original: the new text is
+        # inserted, and the old text stays (`_beats_walk`).
+        return ""
     raise LookupError(f"no unit '{label}' at {step}")
 
 
@@ -1180,34 +1382,67 @@ def _unit_message(db: Database, manuscript: dict, inst: dict, step: str,
                 "made it. Return the whole unit in `proposed`, or an empty "
                 f"`proposed` when nothing needs changing.\n\n{before}")
     m = _BEAT.match(label)
+    kept = _kept(db, inst)
+    cover = _COVER.match(label)
+    if cover:
+        return (f"Unit {label}: the beats are written, and paragraph "
+                f"{cover.group(1)} of the old text still stands, claimed by no "
+                "beat's plan. Propose what becomes of it: keep it (empty "
+                "`changes` and `proposed`), or cut it or move it (`changes`), "
+                "with your reason." + CHANGES_HOW
+                + f"\n\nThe paragraph:\n\n{before}")
+    if m and m.group(4):
+        return (f"Unit {label}: beat {m.group(1)}'s plan says its new text takes "
+                "the place of the old paragraph below. Propose what becomes of "
+                "it: cut it, merge what it still has into the beat (a replace "
+                "of the beat's paragraph and a cut of this one), or move it."
+                + CHANGES_HOW + f"\n\nThe paragraph:\n\n{before}")
     if m and inst["construction_mode"] == "beats":
         b = int(m.group(1))
-        kept = _kept(db, inst)
         if m.group(2) == "plan":
-            return (f"Beat {b}: propose its plan — what the section is for, the "
+            return (f"Beat {b}: propose its plan — what the beat is for, the "
                     "point it makes and how it follows from the one before — "
-                    "in `proposed`, with your reason."
-                    + (f"\n\n{kept}" if kept else "")
-                    + (f"\n\nThe section as it stands:\n\n{before}" if before else ""))
+                    "in `proposed`, with your reason. Its new text is inserted, "
+                    "and the essay around it stays as it is: say in `placement` "
+                    "where it goes in (`where` before or after the paragraph "
+                    "whose opening words are `quote`, or the start or end of the "
+                    "essay; an existing essay's first beat usually goes in at "
+                    "the start) and name in `placement.supersedes` the opening "
+                    "words of each old paragraph this beat takes the place of. "
+                    "Once the beat's text is in, each of those comes to the "
+                    "author to cut, keep, merge into the beat or move."
+                    + (f"\n\n{kept}" if kept else ""))
         hist = _by_label(core.turns(db, inst), "construction")
         plan = unit_state(hist.get(f"b{b}:plan", []))
         plan_text = plan.get("text") or (plan.get("form") or {}).get("proposed", "")
-        what = ("the whole section" if m.group(2) == "section"
-                else f"paragraph {m.group(3)} of the section")
+        what = ("the beat's new text, whole" if m.group(2) in ("section", "insert")
+                else f"paragraph {m.group(3)} of the beat's new text")
         return (f"Beat {b}: write {what}, following the accepted plan:\n\n"
-                f"{plan_text}\n\nReturn it in `proposed`; an empty `proposed` "
-                "means the section is complete."
-                + (f"\n\n{kept}" if kept else "")
-                + (f"\n\nAs it stands now:\n\n{before}" if before else ""))
+                f"{plan_text}\n\nIt is inserted where the plan says; the old "
+                "text stays until the author rules each paragraph the beat "
+                "supersedes. Return it in `proposed`; an empty `proposed` "
+                "means the beat is complete."
+                + (f"\n\n{kept}" if kept else ""))
     findings = _accepted_findings(db, inst)
-    kept = _kept(db, inst)
-    return (f"Unit {label} ({inst['unit']}): propose the text this unit needs, "
-            "working the accepted findings and any paragraph note that names "
-            "it. Reason first; an empty `proposed` when nothing needs "
-            "changing here."
+    return (f"Unit {label} ({inst['unit']}): propose the changes this unit "
+            "needs, working the accepted findings and any paragraph note that "
+            "names it. Reason first; an empty `proposed` and no `changes` when "
+            "nothing needs changing here." + CHANGES_HOW
             + (f"\n\nAccepted findings:\n{findings}" if findings else "")
             + (f"\n\n{kept}" if kept else "")
             + f"\n\nThe unit as it stands:\n\n{before}")
+
+
+# How a turn gives its changes (workflow/edits.py), said in every message
+# that may change text in place.
+CHANGES_HOW = (" Give the whole unit rewritten in `proposed`, or, when the "
+               "change is not a rewrite of the whole unit, list it in "
+               "`changes`, each one change the author rules on its own: "
+               "replace (`original` quoted exactly, `text` the new words), "
+               "insert (`text`, placed `where` before or after the paragraph "
+               "whose opening words are `quote`, or at the start or end), cut "
+               "(`original`), or move (`original`, and its new place as for "
+               "an insert). An empty `original` means this whole unit.")
 
 
 def _redo_message(label: str, blurbs: list[str], free: str,
@@ -1279,6 +1514,11 @@ def page_gate(db: Database, manuscript: dict, inst: dict) -> str | None:
             return f"{nxt} waits: {pending[0]} has a form waiting for you" + skip
         if not w["end"]:
             if w["mode"] == "beats":
+                left = [u["label"] for u in w["units"]
+                        if u["kind"] == "cover" and u["state"] == "open"]
+                if left:
+                    return (f"{nxt} waits: rule what the beats left standing "
+                            f"({', '.join(left[:5])}), then conclude" + skip)
                 return (f"{nxt} waits: conclude the beats when the essay is "
                         "built" + skip)
             return (f"{nxt} waits: the walk has not reached the end of the "
@@ -1361,34 +1601,85 @@ def propose(db: Database, manuscript: dict, inst: dict, label: str | None) -> di
                  author_text="", unit_label=label, unit_before=unit["before"])
 
 
+ACTIONS = ("accept", "reject", "redo", "edit", "cut", "keep", "move")
+
+
 def act(db: Database, manuscript: dict, inst: dict, label: str, action: str,
         text: str = "", blurbs: list[str] | None = None, free: str = "",
-        with_discussion: bool = False) -> dict:
-    """The four actions on a unit (Q8a, Q11). Accept and reject, and an
-    edit with no bracket, are recorded without a model call; a redo, and
-    an edit with a bracket in it, ask the engine for the next revision.
-    Accept and reject rule an open form only; a ruled unit is reopened
-    first, so a stale click never overwrites the author's own text."""
+        with_discussion: bool = False, where: str = "", quote: str = "") -> dict:
+    """The actions on a unit or one change of it (Q8a, Q11). Accept and
+    reject, an edit with no bracket, and the author's own changes (cut the
+    unit; keep it, as a reject; move it `where` before or after the
+    paragraph `quote` opens, or to the start or end) are recorded without a
+    model call; a redo, and an edit with a bracket in it, ask the engine
+    for the next revision. Accept and reject rule an open form only; a
+    ruled unit is reopened first, so a stale click never overwrites the
+    author's own text."""
     step = _step_for(inst, label)
     _check_label_step(inst, step)
+    if action not in ACTIONS:
+        raise ValueError(f"action is one of {', '.join(ACTIONS)}")
     inst = core.ensure_base(db, manuscript, inst)
-    unit, _walk_ = _unit(db, manuscript, inst, step, label)
+    unit, walk = _unit(db, manuscript, inst, step, label)
     state = unit["state"]
     before = unit.get("before", "")
     blurbs = [b for b in (blurbs or []) if b.strip()]
+    if state == "split":
+        raise ValueError(f"{label} is several changes; rule each of them: "
+                         + ", ".join(unit.get("children") or []))
+    form = unit.get("form") or {}
+    if action == "keep":
+        if state not in ("pending", "open") or not before or step == "wrapup":
+            raise ValueError(f"{label} has nothing to keep (it is {state})")
+        action = "reject"
     if action == "accept":
-        proposed = (unit.get("form") or {}).get("proposed", "")
-        if state != "pending" or not proposed:
+        if step == "wrapup":
+            proposed = form.get("proposed", "")
+            if state != "pending" or not proposed:
+                raise ValueError(f"{label} has no proposal waiting to accept "
+                                 f"(it is {state})")
+            return core.record_turn(db, inst, "accept", author_text=proposed,
+                                    unit_label=label, unit_before=before)
+        changes = form.get("changes") or []
+        if state != "pending" or not changes:
             raise ValueError(f"{label} has no proposal waiting to accept "
                              f"(it is {state})")
-        return core.record_turn(db, inst, "accept", author_text=proposed,
-                                unit_label=label, unit_before=before)
+        return core.record_turn(db, inst, "accept",
+                                author_text=form.get("proposed") or "",
+                                unit_label=label, unit_before=before,
+                                edits={"changes": changes})
     if action == "reject":
-        if state not in ("pending",) and not (step == "wrapup" and state == "open"):
+        if state not in ("pending",) and not (
+                state == "open" and (step == "wrapup" or _COVER.match(label))):
             raise ValueError(f"{label} has no proposal waiting to reject "
                              f"(it is {state})")
         return core.record_turn(db, inst, "reject", unit_label=label,
                                 unit_before=before)
+    if state in RESOLVED and state != "passed":
+        raise ValueError(f"{label} is {state}; reopen it first")
+    if action in ("cut", "move"):
+        if step == "wrapup" or not before:
+            raise ValueError(f"{label} has no original text to {action}")
+        if action == "cut":
+            return core.record_turn(db, inst, "edit", unit_label=label,
+                                    author_text="(cut: the author takes this out)",
+                                    unit_before=before,
+                                    edits={"changes": [{
+                                        "kind": "cut", "original": "", "where": "",
+                                        "quote": "", "text": ""}]})
+        change = edits.clean({"kind": "move", "original": "", "where": where,
+                              "quote": quote, "text": text})
+        if change["where"] not in edits.WHERES:
+            raise ValueError("a move says where: before or after a paragraph "
+                             "(its opening words), or the start or end")
+        if change["where"] in ("before", "after") and (
+                not change["quote"] or edits.find((walk or {}).get("text", ""),
+                                                  change["quote"]) is None):
+            raise ValueError("the paragraph to move it next to is not in the "
+                             "essay: quote its opening words exactly")
+        return core.record_turn(db, inst, "edit", unit_label=label,
+                                author_text=f"(moved: {edits.describe(change)})",
+                                unit_before=before, edits={"changes": [change]})
     if state in RESOLVED and state != "passed":
         raise ValueError(f"{label} is {state}; reopen it first")
     if action == "redo":
@@ -1460,8 +1751,10 @@ def reopen(db: Database, manuscript: dict, inst: dict, label: str) -> dict:
     _check_label_step(inst, step)
     inst = core.ensure_base(db, manuscript, inst)
     unit, _w = _unit(db, manuscript, inst, step, label)
-    if unit["state"] not in RESOLVED:
-        raise ValueError(f"{label} is not ruled yet; nothing to reopen")
+    if unit["state"] not in RESOLVED or unit["state"] == "gone":
+        raise ValueError(f"{label} is not ruled yet; nothing to reopen"
+                         if unit["state"] != "gone" else
+                         f"{label} was taken out by an earlier change; reopen that")
     landing.revert(db, manuscript, inst, step, label, road=_road(db, manuscript))
     kept = unit.get("text", "")
     return _send(db, manuscript, inst, "reply",
@@ -2071,7 +2364,8 @@ def _apply(db: Database, manuscript: dict, inst: dict, method: str,
         act(db, manuscript, inst, str(p.get("label") or ""),
             str(p.get("action") or ""), text=str(p.get("text") or ""),
             blurbs=_blurb_list(p), free=str(p.get("free") or ""),
-            with_discussion=bool(p.get("with_discussion")))
+            with_discussion=bool(p.get("with_discussion")),
+            where=str(p.get("where") or ""), quote=str(p.get("quote") or ""))
     elif method == "discuss":
         discuss_unit(db, manuscript, inst, str(p.get("label") or ""),
                      str(p.get("text") or ""))
@@ -2090,7 +2384,16 @@ def _apply(db: Database, manuscript: dict, inst: dict, method: str,
             raise ValueError("the beats are concluded at construction, beat by beat")
         if any(u["state"] == "pending" for u in walk["units"]):
             raise ValueError("rule the open form first")
-        core.record_turn(db, inst, "accept", unit_label=CONCLUDE_LABEL)
+        if not walk["cover_asked"] and walk["unclaimed"]:
+            # First what the beats left standing, one form each.
+            core.record_turn(db, inst, "accept", unit_label=COVER_LABEL)
+        else:
+            left = [u["label"] for u in walk["units"]
+                    if u["kind"] == "cover" and u["state"] == "open"]
+            if left:
+                raise ValueError("rule what the beats left standing first: "
+                                 + ", ".join(left[:5]))
+            core.record_turn(db, inst, "accept", unit_label=CONCLUDE_LABEL)
     elif method == "lint":
         run_lint(db, manuscript, inst)
     elif method == "wrapup":

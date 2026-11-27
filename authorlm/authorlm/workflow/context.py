@@ -260,6 +260,6 @@ def instance_context(db: Database, manuscript: dict, instance: dict) -> dict:
         "essay": files.get(instance["file"], ""),
         "turns": [{k: t[k] for k in ("seq", "step", "unit_label", "action",
                                      "author_text", "blurbs", "reply",
-                                     "reason", "proposed", "engine", "model")}
+                                     "reason", "proposed", "engine", "model", "edits")}
                   for t in _history(core.turns(db, instance))],
     }

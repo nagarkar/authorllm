@@ -19,6 +19,17 @@ Your reply is ONE JSON object with exactly these keys:
   wordy", "lost the point"), that the author may want on the checklist for
   the next unit: drawn from the author's recent reasons and from patterns
   you see in your own drafts. An empty list when you have none.
+- "changes": when your proposal changes the essay in place rather than
+  rewriting the unit whole, the list of changes, each one the author rules
+  on its own: {"kind": "replace" | "insert" | "cut" | "move", "original":
+  the text replaced, cut or moved, quoted exactly ("" for the whole unit),
+  "where": "before" | "after" | "start" | "end" ("" for after the unit),
+  "quote": the opening words of the paragraph an insert or move goes
+  next to, "text": the new text ("" for a cut)}. null otherwise. A cut is
+  always a change of kind cut, never an empty "proposed".
+- "placement": for a beat's plan only, {"where", "quote", "supersedes":
+  [the opening words of each old paragraph the beat takes the place of]}:
+  where the beat's new text is inserted. null otherwise.
 
 Never invent: a fact you cannot find is said to be missing, not supplied.
 

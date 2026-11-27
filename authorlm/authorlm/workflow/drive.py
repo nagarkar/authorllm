@@ -114,6 +114,50 @@ def _focus(view: dict, label: str | None) -> dict | None:
     return next((u for u in items if u["label"] == nxt), None)
 
 
+def _where(a: dict) -> str:
+    q = " ".join((a.get("quote") or "").split())
+    q = q if len(q) <= 70 else q[:67] + "…"
+    return {"start": "at the start of the essay", "end": "at the end of the essay",
+            "before": f"before the paragraph opening “{q}”",
+            "after": f"after the paragraph opening “{q}”"}.get(
+                a.get("where") or "", "after this unit")
+
+
+def _plain(changes: list[dict], u: dict) -> bool:
+    """A form that is the unit rewritten whole (the shape before change
+    kinds), shown as original and proposed."""
+    if u.get("kind") == "plan":
+        return True
+    if u.get("beat") and u.get("kind") in ("insert", "paragraph"):
+        return False  # a beat's new text is an insert
+    return not changes or (len(changes) == 1 and changes[0]["kind"] == "replace"
+                           and not changes[0].get("original"))
+
+
+def change_lines(label: str, changes: list[dict], before: str,
+                 how: str) -> list[str]:
+    """Each change of a form, plainly: what kind, where, and its texts
+    exactly (what is replaced, inserted, cut or moved)."""
+    from . import edits
+    lines = []
+    for k, c in enumerate(changes, start=1):
+        tag = f"{label} change {k}" if len(changes) > 1 else label
+        lines.append(f"change {k} ({how}): {c['kind'].upper()} — {edits.describe(c)}")
+        orig = c.get("original") or before
+        if c["kind"] == "replace":
+            lines += _block(f"replaced ({tag})", orig)
+            lines += _block(f"with ({tag})", c.get("text", ""))
+        elif c["kind"] == "insert":
+            lines.append(f"inserted {_where(c)}" if c.get("where") else "inserted after this unit")
+            lines += _block(f"new text ({tag})", c.get("text", ""))
+        elif c["kind"] == "cut":
+            lines += _block(f"cut ({tag})", orig)
+        else:
+            lines.append(f"moved to: {_where(c) if c.get('where') else 'the end'}")
+            lines += _block(f"moved ({tag})", c.get("text") or orig)
+    return lines
+
+
 def _unit_lines(u: dict) -> list[str]:
     form = u.get("form") or {}
     head = f"{u['label']}  {u['state']}"
@@ -124,12 +168,26 @@ def _unit_lines(u: dict) -> list[str]:
         lines.append(f"reason: {form['reason']}")
     if form.get("engine"):
         lines.append(f"by: {form['engine']}" + (f" ({form['model']})" if form.get("model") else ""))
+    if u.get("anchor"):
+        lines.append(f"goes in: {_where(u['anchor'])}")
+    pl = form.get("placement")
+    if pl:
+        lines.append(f"its text goes in: {_where(pl)}")
+        lines += [f"supersedes: “{q}”" for q in pl.get("supersedes") or []] or [
+            "supersedes: nothing named"]
     lines += _block(f"original ({u['label']})", u.get("before", ""))
-    if u["state"] == "pending" or (form.get("proposed") and u["state"] not in
-                                   ("accepted", "edited")):
-        lines += _block(f"proposed ({u['label']})", form.get("proposed", ""))
-    elif u["state"] in ("accepted", "edited"):
-        lines += _block(f"kept ({u['label']}, {u['state']})", u.get("text", ""))
+    ruled = u["state"] in ("accepted", "edited")
+    changes = (u.get("applied") if ruled else form.get("changes")) or []
+    if _plain(changes, u):
+        if u["state"] == "pending" or (form.get("proposed") and not ruled):
+            lines += _block(f"proposed ({u['label']})", form.get("proposed", ""))
+        elif ruled:
+            lines += _block(f"kept ({u['label']}, {u['state']})", u.get("text", ""))
+    else:
+        lines += change_lines(u["label"], changes, u.get("before", ""),
+                              "ruled in" if ruled else "proposed")
+    if u.get("unapplied"):
+        lines.append(f"not applied: {u['unapplied']}")
     if form.get("text") and not form.get("proposed"):
         lines += _block(f"the engine's note ({u['label']})", form["text"])
     for d in u.get("thread") or []:
@@ -187,7 +245,9 @@ def walk_lines(view: dict, label: str | None = None) -> list[str]:
         if w["mode"] == "beats":
             lines.append(f"  walk: beat by beat, by {w['unit']}; beat {w['beat']}"
                          + (" open" if w.get("beat_open") else "")
-                         + f"; the essay had {w.get('beats_before', 0)} section(s)"
+                         + f"; the old text had {w.get('paragraphs_before', 0)} paragraph(s)"
+                         + (f"; claimed by no beat: {', '.join(f'p{k}' for k in w['unclaimed'])}"
+                            if w.get("unclaimed") else "")
                          + ("; concluded" if w.get("concluded") else ""))
         else:
             lines.append(f"  walk: by {w['unit']}"
@@ -440,6 +500,16 @@ def _preview(db, manuscript: dict, inst: dict, method: str,
             lines.append(f"would record reject: {label} keeps its original"
                          if unit.get("before") else
                          f"would record reject: {label} is dropped")
+        elif action in ("keep", "cut", "move"):
+            if action == "keep" and state not in ("pending", "open"):
+                raise ValueError(f"{label} has nothing to keep (it is {state})")
+            if action != "keep" and state in page.RESOLVED and state != "passed":
+                raise ValueError(f"{label} is {state}; reopen it first")
+            lines.append({"keep": f"would record keep: {label} stays as it is",
+                          "cut": f"would record the author's cut of {label}",
+                          "move": f"would record the author's move of {label} "
+                                  f"({params.get('where')} {params.get('quote', '')})".rstrip()}[action])
+            lines += _block(f"original ({label})", unit.get("before", ""))
         elif action == "reopen":
             if state not in page.RESOLVED:
                 raise ValueError(f"{label} is not ruled yet; nothing to reopen")
@@ -528,6 +598,14 @@ def _unit_params(args) -> dict:
         return {"label": label, "action": "accept"}
     if args.reject:
         return {"label": label, "action": "reject"}
+    if args.keep:
+        return {"label": label, "action": "keep"}
+    if args.cut:
+        return {"label": label, "action": "cut"}
+    if args.move:
+        where, _, quote = args.move.partition(":")
+        return {"label": label, "action": "move", "where": where.strip(),
+                "quote": quote.strip()}
     if args.redo:
         out = {"label": label, "action": "redo", "blurbs": list(args.blurb or []),
                "free": args.note or ""}
@@ -704,8 +782,10 @@ def add_leaves(leaf, instance) -> None:
                    help="hide the failed attempt; it stays on the record")
     wait(q)
     dry(q)
-    q = leaf("unit", "rule a unit's form with the author's verdict: --accept "
-                     "the proposal, --reject it (keeps the original), --redo "
+    q = leaf("unit", "rule a unit's form (or one change of it, p3:c2) with "
+                     "the author's verdict: --accept "
+                     "the proposal, --reject it (keeps the original), --keep, "
+                     "--cut or --move the unit himself, --redo "
                      "with --blurb and --note (the author's words; a model "
                      "turn), or --edit/--edit-file the author's text (a "
                      "[bracket] in it is an instruction to the engine, a "
@@ -720,6 +800,13 @@ def add_leaves(leaf, instance) -> None:
                    help="reject it: the original stays")
     g.add_argument("--redo", action="store_true",
                    help="ask again, with --blurb and/or --note")
+    g.add_argument("--keep", action="store_true",
+                   help="keep the original (a leftover or coverage form)")
+    g.add_argument("--cut", action="store_true",
+                   help="the author cuts the unit (its original text) himself")
+    g.add_argument("--move", metavar="WHERE[:QUOTE]",
+                   help="the author moves the unit: start, end, or "
+                        "before:/after: the opening words of a paragraph")
     g.add_argument("--edit", metavar="TEXT", help="the author's text, whole")
     g.add_argument("--edit-file", metavar="PATH",
                    help="the author's text from a file ('-' for stdin)")

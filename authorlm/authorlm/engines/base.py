@@ -83,18 +83,67 @@ REPLY_SCHEMA: dict = {
         "proposed": {
             "type": ["string", "null"],
             "description": "The proposed text of the unit, whole, ready to "
-                           "replace it; null when this turn proposes no text."},
+                           "replace it; null when this turn proposes no text "
+                           "or gives its proposal as `changes`."},
         "suggested_blurbs": {
             "type": "array",
             "items": {"type": "string"},
             "description": "Short reject reasons (two or three words) the "
                            "author may want on the redo checklist."},
+        "changes": {
+            "type": ["array", "null"],
+            "description": "The proposal as changes, each its own form for "
+                           "the author (workflow/edits.py); null when the "
+                           "turn proposes the unit whole in `proposed`, or "
+                           "nothing.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string",
+                             "enum": ["replace", "insert", "cut", "move"]},
+                    "original": {"type": "string",
+                                 "description": "The text replaced, cut or "
+                                                "moved, quoted exactly; \"\" "
+                                                "for the whole unit or an "
+                                                "insert."},
+                    "where": {"type": "string",
+                              "enum": ["", "before", "after", "start", "end"],
+                              "description": "Where an insert or a move goes "
+                                             "in; \"\" for after the unit."},
+                    "quote": {"type": "string",
+                              "description": "With before or after: the "
+                                             "paragraph's opening words, "
+                                             "enough to occur once."},
+                    "text": {"type": "string",
+                             "description": "The new text; \"\" for a cut."},
+                },
+                "required": ["kind", "original", "where", "quote", "text"],
+                "additionalProperties": False,
+            }},
+        "placement": {
+            "anyOf": [{
+                "type": "object",
+                "description": "A beat plan only: where the beat's new text "
+                               "goes in, and the old paragraphs it takes "
+                               "the place of (opening words each).",
+                "properties": {
+                    "where": {"type": "string",
+                              "enum": ["", "before", "after", "start", "end"]},
+                    "quote": {"type": "string"},
+                    "supersedes": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["where", "quote", "supersedes"],
+                "additionalProperties": False,
+            }, {"type": "null"}]},
     },
-    "required": ["text", "reason", "proposed", "suggested_blurbs"],
+    "required": ["text", "reason", "proposed", "suggested_blurbs", "changes",
+                 "placement"],
     "additionalProperties": False,
 }
 
+# The keys every reply has; `changes` and `placement` may be absent (null).
 REPLY_KEYS = ("text", "reason", "proposed", "suggested_blurbs")
+OPTIONAL_KEYS = ("changes", "placement")
 
 
 class EngineError(RuntimeError):
@@ -171,7 +220,7 @@ def parse_reply(raw: Any) -> dict:
     missing = [k for k in REPLY_KEYS if k not in raw]
     if missing:
         raise EngineError(f"the reply lacks {', '.join(missing)}: {raw!r:.300}")
-    extra = sorted(set(raw) - set(REPLY_KEYS))
+    extra = sorted(set(raw) - set(REPLY_KEYS) - set(OPTIONAL_KEYS))
     if extra:
         raise EngineError(f"the reply has keys outside the schema: {extra}")
     for key in ("text", "reason"):
@@ -185,8 +234,17 @@ def parse_reply(raw: Any) -> dict:
     for b in raw["suggested_blurbs"]:
         if isinstance(b, str) and b.strip() and b.strip() not in blurbs:
             blurbs.append(b.strip())
-    return {"text": raw["text"], "reason": raw["reason"],
-            "proposed": raw["proposed"], "suggested_blurbs": blurbs}
+    out = {"text": raw["text"], "reason": raw["reason"],
+           "proposed": raw["proposed"], "suggested_blurbs": blurbs}
+    from ..workflow import edits
+    try:
+        if raw.get("changes"):
+            out["changes"] = edits.clean_list(raw["changes"])
+        if raw.get("placement"):
+            out["placement"] = edits.clean_placement(raw["placement"])
+    except ValueError as err:
+        raise EngineError(f"the reply's changes: {err}")
+    return out
 
 
 def empty_usage() -> dict:
@@ -357,15 +415,20 @@ def turn_messages(turns: list[dict]) -> list[tuple[str, str]]:
         reply = turn.get("reply")
         if isinstance(reply, dict):
             out.append(("assistant", _reply_text(reply)))
-        elif reply or turn.get("proposed") or turn.get("reason"):
+        elif reply or turn.get("proposed") or turn.get("reason") or (
+                turn.get("engine") and (turn.get("edits") or {}).get("changes")):
+            ed = turn.get("edits") if turn.get("engine") else None
             out.append(("assistant", _reply_text({
                 "text": reply or "", "reason": turn.get("reason") or "",
-                "proposed": turn.get("proposed") or None})))
+                "proposed": turn.get("proposed") or None,
+                **({k: (ed or {}).get(k) for k in OPTIONAL_KEYS
+                    if (ed or {}).get(k)})})))
     return out
 
 
 def _reply_text(reply: dict) -> str:
-    return json.dumps({k: reply.get(k) for k in REPLY_KEYS if k in reply},
+    return json.dumps({k: reply.get(k) for k in REPLY_KEYS + OPTIONAL_KEYS
+                       if reply.get(k) is not None or k in REPLY_KEYS and k in reply},
                       ensure_ascii=False)
 
 

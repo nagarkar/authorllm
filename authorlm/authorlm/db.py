@@ -791,6 +791,8 @@ CREATE TABLE IF NOT EXISTS session_turns (
     requests TEXT NOT NULL DEFAULT '[]',   -- JSON: [{{name, args, chars}}]
     unit_before TEXT NOT NULL DEFAULT '',  -- the unit's original text when
                                   -- the turn ran: what a ruling lands on
+    edits TEXT NOT NULL DEFAULT '{{}}',    -- JSON: {{changes: [...], placement}}
+                                  -- (workflow/edits.py); {{}}: none
     UNIQUE (instance_id, seq)
 );
 
@@ -1101,6 +1103,10 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE session_turns ADD COLUMN unit_before TEXT "
                 "NOT NULL DEFAULT ''")
+        if "edits" not in self._columns("session_turns"):
+            self.conn.execute(
+                "ALTER TABLE session_turns ADD COLUMN edits TEXT "
+                "NOT NULL DEFAULT '{}'")
         if "comment_id" in self._columns("doc_threads"):
             self._migrate_thread_origins()
 

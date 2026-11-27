@@ -124,6 +124,7 @@ def _turn(row) -> dict:
     out["blurbs"] = loads(out["blurbs"], [])
     out["usage"] = loads(out["usage"], {})
     out["requests"] = loads(out["requests"], [])
+    out["edits"] = loads(out.get("edits") or "{}", {})
     return out
 
 
@@ -1066,12 +1067,15 @@ def _check_turn(instance: dict, action: str, author_text: str,
 def record_turn(db: Database, instance: dict, action: str, *,
                 author_text: str = "", blurbs: list[str] | None = None,
                 unit_label: str = "", reply: dict | None = None,
-                session_ref: str | None = None, unit_before: str = "") -> dict:
+                session_ref: str | None = None, unit_before: str = "",
+                edits: dict | None = None) -> dict:
     """Append one turn to the instance's session. `reply` is a normalized
     engine reply (contract.normalize_reply) when the turn asked the model;
     `session_ref` the engine's handle after it, stored in the instance's
     engine_state in the same transaction as the turn. `unit_before` is the
-    unit's original text, which a ruling lands on."""
+    unit's original text, which a ruling lands on. `edits` is the turn's
+    changes (workflow/edits.py) when the author made them (a cut, a
+    move); a reply's own `changes` and `placement` are kept the same way."""
     blurbs = list(blurbs or [])
     _check_turn(instance, action, author_text, blurbs)
     reply = reply or {}
@@ -1091,6 +1095,7 @@ def record_turn(db: Database, instance: dict, action: str, *,
             "requests": json.dumps(reply.get("requests") or [],
                                    ensure_ascii=False),
             "unit_before": unit_before or "",
+            "edits": json.dumps(_turn_edits(reply, edits), ensure_ascii=False),
         }
         db.insert("session_turns", row)
         if blurbs:
@@ -1106,6 +1111,14 @@ def record_turn(db: Database, instance: dict, action: str, *,
             changes["engine_state"] = json.dumps(state, ensure_ascii=False)
         _touch(db, instance, changes)
     return _turn(row)
+
+
+def _turn_edits(reply: dict, edits: dict | None) -> dict:
+    """What a turn records of its changes: the author's, else the reply's
+    (`changes`, `placement`); {} when it has none."""
+    if edits:
+        return {k: v for k, v in edits.items() if v}
+    return {k: reply[k] for k in ("changes", "placement") if reply.get(k)}
 
 
 def ask(db: Database, manuscript: dict, instance: dict, action: str,
