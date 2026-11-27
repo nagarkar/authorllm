@@ -8773,6 +8773,9 @@ def _doc_share_access(args) -> None:
         print("  download/print/copy: "
               + ("off for commenters and viewers"
                  if report["copy_requires_writer_permission"] else "ON"))
+        if report.get("google_invited"):
+            print("  no Google account on that address: Google emailed them "
+                  "an invitation to the Doc")
         for problem in report["problems"]:
             print(ui.yellow(f"  problem: {problem}"))
         print("  confidential review copy: "
