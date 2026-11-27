@@ -10702,6 +10702,25 @@ def cmd_history(args):
             )
         return
 
+    if action == "file":
+        # The same read an engine's essay_version request gets
+        # (engines/catalogue.py), so the owner sees what the model saw.
+        if not args.version or not args.as_of:
+            sys.exit("error: 'history file' needs a file and a date. "
+                     "authorlm history file <file.md> --as-of 2026-10-10")
+        from .engines import catalogue as cat
+
+        reader = cat.BookReader(args.workspace, manuscript["name"],
+                                refresh=False, _db=db, _manuscript=manuscript)
+        request = {"file": args.version, "as_of": args.as_of}
+        if args.section is not None:
+            request["section"] = args.section
+        text, entry = cat.run(reader, "essay_version", request)
+        if entry["declined"]:
+            sys.exit(f"error: {entry['declined']}.")
+        print(text)
+        return
+
     if not args.version:
         sys.exit(f"error: 'history {action}' needs a version number, e.g. 'history {action} 3'.")
     number = int(args.version.lstrip("v"))
@@ -12287,9 +12306,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-setup", dest="print_setup", action="store_true")
     p.set_defaults(func=cmd_client_hook)
 
-    p = sub.add_parser("history", help="list/show/restore collected manuscript versions")
-    p.add_argument("action", nargs="?", default="list", choices=["list", "show", "restore"])
-    p.add_argument("version", nargs="?", help="version number, e.g. '3' or 'v3' (show/restore)")
+    p = sub.add_parser(
+        "history",
+        help="list/show/restore collected manuscript versions; 'file' prints "
+             "one file as it stood at a date",
+        epilog="example: authorlm history file recap-sermon-three.md "
+               "--as-of 2026-10-10 -m SMSTTD")
+    p.add_argument("action", nargs="?", default="list",
+                   choices=["list", "show", "restore", "file"])
+    p.add_argument("version", nargs="?", metavar="version-or-file",
+                   help="version number, e.g. '3' or 'v3' (show/restore); "
+                        "the file's name (file)")
+    p.add_argument("--as-of", dest="as_of",
+                   help="file: the date, YYYY-MM-DD (the whole day) or "
+                        "YYYY-MM-DDTHH:MM, local time unless it ends in Z")
+    p.add_argument("--section", type=int,
+                   help="file: only this section of it, numbered from 1")
     p.set_defaults(func=cmd_history)
 
     return parser

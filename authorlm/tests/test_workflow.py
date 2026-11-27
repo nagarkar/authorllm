@@ -366,12 +366,13 @@ def test_turns_context_and_blurbs() -> None:
               and blocks["brief"]["text"] == "Read the whole essay.")
         check("the author's brief is a block",
               blocks["author-brief"]["text"] == "tighten it")
-        check("voice carries whole essays in reading order",
-              blocks["voice"]["text"].index("=== preface.md")
-              < blocks["voice"]["text"].index("=== one.md")
-              and "The first essay." in blocks["voice"]["text"])
+        check("other essays go whole, labelled, in reading order",
+              blocks["essays"]["text"].index("=== preface.md [voice] ===")
+              < blocks["essays"]["text"].index("=== one.md [voice] ===")
+              and "The first essay." in blocks["essays"]["text"])
         check("reference may hold the Sermons (read, never edited)",
-              "The owner's own." in blocks["reference"]["text"])
+              "=== sermons_new.md [reference] ===\n\n# Sermons\n\nThe owner's own."
+              in blocks["essays"]["text"])
         check("no filter text outside the filter step",
               blocks["filters"]["text"] == "")
         check("the essay as it stands follows the standing blocks",
@@ -420,6 +421,54 @@ def test_turns_context_and_blurbs() -> None:
         # The engines package registers the real engines (engines/__init__.py);
         # a name nobody registered still raises.
         raises(lambda: contract.make_engine("no-such-engine", "m"), LookupError)
+
+
+def test_each_essay_sent_once_with_its_roles() -> None:
+    """Owner, 2026-11-26: "if an essay is in more than one list, reference
+    and voice, we should be sending the essay and then saying whether this
+    essay should apply to reference or reference and voice, or just
+    voice." Seen live on SMSTTD (wi-7abca47358e0): recapitulation.md went
+    whole as reference and again whole as voice; preface.md whole as voice
+    and again as an aware summary."""
+    with world() as (db, ms, _ws):
+        from authorlm.db import ko_fields
+
+        db.insert("essay_summaries", {
+            **ko_fields("es"), "manuscript_id": ms["id"], "file": "preface.md",
+            "summary": "PREFACE SUMMARY", "source_hash": "x",
+            "upstream_hash": "y", "status": "current"})
+        inst = core.start(db, ms, "two", "refine")
+        for which, name in (("reference", "one"), ("voice", "one"),
+                            ("voice", "preface"), ("aware", "preface"),
+                            ("aware", "sermons_new")):
+            core.change_list(db, ms, inst, which, name)
+            inst = core.get_instance(db, ms, inst["id"])
+        blocks = {b["name"]: b for b in context.standing_context(db, ms, inst)}
+        text = blocks["essays"]["text"]
+        check("an essay on reference and voice is sent whole once, labelled both",
+              text.count("The first essay.") == 1
+              and "=== one.md [reference and voice] ===" in text, text)
+        check("a voice essay also on aware is labelled so, sent once",
+              "=== preface.md [voice, also aware] ===" in text
+              and text.count("Why this book.") == 1, text)
+        check("the block opens with the legend the labels are read by",
+              text.startswith(context.ESSAY_LABEL_LEGEND))
+        aware = blocks["aware"]
+        check("no aware summary for an essay already sent whole",
+              "PREFACE SUMMARY" not in aware["text"]
+              and "preface.md" not in aware["no_summary"]
+              and aware["sent_whole"] == ["preface.md"], aware)
+        check("an aware-only essay stays on the aware list (no summary on record)",
+              aware["no_summary"] == ["sermons_new.md"], aware)
+        check("the essays block names each essay's roles",
+              blocks["essays"]["roles"] == {
+                  "preface.md": ["voice", "aware"],
+                  "one.md": ["reference", "voice"]}, blocks["essays"]["roles"])
+        empty = core.start(db, ms, "one", "refine")
+        blocks = {b["name"]: b for b in context.standing_context(db, ms, empty)}
+        check("no lists: an empty essays block in its place",
+              blocks["essays"]["text"] == ""
+              and tuple(blocks) == context.BLOCK_ORDER)
 
 
 def test_protected_register_is_honoured() -> None:
@@ -760,6 +809,7 @@ def main() -> None:
              test_carry_over,
              test_switches_need_reasons_and_are_logged,
              test_turns_context_and_blurbs,
+             test_each_essay_sent_once_with_its_roles,
              test_protected_register_is_honoured,
              test_usage_totals,
              test_session_ref_is_persisted,

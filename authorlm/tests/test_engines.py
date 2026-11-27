@@ -223,7 +223,7 @@ def check_catalogue(ws: str) -> None:
     names = [r.name for r in cat.CATALOGUE]
     check("catalogue: the entries", names == [
         "essay_list", "essay_text", "essay_section", "essay_summaries", "style_rules",
-        "concept_notes", "profile", "earlier_instances"], names)
+        "concept_notes", "profile", "essay_version", "earlier_instances"], names)
     for r in cat.CATALOGUE:
         tool = r.function_tool()
         params = tool["parameters"]
@@ -764,6 +764,172 @@ def check_summaries_as_stored(ws: str) -> None:
     check("headless: refresh_summaries = true passes --refresh", "--refresh" in args, args)
 
 
+# ------------------------------------------------------------ essay_version
+#
+# Owner, 2026-11-26: "if the brief says something like, check the prior
+# version of an essay, which is named ... will the headless agent ask for
+# that essay and get the essay? And will the API option with OpenAI ask for
+# that essay and get the essay back? ... this is a common case where you
+# want to go back in time." The split case is SMSTTD's: recap-sermon-three.md
+# was split out of recapitulation.md, whose "## Sermon Three" section held
+# its text before.
+
+OLD_ONE = "# Small Things\n\nA cup of coffee is a small thing.\n"
+OLD_RECAP = ("# Recapitulation\n\n## Sermon One\n\nFirst sermon.\n\n"
+             "## The First Cup\n\nOne cup.\n\n"
+             "## The Second Cup Sermon\n\nOLD SECOND CUP TEXT.\n")
+OLD_TOC = '[[chapter]]\nfile = "one.md"\n[[chapter]]\nfile = "recap.md"\n'
+
+
+def plant_snapshots(ws: str) -> None:
+    """Two past snapshots, dated in January and February 2026 (noon UTC,
+    so a whole-day date means the same day in any time zone)."""
+    from authorlm import api
+    from authorlm.db import ko_fields
+
+    db = api.open_db(ws)
+    ms = db.one("SELECT * FROM manuscripts WHERE name = 'Book'")
+    current_one = (Path(ms["path"]) / "one.md").read_text(encoding="utf-8")
+    for no, when, files in (
+            (101, "2026-01-05T12:00:00.000000Z",
+             {"one.md": OLD_ONE, "recap.md": OLD_RECAP, "toc.toml": OLD_TOC,
+              "drafts/old.md": "secret draft\n"}),
+            (102, "2026-02-10T12:00:00.000000Z",
+             {"one.md": current_one, "recap.md": OLD_RECAP, "toc.toml": OLD_TOC})):
+        db.insert("manuscript_versions", {
+            **ko_fields("mv"), "created_at": when, "manuscript_id": ms["id"],
+            "version_no": no, "checksum": f"c{no}", "files": json.dumps(files),
+            "source": "snapshot", "session_id": None})
+
+
+def check_essay_version(ws: str) -> None:
+    reader = cat.BookReader(ws, "Book", refresh=False)
+    text, entry = cat.run(reader, "essay_version",
+                          {"file": "one.md", "as_of": "2026-01-06"})
+    check("version: the text of the latest snapshot at or before the date",
+          entry["declined"] is None and "coffee" in text and "v101" in text
+          and "it has changed since" in text, text)
+    text, _ = cat.run(reader, "essay_version", {"file": "one.md", "as_of": "2026-02-11"})
+    check("version: a later date gets the later snapshot, said to be unchanged",
+          "v102" in text and "unchanged since" in text and "coffee" not in text, text)
+    text, _ = cat.run(reader, "essay_version",
+                      {"file": "one.md", "as_of": "2026-02-10T11:59Z"})
+    check("version: a time just before a snapshot gets the one before it",
+          "v101" in text, text)
+    _text, entry = cat.run(reader, "essay_version",
+                           {"file": "one.md", "as_of": "2025-12-01"})
+    check("version: no snapshot that old is declined, naming the first",
+          entry["declined"] and "no snapshot" in entry["declined"], entry)
+    text, entry = cat.run(reader, "essay_version",
+                          {"file": "second-cup.md", "as_of": "2026-01-06"})
+    check("version: a file that did not exist then is said so, with the files that did",
+          entry["declined"] is None and "did not exist" in text
+          and "one.md, recap.md" in text, text)
+    check("version: ... and only the section whose heading best matches its title",
+          "recap.md section 4: ## The Second Cup Sermon" in text
+          and "First Cup" not in text, text)
+    text, entry = cat.run(reader, "essay_version",
+                          {"file": "recap.md", "as_of": "2026-01-06", "section": 4})
+    check("version: a section of a file since removed from the book",
+          entry["declined"] is None and "OLD SECOND CUP TEXT." in text
+          and "First sermon." not in text
+          and "not an essay of the book now" in text, text)
+    text, entry = cat.run(reader, "essay_version",
+                          {"file": "drafts/old.md", "as_of": "2026-01-06"})
+    check("version: a file outside that snapshot's book is never served",
+          "secret" not in text and "did not exist" in text, text)
+    for label, args in (("a date it cannot read", {"file": "one.md", "as_of": "last week"}),
+                        ("a section that did not exist",
+                         {"file": "recap.md", "as_of": "2026-01-06", "section": 9}),
+                        ("no date", {"file": "one.md"})):
+        _text, entry = cat.run(reader, "essay_version", args)
+        check(f"version: {label} is declined", bool(entry["declined"]), entry)
+    request = cat.BY_NAME["essay_version"]
+    check("version: file and as_of required, section optional",
+          request.required == ("file", "as_of") and "section" in request.params)
+    code, out = run(["history", "file", "one.md", "--as-of", "2026-01-06", "-w", ws])
+    check("cli: history file prints the file as of the date",
+          code == 0 and "coffee" in out, (code, out))
+    code, out = run(["history", "file", "recap.md", "--as-of", "2026-01-06",
+                     "--section", "4", "-w", ws])
+    check("cli: history file --section", code == 0 and "OLD SECOND CUP" in out
+          and "First sermon." not in out, (code, out))
+    code, out = run(["history", "file", "one.md", "-w", ws])
+    check("cli: history file without --as-of exits 1 naming the fix",
+          code == 1 and "--as-of" in out, (code, out))
+    code, out = run(["engine", "read", "essay_version", "--arg", "file=one.md",
+                     "--arg", "as_of=2026-01-06", "-w", ws])
+    check("cli: engine read essay_version", code == 0 and "coffee" in out, (code, out))
+
+
+def check_essay_version_over_mcp(ws: str) -> None:
+    """claude-headless reaches the catalogue through engines/mcp_read.py:
+    the MCP server lists essay_version with its schema and serves it."""
+    import asyncio
+
+    import mcp.types as types
+
+    from authorlm.engines import mcp_read
+
+    server = mcp_read.build_server(cat.BookReader(ws, "Book", refresh=False))
+
+    async def talk():
+        listed = await server.request_handlers[types.ListToolsRequest](
+            types.ListToolsRequest(method="tools/list"))
+        called = await server.request_handlers[types.CallToolRequest](
+            types.CallToolRequest(method="tools/call", params=types.CallToolRequestParams(
+                name="essay_version",
+                arguments={"file": "recap.md", "as_of": "2026-01-06", "section": 4})))
+        return listed.root, called.root
+
+    listed, called = asyncio.run(talk())
+    tool = next((t for t in listed.tools if t.name == "essay_version"), None)
+    check("mcp: essay_version listed, file and as_of required",
+          tool is not None and tool.inputSchema["required"] == ["file", "as_of"]
+          and "earlier version" in tool.description, tool)
+    text = "".join(c.text for c in called.content)
+    check("mcp: essay_version served, the old section's text returned",
+          not called.isError and "OLD SECOND CUP TEXT." in text, text)
+
+
+def check_essay_version_over_openai(ws: str) -> None:
+    """openai-api serves the same request as a strict function call."""
+    reply = {"text": "Compared.", "reason": "", "proposed": None, "suggested_blurbs": []}
+    fake = FakeResponses([
+        _response("resp_v1", [
+            SimpleNamespace(type="function_call", name="essay_version", call_id="v1",
+                            arguments=json.dumps({"file": "second-cup.md",
+                                                  "as_of": "2026-01-06",
+                                                  "section": None})),
+            SimpleNamespace(type="function_call", name="essay_version", call_id="v2",
+                            arguments=json.dumps({"file": "recap.md",
+                                                  "as_of": "2026-01-06",
+                                                  "section": 4}))]),
+        _response("resp_v2", [], text=json.dumps(reply)),
+    ])
+    eng = OpenAIEngine("gpt-test", client=SimpleNamespace(responses=fake),
+                       reader_factory=lambda turn: cat.BookReader(ws, turn.manuscript,
+                                                                 refresh=False),
+                       pricer=lambda *a: 0.0)
+    got = eng.send({"standing": ["CHARTER"], "turns": [], "session_ref": None,
+                    "manuscript": "Book", "essay": "one.md", "workspace": ws},
+                   "Check the version of 6 January.")
+    tool = next(t for t in fake.calls[0]["tools"] if t.get("name") == "essay_version")
+    check("openai: essay_version offered strict, section nullable",
+          tool["strict"] and tool["parameters"]["required"] == ["file", "as_of", "section"]
+          and tool["parameters"]["properties"]["section"]["type"] == ["integer", "null"],
+          tool)
+    outputs = {i["call_id"]: i["output"] for i in fake.calls[1]["input"]}
+    check("openai: the missing file answered with where its text stood",
+          "recap.md section 4" in outputs["v1"], outputs["v1"])
+    check("openai: the old section's text goes back to the model",
+          "OLD SECOND CUP TEXT." in outputs["v2"], outputs["v2"])
+    check("openai: both version requests logged with their arguments",
+          [(r["name"], r["args"].get("file")) for r in got["requests"]]
+          == [("essay_version", "second-cup.md"), ("essay_version", "recap.md")]
+          and got["requests"][1]["args"]["section"] == 4, got["requests"])
+
+
 def main() -> int:
     tmp = Path(tempfile.mkdtemp())
     try:
@@ -779,6 +945,10 @@ def main() -> int:
         check_openai(ws)
         check_turn_run_and_timeout(tmp)
         check_summaries_as_stored(ws)
+        plant_snapshots(ws)
+        check_essay_version(ws)
+        check_essay_version_over_mcp(ws)
+        check_essay_version_over_openai(ws)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILS:

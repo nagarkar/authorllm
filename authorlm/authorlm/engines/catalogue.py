@@ -24,6 +24,15 @@ else in the folders. A request outside the book is **declined**, with a
 reason the model sees (`Declined`), and logged like any other request.
 Read-only: nothing here writes the manuscript, the Doc or the style laws.
 
+**The past** (`essay_version`): a file as it stood at a date, from the
+latest `manuscript_versions` snapshot collected at or before it
+(`revisions.file_as_of`). The same limit holds, applied to that snapshot:
+any file in its own reading order, so a file since split up or removed
+(an old recapitulation.md whose sermons now have files of their own) can
+be read as it was. When the asked-for file did not exist then, the reply
+lists the files that did and the sections whose headings share the
+essay's title words, so the model can ask again for the right one.
+
 **Summaries are served as stored inside a turn** (`refresh_in_turns`).
 Q20b first had a stale or missing summary rebuilt before it was served;
 inside a model turn that made one `essay_summaries` request cost a minute
@@ -306,6 +315,64 @@ def _profile(reader: BookReader, args: dict) -> str:
     return f"PROFILE {got['key']}:\n\n{got['content']}"
 
 
+def _essay_version(reader: BookReader, args: dict) -> str:
+    """A file as it stood at a past date (`revisions.file_as_of`): its
+    text, or one numbered section of it; when the file did not exist
+    then, the files that did and the headings that match its title."""
+    from ..revisions import file_as_of
+    from ..summaries import sections_of
+
+    file, as_of = args.get("file"), args.get("as_of")
+    if not isinstance(file, str) or not file.strip():
+        raise Declined("name the file, e.g. 'good-life.md'")
+    if not isinstance(as_of, str) or not as_of.strip():
+        raise Declined("give as_of, a date such as '2026-10-10' or "
+                       "'2026-10-10T14:30'")
+    current = reader.essays().get(file.strip())
+    try:
+        got = file_as_of(reader.db, reader.manuscript, file, as_of,
+                         current_text=current)
+    except (LookupError, ValueError) as err:
+        raise Declined(str(err))
+    head = (f"snapshot v{got['version_no']}, collected {got['created_at']} "
+            f"(the latest at or before {as_of})")
+    if got["file"] is None:
+        out = [f"FILE {got['requested']} did not exist in {head}.",
+               "Files in that snapshot's reading order: "
+               + (", ".join(got["book"]) or "(none)") + "."]
+        if got["matches"]:
+            out.append("Sections of that snapshot whose headings share this "
+                       f"essay's title words ({', '.join(got['title_words'])}); "
+                       "ask for one with essay_version(file, as_of, section):")
+            out += [f"- {m['file']} section {m['section']}: {m['heading']}"
+                    for m in got["matches"]]
+        else:
+            out.append("No heading in that snapshot shares this essay's title "
+                       "words; ask for one of the files above.")
+        return "\n".join(out)
+    text = got["text"]
+    named = (f"{got['file']} (now {got['requested']})"
+             if got["file"] != got["requested"] else got["file"])
+    if current is None:
+        status = "it is not an essay of the book now"
+    elif current == text:
+        status = "unchanged since: the same as the current text"
+    else:
+        status = "it has changed since"
+    section = args.get("section")
+    if section is not None:
+        secs = sections_of(text)
+        if not isinstance(section, int) or not 1 <= section <= len(secs):
+            raise Declined(f"{got['file']} had sections 1 to {len(secs)} in "
+                           f"v{got['version_no']}; section {section!r} did not exist")
+        sec = secs[section - 1]
+        body = "\n\n".join(p["text"] for p in sec["paragraphs"])
+        return (f"FILE {named}, section {section} of {len(secs)} "
+                f"({sec['heading'] or 'preamble'}), as of {head}; {status}:"
+                f"\n\n{body}")
+    return f"FILE {named} as of {head}; {status}:\n\n{text}"
+
+
 def _earlier_instances(reader: BookReader, args: dict) -> str:
     file, _text = reader.essay(args.get("file"))
     try:
@@ -362,6 +429,27 @@ CATALOGUE: tuple[Request, ...] = (
             "market, scheme, ...); without a key, the list of profiles.",
             {"key": {"type": "string", "description": "profile key, e.g. 'audience'"}},
             (), _profile),
+    Request("essay_version",
+            "A file of the book as it stood at a past date or time: the "
+            "latest snapshot collected at or before as_of. Use it whenever "
+            "the brief or the author points to an earlier version (\"the "
+            "version of 10 October\", \"what it said last month\"). If the "
+            "file did not exist then, the reply lists the files that did "
+            "and the sections whose headings match the essay's title; ask "
+            "again with that file and section. Any file in that snapshot's "
+            "reading order can be asked for, including one since split up "
+            "or removed.",
+            {"file": {"type": "string",
+                      "description": "the file name, as the reading order "
+                                     "lists it now or listed it then"},
+             "as_of":{"type": "string",
+                       "description": "YYYY-MM-DD (the whole day) or "
+                                      "YYYY-MM-DDTHH:MM, the author's local "
+                                      "time unless it ends in Z"},
+             "section": {"type": "integer",
+                         "description": "only this section of the old file, "
+                                        "numbered from 1"}},
+            ("file", "as_of"), _essay_version),
     Request("earlier_instances",
             "This essay's earlier workflow instances: their findings, the "
             "author's decisions and the discussion. Context to weigh, never "

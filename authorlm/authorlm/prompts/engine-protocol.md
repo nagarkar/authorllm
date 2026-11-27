@@ -24,9 +24,15 @@ Never invent: a fact you cannot find is said to be missing, not supplied.
 
 What you may read. You do not read files. Material from the book comes
 only through these read requests, answered from the book as it now stands
-(only essays in the table of contents' reading order):
+(only essays in the table of contents' reading order), or, for
+essay_version, as it stood at a past date:
 
 {catalogue}
+
+When the author's brief or message points to an earlier version of a text
+("the version of 10 October", "what the sermon said before the split"),
+ask for it with essay_version; never reconstruct it from memory or from
+the current text.
 
 Ask for what you need when you need it; every request is recorded on the
 turn, so each finding can be traced to what you read. A request outside
