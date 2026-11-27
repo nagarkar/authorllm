@@ -59,13 +59,19 @@ interface Instance {
   unit: string; construction_mode: string; filter_unit: string; filters: string[]; filters_confirmed: boolean;
   carried_from: string | null;
 }
-interface Form { seq: number; reason: string; proposed: string; text: string; engine: string; model: string; }
+// A change of a form (workflow/edits.py): replace, insert, cut or move.
+interface Change { kind: "replace" | "insert" | "cut" | "move"; original: string; where: string; quote: string; text: string; }
+interface Placement { where: string; quote: string; supersedes: string[]; }
+interface Form { seq: number; reason: string; proposed: string; text: string; engine: string; model: string; changes?: Change[]; placement?: Placement | null; mechanical?: boolean; }
 // One exchange of a discussion: the author's words and the engine's reply.
 interface Said { seq: number; author: string; reply: string; at: string; earlier?: boolean; }
-interface Unit { label: string; kind: string; n?: number; beat?: number; before: string; state: string; text?: string; form?: Form; turns?: number; thread?: Said[]; }
+interface Unit {
+  label: string; kind: string; n?: number; beat?: number; before: string; state: string; text?: string; form?: Form; turns?: number; thread?: Said[];
+  anchor?: { where: string; quote: string }; placement?: Placement | null; applied?: Change[]; parent?: string; children?: string[]; unapplied?: string;
+}
 interface Walk {
   mode: string; unit: string; asked_unit: string; units: Unit[]; next: string | null; end: boolean; fallback: boolean;
-  beat?: number; beat_open?: boolean; beats_before?: number; concluded?: boolean;
+  beat?: number; beat_open?: boolean; paragraphs_before?: number; concluded?: boolean; unclaimed?: number[]; cover_asked?: boolean;
   earlier: { label: string; kind: string; state: string; text: string; stretch: number }[];
   reopen?: { label: string; finding: string; title: string; quote: string }[];
 }
@@ -141,6 +147,7 @@ const LETTER_STEPS = ["letter", "construction", "wrapup", "filters"];
 const STATE_WORDS: Record<string, string> = {
   open: "not yet worked", pending: "waiting for you", passed: "no change needed",
   accepted: "accepted", rejected: "kept the original", dropped: "dropped", edited: "your text",
+  split: "several changes", gone: "taken out by an earlier change",
 };
 // How construction walks the essay: the construction mode × the unit, in
 // plain words (owner, 2026-11-26, at the letter step: "I didn't see any
@@ -271,6 +278,59 @@ function Diff({ before, after }: { before: string; after: string }) {
   const pieces = useMemo(() => diffWords(before, after), [before, after]);
   return <p className="devedit-diff wf-diff">{pieces.map(([op, s], k) =>
     op === 0 ? <span key={k}>{s}</span> : op < 0 ? <del key={k} className="del">{s}</del> : <ins key={k} className="add">{s}</ins>)}</p>;
+}
+
+// Where an insert or a move goes in, in words.
+function whereWords(a: { where?: string; quote?: string } | null | undefined): string {
+  const q = (a?.quote || "").replace(/\s+/g, " ");
+  const short = q.length > 70 ? `${q.slice(0, 67)}…` : q;
+  return a?.where === "start" ? "at the start of the essay" : a?.where === "end" ? "at the end of the essay"
+    : a?.where === "before" ? `before the paragraph opening “${short}”` : a?.where === "after" ? `after the paragraph opening “${short}”`
+    : "after this paragraph";
+}
+
+// The text a replace leaves of the unit: the whole unit's new text, or the
+// unit with its quoted passage replaced.
+function replaced(before: string, c: Change): string {
+  if (!c.original) return c.text;
+  const i = before.indexOf(c.original);
+  return i < 0 ? c.text : before.slice(0, i) + c.text + before.slice(i + c.original.length);
+}
+
+// One change, laid out by its kind (owner, 2026-11-27: "I can't eyeball
+// what has been changed easily"): a replace as before and after, an insert
+// with its place and the new text in green, a cut struck, a move in both
+// places. The same diff colours as every form.
+function ChangeView({ c, before }: { c: Change; before: string }) {
+  const orig = c.original || before;
+  if (c.kind === "replace") return <Diff before={before || orig} after={before ? replaced(before, c) : c.text} />;
+  if (c.kind === "insert") return <div className="wf-change">
+    <div className="muted wf-where">Inserted {whereWords(c.where ? c : null)}; nothing is removed.</div>
+    <p className="devedit-diff wf-diff"><ins className="add">{c.text}</ins></p></div>;
+  if (c.kind === "cut") return <div className="wf-change">
+    <div className="muted wf-where">Cut: this comes out of the essay.</div>
+    <p className="devedit-diff wf-diff"><del className="del">{orig}</del></p></div>;
+  return <div className="wf-change">
+    <div className="muted wf-where">Moved from here…</div>
+    <p className="devedit-diff wf-diff"><del className="del">{orig}</del></p>
+    <div className="muted wf-where">…and put in {whereWords(c.where ? c : { where: "end" })}:</div>
+    <p className="devedit-diff wf-diff"><ins className="add">{c.text || orig}</ins></p></div>;
+}
+
+const KIND_WORDS: Record<string, string> = { replace: "Replace", insert: "Insert", cut: "Cut", move: "Move" };
+
+// A form made of changes rather than the unit rewritten whole.
+function isChanges(unit: Unit, changes: Change[]): boolean {
+  if (unit.kind === "plan") return false;
+  if (unit.beat && (unit.kind === "insert" || unit.kind === "paragraph")) return true;
+  return changes.length > 0 && !(changes.length === 1 && changes[0].kind === "replace" && !changes[0].original);
+}
+
+function Changes({ unit, changes }: { unit: Unit; changes: Change[] }) {
+  return <>{changes.map((c, k) => <div key={k}>
+    <div className="wf-kind"><span className={`wf-kind-tag ${c.kind}`}>{KIND_WORDS[c.kind] || c.kind}</span></div>
+    <ChangeView c={unit.anchor && c.kind === "insert" && !c.where ? { ...c, ...unit.anchor } : c} before={unit.before} />
+  </div>)}</>;
 }
 
 // ---------------------------------------------------------------- listen
@@ -457,7 +517,9 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
   run: (method: string, params: Record<string, unknown>) => Promise<boolean>;
   showHidden: boolean; setShowHidden: (v: boolean) => void; job: Job | null; inst: string;
 }) {
-  const [mode, setMode] = useState<"" | "redo" | "edit">("");
+  const [mode, setMode] = useState<"" | "redo" | "edit" | "move">("");
+  const [moveWhere, setMoveWhere] = useState("after");
+  const [moveQuote, setMoveQuote] = useState("");
   const [ticked, setTicked] = useState<string[]>([]);
   const [free, setFree] = useState("");
   const [newBlurb, setNewBlurb] = useState("");
@@ -475,8 +537,23 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
   const fresh = thread.filter(d => d.seq > (form?.seq || 0));
   const canRedo = ["pending", "passed", "open"].includes(unit.state);
   const [withTalk, setWithTalk] = useState(true);
-  const title = unit.kind === "plan" ? `Beat ${unit.beat}: plan` : unit.beat ? `Beat ${unit.beat}: ${unit.kind === "section" ? "section" : `paragraph ${unit.n}`}`
+  const title = unit.kind === "plan" ? `Beat ${unit.beat}: plan`
+    : unit.kind === "leftover" ? `Beat ${unit.beat}: left over, old paragraph ${unit.n}`
+    : unit.kind === "cover" ? `Left standing: old paragraph ${unit.n}`
+    : unit.kind === "change" ? `${unit.parent}: change ${unit.n}`
+    : unit.beat ? `Beat ${unit.beat}: ${unit.kind === "paragraph" ? `new paragraph ${unit.n}` : "new text"}`
     : unit.label.startsWith("w:") ? `${unit.kind} ${unit.label.split(":")[2]}` : `${unit.kind} ${unit.n ?? unit.label}`;
+  const changes = (pending ? form?.changes : unit.applied) || [];
+  const byChanges = !unit.label.startsWith("w:") && isChanges(unit, changes);
+  const firstKind = (form?.changes || [])[0]?.kind;
+  // The author's own changes on a unit with an original (not a wrap-up item).
+  const canCut = !!unit.before && !unit.label.startsWith("w:") && unit.kind !== "change" && ["pending", "open", "passed"].includes(unit.state);
+  const kept = unit.kind === "leftover" || unit.kind === "cover";
+  if (unit.state === "split") return <div className="card wf-unit split" id={`unit-${unit.label}`}>
+    <div className="card-head"><span>{title}</span><span className="state">{STATE_WORDS.split}</span></div>
+    <p className="muted">{(unit.children || []).length} changes proposed here, each its own form below{form?.reason ? `: ${form.reason}` : "."}</p>
+    <div className="devedit-actions"><button className="pill" disabled={busy} onClick={() => void run("reopen", { label: unit.label })}>Propose this paragraph again</button></div>
+  </div>;
   return (
     <div className={`card wf-unit ${unit.state}`} id={`unit-${unit.label}`}>
       <div className="card-head"><span>{title}</span><span className={`state${resolved ? " done" : ""}`}>{STATE_WORDS[unit.state] || unit.state}</span>
@@ -485,15 +562,23 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
         {/* The reason sits above the new text (Q16). */}
         <div className="wf-reason"><b>Reason:</b> {form.reason || <i className="muted">(none given)</i>}</div>
         {form.text && <div className="muted wf-said">{form.text}</div>}
-        {noOriginal ? <p className="devedit-diff"><ins className="add">{form.proposed}</ins></p>
+        {byChanges ? <Changes unit={unit} changes={form.changes || []} />
+          : noOriginal ? <p className="devedit-diff"><ins className="add">{form.proposed}</ins></p>
           : <Diff before={unit.before} after={form.proposed} />}
         <ListenBar before={unit.before} reason={form.reason} after={form.proposed} manuscript={manuscript} plan={unit.kind === "plan"} />
       </>}
       {!pending && <>
-        {resolved && unit.state !== "passed" && unit.before && unit.text !== unit.before ? <Diff before={unit.before} after={unit.text || ""} />
+        {unit.state === "open" && kept && <div className="muted wf-where">No beat's plan claimed this paragraph: keep it, cut it or move it.</div>}
+        {(unit.state === "accepted" || unit.state === "edited") && byChanges ? <Changes unit={unit} changes={changes} />
+          : resolved && unit.state !== "passed" && unit.before && unit.text !== unit.before ? <Diff before={unit.before} after={unit.text || ""} />
           : <p className="devedit-diff">{unit.text || unit.before || <i className="muted">(empty)</i>}</p>}
+        {unit.unapplied && <div className="bad">Not applied: {unit.unapplied}</div>}
         {unit.state === "passed" && form?.text && <div className="muted">{form.text}</div>}
       </>}
+      {unit.kind === "plan" && form?.placement && <div className="wf-placement muted">
+        Its new text goes in {whereWords(form.placement)}; the rest of the essay stays.
+        {form.placement.supersedes.length > 0 ? <> It takes the place of: {form.placement.supersedes.map(q => `“${q}”`).join("; ")} (each comes to you once the text is in).</> : " It supersedes no old paragraph."}
+      </div>}
       {mode === "redo" && <div className="wf-redo">
         <div className="muted">What is wrong (tick any; most recent first)</div>
         <div className="wf-blurbs">
@@ -521,6 +606,22 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
           <button className="pill" onClick={() => setMode("")}>Cancel</button>
         </div>
       </div>}
+      {mode === "move" && <div className="wf-edit">
+        <div className="devedit-actions">
+          <select className="wf-input" value={moveWhere} aria-label="Where to move it" onChange={e => setMoveWhere(e.target.value)}>
+            <option value="after">after the paragraph opening…</option><option value="before">before the paragraph opening…</option>
+            <option value="start">to the start of the essay</option><option value="end">to the end of the essay</option>
+          </select>
+          {(moveWhere === "after" || moveWhere === "before") && <input className="wf-input" value={moveQuote} placeholder="its opening words, exactly"
+            aria-label="Opening words of the paragraph" onChange={e => setMoveQuote(e.target.value)} />}
+        </div>
+        <div className="devedit-actions">
+          <button className="pill on" disabled={busy || ((moveWhere === "after" || moveWhere === "before") && !moveQuote.trim())} onClick={async () => {
+            if (await run("act", { label: unit.label, action: "move", where: moveWhere, quote: moveQuote })) setMode("");
+          }}>Move it</button>
+          <button className="pill" onClick={() => setMode("")}>Cancel</button>
+        </div>
+      </div>}
       {mode === "edit" && <div className="wf-edit">
         <textarea className="devedit-edit" autoFocus value={text} onChange={e => setText(e.target.value)}
           rows={Math.min(16, Math.max(4, Math.ceil(text.length / 70) + text.split("\n").length))} aria-label="Your text for this unit" />
@@ -535,12 +636,20 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
       </div>}
       {!mode && <div className="devedit-actions">
         {pending && <>
-          <button className="pill on" disabled={busy} onClick={() => void run("act", { label: unit.label, action: "accept" })}>Accept</button>
+          <button className="pill on" disabled={busy} onClick={() => void run("act", { label: unit.label, action: "accept" })}>
+            {kept && firstKind === "cut" ? "Cut it" : "Accept"}</button>
           <button className="pill" disabled={busy} onClick={() => void run("act", { label: unit.label, action: "reject" })}
-            title={noOriginal || newEssay ? "Drop the proposed text" : "Keep the original"}>{noOriginal ? "Reject (drop)" : "Reject (keep original)"}</button>
-          <button className="pill" disabled={busy} onClick={() => setMode("redo")}>Redo…</button>
+            title={noOriginal || newEssay ? "Drop the proposed text" : "Keep the original"}>{kept ? "Keep it" : firstKind === "insert" ? "Reject (insert nothing)" : noOriginal ? "Reject (drop)" : "Reject (keep original)"}</button>
+          <button className="pill" disabled={busy} onClick={() => setMode("redo")}>{kept ? "Merge or redo…" : "Redo…"}</button>
           <button className="pill" disabled={busy} onClick={() => { setText(form?.proposed || unit.before); setMode("edit"); }}>Edit…</button>
         </>}
+        {unit.state === "open" && kept && <>
+          <button className="pill on" disabled={busy} onClick={() => void run("act", { label: unit.label, action: "keep" })}>Keep it</button>
+          <button className="pill" disabled={busy} onClick={() => void run("propose", { label: unit.label })}>Ask the engine</button>
+        </>}
+        {canCut && !(pending && kept && firstKind === "cut") && <button className="pill" disabled={busy} onClick={() => void run("act", { label: unit.label, action: "cut" })}
+          title="Take this paragraph out yourself">Cut it</button>}
+        {canCut && <button className="pill" disabled={busy} onClick={() => setMode("move")} title="Move this paragraph yourself">Move…</button>}
         {resolved && unit.state !== "passed" && <button className="pill" disabled={busy} onClick={() => void run("reopen", { label: unit.label })}>Reopen</button>}
       </div>}
       {/* Talk with the engine about this unit (owner, 2026-11-27: "there is
@@ -921,7 +1030,7 @@ function WalkStep({ v, run, busy, manuscript, showHidden, setShowHidden }: {
   const units = w.units;
   return <>
     <div className="card muted">
-      {w.mode === "beats" ? `Beat by beat: each beat's plan, then its text ${inst.unit === "section" ? "as a whole section" : "paragraph by paragraph"}.`
+      {w.mode === "beats" ? `Beat by beat: each beat's plan, then its new text ${inst.unit === "section" ? "whole" : "paragraph by paragraph"}, inserted; the old text stays until you rule what each beat supersedes.`
         : `${inst.step === "filters" ? "The filters" : "The accepted findings"}, ${w.unit} by ${w.unit}.`}
       {w.fallback && ` The essay has no subheadings, so it goes by paragraph.`}
       {inst.step === "construction" && v.letter.notes.length > 0 && ` ${v.letter.notes.length} paragraph note(s) from the letter.`}
@@ -952,7 +1061,9 @@ function WalkStep({ v, run, busy, manuscript, showHidden, setShowHidden }: {
         <button className="pill" disabled={busy} onClick={() => void run("beat_done", {})}>Beat {w.beat} done — next beat</button>}
       {w.mode === "beats" && !w.concluded && inst.step === "construction" && !units.some(u => u.state === "pending") &&
         <button className="pill" disabled={busy} onClick={() => void run("conclude", {})}
-          title="Construction ends when you conclude it (Q18)">The essay is built — conclude the beats</button>}
+          title="Construction ends when you conclude it (Q18)">{!w.cover_asked && (w.unclaimed || []).length > 0
+            ? `The essay is built — review the ${(w.unclaimed || []).length} old paragraph(s) no beat claimed`
+            : "The essay is built — conclude the beats"}</button>}
       {w.end && <span className="muted">{w.mode === "beats" ? "The beats are concluded." : "The walk has reached the end of the essay."}</span>}
     </div>}
   </>;

@@ -10,7 +10,10 @@ text, the form; "" when nothing is proposed), `suggested_blurbs` (short
 reject reasons for the redo checklist, Q8b), `usage` (input, cached,
 output, dollars, est_subscription; Q7 "cost against quality") and
 `requests` (what the model asked for through the read catalogue, each
-`{name, args, chars}`, Q20). `usage.dollars` is None when the engine does
+`{name, args, chars}`, Q20). Two keys are optional: `changes`, the
+proposal as a list of changes of the kinds in `workflow.edits` (replace,
+insert, cut, move), each its own form for the author; and `placement`, a
+beat plan's anchor for its new text and the old paragraphs it supersedes. `usage.dollars` is None when the engine does
 not know what the turn cost (absent counts as unknown); it is never turned
 into $0.
 
@@ -30,7 +33,7 @@ from __future__ import annotations
 from typing import Any, Callable, Protocol
 
 REPLY_KEYS = ("text", "reason", "proposed", "suggested_blurbs", "usage",
-              "requests")
+              "requests", "changes", "placement")
 USAGE_KEYS = ("input", "cached", "output", "dollars", "est_subscription")
 
 
@@ -91,4 +94,7 @@ def normalize_reply(reply: Any) -> dict:
         requests.append({"name": r["name"], "args": r.get("args") or {},
                          "chars": int(r.get("chars") or 0)})
     out["requests"] = requests
+    from . import edits
+    out["changes"] = edits.clean_list(reply.get("changes"))
+    out["placement"] = edits.clean_placement(reply.get("placement"))
     return out

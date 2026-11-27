@@ -128,6 +128,7 @@ class FakeEngine:
         self.name, self.model = "claude-headless", ""
         self.session_ref: str | None = None
         self.letter = LETTER
+        self.queue: list[dict] = []
 
     gate: threading.Event | None = None
     fail: str | None = None
@@ -147,6 +148,10 @@ class FakeEngine:
         usage = {"input": 100, "cached": 50, "output": 20, "dollars": 0.0,
                  "est_subscription": 0.01}
         base = {"usage": usage, "requests": [], "suggested_blurbs": []}
+        if self.queue:
+            # A scripted reply for the next turn (tests of change kinds).
+            return {**base, "text": "", "reason": "scripted", "proposed": "",
+                    **self.queue.pop(0)}
         if message.startswith("Recommend"):
             return {**base, "text": json.dumps({"recommendations": [
                 {"list": "voice", "essay": "preface.md", "change": "add",

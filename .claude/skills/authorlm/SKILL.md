@@ -988,7 +988,20 @@ from the walk verbs below.
     author's verdict on the form (wrap-up items `w:…` too). `--note`
     carries the author's own words to the engine on a redo; an edit with
     a `[bracket]` is an instruction to the engine (a model turn); an edit
-    without one is his text, recorded as is.
+    without one is his text, recorded as is. `--keep`, `--cut` and
+    `--move WHERE[:QUOTE]` (start, end, or before:/after: a paragraph's
+    opening words) are his own changes, no model call. A proposal is a
+    list of changes (replace, insert, cut, move; `authorlm/workflow/edits.py`);
+    several at one unit are forms of their own, `p3:c1`, `p3:c2`, and
+    `walk` prints each with its kind and texts exactly (what is replaced
+    and with what, inserted where, cut, moved from and to).
+  - Beat by beat inserts: each beat's plan names where its new text goes
+    in and the old paragraphs it supersedes; its text (`b<n>:insert`, or
+    `b<n>:p<k>`) goes in there and the old essay stays. Then one leftover
+    form per superseded paragraph (`b<n>:x<k>`: accept cuts it, `--keep`,
+    a redo to merge or move). `conclude` first opens one coverage form per
+    old paragraph no beat claimed (`beats:cover:p<k>`: `--keep`, `--cut`,
+    `--move`), then, once they are ruled, concludes.
   - `workflow reopen <i> <label> [--wait]`: back to a ruled unit (a
     landed one is taken out of the file first). After a revised letter,
     `walk` lists each reopen it proposes; `reopen <i> <label> --leave` is

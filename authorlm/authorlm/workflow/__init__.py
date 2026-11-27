@@ -18,6 +18,10 @@
   whose original is gone from the file is not landed and waits for the
   author. Every landing run keeps the file before it; a reopen takes a
   landed unit back out.
+- `edits`: the change kinds a ruling makes in place (replace, insert,
+  cut, move), each its own form for the author, resolved into text pairs
+  that land where their original stands. A beat's new text is an insert;
+  nothing replaces the essay whole.
 - `roads`: the old roads (filter and lens runs, the beat loop, the Filters
   view's requests) as entry points that send to the workflow, or run with
   a skip of one sentence of reason, recorded.

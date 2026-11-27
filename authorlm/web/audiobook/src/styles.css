@@ -433,6 +433,11 @@ header .popover select{width:100%;max-width:none;flex:none;background:var(--grou
 .wf-listen{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}
 .wf-listen audio{width:100%}
 .wf-unit.pending{border-color:var(--band);border-width:2px}
+.wf-kind{margin:8px 0 2px}
+.wf-kind-tag{display:inline-block;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.wf-where{margin:4px 0;font-size:14px}
+.wf-placement{margin:6px 0;font-size:14px}
+.wf-change .devedit-diff{margin:4px 0}
 .wf-blurbs{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
 .wf-blurb{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 10px;font-size:14px}
 .wf-blurb.hidden{opacity:.55}
