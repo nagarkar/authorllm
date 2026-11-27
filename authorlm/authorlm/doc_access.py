@@ -7,7 +7,13 @@ sharing, nobody but the owner able to edit, download/print/copy off for
 everyone else, and, when a reader is named, that reader present as a
 commenter. `share` makes a file so: it turns download/print/copy off, removes
 link and domain sharing, gives the reader comment access without Google's
-notification email (the author sends the link), then reports `access`.
+notification email (the author sends the link), then reports `access`. An
+address with no Google account (Outlook, a work address) cannot be added
+silently: Drive answers `invalidSharingRequest`, and `share` then lets Google
+send its own invitation, so the reader can make a Google account on that
+address and comment (owner, 2026-11-26: "let Google send its invitation to its
+Outlook address. This should be the standard behavior."). The report's
+`google_invited` says which happened.
 
 The Drive token's scope is `drive.file`: both work on files authorlm created
 (its uploads and export Docs), which is every review copy it makes.
@@ -83,13 +89,21 @@ def share(service, ref: str, reader: str) -> dict:
                 fileId=file_id, permissionId=perm["id"]))
         elif (perm.get("emailAddress") or "").lower() == reader:
             found = perm
+    invited = False
     if found is None:
-        _execute(service.permissions().create(
-            fileId=file_id, sendNotificationEmail=False,
-            body={"type": "user", "role": "commenter",
-                  "emailAddress": reader}))
+        body = {"type": "user", "role": "commenter", "emailAddress": reader}
+        try:
+            _execute(service.permissions().create(
+                fileId=file_id, sendNotificationEmail=False, body=body))
+        except Exception as err:  # googleapiclient HttpError
+            if "invalidSharingRequest" not in str(err) + str(
+                    getattr(err, "content", b"")):
+                raise
+            _execute(service.permissions().create(
+                fileId=file_id, sendNotificationEmail=True, body=body))
+            invited = True
     elif found.get("role") not in ("commenter", "owner"):
         _execute(service.permissions().update(
             fileId=file_id, permissionId=found["id"],
             body={"role": "commenter"}))
-    return access(service, file_id, reader=reader)
+    return {**access(service, file_id, reader=reader), "google_invited": invited}

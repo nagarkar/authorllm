@@ -29,13 +29,14 @@ class _Call:
 class FakeDrive:
     """One file's metadata and permissions, as Drive v3 keeps them."""
 
-    def __init__(self, copy_locked=False, perms=None):
+    def __init__(self, copy_locked=False, perms=None, no_google=()):
         self.meta = {"id": "DOC1", "name": "Beta copy for Ann",
                      "webViewLink": "https://docs.google.com/document/d/DOC1/edit",
                      "copyRequiresWriterPermission": copy_locked}
         self.perms = list(perms or [{"id": "o", "type": "user", "role": "owner",
                                      "emailAddress": "author@example.com"}])
         self.sent: list[dict] = []
+        self.no_google = set(no_google)
 
     def files(self):
         drive = self
@@ -65,6 +66,10 @@ class FakeDrive:
 
             def create(self, fileId, body, sendNotificationEmail=True):
                 def run():
+                    if (body["emailAddress"] in drive.no_google
+                            and not sendNotificationEmail):
+                        raise RuntimeError(
+                            "<HttpError 400 ... 'reason': 'invalidSharingRequest'>")
                     drive.sent.append({"notify": sendNotificationEmail, **body})
                     drive.perms.append({"id": f"p{len(drive.perms)}", **{
                         "type": body["type"], "role": body["role"],
@@ -129,6 +134,18 @@ class ShareTest(unittest.TestCase):
         self.assertTrue(report["ok"], report["problems"])
         self.assertEqual(drive.sent, [])
         self.assertEqual(report["commenters"], ["ann@example.com"])
+
+    def test_an_address_without_a_google_account_gets_googles_invitation(self):
+        drive = FakeDrive(no_google={"mick@outlook.com"})
+        report = doc_access.share(drive, "DOC1", "mick@outlook.com")
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertTrue(report["google_invited"])
+        self.assertEqual([s["notify"] for s in drive.sent], [True])
+        self.assertEqual(report["commenters"], ["mick@outlook.com"])
+
+    def test_a_google_account_is_added_silently(self):
+        report = doc_access.share(FakeDrive(), "DOC1", "ann@example.com")
+        self.assertFalse(report["google_invited"])
 
     def test_share_needs_an_email(self):
         with self.assertRaises(ValueError):
