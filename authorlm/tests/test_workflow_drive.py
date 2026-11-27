@@ -283,6 +283,63 @@ def test_dry_run_writes_nothing() -> None:
                                            "--note", "x"))
 
 
+def test_discuss_from_the_cli() -> None:
+    """`workflow discuss <i> <label> --text` is the page's discussion box:
+    the reply printed verbatim, the proposal unchanged, the thread under
+    `walk --label`, `--redo --with-discussion`, the letter as `letter`,
+    and the same records as the page."""
+    with world() as (ws, _root):
+        iid = wp._to_construction(ws)
+        cli(ws, "propose", iid, "--wait")
+        sent, before = len(FAKE.sent), records(ws, iid)
+        out = cli(ws, "discuss", iid, "p1", "--text", "Why so tight?", "--dry-run")
+        check("--dry-run says what would go and writes nothing",
+              "would ask the engine about p1" in out
+              and "--- the author ---\nWhy so tight?\n--- end ---" in out
+              and records(ws, iid) == before and len(FAKE.sent) == sent, out)
+        out = cli(ws, "discuss", iid, "p1", "--text", "Why so tight?", "--wait")
+        reply = call(ws, "instance", id=iid)["walk"]["units"][0]["thread"][-1]["reply"]
+        check("the engine's reply is printed verbatim; the proposal is unchanged",
+              f"--- the engine ---\n{reply}\n--- end ---" in out
+              and "the proposal is unchanged" in out
+              and f"authorlm workflow unit {iid} p1 --redo --with-discussion" in out, out)
+        out = cli(ws, "walk", iid, "--label", "p1")
+        check("walk --label shows the thread under the form",
+              "p1  pending" in out
+              and "--- the author (p1) ---\nWhy so tight?\n--- end ---" in out
+              and f"--- the engine (p1) ---\n{reply}\n--- end ---" in out, out)
+        cli(ws, "unit", iid, "p1", "--redo", "--with-discussion", "--wait")
+        check("--redo --with-discussion hands the thread to the redo",
+              FAKE.sent[-1].startswith("Redo p1.")
+              and "The author: Why so tight?" in FAKE.sent[-1], FAKE.sent[-1])
+        check("--with-discussion goes with --redo only",
+              "goes with --redo" in cli_exit(ws, "unit", iid, "p1", "--accept",
+                                             "--with-discussion"))
+        check("with no discussion since the form, it says so",
+              "no discussion since" in cli_exit(ws, "unit", iid, "p1", "--redo",
+                                                "--with-discussion", "--dry-run"))
+        out = cli(ws, "discuss", iid, "letter", "--text", "Is it ready?", "--wait")
+        last = call(ws, "instance", id=iid)["letter"]["discussion"][-1]
+        check("the label `letter` discusses the letter",
+              last["author"] == "Is it ready?"
+              and f"--- the engine ---\n{last['reply']}\n--- end ---" in out, out)
+        check("an unknown unit exits 1",
+              "no unit 'p9'" in cli_exit(ws, "discuss", iid, "p9", "--text", "x"))
+    # The CLI and the page write the same records.
+    worlds = []
+    for by_cli in (False, True):
+        with world() as (ws, _root):
+            iid = wp._to_construction(ws)
+            page(ws, "propose", id=iid)
+            if by_cli:
+                cli(ws, "discuss", iid, "p1", "--text", "Why?", "--wait")
+            else:
+                page(ws, "discuss", id=iid, label="p1", text="Why?")
+            worlds.append(records(ws, iid))
+    check("discuss from the CLI writes what the page writes",
+          worlds[0] == worlds[1], worlds)
+
+
 def test_jobs_from_the_cli() -> None:
     """A model turn is the page's job: without --wait the verb returns
     while it runs; `job` shows it; a failure exits 1 and is retried or
