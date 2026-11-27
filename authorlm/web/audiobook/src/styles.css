@@ -447,6 +447,15 @@ header .popover select{width:100%;max-width:none;flex:none;background:var(--grou
 .wf-tier.should{background:#fff4d0;color:var(--yellow-ink)}
 .wf-tier.could{background:var(--good-soft);color:var(--good)}
 .wf-finding.ruled{opacity:.8}
+.wf-edited{font-size:12px;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--ground);color:var(--band);border:1px solid var(--band)}
+.wf-finding .card-head .wf-edit,.wf-keep .card-head .pill{margin-left:auto;min-height:40px}
+.wf-finding-edit{display:flex;flex-direction:column;gap:8px;margin:6px 0}
+.wf-finding-edit label{display:flex;flex-direction:column;gap:2px}
+.wf-finding-edit textarea,.wf-keep-item textarea{width:100%;box-sizing:border-box;line-height:1.45;resize:vertical;font-size:16px}
+.wf-finding-edit select{align-self:flex-start;min-height:40px}
+.wf-keep-item{display:flex;gap:6px;align-items:flex-start;margin:6px 0}
+.wf-keep-item .wf-x{min-width:40px;min-height:40px;font-size:20px}
+.wf-finding-edit .devedit-actions .pill,.wf-keep .devedit-actions .pill{min-height:44px;padding:8px 18px}
 .wf-check{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;padding:4px 0}
 .wf-pre{white-space:pre-wrap;font:inherit;font-size:14px}
 .wf-turn{border-top:1px solid var(--line);padding:4px 0}

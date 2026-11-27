@@ -364,6 +364,12 @@ def test_unit_form_actions() -> None:
               and u1["form"]["proposed"] == "A tightened paragraph.", u1)
         check("the unit's message carries the accepted findings only",
               "F1" in FAKE.sent[-1] and "F2" not in FAKE.sent[-1])
+        check("the unit's message says the letter's Keep list and paragraph "
+              "notes itself, not only through the session",
+              "Keep (from the letter):\n- the first paragraph's plainness" in FAKE.sent[-1]
+              and 'Paragraph notes (from the letter' in FAKE.sent[-1]
+              and '- "The third": too abstract; give an example.' in FAKE.sent[-1],
+              FAKE.sent[-1])
         v = call(ws, "act", id=iid, label="p1", action="accept")
         check("accept: the proposal becomes the unit's text",
               v["walk"]["units"][0]["state"] == "accepted"
@@ -543,6 +549,39 @@ def test_beats() -> None:
               v["walk"]["units"][1]["state"] == "dropped")
         v = call(ws, "beat_done", id=iid)
         check("beat done: the next beat's plan", v["walk"]["next"] == "b2:plan")
+
+
+def test_beats_carry_keep_and_notes() -> None:
+    """The coordinator's addition of 2026-11-26 to the owner's letter-edit
+    ask: Keep and the paragraph notes reached a construction turn only
+    while the letter was still in the engine's session. Every construction
+    message (beat plan and beat text too) now says them, the Keep list in
+    the author's version once he edited it."""
+    letter = ("No findings.\n\n*Keep*\n- the plain opening\n\n*Paragraph notes*\n"
+              "- \"First\": name the stakes.\n")
+    with world() as (ws, _root):
+        iid = call(ws, "start", essay="three", kind="new", brief="a new essay")["id"]
+        call(ws, "advance", id=iid)
+        saved, FAKE.letter = FAKE.letter, letter
+        try:
+            call(ws, "letter", id=iid)
+        finally:
+            FAKE.letter = saved
+        call(ws, "keep", id=iid, items=["the plain opening", "the short close"])
+        call(ws, "accept_letter", id=iid)
+        call(ws, "advance", id=iid)
+        call(ws, "propose", id=iid)
+        plan_msg = FAKE.sent[-1]
+        check("the beat plan's message carries the author's Keep list and the notes",
+              plan_msg.startswith("Beat 1: propose its plan")
+              and "Keep (the author's list, in place of the letter's):\n"
+                  "- the plain opening\n- the short close" in plan_msg
+              and '- "First": name the stakes.' in plan_msg, plan_msg)
+        call(ws, "act", id=iid, label="b1:plan", action="accept")
+        call(ws, "propose", id=iid)
+        check("the beat text's message carries them too",
+              "- the short close" in FAKE.sent[-1]
+              and '"First": name the stakes.' in FAKE.sent[-1], FAKE.sent[-1])
 
 
 def test_letter_parsing_edges() -> None:
@@ -913,6 +952,200 @@ def test_brief_card_controls() -> None:
           "if (await run(\"brief\", { brief: draft })) setDraft(null);" in card
           and "onClick={() => setDraft(null)}>Cancel" in card)
     check("the method is on the server's list", "brief" in workflow_page.METHODS)
+
+
+def test_letter_edits() -> None:
+    """Owner, 2026-11-26, at the letter step of wi-7abca47358e0: "I noticed
+    that the keep section in the letter output cannot be edited. Is there a
+    way we can allow that to be edited so that I can change it before we
+    move to the next stage? The same applies to a large extent for any of
+    the recommendations. So if I can edit the recommendation as well, that
+    would be ideal. So I can tweak it in minor ways." The author edits a
+    finding (before or after its verdict) and the Keep list at the letter
+    step; the model's words stay on the record; construction and every
+    later turn work from his version."""
+    from authorlm import api
+
+    with world() as (ws, _root):
+        iid = _to_letter(ws)
+        raises(lambda: call(ws, "keep", id=iid, items=["x"]), "not written")
+        call(ws, "letter", id=iid)
+        v = call(ws, "finding_edit", id=iid, item="F1",
+                 fields={"direction": "narrow the claim to the first case.",
+                         "tier": "Should"})
+        f1 = v["letter"]["findings"][0]
+        check("an edited finding shows the author's words and says it was edited",
+              f1["direction"] == "narrow the claim to the first case."
+              and f1["tier"] == "should" and f1["edited"] == ["direction", "tier"]
+              and f1["original"] == {"direction": "narrow the claim.", "tier": "must"}, f1)
+        check("fields the author left alone are the letter's",
+              f1["what"] == "it claims more than it shows." and f1["title"] == "The claim drifts")
+        raises(lambda: call(ws, "finding_edit", id=iid, item="F1",
+                            fields={"direction": "narrow the claim to the first case."}),
+               "unchanged")
+        raises(lambda: call(ws, "finding_edit", id=iid, item="F1", fields={"colour": "x"}),
+               "no field colour")
+        raises(lambda: call(ws, "finding_edit", id=iid, item="F1", fields={"tier": "maybe"}),
+               "tier is one of")
+        raises(lambda: call(ws, "finding_edit", id=iid, item="F1", fields={"title": " "}),
+               "keeps a title")
+        raises(lambda: call(ws, "finding_edit", id=iid, item="F9", fields={"what": "x"}),
+               "no finding 'F9'")
+        check("an edited letter is not offered for redraft",
+              v["letter"]["redraft"] is False)
+        raises(lambda: call(ws, "letter", id=iid), "replace your edits")
+        v = call(ws, "keep", id=iid, items=["the first paragraph's plainness",
+                                            "  the  closing   image ", ""])
+        L = v["letter"]
+        check("the Keep list is the author's; the letter's stays beside it",
+              L["keep"] == ["the first paragraph's plainness", "the closing image"]
+              and L["keep_letter"] == ["the first paragraph's plainness"]
+              and L["keep_edited"] is True, L)
+        raises(lambda: call(ws, "keep", id=iid, items=L["keep"]), "unchanged")
+        v = call(ws, "finding", id=iid, item="F1", verdict="accept", reason="yes")
+        v = call(ws, "finding_edit", id=iid, item="F1", fields={"what": "it claims too much."})
+        f1 = v["letter"]["findings"][0]
+        check("a finding is editable after its verdict, and keeps the verdict",
+              f1["verdict"] == "accept" and f1["what"] == "it claims too much."
+              and f1["edited"] == ["what", "direction", "tier"], f1)
+        v = call(ws, "finding_edit", id=iid, item="F1", fields={"tier": "must"})
+        check("a field set back to the letter's words is no longer an edit",
+              v["letter"]["findings"][0]["edited"] == ["what", "direction"])
+        db = api.open_db(ws)
+        events = db.all("SELECT item_id, detail FROM edit_events WHERE event = 'edit' "
+                        "ORDER BY at")
+        first = json.loads(events[0]["detail"])["fields"]
+        check("each edit is on the record with the model's words as its from",
+              [e["item_id"] for e in events] == ["F1", "keep", "F1", "F1"]
+              and first["direction"] == {"from": "narrow the claim.",
+                                         "to": "narrow the claim to the first case."},
+              [dict(e) for e in events])
+        body = json.loads(db.one("SELECT body FROM devedit_items WHERE item_id = 'F1' "
+                                 "AND run = ?", (f"workflow/{iid}",))["body"])
+        check("the finding's body keeps the model's fields as written",
+              body["direction"] == "narrow the claim." and body["what"]
+              == "it claims more than it shows.", body)
+        call(ws, "finding", id=iid, item="F2", verdict="defer")
+        v = call(ws, "advance", id=iid)
+        check("the gate is unchanged by edits", v["instance"]["step"] == "construction")
+        raises(lambda: call(ws, "keep", id=iid, items=["late"]), "letter step")
+        raises(lambda: call(ws, "finding_edit", id=iid, item="F1",
+                            fields={"what": "late"}), "letter step")
+        call(ws, "propose", id=iid)
+        msg = FAKE.sent[-1]
+        check("construction's message carries the edited finding in the author's words",
+              "it claims too much." in msg and "narrow the claim to the first case." in msg
+              and "[as the author edited it]" in msg
+              and "it claims more than it shows." not in msg, msg)
+        check("construction's message carries the author's Keep list and the notes",
+              "Keep (the author's list" in msg and "- the closing image" in msg
+              and '"The third": too abstract' in msg, msg)
+        turns = FAKE.contexts[-1]["turns"]
+        edits = [t for t in turns if t["action"] == "edit" and t["step"] == "letter"]
+        check("every later turn's context holds the edits as the author's turns",
+              [t["unit_label"] for t in edits] == ["letter:F1", "letter:keep",
+                                                    "letter:F1", "letter:F1"]
+              and "Direction: narrow the claim to the first case." in edits[0]["author_text"]
+              and "- the closing image" in edits[1]["author_text"], edits)
+        from authorlm.engines import base
+        said = base.rebuild_transcript(turns)
+        check("the engine's transcript tells the model of each edit",
+              "[edit letter:keep] The author edited the letter's Keep list" in said)
+
+
+def test_letter_edit_cli() -> None:
+    """`authorlm workflow finding` and `keep`: the same edits from the
+    command line, with --dry-run writing nothing."""
+    with world() as (ws, _root):
+        iid = _to_letter(ws)
+        call(ws, "letter", id=iid)
+
+        def cli(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli_main(["--workspace", ws, "-m", "MS", "workflow", *argv])
+            return out.getvalue()
+
+        out = json.loads(cli("finding", iid, "F1", "--set", "what=too much.",
+                             "--dry-run", "--json"))
+        check("finding --dry-run says what would change and writes nothing",
+              out["would_change"] == ["what"] and out["dry_run"]
+              and call(ws, "instance", id=iid)["letter"]["findings"][0]["edited"] == [],
+              out)
+        out = json.loads(cli("finding", iid, "F1", "--set", "what=too much.",
+                             "--set", "direction=cut it", "--json"))
+        check("finding --set edits the fields and the board carries next",
+              out["what"] == "too much." and out["edited"] == ["what", "direction"]
+              and out["next"].startswith("authorlm workflow show"), out)
+        try:
+            cli("finding", iid, "F1", "--set", "colour=red")
+            raise AssertionError("expected exit")
+        except SystemExit as err:
+            check("an unknown field exits 1 naming the fields",
+                  "no field colour" in str(err.code) and "direction" in str(err.code))
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+            fh.write("- the plain opening\n\n- the closing image\n")
+        out = json.loads(cli("keep", iid, "--file", fh.name, "--dry-run", "--json"))
+        check("keep --dry-run shows the proposed list and writes nothing",
+              out["proposed"] == ["the plain opening", "the closing image"]
+              and out["edited"] is False, out)
+        out = json.loads(cli("keep", iid, "--file", fh.name, "--json"))
+        os.unlink(fh.name)
+        check("keep --file replaces the list",
+              out["keep"] == ["the plain opening", "the closing image"] and out["edited"], out)
+        out = cli("keep", iid, "--item", "only this")
+        check("keep --item replaces it again; the board prints the list",
+              "- only this" in out and "your list, 1 item" in out, out)
+        out = cli("keep", iid)
+        check("keep without a change is read-only and shows the list", "- only this" in out)
+        help_text = io.StringIO()
+        with contextlib.redirect_stdout(help_text), contextlib.suppress(SystemExit):
+            cli_main(["workflow", "finding", "--help"])
+        check("the verbs carry an example", "example: authorlm workflow finding"
+              in help_text.getvalue())
+
+
+def test_letter_edit_controls() -> None:
+    """The letter step on the page (Workflows.tsx): an Edit control on each
+    finding and on the Keep card, Save and Cancel, phone-sized textareas,
+    the drafts kept per instance (and finding) across a reload, an edited
+    mark with the letter's own words a tap away, and the verdict buttons
+    still there."""
+    src = Path(__file__).resolve().parents[1] / "web" / "audiobook" / "src"
+    wf = (src / "Workflows.tsx").read_text(encoding="utf-8")
+    css = (src / "styles.css").read_text(encoding="utf-8")
+    keep = wf[wf.index("function KeepCard"):wf.index("const FIELDS")]
+    card = wf[wf.index("function FindingCard"):wf.index("function LetterStep")]
+    check("Keep: Edit, one textarea per item, remove and add, Save and Cancel",
+          ">Edit</button>" in keep and "<textarea" in keep and "Remove keep item" in keep
+          and "+ Add an item" in keep and 'run("keep", { items: clean })' in keep
+          and ">Cancel</button>" in keep)
+    check("Keep: the draft survives a reload, per manuscript and instance",
+          "`authorlm.wf.keepDraft.${manuscript}.${inst}`" in keep
+          and "authorlm.wf.keepDraft.<ms>." in wf)
+    check("Keep: an edited list is marked, the letter's own list a tap away",
+          "L.keep_edited &&" in keep and "The letter's list" in keep)
+    check("Finding: Edit opens its fields and tier; Save sends only what changed",
+          ">Edit</button>" in card and all(f'["{k}", ' in wf for k in
+                                             ("title", "where", "what", "why", "direction"))
+          and '["must", "should", "could"]' in card
+          and 'run("finding_edit", { item: f.item, fields: changed })' in card
+          and ">Cancel</button>" in card)
+    check("Finding: the draft survives a reload, per instance and finding",
+          "`authorlm.wf.findingDraft.${manuscript}.${inst}.${f.item}`" in card)
+    check("Finding: an edited one is marked, the letter's words a tap away",
+          'className="wf-edited"' in card and "The letter's words" in card)
+    check("Finding: the verdict buttons stay",
+          'run("finding", { item: f.item, verdict, reason })' in card)
+    check("edits only while the letter step is open",
+          "const editing = here && draft !== null" in keep
+          and "const editing = here && draft !== null" in card
+          and 'const here = v.instance.step === "letter";' in wf)
+    check("phone: 16px text in the editors, 40px+ targets",
+          "font-size:16px" in css[css.index(".wf-finding-edit textarea"):]
+          and ".wf-keep-item .wf-x{min-width:40px;min-height:40px" in css)
+    check("the methods are on the server's list",
+          "finding_edit" in workflow_page.METHODS and "keep" in workflow_page.METHODS)
 
 
 def test_http_route() -> None:

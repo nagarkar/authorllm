@@ -20,7 +20,10 @@ What the page shows for an instance, by step:
   recommendations with a reason each, accept or decline each (Q1, Q3).
 - letter: the findings with their tiers, accept / reject / defer with a
   reason; the keep list, the passes needed or not, the paragraph notes
-  (Q4, Q21d, Q21e); a reply box to discuss the letter.
+  (Q4, Q21d, Q21e); a reply box to discuss the letter. While the step is
+  open the author edits any finding's fields and the Keep list
+  (`finding_edit`, `keep`; core.edit_finding, core.set_keep): the model's
+  words stay on the record, and every later turn works from his.
 - construction: the walk, one unit at a time (paragraph or section; Q8,
   Q19), or beat by beat with a plan step per beat (Q18). Each unit's form:
   before, the reason, after; accept / reject / redo / edit (Q8a, Q11);
@@ -63,7 +66,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import api
-from .db import Database, loads
+from .db import Database
 from .workflow import context, contract, core
 
 METHODS = ("overview", "instance", "start", "recommend", "rec", "list",
@@ -71,7 +74,7 @@ METHODS = ("overview", "instance", "start", "recommend", "rec", "list",
            "act", "reopen", "beat_done", "conclude", "wrapup", "principle",
            "filters", "lint", "skip", "advance", "engine", "unit", "blurbs",
            "blurb_add", "blurb_hide", "usage", "estimate", "land", "leave",
-           "summaries", "job_dismiss", "brief")
+           "summaries", "job_dismiss", "brief", "finding_edit", "keep")
 
 # The read-only methods: they write nothing (the page polls none of them).
 READ_ONLY = ("overview", "instance", "blurbs", "usage", "estimate")
@@ -698,18 +701,40 @@ def _letter_turn(turns: list[dict]) -> dict | None:
                  and t["action"] == "start"), None)
 
 
+def letter_keep(db: Database, inst: dict, turns: list[dict] | None = None) -> dict:
+    """The letter's Keep list as it now stands: {keep, letter (the list as
+    the letter wrote it), edited}. The author's list (core.set_keep) wins
+    over the letter's once he has edited it."""
+    lt = _letter_turn(core.turns(db, inst) if turns is None else turns)
+    if lt is None:
+        return {"keep": [], "letter": [], "edited": False}
+    written = parse_letter(lt["reply"], [p["name"] for p in passes()])["keep"]
+    mine = core.keep_edit(db, inst, lt["created_at"])
+    return {"keep": written if mine is None else mine, "letter": written,
+            "edited": mine is not None}
+
+
+def edit_keep(db: Database, inst: dict, items: list[str],
+              actor: str = "chat") -> dict:
+    """Replace the letter's Keep list with the author's (letter step only)."""
+    if _letter_turn(core.turns(db, inst)) is None:
+        raise ValueError("the letter is not written yet; nothing to keep")
+    core.set_keep(db, inst, items, letter_keep(db, inst)["keep"], actor=actor)
+    return letter_keep(db, inst)
+
+
+def _letter_edited(db: Database, inst: dict, turns: list[dict]) -> bool:
+    """Whether the author has edited a finding or the Keep list."""
+    return any(t["step"] == "letter" and t["action"] == "edit"
+               and t["unit_label"].startswith(LETTER_LABEL + ":") for t in turns)
+
+
 def _letter_view(db: Database, inst: dict, turns: list[dict]) -> dict:
     lt = _letter_turn(turns)
     names = [p["name"] for p in passes()]
     parsed = parse_letter(lt["reply"], names) if lt else None
-    findings = []
-    for f in core.letter_findings(db, inst):
-        body = loads(f["body"], {}) if isinstance(f["body"], str) else (f["body"] or {})
-        findings.append({"item": f["item_id"], "verdict": f["verdict"],
-                         "reason": f["reason_given"], "decided": f["decided"],
-                         **{k: body.get(k, "") for k in
-                            ("n", "title", "where", "what", "why",
-                             "direction", "tier", "text")}})
+    findings = [core.finding_view(f) for f in core.letter_findings(db, inst)]
+    keep = letter_keep(db, inst, turns)
     discussion = [{"seq": t["seq"], "action": t["action"],
                    "author": t["author_text"], "reply": t["reply"],
                    "reason": t["reason"], "at": t["created_at"]}
@@ -717,10 +742,12 @@ def _letter_view(db: Database, inst: dict, turns: list[dict]) -> dict:
                   and t["unit_label"] == LETTER_LABEL
                   and not (t["engine"] and t["action"] == "start")]
     return {"drafted": lt is not None,
-            "redraft": lt is not None and not any(f["verdict"] for f in findings),
+            "redraft": lt is not None and not any(f["verdict"] for f in findings)
+            and not _letter_edited(db, inst, turns),
             "text": lt["reply"] if lt else "",
             "findings": findings,
-            "keep": parsed["keep"] if parsed else [],
+            "keep": keep["keep"], "keep_letter": keep["letter"],
+            "keep_edited": keep["edited"],
             "passes": parsed["passes"] if parsed else {},
             "notes": parsed["notes"] if parsed else [],
             "discussion": discussion,
@@ -979,14 +1006,45 @@ def _recommendations(turns: list[dict], inst: dict) -> dict:
 # ------------------------------------------------------------- messages
 
 def _accepted_findings(db: Database, inst: dict) -> str:
-    rows = [f for f in core.letter_findings(db, inst) if f["verdict"] == "accept"]
+    """The accepted findings as the author left them: each one's title, and
+    for one the author edited, every field in his words (the session holds
+    the letter as first written, so the edit is spelled out here too)."""
+    rows = [core.finding_view(f) for f in core.letter_findings(db, inst)
+            if f["verdict"] == "accept"]
     lines = []
     for f in rows:
-        body = loads(f["body"], {}) if isinstance(f["body"], str) else (f["body"] or {})
-        lines.append(f"- {f['item_id']}"
-                     + (f" ({body.get('tier')})" if body.get("tier") else "")
-                     + f": {body.get('title') or body.get('what') or ''}")
+        lines.append(f"- {f['item']}"
+                     + (f" ({f['tier']})" if f["tier"] else "")
+                     + f": {f['title'] or f['what'] or ''}"
+                     + (" [as the author edited it]" if f["edited"] else ""))
+        if f["edited"]:
+            lines += [f"  {core.FINDING_WORDS[k]}: {f[k]}"
+                      for k in ("where", "what", "why", "direction") if f[k]]
     return "\n".join(lines)
+
+
+def _kept(db: Database, inst: dict) -> str:
+    """The letter's Keep list (the author's version once he edited it) and
+    its paragraph notes, for every construction message: said in the
+    message itself, so a turn has them even when the letter is no longer
+    in the engine's session (a rebuilt or switched engine, a long walk).
+    "" when the letter has neither."""
+    turns = core.turns(db, inst)
+    lt = _letter_turn(turns)
+    if lt is None:
+        return ""
+    keep = letter_keep(db, inst, turns)
+    notes = parse_letter(lt["reply"], [p["name"] for p in passes()])["notes"]
+    parts = []
+    if keep["keep"] or keep["edited"]:
+        head = ("Keep (the author's list, in place of the letter's):"
+                if keep["edited"] else "Keep (from the letter):")
+        parts.append(head + "\n" + ("\n".join(f"- {k}" for k in keep["keep"])
+                                    or "(nothing named)"))
+    if notes:
+        parts.append("Paragraph notes (from the letter; work each at the "
+                     "paragraph it names):\n" + "\n".join(f"- {n}" for n in notes))
+    return "\n\n".join(parts)
 
 
 def _unit_message(db: Database, manuscript: dict, inst: dict, step: str,
@@ -1000,10 +1058,12 @@ def _unit_message(db: Database, manuscript: dict, inst: dict, step: str,
     m = _BEAT.match(label)
     if m and inst["construction_mode"] == "beats":
         b = int(m.group(1))
+        kept = _kept(db, inst)
         if m.group(2) == "plan":
             return (f"Beat {b}: propose its plan — what the section is for, the "
                     "point it makes and how it follows from the one before — "
                     "in `proposed`, with your reason."
+                    + (f"\n\n{kept}" if kept else "")
                     + (f"\n\nThe section as it stands:\n\n{before}" if before else ""))
         hist = _by_label(core.turns(db, inst), "construction")
         plan = unit_state(hist.get(f"b{b}:plan", []))
@@ -1013,13 +1073,16 @@ def _unit_message(db: Database, manuscript: dict, inst: dict, step: str,
         return (f"Beat {b}: write {what}, following the accepted plan:\n\n"
                 f"{plan_text}\n\nReturn it in `proposed`; an empty `proposed` "
                 "means the section is complete."
+                + (f"\n\n{kept}" if kept else "")
                 + (f"\n\nAs it stands now:\n\n{before}" if before else ""))
     findings = _accepted_findings(db, inst)
+    kept = _kept(db, inst)
     return (f"Unit {label} ({inst['unit']}): propose the text this unit needs, "
             "working the accepted findings and any paragraph note that names "
             "it. Reason first; an empty `proposed` when nothing needs "
             "changing here."
             + (f"\n\nAccepted findings:\n{findings}" if findings else "")
+            + (f"\n\n{kept}" if kept else "")
             + f"\n\nThe unit as it stands:\n\n{before}")
 
 
@@ -1225,6 +1288,9 @@ def draft_letter(db: Database, manuscript: dict, inst: dict) -> dict:
     if _letter_turn(turns) and any(f["verdict"] for f in old):
         raise ValueError("the letter is drafted and its findings are being "
                          "ruled; discuss it with a reply")
+    if _letter_turn(turns) and _letter_edited(db, inst, turns):
+        raise ValueError("you have edited this letter; a redraft would "
+                         "replace your edits. Discuss it with a reply")
     names = [p["name"] for p in passes()]
     message = ("Write the editorial letter on this essay now, in `text`, in "
                "the shape your brief's Output asks for (Findings, Keep, "
@@ -1602,6 +1668,16 @@ def _apply(db: Database, manuscript: dict, inst: dict, method: str,
         core.rule_finding(db, inst, str(p.get("item") or ""),
                           str(p.get("verdict") or ""),
                           str(p.get("reason") or ""), actor="web")
+    elif method == "finding_edit":
+        fields = p.get("fields") or {}
+        if not isinstance(fields, dict):
+            raise ValueError("fields is an object of field: text")
+        core.edit_finding(db, inst, str(p.get("item") or ""), fields, actor="web")
+    elif method == "keep":
+        items = p.get("items")
+        if not isinstance(items, list):
+            raise ValueError("items is the whole Keep list, one string each")
+        edit_keep(db, inst, [str(k) for k in items], actor="web")
     elif method == "accept_letter":
         accept_letter(db, inst)
     elif method == "propose":

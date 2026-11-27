@@ -924,9 +924,26 @@ are not yet sent from the CLI.
   already running keeps the brief it started with. Each change is a
   `brief-change` decision holding the old and new text. A done instance
   keeps its brief. Never change the brief without the author's words.
+- The letter is the author's to edit before construction (owner,
+  2026-11-26: "if I can edit the recommendation as well, that would be
+  ideal. So I can tweak it in minor ways"). While the instance is at the
+  letter step, `workflow finding <i> F2 --set what=TEXT [--set
+  direction=TEXT ...]` changes a finding's title, where, what, why,
+  direction or tier, before or after its verdict; `workflow keep <i>
+  --file PATH` (one item a line, `-` for stdin) or `--item TEXT` (repeated)
+  replaces the whole Keep list. Both take `--dry-run`, and without a
+  change they show the finding or the list. On the Workflows page: Edit on
+  a finding card or on the Keep card. The model's words stay on the record
+  (the finding's body and the letter's text; each edit is an `edit_events`
+  row with from and to); every later turn works from the author's version
+  (an edit is also a session turn the engine is sent, and construction's
+  unit messages spell out edited findings and an edited Keep list). An
+  edited letter is not redrafted. Edit only on the author's words.
 - Read-only: `list`, `status`, `show`, `turns`, `usage [--essay|--month]`,
   `filters <i>` without `--set`, `brief <i>` without `--set`/`--file` (or
-  with `--dry-run`), `blurbs` without a change, `land <i> --dry-run`.
+  with `--dry-run`), `finding <i> <item>` without `--set` (or with
+  `--dry-run`), `keep <i>` without `--file`/`--item` (or with
+  `--dry-run`), `blurbs` without a change, `land <i> --dry-run`.
 - Any essay in the reading order can have a workflow; no file is treated
   specially (owner, 2026-11-26: "there should be no special casing").
   An essay whose toc entry says `register = "protected"` gets the

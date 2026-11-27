@@ -1,7 +1,8 @@
 """`authorlm workflow …`: the per-essay editing workflow from the command
 line. Read-only verbs (list, status, show, turns, usage, filters without
---set, brief without --set/--file or with --dry-run, blurbs without a
-change) write nothing."""
+--set, brief without --set/--file or with --dry-run, finding without --set
+or with --dry-run, keep without --file/--item or with --dry-run, blurbs
+without a change) write nothing."""
 
 from __future__ import annotations
 
@@ -111,6 +112,88 @@ def _land_lines(out: dict | None) -> list[str]:
     return lines
 
 
+def _finding_lines(f: dict) -> list[str]:
+    lines = [f"{f['item']}" + (f" ({f['tier']})" if f["tier"] else "")
+             + (f"  verdict: {f['verdict']}" if f["verdict"] else "  not ruled")
+             + (f"  edited: {', '.join(f['edited'])}" if f["edited"] else "")]
+    for k in core.FINDING_FIELDS:
+        if k != "tier" and f[k]:
+            lines.append(f"  {k}: {_clip(f[k])}")
+    return lines
+
+
+def _set_pairs(pairs: list[str]) -> dict:
+    fields = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep:
+            raise ValueError(f"--set takes FIELD=TEXT, not '{pair}' "
+                             f"(fields: {', '.join(core.FINDING_FIELDS)})")
+        fields[key.strip()] = value
+    unknown = sorted(set(fields) - set(core.FINDING_FIELDS))
+    if unknown:
+        raise ValueError(f"a finding has no field {', '.join(unknown)} "
+                         f"(fields: {', '.join(core.FINDING_FIELDS)})")
+    return fields
+
+
+def _finding_verb(db, inst: dict, args) -> None:
+    """`workflow finding <i> <item> [--set FIELD=TEXT ...] [--dry-run]`."""
+    rows = {r["item_id"]: r for r in core.letter_findings(db, inst)}
+    if args.item not in rows:
+        raise LookupError(f"no finding '{args.item}' on {inst['id']} "
+                          f"(findings: {', '.join(rows) or 'none'})")
+    now = core.finding_view(rows[args.item])
+    fields = _set_pairs(args.set or [])
+    nxt = f"authorlm workflow finding {inst['id']} {args.item} --set what=TEXT"
+    if not fields:
+        _print(args, {**now, "next": nxt}, _finding_lines(now))
+        return
+    if args.dry_run:
+        changed = [k for k, v in fields.items() if v.strip() != now[k]]
+        _print(args, {**now, "dry_run": True, "would_change": changed,
+                      "next": nxt},
+               _finding_lines(now)
+               + [f"  dry run: would change {', '.join(changed) or 'nothing'}; "
+                  "nothing written"])
+        return
+    after = core.edit_finding(db, inst, args.item, fields)
+    _print(args, {**after, "next": f"authorlm workflow show {inst['id']}"},
+           _finding_lines(after)
+           + ["  the next model turn works from this version; the letter's "
+              "own words stay on the record"])
+
+
+def _keep_verb(db, inst: dict, args) -> None:
+    """`workflow keep <i> [--file PATH | --item TEXT ...] [--dry-run]`."""
+    from .. import workflow_page
+    now = workflow_page.letter_keep(db, inst)
+    items = None
+    if args.file is not None:
+        text = (sys.stdin.read() if args.file == "-" else
+                Path(args.file).read_text(encoding="utf-8"))
+        items = workflow_page._bullets(text.splitlines())
+    elif args.item:
+        items = list(args.item)
+    which = "your list" if now["edited"] else "as the letter wrote it"
+    lines = [f"keep ({which}, {len(now['keep'])} item(s)):"] \
+        + [f"  - {_clip(k)}" for k in now["keep"]]
+    nxt = f"authorlm workflow keep {inst['id']} --file PATH"
+    if items is None or args.dry_run:
+        if items is not None:
+            lines.append(f"  dry run: would replace it with {len(items)} "
+                         "item(s); nothing written")
+        _print(args, {**now, "dry_run": items is not None,
+                      "proposed": items, "next": nxt}, lines)
+        return
+    out = workflow_page.edit_keep(db, inst, items)
+    _print(args, {**out, "next": f"authorlm workflow show {inst['id']}"},
+           [f"keep (your list, {len(out['keep'])} item(s)):"]
+           + [f"  - {_clip(k)}" for k in out["keep"]]
+           + ["  the next model turn keeps these; the letter's own list "
+              "stays on the record"])
+
+
 def _road(db, manuscript, args):
     return landing.make_road(db, manuscript, getattr(args, "workspace", None))
 
@@ -160,7 +243,8 @@ def cmd_workflow(args):
             _print(args, {**inst, "gate": core.gate(db, inst),
                           "decisions": core.decisions(db, inst),
                           "since_last": core.since_last(db, inst),
-                          "letter_findings": core.letter_findings(db, inst)},
+                          "letter_findings": [core.finding_view(f) for f in
+                                              core.letter_findings(db, inst)]},
                    _show_lines(db, inst))
         elif verb == "turns":
             inst = core.get_instance(db, manuscript, args.instance)
@@ -267,6 +351,12 @@ def cmd_workflow(args):
                                     f"  brief: {inst['brief'] or '(none)'}",
                                     "  the next model turn reads this brief; "
                                     "earlier turns keep the one they had"])
+        elif verb == "finding":
+            inst = core.get_instance(db, manuscript, args.instance)
+            _finding_verb(db, inst, args)
+        elif verb == "keep":
+            inst = core.get_instance(db, manuscript, args.instance)
+            _keep_verb(db, inst, args)
         elif verb == "decide":
             inst = core.get_instance(db, manuscript, args.instance)
             d = core.decide(db, inst, args.kind, args.words, args.reason or "")
@@ -294,9 +384,10 @@ def add_parser(sub, common) -> None:
              "engine, unit and filters, the step gates, skips, turns, usage")
     verbs = p.add_subparsers(dest="action", required=True)
 
-    def leaf(name: str, text: str):
+    def leaf(name: str, text: str, example: str = ""):
         parser = verbs.add_parser(name, parents=[common], help=text,
-                                  description=text)
+                                  description=text,
+                                  epilog=f"example: {example}" if example else None)
         parser.add_argument("--json", action="store_true",
                             help="machine-readable output")
         parser.set_defaults(func=cmd_workflow)
@@ -395,6 +486,35 @@ def add_parser(sub, common) -> None:
     src.add_argument("--set", metavar="TEXT", help="the new brief, whole")
     src.add_argument("--file", metavar="PATH",
                      help="read the new brief from a file ('-' for stdin)")
+    q.add_argument("--dry-run", action="store_true",
+                   help="say what would change; write nothing (read-only)")
+
+    q = leaf("finding", "a letter finding as it stands: without --set, show it "
+                        "(read-only); --set FIELD=TEXT edits a field (title, "
+                        "where, what, why, direction, tier) at the letter "
+                        "step, before or after its verdict; the model's "
+                        "words stay on the record",
+             "authorlm workflow finding wi-123 F2 --set "
+             "'direction=cut the second example'")
+    instance(q)
+    q.add_argument("item", help="the finding's id, e.g. F2")
+    q.add_argument("--set", action="append", metavar="FIELD=TEXT",
+                   help="a field's new text (repeat for several fields)")
+    q.add_argument("--dry-run", action="store_true",
+                   help="say what would change; write nothing (read-only)")
+
+    q = leaf("keep", "the letter's Keep list: without --file or --item, show "
+                     "it (read-only); --file PATH (one item a line, '-' for "
+                     "stdin) or --item TEXT (repeated) replaces the whole "
+                     "list at the letter step",
+             "authorlm workflow keep wi-123 --item 'the plain opening' "
+             "--item 'the closing image'")
+    instance(q)
+    src = q.add_mutually_exclusive_group()
+    src.add_argument("--file", metavar="PATH",
+                     help="the new list, one item a line ('-' for stdin)")
+    src.add_argument("--item", action="append", metavar="TEXT",
+                     help="one item of the new list (repeat for each)")
     q.add_argument("--dry-run", action="store_true",
                    help="say what would change; write nothing (read-only)")
 
