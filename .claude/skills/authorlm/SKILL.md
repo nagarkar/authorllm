@@ -878,9 +878,9 @@ workflow over `authorlm devedit` (devedit.py owns the run folder,
 ## The per-essay workflow (`authorlm workflow`; being built)
 
 Design: `docs/plans/filter-lens-consolidation.md` §11.9 (the owner's
-decisions, with his words) and §12. Piece 1, the record and its gates, is
-in; the engines, briefs and the Workflows page come next, so model turns
-are not yet sent from the CLI.
+decisions, with his words) and §12. The record and its gates, the engines
+and the Workflows page are in; model turns are sent from the page and
+from the walk verbs below.
 
 - A workflow is one essay and one kind (`new`, `refine`, `re-review`); each
   run is an instance with three lists (`reference`: whole text, content
@@ -972,12 +972,57 @@ are not yet sent from the CLI.
   editable before the first turn. The new letter reads the abandoned one
   through the `earlier_instances` request. Never start over without the
   author's words and reason.
+- The walks (construction, the wrap-up, the filters) are driven from the
+  CLI as from the Workflows page, through the page's own calls, so both
+  write the same records (`authorlm/authorlm/workflow/drive.py`):
+  - `workflow walk <i> [--label L]` (read-only): each unit's state, then
+    one unit in full (the form waiting for the author, else the next):
+    its reason, its original and its proposed text exactly, between
+    `--- … ---` lines; the job, the gate and the next command.
+  - `workflow propose <i> [--label L] [--wait]`: the engine's form for the
+    walk's next unit. A model turn runs as the page's background job:
+    without `--wait` the verb returns with the job id and the job runs on
+    in a detached process; `--wait` blocks, progress on stderr.
+  - `workflow unit <i> <label> --accept | --reject | --redo [--blurb B
+    ...] [--note TEXT] | --edit TEXT | --edit-file PATH [--wait]`: the
+    author's verdict on the form (wrap-up items `w:…` too). `--note`
+    carries the author's own words to the engine on a redo; an edit with
+    a `[bracket]` is an instruction to the engine (a model turn); an edit
+    without one is his text, recorded as is.
+  - `workflow reopen <i> <label> [--wait]`: back to a ruled unit (a
+    landed one is taken out of the file first). After a revised letter,
+    `walk` lists each reopen it proposes; `reopen <i> <label> --leave` is
+    the page's "Leave as accepted".
+  - `workflow beat-done <i>` and `workflow conclude <i>`: beat by beat,
+    the beat is done; the essay is built (then `advance`).
+  - `workflow wrapup <i> [--wait]` drafts the wrap-up; `workflow principle
+    <i> --words W [--scope S]` ticks a principle it offered.
+  - `workflow job <i>` (read-only): the running job or the failed
+    attempt with its error; `--retry` sends it again, `--dismiss` hides
+    it, `--wait` blocks until it ends. A failed turn exits 1 naming
+    `--retry`.
+  - Every write verb takes `--dry-run` (what would be sent or recorded,
+    the billed estimate on openai-api; nothing sent or written) and
+    `--json`.
+- **Driving construction from chat.** When the owner works a walk in the
+  conversation: run `workflow walk <i>` and show him the unit's original
+  and proposed text verbatim, with the engine's reason, never a summary
+  or a clip of it. Ask for his verdict. Record only his words: `--accept`
+  or `--reject` on his say-so, a redo's `--note` in his words (blurbs he
+  picks), an edit's text as he wrote it (`--edit-file` for anything
+  long); never pick a verdict or write a note for him. Then `propose
+  <i> --wait` for the next unit and show it the same way. One driver at
+  a time: if the page is open on the same instance, he works there or
+  here, not both (a running job holds the instance either way; a stale
+  verdict is refused, never written over his text). When the walk ends,
+  `advance` (which lands the rulings), and say what landed.
 - Read-only: `list`, `status`, `show`, `turns`, `usage [--essay|--month]`,
-  `filters <i>` without `--set`, `brief <i>` without `--set`/`--file` (or
-  with `--dry-run`), `finding <i> <item>` without `--set` (or with
-  `--dry-run`), `keep <i>` without `--file`/`--item` (or with
-  `--dry-run`), `revise-letter <i> --dry-run`, `restart <i> --dry-run`,
-  `blurbs` without a change, `land <i> --dry-run`.
+  `walk`, `job` without a flag, `filters <i>` without `--set`, `brief <i>`
+  without `--set`/`--file` (or with `--dry-run`), `finding <i> <item>`
+  without `--set` (or with `--dry-run`), `keep <i>` without
+  `--file`/`--item` (or with `--dry-run`), `revise-letter <i> --dry-run`,
+  `restart <i> --dry-run`, `blurbs` without a change, `land <i>
+  --dry-run`, and every `--dry-run` of the walk verbs.
 - Any essay in the reading order can have a workflow; no file is treated
   specially (owner, 2026-11-26: "there should be no special casing").
   An essay whose toc entry says `register = "protected"` gets the

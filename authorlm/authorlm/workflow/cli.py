@@ -2,8 +2,9 @@
 line. Read-only verbs (list, status, show, turns, usage, filters without
 --set, brief without --set/--file or with --dry-run, finding without --set
 or with --dry-run, keep without --file/--item or with --dry-run,
-revise-letter and restart with --dry-run, blurbs without a change) write
-nothing."""
+revise-letter and restart with --dry-run, blurbs without a change, walk,
+job without a flag, and every --dry-run of the walk verbs) write nothing.
+The verbs that drive the walks are workflow/drive.py."""
 
 from __future__ import annotations
 
@@ -11,9 +12,9 @@ import json
 import sys
 from pathlib import Path
 
-from . import context, core, landing
+from . import context, core, drive, landing
 
-READ_ONLY = ("list", "status", "show", "turns", "usage")
+READ_ONLY = ("list", "status", "show", "turns", "usage", "walk")
 
 
 def _print(args, data, lines: list[str]) -> None:
@@ -284,7 +285,9 @@ def cmd_workflow(args):
     manuscript = _manuscript(db, args)
     verb = args.action
     try:
-        if verb == "start":
+        if verb in drive.VERBS:
+            drive.run_verb(db, manuscript, args)
+        elif verb == "start":
             inst = core.start(db, manuscript, args.essay, args.kind,
                               brief=args.brief or "", engine=args.engine,
                               model=args.model, unit=args.unit, mode=args.mode)
@@ -642,6 +645,10 @@ def add_parser(sub, common) -> None:
     q.add_argument("--kind", required=True, choices=["principle", "ruling"])
     q.add_argument("--words", required=True, help="the author's words")
     q.add_argument("--reason")
+
+    # Driving the walks (construction, the wrap-up, the filters) as the
+    # Workflows page does, through its own calls: workflow/drive.py.
+    drive.add_leaves(leaf, instance)
 
     q = leaf("blurbs", "the manuscript's redo blurbs, most recently used first")
     q.add_argument("--add", action="append", metavar="TEXT")
