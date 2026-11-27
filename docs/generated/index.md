@@ -894,6 +894,12 @@ Critique-pass tests (docs/critique-pass-design.md).
 
 `critique._dedupe_key` is the cross-source idempotency normalizer for critique import.
 
+## `tests.test_dash_rows`
+
+`authorlm/tests/test_dash_rows.py`
+
+Unit pins for changes._dash_rows: em-dash findings → file line numbers.
+
 ## `tests.test_depends_on`
 
 `authorlm/tests/test_depends_on.py`
@@ -1241,6 +1247,12 @@ Individual `lint.check_*` helpers encode ratified style laws that `write propose
 `authorlm/tests/test_lint_page.py`
 
 The Lint view of the Filters page (`lint_page`, the `lint.*` methods of `/api/runs`): lint on chosen tabs, bulk mechanical fixes, one-by-one rulings, direct application through the tab's pull and guarded push, and the log with Undo.
+
+## `tests.test_lint_page_plan_undo`
+
+`authorlm/tests/test_lint_page_plan_undo.py`
+
+Unit pins for lint_page's quote/dash target, apply planner, and undo row selection.
 
 ## `tests.test_lint_proof`
 
@@ -1643,6 +1655,12 @@ Workspace style defaults: `library/style-defaults.toml` is the lowest layer of e
 `authorlm/tests/test_style_page.py`
 
 The Style laws page (`style_page.dispatch`, `/api/style`) and the verbs it shares with the CLI: edit in place, retire with a reason, un-retire, copy, move, history, and the near-duplicate warning on add.
+
+## `tests.test_style_page_replacement`
+
+`authorlm/tests/test_style_page_replacement.py`
+
+Unit pins for style_page's replacement resolver and law↔file bindings.
 
 ## `tests.test_style_snapshots`
 
