@@ -44,6 +44,7 @@ from .llm import LLMClient
 from .normalize import clamp, normalize_markdown
 from .sessions import NO_EPISODE
 from .summaries import drafting_context_for_write_status, drafting_context_for_writeup
+from . import revisions
 from .revisions import (
     MARKER, PLACEHOLDER, _version_text, is_placeholder, marker_present,
     read_manuscript_files,
@@ -460,17 +461,18 @@ def resolve_file(db: Database, path: str) -> dict | None:
 def status(db: Database, manuscript: dict) -> dict:
     mid = manuscript["id"]
     session = ses.active_session(db, mid)
-    counts = {
+    counts = {"manuscript_versions": revisions.count_versions(db, mid)}
+    counts.update({
         table: db.one(
             f"SELECT COUNT(*) AS n FROM {table} WHERE manuscript_id = ?", (mid,)
         )["n"]
         for table in (
-            "manuscript_versions", "editorial_transitions", "editorial_episodes",
+            "editorial_transitions", "editorial_episodes",
             "declared_intents", "concept_nodes", "concept_edges",
             "editorial_beliefs", "guidance_history", "editorial_reviews",
             "evidence", "knowledge_proposals",
         )
-    }
+    })
     # Open [Footnote: …] / [Explain: …] / [Suggestion: …] tags ride here (footnote design
     # §8): the author learns about an undrafted request without having
     # to remember to ask.
@@ -521,7 +523,10 @@ def expire_idle_session(db: Database, manuscript: dict, config: dict) -> dict | 
         return None
     idle_hours = config.get("session", {}).get("idle_hours", 3)
     candidates = [session["started_at"]]
-    for table in ("manuscript_versions", "guidance_history", "declared_intents"):
+    recorded = revisions.last_recorded_at(db, session["id"])
+    if recorded:
+        candidates.append(recorded)
+    for table in ("guidance_history", "declared_intents"):
         row = db.one(
             f"SELECT MAX(created_at) AS latest FROM {table} WHERE session_id = ?",
             (session["id"],),
@@ -1509,11 +1514,7 @@ def write_start(db: Database, manuscript: dict, config: dict,
     # was already doing, and filing it against a goal declared a moment
     # later would be back-dating. It stays ambient, deliberately.
     collect(db, manuscript, config, source="write-start")
-    source = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (mid,),
-    )
+    source = revisions.latest_version(db, mid)
     if source is None:
         raise LookupError("no collected version to pin — is the manuscript empty?")
     # Create (--new) or truncate. Either way the file's pre-writeup state
@@ -1559,7 +1560,7 @@ def write_start(db: Database, manuscript: dict, config: dict,
                              "intents": block}),
     )
     db.insert("writeups", row)
-    source_text = loads(source["files"], {}).get(relpath, "")
+    source_text = revisions.file_at(db, source["id"], relpath) or ""
     # Q3: a `--new` file has no toc entry yet, so `scope_chain` is
     # [file, None] and no chapter-scoped intent can be derived. Say so
     # at the start rather than letting the author discover the absence.
@@ -2062,15 +2063,10 @@ def write_digest(db: Database, manuscript: dict, payload=None,
     if writeup["status"] != "active":
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
     meta = loads(writeup["metadata"], {})
-    source = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
-                    (writeup["source_version_id"],))
-    from . import docs
-
+    source = revisions.version_by_id(db, writeup["source_version_id"])
     # Under whichever name the file had when the version was pinned.
-    source_text = (docs.snapshot_text(db, manuscript["id"],
-                                      loads(source["files"], {}),
-                                      writeup["file"]) or ""
-                   if source else "")
+    source_text = _version_text(db, writeup["source_version_id"],
+                                writeup["file"]) or ""
     # Two conditions, two truths. Collapsing them into one message told a
     # rewrite over a blank source that "this writeup created" its file,
     # which it did not — a small lie about the writeup's own history, in
@@ -2959,9 +2955,7 @@ def write_abandon(db: Database, manuscript: dict, config: dict,
         raise ValueError(f"writeup {writeup['id']} is {writeup['status']}")
     path = Path(manuscript["path"]) / writeup["file"]
     if loads(writeup["metadata"], {}).get("created_file"):
-        preserved = db.one(
-            "SELECT version_no FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
+        preserved = revisions.latest_version(db, manuscript["id"])
         had_text = path.exists() and bool(
             path.read_text(encoding="utf-8").strip())
         path.unlink(missing_ok=True)
@@ -2988,18 +2982,13 @@ def write_abandon(db: Database, manuscript: dict, config: dict,
                 "preserved_in_version": (preserved["version_no"]
                                          if preserved else None),
                 "file": writeup["file"], "collect": report}
-    source = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
-                    (writeup["source_version_id"],))
     restored = False
-    if source:
-        from . import docs
-
-        content = docs.snapshot_text(db, manuscript["id"],
-                                     loads(source["files"], {}),
-                                     writeup["file"])
-        if content is not None:
-            path.write_text(content, encoding="utf-8")
-            restored = True
+    # Under whichever name the file had when the version was pinned.
+    content = _version_text(db, writeup["source_version_id"],
+                            writeup["file"])
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+        restored = True
     report = collect(db, manuscript, config, source="write-abandon")
     db.update("writeups", writeup["id"], {"status": "abandoned"})
     return {"writeup_id": writeup["id"], "restored": restored,
@@ -3064,10 +3053,7 @@ def rename_document(db: Database, manuscript: dict, config: dict,
 
 def diff_versions(db: Database, manuscript: dict, older: int | None = None,
                   newer: int | None = None, file_filter: str | None = None) -> dict:
-    versions = db.all(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? ORDER BY version_no",
-        (manuscript["id"],),
-    )
+    versions = revisions.list_versions(db, manuscript["id"])
     if not versions:
         raise LookupError("no versions collected yet")
     by_no = {v["version_no"]: v for v in versions}
@@ -3085,8 +3071,8 @@ def diff_versions(db: Database, manuscript: dict, older: int | None = None,
         new_v = versions[-1]
         old_v = versions[-2] if len(versions) > 1 else None
 
-    old_files = loads(old_v["files"], {}) if old_v else {}
-    new_files = loads(new_v["files"], {})
+    old_files = revisions.files_at(db, old_v["id"]) if old_v else {}
+    new_files = revisions.files_at(db, new_v["id"])
     old_label = f"v{old_v['version_no']}" if old_v else "∅"
     new_label = f"v{new_v['version_no']}"
     files: dict[str, list[str]] = {}
@@ -3116,16 +3102,11 @@ def diff_versions(db: Database, manuscript: dict, older: int | None = None,
 
 
 def get_version(db: Database, manuscript: dict, version_no: int) -> dict:
-    """A single collected revision snapshot, by version number."""
-    version = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? AND version_no = ?",
-        (manuscript["id"], version_no),
-    )
+    """A single collected revision snapshot, by version number: its row,
+    no text (`revisions.files_at` reads that)."""
+    version = revisions.version_by_number(db, manuscript["id"], version_no)
     if not version:
-        last = db.one(
-            "SELECT version_no FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],),
-        )
+        last = revisions.latest_version(db, manuscript["id"])
         raise LookupError(
             f"no version v{version_no} (have v1..v{last['version_no'] if last else 0})")
     return version
@@ -3141,7 +3122,7 @@ def restore_version(db: Database, manuscript: dict, version_no: int, config: dic
     # (BUG-2 / A1). A no-op when there is nothing uncollected.
     collect(db, manuscript, config, source=f"pre-restore:v{version_no}")
     version = get_version(db, manuscript, version_no)
-    files = loads(version["files"], {})
+    files = revisions.files_at(db, version["id"])
     root = Path(manuscript["path"])
     for name in set(read_manuscript_files(root)) - set(files):
         (root / name).unlink()
@@ -4225,10 +4206,7 @@ def file_improvement(db: Database, title: str, evidence: str, given: str,
     context: dict = {}
     if manuscript:
         session = ses.active_session(db, manuscript["id"])
-        version = db.one(
-            "SELECT id, version_no FROM manuscript_versions WHERE "
-            "manuscript_id = ? ORDER BY version_no DESC LIMIT 1",
-            (manuscript["id"],))
+        version = revisions.latest_version(db, manuscript["id"])
         if version:
             context["manuscript_version_id"] = version["id"]
             context["manuscript_version_no"] = version["version_no"]
@@ -4499,9 +4477,7 @@ def _touched_filter_run(db: Database, row: dict) -> dict:
 
 
 def _latest_version_id(db: Database, manuscript_id: str) -> str | None:
-    row = db.one(
-        "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1", (manuscript_id,))
+    row = revisions.latest_version(db, manuscript_id)
     return row["id"] if row else None
 
 

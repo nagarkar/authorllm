@@ -19,7 +19,7 @@ WHAT IS REPLAYED
     own state (a retired node or rejected edge was rejected; a confirmed
     node or declared edge kept). An edge retired with its endpoint, and
     anything still pending, carries no label and is measured by nobody.
-  * Text: `manuscript_versions.files` of the version current when the
+  * Text: the files (revisions.files_at) of the version current when the
     candidate was created. Historical candidates carry no span (§6.1's
     honest limit), so each is re-located: a concept in the first
     paragraph, in reading order, naming it; a relation in the first
@@ -66,6 +66,7 @@ from pathlib import Path
 from .concepts import node_names
 from .terms import concept_pattern
 from .db import Database, loads, now_iso
+from . import revisions
 from .revisions import _paragraphs
 
 TARGET_CONCEPTS = 0.70      # §2.5: concept candidates the author confirms
@@ -226,9 +227,7 @@ class _Versions:
 
     def __init__(self, db: Database, mid: str):
         self.db = db
-        self.rows = [dict(r) for r in db.all(
-            "SELECT id, version_no, created_at FROM manuscript_versions "
-            "WHERE manuscript_id = ? ORDER BY version_no", (mid,))]
+        self.rows = revisions.list_versions(db, mid)
         self._files: dict[str, dict] = {}
         self._layout: dict[str, list] = {}
 
@@ -245,9 +244,7 @@ class _Versions:
 
     def files(self, vid: str) -> dict[str, str]:
         if vid not in self._files:
-            row = self.db.one("SELECT files FROM manuscript_versions WHERE "
-                              "id = ?", (vid,))
-            self._files[vid] = loads(row["files"], {}) if row else {}
+            self._files[vid] = revisions.files_at(self.db, vid)
         return self._files[vid]
 
     def layout(self, vid: str) -> list[tuple[str, list[tuple]]]:

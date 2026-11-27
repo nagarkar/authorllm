@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 
+from . import revisions
 from .concepts import node_name, node_names
 from .terms import concept_pattern, mention_pattern
 from .db import Database, ko_fields, loads, new_id
@@ -179,12 +180,8 @@ def generate_guidance(
         "SELECT * FROM declared_intents WHERE manuscript_id = ? AND status = 'active'",
         (mid,),
     )
-    latest = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (mid,),
-    )
-    files: dict[str, str] = loads(latest["files"], {}) if latest else {}
+    latest = revisions.latest_version(db, mid)
+    files = revisions.files_at(db, latest["id"]) if latest else {}
     nodes = {n["id"]: n for n in db.all(
         "SELECT * FROM concept_nodes WHERE manuscript_id = ? AND status != 'retired'",
         (mid,),

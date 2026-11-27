@@ -1745,12 +1745,11 @@ def scenario_write_loop(root: Path) -> None:
               (ms / "01-choice.md").read_text() == CH1, "")
 
         from authorlm.db import loads as _loads
-        versions = _db.all(
-            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no", (_row["id"],))
+        from authorlm import revisions as _rv
+        versions = [_rv.files_at(_db, v["id"])
+                    for v in _rv.list_versions(_db, _row["id"])]
         recovered = any(
-            _loads(v["files"], {}).get("01-choice.md") == UNCOLLECTED_DRAFT
-            for v in versions)
+            v.get("01-choice.md") == UNCOLLECTED_DRAFT for v in versions)
         check("abandon snapshots the uncollected draft into history "
               "before overwriting it with the restored content "
               "(BUG-2 / A1)", recovered)
@@ -2666,19 +2665,18 @@ def scenario_write_new_and_digest(root: Path) -> None:
         check("I4 — write abandon makes zero LLM requests",
               StubLLMHandler.REQUESTS == before_requests,
               f"{before_requests} -> {StubLLMHandler.REQUESTS}")
-        versions = _db.all(
-            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no", (_row["id"],))
+        from authorlm import revisions as _rv
+        versions = [_rv.files_at(_db, v["id"])
+                    for v in _rv.list_versions(_db, _row["id"])]
         check("A12 — the accepted prose is preserved in version history: the "
               "essay is unpublished, not destroyed",
-              any(NEW_BEAT_1 in (_loads(v["files"], {}).get("03-new.md") or "")
+              any(NEW_BEAT_1 in (v.get("03-new.md") or "")
                   for v in versions))
         check("A12 / K2 — the never-collected text is preserved too. This is "
               "the order-swap regression: if the unlink ever moved above "
               "write_abandon's pre-collect, this text would be gone with no "
               "recovery point at all",
-              any(_loads(v["files"], {}).get("03-new.md") == UNCOLLECTED
-                  for v in versions))
+              any(v.get("03-new.md") == UNCOLLECTED for v in versions))
         check("A11 — abandon reports the version the text survives in",
               "preserved in v" in out, out)
         out = run(ws, "collect")
@@ -6653,9 +6651,8 @@ def scenario_filter(root: Path) -> None:
             "SELECT source_version_id FROM filter_runs WHERE "
             "manuscript_id = ? AND file = '02-wall.md' "
             "ORDER BY created_at DESC LIMIT 1", (mid,)))
-        pinned_text = _loads(db.one(
-            "SELECT files FROM manuscript_versions WHERE id = ?",
-            (pin["source_version_id"],))["files"], {})["02-wall.md"]
+        from authorlm import revisions as _rv
+        pinned_text = _rv.file_at(db, pin["source_version_id"], "02-wall.md")
         out = run(ws, "filter", "rollback", "02-wall.md")
         check("F36 filter rollback restores the run's PINNED version, "
               "byte for byte",
@@ -7491,13 +7488,12 @@ def scenario_pronunciations(root: Path) -> None:
         check("E6 the briefing never reports it as missing from toc.toml — "
               "`reading_order`'s unlisted list only covers CONTENT files",
               _pron.FILENAME not in brief, brief)
-        version = db.one(
-            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no DESC LIMIT 1", (mid,))
-        check("E6 BUT it IS in manuscript_versions.files — structure is "
+        from authorlm import revisions as _rv
+        version = _rv.latest_version(db, mid)
+        check("E6 BUT it IS in the version history — structure is "
               "not content, and it is still the author's: versioned, "
               "checksummed, diffable and rollback-able like any file",
-              _pron.FILENAME in _loads(version["files"], {}), "")
+              _pron.FILENAME in _rv.manifest_at(db, version["id"]), "")
         dict_path.write_text(
             dict_path.read_text() + "| Līlā | LEE-laa | play |\n",
             encoding="utf-8")

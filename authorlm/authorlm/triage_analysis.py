@@ -34,17 +34,19 @@ the manuscript does not support the item. Do not turn analysis into a decision."
 
 
 def _latest_version(db: Database, manuscript_id: str) -> dict:
-    row = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1", (manuscript_id,))
+    from . import revisions
+
+    row = revisions.latest_version(db, manuscript_id)
     if not row:
         raise RuntimeError("collect the manuscript before analyzing it")
-    return dict(row)
+    return row
 
 
-def _paragraphs(version: dict) -> list[dict[str, str]]:
+def _paragraphs(db: Database, version: dict) -> list[dict[str, str]]:
+    from . import revisions
+
     passages: list[dict[str, str]] = []
-    for file, text in sorted(loads(version["files"], {}).items()):
+    for file, text in sorted(revisions.files_at(db, version["id"]).items()):
         heading = ""
         occurrences: dict[str, int] = {}
         for block in re.split(r"\n\s*\n", text):
@@ -131,7 +133,7 @@ def start_run(db: Database, manuscript: dict, config: dict[str, Any],
     client = _llm(config, profile)
     if not client.enabled:
         raise RuntimeError("the LLM is disabled in AuthorLM configuration")
-    passages = _paragraphs(version)
+    passages = _paragraphs(db, version)
     context = _reuse_context(db, manuscript["id"], version["id"], client.model)
     reused = context is not None
     if context is None:
@@ -255,12 +257,12 @@ def analyze_batch(db: Database, manuscript: dict, config: dict[str, Any],
     max_batch = int(profile.get("batch_size", 12))
     if len(batch) > max_batch:
         raise ValueError(f"analyzer batches are limited to {max_batch} rows")
-    version_row = db.one("SELECT * FROM manuscript_versions WHERE id = ?",
-                         (run["manuscript_version_id"],))
-    if not version_row:
+    from . import revisions
+
+    version = revisions.version_by_id(db, run["manuscript_version_id"])
+    if not version:
         raise RuntimeError("the pinned manuscript version is missing")
-    version = dict(version_row)
-    passages = _paragraphs(version)
+    passages = _paragraphs(db, version)
     context = loads(run["context"], {})
     rows = context.get("objects", {})
     if any(object_id not in rows for object_id in batch):

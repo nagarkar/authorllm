@@ -146,7 +146,7 @@ def bundle(db: Database, task: dict) -> str:
         time_machine.append(
             f"Manuscript at filing time: version {stamp['manuscript_version_id']}"
             + (f" (v{stamp['manuscript_version_no']})" if stamp.get("manuscript_version_no") else "")
-            + " — its complete file text is frozen in manuscript_versions; "
+            + " — its complete file text is frozen in the version history; "
             "resolve manuscript line references against it, not the working "
             "tree (`authorlm diff`).")
     if stamp.get("intent_id"):

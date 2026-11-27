@@ -784,8 +784,7 @@ OLD_TOC = '[[chapter]]\nfile = "one.md"\n[[chapter]]\nfile = "recap.md"\n'
 def plant_snapshots(ws: str) -> None:
     """Two past snapshots, dated in January and February 2026 (noon UTC,
     so a whole-day date means the same day in any time zone)."""
-    from authorlm import api
-    from authorlm.db import ko_fields
+    from authorlm import api, revisions
 
     db = api.open_db(ws)
     ms = db.one("SELECT * FROM manuscripts WHERE name = 'Book'")
@@ -796,10 +795,12 @@ def plant_snapshots(ws: str) -> None:
               "drafts/old.md": "secret draft\n"}),
             (102, "2026-02-10T12:00:00.000000Z",
              {"one.md": current_one, "recap.md": OLD_RECAP, "toc.toml": OLD_TOC})):
-        db.insert("manuscript_versions", {
-            **ko_fields("mv"), "created_at": when, "manuscript_id": ms["id"],
-            "version_no": no, "checksum": f"c{no}", "files": json.dumps(files),
-            "source": "snapshot", "session_id": None})
+        # Recorded through the version store, then dated and numbered as
+        # the past snapshot this test needs.
+        row = revisions.record_version(db, ms["id"], files, None, "snapshot")
+        db.conn.execute("UPDATE manuscript_versions SET created_at = ?, "
+                        "version_no = ? WHERE id = ?", (when, no, row["id"]))
+        db.conn.commit()
 
 
 def check_essay_version(ws: str) -> None:

@@ -24,7 +24,6 @@ landing an edit, and it reads only areas at or below its own.
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -36,9 +35,10 @@ from .db import Database, loads
 from .guidance import compute_prerequisite_gaps
 from .illus import slot_report as illus_slot_report
 from .llm import LLMClient
-from .revisions import (collect_revision, detect_transitions, is_placeholder,
-                        iter_manuscript_paths, massive_deletions,
-                        pair_renames, read_manuscript_files)
+from .revisions import (collect_revision, detect_transitions, files_at,
+                        is_placeholder, iter_manuscript_paths,
+                        latest_version, massive_deletions, pair_renames,
+                        read_manuscript_files)
 from .sessions import NO_EPISODE
 
 
@@ -89,7 +89,7 @@ def _carry_renames_on_disk(db: Database, manuscript: dict,
     root = Path(manuscript["path"])
     if before is None or not root.is_dir():
         return []
-    old_files: dict[str, str] = loads(before["files"], {})
+    old_files = files_at(db, before["id"])
     names = set(iter_manuscript_paths(root))
     if not (set(old_files) - names) or not (names - set(old_files)):
         return []
@@ -152,11 +152,7 @@ def collect(db: Database, manuscript: dict, config: dict,
         media_keys = []
 
     session = ses.active_session(db, mid)
-    before = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (mid,),
-    )
+    before = latest_version(db, mid)
     # A rename made outside AuthorLM is carried BEFORE the snapshot, so
     # the version recorded here already holds toc.toml with the new name
     # and every scan below finds the document's records under it.
@@ -167,8 +163,8 @@ def collect(db: Database, manuscript: dict, config: dict,
     if version is None:
         return {"unchanged": True}
 
-    transitions = detect_transitions(db, mid, dict(before) if before else None,
-                                     version, renames=document_ids)
+    transitions = detect_transitions(db, mid, before, version,
+                                     renames=document_ids)
     docs.ensure_documents(db, manuscript)
     attached = False
     if episode is NO_EPISODE:
@@ -199,10 +195,10 @@ def collect(db: Database, manuscript: dict, config: dict,
     def _blinded(files: dict) -> dict:
         return {f: ("" if is_placeholder(t) else t) for f, t in files.items()}
 
-    _blind = _blinded(loads(version["files"], {}))
-    _scan_version = {**dict(version), "files": json.dumps(_blind)}
-    realized = cg.scan_realizations(db, mid, _scan_version)
-    repointed, vanished = cg.rescan_primary_locations(db, mid, _scan_version)
+    _blind = _blinded(files_at(db, version["id"]))
+    realized = cg.scan_realizations(db, mid, version, files=_blind)
+    repointed, vanished = cg.rescan_primary_locations(db, mid, version,
+                                                      files=_blind)
     # Summaries: mark, don't cascade. A changed unit's own row is already
     # stale by source_hash; downstream rows get the tolerated flag.
     from . import summaries as sums
@@ -254,7 +250,7 @@ def collect(db: Database, manuscript: dict, config: dict,
     # DELTA — gaps_resolved and gaps_new are set differences of these two
     # — which is the same defect wearing a subtraction sign.
     gaps_before = (
-        compute_prerequisite_gaps(db, mid, _blinded(loads(before["files"], {})))
+        compute_prerequisite_gaps(db, mid, _blinded(files_at(db, before["id"])))
         if before else []
     )
     gaps_after = compute_prerequisite_gaps(db, mid, _blind)
