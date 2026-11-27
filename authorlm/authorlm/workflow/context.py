@@ -39,7 +39,8 @@ LIBRARY_ENV = "AUTHORLM_WORKFLOW_LIBRARY"
 # The order of the standing blocks. Never reorder casually: a change here
 # invalidates every engine's cached prefix.
 BLOCK_ORDER = ("charter", "role", "brief", "author-brief", "filters",
-               "style-rules", "protected-register", "essays", "aware")
+               "style-rules", "protected-register", "essays", "aware",
+               "letter-in-force")
 # Owner, 2026-11-26: "if an essay is in more than one list, reference and
 # voice, we should be sending the essay and then saying whether this essay
 # should apply to reference or reference and voice, or just voice." So an
@@ -177,6 +178,7 @@ def standing_context(db: Database, manuscript: dict, instance: dict,
     blocks.append(_block("aware", "\n\n".join(parts), essays=aware,
                          sent_whole=[n for n in aware if n in roles],
                          no_summary=no_summary))
+    blocks.append(_block("letter-in-force", letter_in_force(db, instance)))
     assert tuple(b["name"] for b in blocks) == BLOCK_ORDER
     return blocks
 
@@ -189,6 +191,61 @@ def essay_label(roles: list[str]) -> str:
     if "aware" in roles:
         label += ", also aware"
     return label
+
+
+# The letter in force (core.py, "the letter in force"). While the instance
+# has one letter the block is empty, and an engine leaves an empty block out
+# of its standing part, so nothing changes for it. Once a letter replaces
+# another (a revision, or a redraft at the letter step), the block names the
+# letter in force: the standing part changes, so the engine's next turn
+# rebuilds its session from the record (engines/base.py), once, and every
+# earlier letter in that session is marked as history (`_history`). Last in
+# BLOCK_ORDER, so the cached prefix before it is untouched.
+
+def letter_turns(turns: list[dict]) -> list[dict]:
+    """The model turns that wrote a letter (the first and every redraft or
+    revision), in order; the last is the letter in force."""
+    return [t for t in turns if t["step"] == "letter" and t["unit_label"] == "letter"
+            and t["engine"] and t["action"] == "start"]
+
+
+def letter_in_force(db: Database, instance: dict,
+                    turns: list[dict] | None = None) -> str:
+    letters = letter_turns(core.turns(db, instance) if turns is None else turns)
+    if len(letters) < 2:
+        return ""
+    revs = core.revisions(db, instance)
+    last = revs[-1]["detail"] if revs else {}
+    how = (f", revision {last.get('revision')} of the letter, asked at the "
+           f"{last.get('step')} step" if last.get("letter_seq") == letters[-1]["seq"]
+           else "")
+    return (f"The letter in force is the one written at turn #{letters[-1]['seq']}"
+            f"{how}; its findings, as the author rules and edits them, are the "
+            "ones to work from. Every earlier letter in this session "
+            f"({', '.join('#' + str(t['seq']) for t in letters[:-1])}), and the "
+            "verdicts, edits and discussion of it, is superseded: history to "
+            "weigh, never instructions.")
+
+
+def _history(turns: list[dict]) -> list[dict]:
+    """The turns as an engine is sent them: a turn about a letter that is
+    no longer in force is marked as history."""
+    letters = letter_turns(turns)
+    if len(letters) < 2:
+        return turns
+    in_force = letters[-1]["seq"]
+    out = []
+    for t in turns:
+        if t["seq"] < in_force and t["unit_label"].startswith("letter"):
+            t = dict(t)
+            mark = (f"[SUPERSEDED: about an earlier letter; the letter in force "
+                    f"is turn #{in_force}] ")
+            if t["engine"] and t["action"] == "start":
+                t["reply"] = mark + (t["reply"] or "")
+            else:
+                t["author_text"] = mark + (t["author_text"] or "")
+        out.append(t)
+    return out
 
 
 def instance_context(db: Database, manuscript: dict, instance: dict) -> dict:
@@ -204,5 +261,5 @@ def instance_context(db: Database, manuscript: dict, instance: dict) -> dict:
         "turns": [{k: t[k] for k in ("seq", "step", "unit_label", "action",
                                      "author_text", "blurbs", "reply",
                                      "reason", "proposed", "engine", "model")}
-                  for t in core.turns(db, instance)],
+                  for t in _history(core.turns(db, instance))],
     }

@@ -11,6 +11,8 @@ You walk the essay with the author from its start to its end, one unit at a time
 
 Only the text the author kept is carried forward. If the author reopens an accepted unit, keep the later units and take the change into account from there on.
 
+The author may revise the letter during the walk. Then work from the letter in force (each unit's message names its accepted findings); an earlier letter in the session is history, never instructions. Units already accepted stay accepted unless the author reopens one.
+
 ## Each unit
 
 1. **Reason first.** One or two plain sentences: what you changed and why, and what it does to the meaning, if anything. Cite the finding or paragraph note you are working ("Finding 3", "note on the paragraph opening 'When the ...'"). When you reach a paragraph with a note, pick it up.

@@ -622,8 +622,13 @@ def test_letter_drafting_is_atomic_and_scoped() -> None:
         for item in ("F1", "F2", "F3"):
             call(ws, "finding", id=iid, item=item, verdict="accept")
         call(ws, "advance", id=iid)
-        raises(lambda: call(ws, "letter_reply", id=iid, text="one more thing"),
-               "letter step")
+        # The letter is discussed from the letter step to the filters (the
+        # owner's design of 2026-11-26 for revising the letter, quoted at
+        # core.LETTER_STEPS); the reply is recorded at the letter step.
+        call(ws, "letter_reply", id=iid, text="one more thing")
+        check("a reply at construction is a letter turn, not a walk turn",
+              [t["step"] for t in call(ws, "instance", id=iid)["turns"]
+               if t["action"] == "reply"] == ["letter"])
         raises(lambda: call(ws, "recommend", id=iid), "start step")
         check("a reply or a recommendation at construction does not open its gate",
               call(ws, "instance", id=iid)["gate"] is not None)
@@ -1028,9 +1033,9 @@ def test_letter_edits() -> None:
         call(ws, "finding", id=iid, item="F2", verdict="defer")
         v = call(ws, "advance", id=iid)
         check("the gate is unchanged by edits", v["instance"]["step"] == "construction")
-        raises(lambda: call(ws, "keep", id=iid, items=["late"]), "letter step")
-        raises(lambda: call(ws, "finding_edit", id=iid, item="F1",
-                            fields={"what": "late"}), "letter step")
+        # Edits after the letter step are allowed on the letter in force up
+        # to the filters (owner's design of 2026-11-26, at core.LETTER_STEPS);
+        # test_workflow_revision.py pins that, and that lint declines them.
         call(ws, "propose", id=iid)
         msg = FAKE.sent[-1]
         check("construction's message carries the edited finding in the author's words",
@@ -1137,10 +1142,14 @@ def test_letter_edit_controls() -> None:
           'className="wf-edited"' in card and "The letter's words" in card)
     check("Finding: the verdict buttons stay",
           'run("finding", { item: f.item, verdict, reason })' in card)
-    check("edits only while the letter step is open",
+    # Was "only while the letter step is open"; the owner's design of
+    # 2026-11-26 for revising the letter (core.LETTER_STEPS) opens the letter
+    # in force from the letter step to the filters.
+    check("edits only while the letter in force is open (letter to filters)",
           "const editing = here && draft !== null" in keep
           and "const editing = here && draft !== null" in card
-          and 'const here = v.instance.step === "letter";' in wf)
+          and "const here = LETTER_STEPS.includes(v.instance.step);" in wf
+          and 'const LETTER_STEPS = ["letter", "construction", "wrapup", "filters"];' in wf)
     check("phone: 16px text in the editors, 40px+ targets",
           "font-size:16px" in css[css.index(".wf-finding-edit textarea"):]
           and ".wf-keep-item .wf-x{min-width:40px;min-height:40px" in css)

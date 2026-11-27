@@ -216,8 +216,8 @@ def check_catalogue(ws: str) -> None:
     check("catalogue: summaries served (none on record) without a model",
           entry["declined"] is None and "ESSAY: (none)" in text, text)
     text, entry = cat.run(reader, "earlier_instances", {"file": "one.md"})
-    check("catalogue: earlier instances degrade while the workflow lacks them",
-          entry["declined"] is None and text, text)
+    check("catalogue: earlier instances served; none yet is said in words",
+          entry["declined"] is None and "No earlier workflow instance" in text, text)
     text, entry = cat.run(reader, "concept_notes", {"name": "no-such-thing"})
     check("catalogue: an unknown concept is declined", entry["declined"], entry)
     names = [r.name for r in cat.CATALOGUE]

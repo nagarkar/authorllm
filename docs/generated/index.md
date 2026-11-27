@@ -1782,6 +1782,12 @@ The per-essay workflow's briefs as library files: `authorlm/library/workflow/`.
 
 The Workflows page (`workflow_page.dispatch`, `/api/workflow`): an essay's workflow driven from the app on a fake engine, step by step.
 
+## `tests.test_workflow_revision`
+
+`authorlm/tests/test_workflow_revision.py`
+
+Revising the letter, starting over, and the `earlier_instances` request.
+
 ## `tests.test_write_accept_idempotent`
 
 `authorlm/tests/test_write_accept_idempotent.py`

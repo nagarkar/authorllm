@@ -20,10 +20,19 @@ What the page shows for an instance, by step:
   recommendations with a reason each, accept or decline each (Q1, Q3).
 - letter: the findings with their tiers, accept / reject / defer with a
   reason; the keep list, the passes needed or not, the paragraph notes
-  (Q4, Q21d, Q21e); a reply box to discuss the letter. While the step is
-  open the author edits any finding's fields and the Keep list
-  (`finding_edit`, `keep`; core.edit_finding, core.set_keep): the model's
-  words stay on the record, and every later turn works from his.
+  (Q4, Q21d, Q21e); a reply box to discuss the letter. From the letter
+  step to the filters (core.LETTER_STEPS) the author edits any finding's
+  fields and the Keep list of the letter in force (`finding_edit`, `keep`;
+  core.edit_finding, core.set_keep): the model's words stay on the record,
+  and every later turn works from his. He may revise the letter there too
+  (`revise_letter`, with an optional note): the new letter, written
+  against the working text, becomes the letter in force; the one it
+  replaces stays on the record as superseded; the walk continues where it
+  is once the new findings are ruled, and a new finding that quotes an
+  accepted unit proposes reopening it (`reopen_proposals`).
+- start over (`restart`): the instance is closed as abandoned with one
+  sentence of reason and a new one starts with its choices and brief
+  (core.restart).
 - construction: the walk, one unit at a time (paragraph or section; Q8,
   Q19), or beat by beat with a plan step per beat (Q18). Each unit's form:
   before, the reason, after; accept / reject / redo / edit (Q8a, Q11);
@@ -74,7 +83,8 @@ METHODS = ("overview", "instance", "start", "recommend", "rec", "list",
            "act", "reopen", "beat_done", "conclude", "wrapup", "principle",
            "filters", "lint", "skip", "advance", "engine", "unit", "blurbs",
            "blurb_add", "blurb_hide", "usage", "estimate", "land", "leave",
-           "summaries", "job_dismiss", "brief", "finding_edit", "keep")
+           "summaries", "job_dismiss", "brief", "finding_edit", "keep",
+           "revise_letter", "reopen_decline", "restart")
 
 # The read-only methods: they write nothing (the page polls none of them).
 READ_ONLY = ("overview", "instance", "blurbs", "usage", "estimate")
@@ -570,9 +580,17 @@ _SECTION = re.compile(
     r"[*_]{0,2}\s*:?[*_]{0,2}\s*(.*)$", re.I)
 _FINDING = re.compile(r"^(\s*)(#{1,4}\s*)?(?:\*\*)?(finding\s+)?(\d+)[.):]\s*(.*)$", re.I)
 _FIELD = re.compile(r"^\s*[-*]?\s*\*{0,2}(where|what is wrong|why it matters|"
-                    r"direction|tier)\s*:\*{0,2}\s*(.*)$", re.I)
+                    r"direction|tier|continues)\s*:\*{0,2}\s*(.*)$", re.I)
 _FIELD_KEY = {"where": "where", "what is wrong": "what",
-              "why it matters": "why", "direction": "direction", "tier": "tier"}
+              "why it matters": "why", "direction": "direction", "tier": "tier",
+              "continues": "continues"}
+
+
+def _continues(text: str) -> str:
+    """The earlier finding a revised letter's finding carries on ("F3",
+    "Finding 3", "continues F3"), or "" (new, none, or not said)."""
+    m = re.search(r"\b(?:F|finding\s*)(\d+)\b", str(text or ""), re.I)
+    return f"F{m.group(1)}" if m else ""
 
 
 def _bullets(lines: list[str]) -> list[str]:
@@ -604,6 +622,7 @@ def parse_letter(text: str, pass_names: list[str]) -> dict:
             f = dict(f)
             f["n"] = i
             f["tier"] = _tier(str(f.get("tier", "")))
+            f["continues"] = _continues(f.get("continues", ""))
             findings.append(f)
         passes_ = {}
         for p in data.get("passes") or []:
@@ -660,6 +679,7 @@ def parse_letter(text: str, pass_names: list[str]) -> dict:
     for f in findings:
         f["text"] = "\n".join(f.pop("lines")).strip()
         f["tier"] = _tier(f.get("tier", ""))
+        f["continues"] = _continues(f.get("continues", ""))
     passes_ = {}
     for ln in parts.get("passes", []):
         for name in pass_names:
@@ -724,26 +744,67 @@ def edit_keep(db: Database, inst: dict, items: list[str],
 
 
 def _letter_edited(db: Database, inst: dict, turns: list[dict]) -> bool:
-    """Whether the author has edited a finding or the Keep list."""
-    return any(t["step"] == "letter" and t["action"] == "edit"
+    """Whether the author has edited a finding or the Keep list of the
+    letter in force."""
+    lt = _letter_turn(turns)
+    since = lt["seq"] if lt else 0
+    return any(t["step"] == "letter" and t["action"] == "edit" and t["seq"] > since
                and t["unit_label"].startswith(LETTER_LABEL + ":") for t in turns)
+
+
+def _earlier_letters(db: Database, inst: dict) -> list[dict]:
+    """Each superseded letter: its revision, the step and note that
+    replaced it, and its findings with the author's verdicts."""
+    out = []
+    for d in core.revisions(db, inst):
+        det = d["detail"] or {}
+        out.append({"revision": det.get("revision"), "step": det.get("step"),
+                    "note": det.get("note") or "", "at": d["created_at"],
+                    "seq": det.get("superseded_seq"),
+                    "findings": [core.finding_view(f) for f in core.findings_of_run(
+                        db, inst, det.get("superseded_run") or "")]})
+    return out
 
 
 def _letter_view(db: Database, inst: dict, turns: list[dict]) -> dict:
     lt = _letter_turn(turns)
     names = [p["name"] for p in passes()]
     parsed = parse_letter(lt["reply"], names) if lt else None
-    findings = [core.finding_view(f) for f in core.letter_findings(db, inst)]
+    earlier = _earlier_letters(db, inst)
+    before = {f["item"]: f for f in (earlier[-1]["findings"] if earlier else [])}
+    findings = []
+    for row in core.letter_findings(db, inst):
+        f = core.finding_view(row)
+        cont = core._body(row).get("continues") or ""
+        prev = before.get(cont) if cont else None
+        # The author's verdict on the earlier finding this one carries on,
+        # so re-ruling it is one tap (the page's "Accept again").
+        f["continues"] = ({"item": cont, "title": prev["title"],
+                           "verdict": prev["verdict"], "reason": prev["reason"]}
+                          if prev else None)
+        findings.append(f)
     keep = letter_keep(db, inst, turns)
+    since = lt["seq"] if lt else 0
     discussion = [{"seq": t["seq"], "action": t["action"],
                    "author": t["author_text"], "reply": t["reply"],
-                   "reason": t["reason"], "at": t["created_at"]}
+                   "reason": t["reason"], "at": t["created_at"],
+                   "earlier": t["seq"] < since}
                   for t in turns if t["step"] == "letter"
                   and t["unit_label"] == LETTER_LABEL
                   and not (t["engine"] and t["action"] == "start")]
+    revs = core.revisions(db, inst)
+    last = revs[-1]["detail"] if revs else {}
     return {"drafted": lt is not None,
             "redraft": lt is not None and not any(f["verdict"] for f in findings)
-            and not _letter_edited(db, inst, turns),
+            and not _letter_edited(db, inst, turns) and inst["step"] == "letter",
+            # Revise: from the letter step to the filters, once a letter is
+            # written (owner's words at core.LETTER_STEPS).
+            "revise": lt is not None and inst["step"] in core.LETTER_STEPS,
+            "open": inst["step"] in core.LETTER_STEPS,
+            "revision": len(revs), "earlier": earlier,
+            "revised_at": last.get("step") or "",
+            "note": lt["author_text"] if lt and revs else "",
+            "unruled": [f["item"] for f in findings if not f["verdict"]],
             "text": lt["reply"] if lt else "",
             "findings": findings,
             "keep": keep["keep"], "keep_letter": keep["letter"],
@@ -820,12 +881,14 @@ def _usage_for(db: Database, manuscript: dict, inst: dict) -> dict:
 def overview(db: Database, manuscript: dict) -> dict:
     order = core.reading_order(manuscript)
     rows = core.instances(db, manuscript)
+    gone = core.abandoned_ids(db, manuscript)
     by_file: dict[str, list[dict]] = {}
     for r in rows:
         by_file.setdefault(r["file"], []).append(
             {"id": r["id"], "kind": r["kind"], "number": r["number"],
              "step": r["step"], "engine": r["engine"], "model": r["model"],
-             "created": r["created_at"], "finished": r["finished_at"]})
+             "created": r["created_at"], "finished": r["finished_at"],
+             "abandoned": r["id"] in gone})
     essays = [{"file": f, "instances": by_file.pop(f, [])} for f in order]
     # A new essay's workflow names a file not yet in the reading order.
     essays += [{"file": f, "instances": v, "new": True} for f, v in by_file.items()]
@@ -858,6 +921,12 @@ def _filter_checklist(db: Database, manuscript: dict, inst: dict) -> dict:
         src = db.one("SELECT filters_confirmed FROM workflow_instances "
                      "WHERE id = ?", (inst["carried_from"],))
         had_last = bool(src and src["filters_confirmed"])
+    # A letter revised at the filters opens the selection again
+    # (core.supersede_letter): this instance's own choice is the start, the
+    # new letter's marks re-tick it, and what the author then chooses
+    # applies to the units still ahead.
+    revs = [d for d in core.revisions(db, inst) if d["detail"].get("step") == "filters"]
+    revised_here = bool(revs)
     out = []
     for p in order:
         name = p["name"]
@@ -865,6 +934,10 @@ def _filter_checklist(db: Database, manuscript: dict, inst: dict) -> dict:
         if inst["filters_confirmed"]:
             ticked = name in carried
             why = "chosen for this instance"
+        elif revised_here:
+            ticked = name in carried
+            why = ("your choice before the letter was revised" if ticked
+                   else "not in your choice before the letter was revised")
         elif had_last:
             ticked = name in carried
             why = "ticked last instance" if ticked else "not ticked last instance"
@@ -885,7 +958,7 @@ def _filter_checklist(db: Database, manuscript: dict, inst: dict) -> dict:
         out.append({"name": name, "stage": p["stage"], "ticked": ticked,
                     "why": why, "letter": mark})
     return {"passes": out, "confirmed": inst["filters_confirmed"],
-            "audiobook": audiobook}
+            "audiobook": audiobook, "revised_here": revised_here}
 
 
 def instance_view(db: Database, manuscript: dict, ref: str) -> dict:
@@ -910,8 +983,19 @@ def instance_view(db: Database, manuscript: dict, ref: str) -> dict:
         "letter": _letter_view(db, inst, turns),
     }
     out["recommendations"] = _recommendations(turns, inst)
+    gone = core.abandoned(db, inst)
+    out["abandoned"] = ({"reason": gone["reason"], "at": gone["created_at"],
+                         "step": gone["detail"].get("step"),
+                         "successor": gone["detail"].get("successor")}
+                        if gone else None)
+    src = (core.abandoned(db, {"id": inst["carried_from"]})
+           if inst.get("carried_from") else None)
+    out["restarted_from"] = (
+        {"id": inst["carried_from"], "reason": src["reason"]}
+        if src and src["detail"].get("successor") == inst["id"] else None)
     if inst["step"] in ("construction", "filters"):
         out["walk"] = _walk(db, manuscript, inst, inst["step"])
+        out["walk"]["reopen"] = reopen_proposals(db, inst, out["walk"])
     if inst["step"] == "wrapup":
         out["wrapup"] = _wrapup(turns)
     if inst["step"] in ("filters", "lint"):
@@ -1189,6 +1273,9 @@ def propose(db: Database, manuscript: dict, inst: dict, label: str | None) -> di
         raise ValueError("the wrap-up's items come from the wrap-up itself")
     if step == "filters" and not inst["filters_confirmed"]:
         raise ValueError("choose the filters first (the checklist)")
+    revised = core.revised_letter_gate(db, inst)
+    if revised:
+        raise ValueError(revised)
     walk = _walk(db, manuscript, inst, step)
     if label is None:
         label = walk["next"]
@@ -1315,6 +1402,174 @@ def draft_letter(db: Database, manuscript: dict, inst: dict) -> dict:
         if parsed["blurbs"]:
             core.add_blurbs(db, manuscript["id"], parsed["blurbs"])
     return turn
+
+
+def _findings_as_ruled(db: Database, inst: dict) -> str:
+    """The letter in force's findings, each with the author's verdict and
+    reason, and his words for any field he edited: what a revision is
+    told of the letter it replaces."""
+    lines = []
+    for row in core.letter_findings(db, inst):
+        f = core.finding_view(row)
+        verdict = f["verdict"] or "not ruled yet"
+        lines.append(f"- {f['item']}" + (f" ({f['tier']})" if f["tier"] else "")
+                     + f": {f['title'] or f['what']} — {verdict}"
+                     + (f": {f['reason']}" if f["reason"] else ""))
+        if f["edited"]:
+            lines += [f"  {core.FINDING_WORDS[k]} (the author's words): {f[k]}"
+                      for k in f["edited"] if k != "tier"]
+    return "\n".join(lines) or "(the letter had no findings)"
+
+
+def revise_message(db: Database, manuscript: dict, inst: dict, note: str) -> str:
+    """The message of a revision turn (`revise_letter`)."""
+    turns = core.turns(db, inst)
+    lt = _letter_turn(turns)
+    names = [p["name"] for p in passes()]
+    keep = letter_keep(db, inst, turns)
+    k = len(core.revisions(db, inst)) + 1
+    step = inst["step"]
+    where = ""
+    if step == "construction":
+        w = _walk(db, manuscript, inst, "construction")
+        done = [u["label"] for u in w["units"] if u["state"] in CHANGED]
+        where = (" Construction is under way: the units accepted so far "
+                 f"({', '.join(done) or 'none yet'}) stay accepted and are in "
+                 "the essay as you have it; the walk goes on from "
+                 f"{w['next'] or 'its end'} under your new letter. Where a "
+                 "finding bears on a unit already accepted, quote that text "
+                 "exactly in its Where, so the author can reopen the unit.")
+    elif step in ("wrapup", "filters"):
+        where = (" Construction is done and the instance is at the "
+                 f"{'wrap-up' if step == 'wrapup' else 'filters'}: the essay "
+                 "you have is the text as the author accepted it. Your "
+                 "findings and passes steer what is still ahead.")
+    return (f"Revise the editorial letter on this essay (revision {k}, asked "
+            f"at the {step} step). Write the whole new letter in `text`, in "
+            "the shape your brief's Output asks for (Findings, Keep, Passes, "
+            "Paragraph notes, Blurbs). It replaces the letter in force (turn "
+            f"#{lt['seq']}), which stays on the record as history.{where}\n\n"
+            "Read the essay as it now stands. Open by saying which findings of "
+            "the letter in force the text now meets. Under every finding add "
+            "a line \"- **Continues:** F<n>\" naming the finding of the letter "
+            "in force it carries on, or \"- **Continues:** new\". Weigh the "
+            "author's verdicts and the discussion: do not raise again what he "
+            "rejected unless the text has changed or you have a reason the "
+            "discussion did not meet, and then give it.\n\n"
+            f"The letter in force, as the author ruled it:\n{_findings_as_ruled(db, inst)}"
+            "\n\nIts Keep list as it stands"
+            + (" (the author's)" if keep["edited"] else "") + ":\n"
+            + ("\n".join(f"- {x}" for x in keep["keep"]) or "(nothing named)")
+            + "\n\nThe author's note on what to look at differently: "
+            + (note.strip() or "(none: read it again with fresh eyes)")
+            + f"\n\nThe passes, in their fixed order: {', '.join(names) or '(none)'}.")
+
+
+def revise_letter(db: Database, manuscript: dict, inst: dict,
+                  note: str = "") -> dict:
+    """Revise the letter (owner, 2026-11-26: "Even if I accept the findings,
+    it need not necessarily cause me to not be able to redraft"), at any of
+    `core.LETTER_STEPS` once a letter is written, with the author's
+    optional note on what to look at differently.
+
+    The new letter is written under the letter's brief and role
+    (`as_step="letter"`) against the working text as it stands (accepted
+    units applied), with the letter in force, its verdicts, edits and
+    discussion as history. It becomes the letter in force: its findings
+    start without verdicts (each says which earlier finding it continues),
+    the replaced findings move to a superseded run, and the revision is a
+    `letter-revision` decision (core.supersede_letter); the turn and all of
+    that land in one transaction, or nothing does. Accepted units stay
+    accepted; the walk continues from where it is once the new findings
+    are ruled (core.revised_letter_gate), and a finding that touches an
+    accepted unit proposes reopening it (`reopen_proposals`)."""
+    if inst["step"] not in core.LETTER_STEPS:
+        raise ValueError("the letter is revised from the letter step to the "
+                         f"filters; the instance is at {inst['step']}")
+    turns = core.turns(db, inst)
+    old = _letter_turn(turns)
+    if old is None:
+        raise ValueError("the letter is not written yet; write it first")
+    note = (note or "").strip()
+    names = [p["name"] for p in passes()]
+    message = revise_message(db, manuscript, inst, note)
+    reply, ref = core.ask(db, manuscript, inst, "start", message,
+                          engine=_engine(inst), author_text=note,
+                          context_extra=_context_extra(db, manuscript, inst),
+                          as_step="letter")
+    parsed = parse_letter(reply.get("text", ""), names)
+    with db.transaction():
+        turn = core.record_turn(db, core.letter_turn_instance(inst), "start",
+                                author_text=note, unit_label=LETTER_LABEL,
+                                reply=reply, session_ref=ref)
+        core.supersede_letter(db, inst, note=note, superseded_seq=old["seq"],
+                              letter_seq=turn["seq"],
+                              findings=len(parsed["findings"]))
+        for i, f in enumerate(parsed["findings"], start=1):
+            core.add_finding(db, inst, f"F{i}", {
+                **{k: f.get(k, "") for k in ("n", "title", "where", "what", "why",
+                                             "direction", "tier", "text",
+                                             "continues")},
+                "letter_seq": turn["seq"]})
+        if parsed["blurbs"]:
+            core.add_blurbs(db, manuscript["id"], parsed["blurbs"])
+    return turn
+
+
+_QUOTE = re.compile(r"[\"“”«]([^\"“”«»]{8,})[\"“”»]|[‘']([^‘’']{8,})[’']")
+
+
+def _quotes(text: str) -> list[str]:
+    return [" ".join((a or b).split()) for a, b in _QUOTE.findall(text or "")]
+
+
+def reopen_proposals(db: Database, inst: dict, walk: dict) -> list[dict]:
+    """After a revision, each accepted finding of the letter in force
+    whose Where quotes the text of a unit accepted (or edited) before the
+    revision: a proposal to reopen that unit (`reopen`, the existing
+    path), rather than redoing the walk. A unit worked again since the
+    revision, or one the author chose to leave (`decline_reopen`), is not
+    proposed. Construction only: the later steps do not walk the
+    findings."""
+    revs = core.revisions(db, inst)
+    if not revs or inst["step"] != "construction":
+        return []
+    since = revs[-1]["detail"].get("letter_seq") or 0
+    declined = {(d["detail"] or {}).get("label") for d in core.decisions(db, inst)
+                if d["kind"] == "reopen-declined"
+                and (d["detail"] or {}).get("letter_seq") == since}
+
+    def norm(t):
+        return " ".join((t or "").split())
+
+    out, seen = [], set()
+    for row in core.letter_findings(db, inst):
+        if row["verdict"] != "accept":
+            continue
+        f = core.finding_view(row)
+        for q in _quotes(f["where"]):
+            for u in walk["units"]:
+                if (u["state"] not in CHANGED or u["label"] in seen
+                        or u["label"] in declined or (u.get("seq") or 0) > since):
+                    continue
+                if q in norm(u.get("text")) or q in norm(u.get("before")):
+                    seen.add(u["label"])
+                    out.append({"label": u["label"], "finding": f["item"],
+                                "title": f["title"], "quote": q,
+                                "letter_seq": since})
+    return out
+
+
+def decline_reopen(db: Database, manuscript: dict, inst: dict, label: str) -> dict:
+    """The author leaves a unit as accepted though the revised letter
+    touches it; recorded, so it is not proposed again for this letter."""
+    walk = (_walk(db, manuscript, inst, "construction")
+            if inst["step"] == "construction" else {"units": []})
+    hit = next((p for p in reopen_proposals(db, inst, walk) if p["label"] == label),
+               None)
+    if hit is None:
+        raise LookupError(f"no reopen proposed for '{label}'")
+    return core._record_decision(db, inst, "reopen-declined", detail=hit)
 
 
 def accept_letter(db: Database, inst: dict) -> dict:
@@ -1522,6 +1777,9 @@ def answer_rec(db: Database, manuscript: dict, inst: dict, p: dict) -> dict:
 def wrapup(db: Database, manuscript: dict, inst: dict) -> dict:
     if inst["step"] != "wrapup":
         raise ValueError(f"the instance is at {inst['step']}, not wrapup")
+    revised = core.revised_letter_gate(db, inst)
+    if revised:
+        raise ValueError(revised)
     return _send(db, manuscript, inst, "start",
                  "The walk has reached the end. Give the wrap-up (your brief's "
                  "Wrap-up): put in `text` only a JSON object: "
@@ -1557,7 +1815,8 @@ def _blurb_list(p: dict) -> list[str]:
 # a bracket, in `act`). The page runs them as background jobs
 # (workflow/jobs.py); `summaries` (bring the book's summaries up to date
 # ahead of a turn) runs the same way.
-MODEL_TURNS = ("recommend", "letter", "letter_reply", "propose", "reopen", "wrapup")
+MODEL_TURNS = ("recommend", "letter", "letter_reply", "propose", "reopen", "wrapup",
+               "revise_letter")
 BACKGROUND = MODEL_TURNS + ("summaries",)
 
 
@@ -1645,6 +1904,11 @@ def _apply(db: Database, manuscript: dict, inst: dict, method: str,
     instance view, or None."""
     if method == "summaries":
         return refresh_summaries(db, manuscript, inst)
+    if method == "restart":
+        brief = p.get("brief")
+        new = core.restart(db, manuscript, inst, str(p.get("reason") or ""),
+                           brief=None if brief is None else str(brief))
+        return {"id": new["id"], "abandoned": inst["id"], "carry": new["carry"]}
     if method == "recommend":
         recommend(db, manuscript, inst)
     elif method == "rec":
@@ -1657,13 +1921,25 @@ def _apply(db: Database, manuscript: dict, inst: dict, method: str,
     elif method == "letter":
         draft_letter(db, manuscript, inst)
     elif method == "letter_reply":
-        if inst["step"] != "letter":
-            raise ValueError(f"the letter is discussed at the letter step; "
-                             f"the instance is at {inst['step']}")
+        if inst["step"] not in core.LETTER_STEPS:
+            raise ValueError("the letter is discussed from the letter step to "
+                             f"the filters; the instance is at {inst['step']}")
         text = str(p.get("text") or "").strip()
         if not text:
             raise ValueError("say something to discuss the letter")
-        _send(db, manuscript, inst, "reply", text, unit_label=LETTER_LABEL)
+        # Under the letter's brief, and recorded at the letter step, at
+        # whatever step the instance is (core.letter_turn_instance).
+        reply, ref = core.ask(db, manuscript, inst, "reply", text,
+                              engine=_engine(inst),
+                              context_extra=_context_extra(db, manuscript, inst),
+                              as_step="letter")
+        core.record_turn(db, core.letter_turn_instance(inst), "reply",
+                         author_text=text, unit_label=LETTER_LABEL,
+                         reply=reply, session_ref=ref)
+    elif method == "revise_letter":
+        revise_letter(db, manuscript, inst, str(p.get("note") or ""))
+    elif method == "reopen_decline":
+        decline_reopen(db, manuscript, inst, str(p.get("label") or ""))
     elif method == "finding":
         core.rule_finding(db, inst, str(p.get("item") or ""),
                           str(p.get("verdict") or ""),

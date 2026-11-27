@@ -924,10 +924,10 @@ are not yet sent from the CLI.
   already running keeps the brief it started with. Each change is a
   `brief-change` decision holding the old and new text. A done instance
   keeps its brief. Never change the brief without the author's words.
-- The letter is the author's to edit before construction (owner,
-  2026-11-26: "if I can edit the recommendation as well, that would be
-  ideal. So I can tweak it in minor ways"). While the instance is at the
-  letter step, `workflow finding <i> F2 --set what=TEXT [--set
+- The letter is the author's to edit (owner, 2026-11-26: "if I can edit
+  the recommendation as well, that would be ideal. So I can tweak it in
+  minor ways"). From the letter step to the filters, on the letter in
+  force, `workflow finding <i> F2 --set what=TEXT [--set
   direction=TEXT ...]` changes a finding's title, where, what, why,
   direction or tier, before or after its verdict; `workflow keep <i>
   --file PATH` (one item a line, `-` for stdin) or `--item TEXT` (repeated)
@@ -938,12 +938,46 @@ are not yet sent from the CLI.
   row with from and to); every later turn works from the author's version
   (an edit is also a session turn the engine is sent, and construction's
   unit messages spell out edited findings and an edited Keep list). An
-  edited letter is not redrafted. Edit only on the author's words.
+  edit after construction began steers the units still ahead; units
+  already ruled keep the words they were ruled on. Edit only on the
+  author's words.
+- Revising the letter (owner, 2026-11-26: "Even if I accept the findings,
+  it need not necessarily cause me to not be able to redraft"): when the
+  author wants the rest of construction or the filters to work from a
+  changed view of the essay, run `workflow revise-letter <i> [--note
+  "what to look at differently"]` (`--dry-run` first; one model turn,
+  billed on openai-api), or he uses "Revise the letter" on the Workflows
+  page at the letter, construction, wrap-up or filters step. The new
+  letter is written on the essay as it now stands (accepted units in it)
+  and becomes the letter in force; the earlier one stays on the record as
+  superseded (its findings and verdicts kept; a `letter-revision`
+  decision). New findings start unruled, each showing the author's
+  verdict on the earlier finding it continues ("Accept again" on the
+  page); the walk waits until they are ruled, then goes on from where it
+  was; accepted units stay accepted. A new finding whose Where quotes an
+  accepted unit proposes reopening that unit (Reopen, or Leave as
+  accepted). At the filters, the new letter's passes re-tick the
+  checklist, and the choice then made applies only to the units still
+  ahead. The engine's session is rebuilt once when the letter in force
+  changes; earlier letters reach the model only marked as history.
+- Starting over (owner, 2026-11-26: "abandoning the workflow instance...
+  copying the selections of voice and reference and everything that's
+  already there and starting from scratch, but then changing the brief as
+  you want it and regenerating the letter"): `workflow restart <i>
+  --reason "<one sentence>" [--brief TEXT | --brief-file PATH]`
+  (`--dry-run` first), or "Start over from here" on the page. The
+  instance is closed as abandoned (kept, not deleted; it never counts as
+  finished; nothing more lands) and a new instance of the same essay and
+  kind starts with its lists, engine, units, filters and brief, the brief
+  editable before the first turn. The new letter reads the abandoned one
+  through the `earlier_instances` request. Never start over without the
+  author's words and reason.
 - Read-only: `list`, `status`, `show`, `turns`, `usage [--essay|--month]`,
   `filters <i>` without `--set`, `brief <i>` without `--set`/`--file` (or
   with `--dry-run`), `finding <i> <item>` without `--set` (or with
   `--dry-run`), `keep <i>` without `--file`/`--item` (or with
-  `--dry-run`), `blurbs` without a change, `land <i> --dry-run`.
+  `--dry-run`), `revise-letter <i> --dry-run`, `restart <i> --dry-run`,
+  `blurbs` without a change, `land <i> --dry-run`.
 - Any essay in the reading order can have a workflow; no file is treated
   specially (owner, 2026-11-26: "there should be no special casing").
   An essay whose toc entry says `register = "protected"` gets the
