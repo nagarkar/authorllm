@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { Transport } from "./transport";
 import { recall, remember } from "./remember";
 
@@ -38,6 +39,11 @@ import { recall, remember } from "./remember";
 // - the reason and brief of an unsent "Start over from here" →
 //   localStorage per manuscript and instance (`authorlm.wf.restartDraft.
 //   <ms>.<instance>`, JSON), cleared when the new instance starts;
+// - an unsent message to the engine about the letter or about one unit →
+//   localStorage per manuscript, instance and unit (`authorlm.wf.discuss.
+//   <ms>.<instance>.<label>`, label "letter" for the letter): half-written
+//   text; it is cleared only once the server has taken the message, which
+//   then shows in the thread from the running turn until the reply lands;
 // - whether hidden blurbs are shown → localStorage per manuscript.
 
 interface Usage { turns?: number; input?: number; cached?: number; output?: number; dollars?: number; est_subscription?: number; }
@@ -54,7 +60,9 @@ interface Instance {
   carried_from: string | null;
 }
 interface Form { seq: number; reason: string; proposed: string; text: string; engine: string; model: string; }
-interface Unit { label: string; kind: string; n?: number; beat?: number; before: string; state: string; text?: string; form?: Form; turns?: number; }
+// One exchange of a discussion: the author's words and the engine's reply.
+interface Said { seq: number; author: string; reply: string; at: string; earlier?: boolean; }
+interface Unit { label: string; kind: string; n?: number; beat?: number; before: string; state: string; text?: string; form?: Form; turns?: number; thread?: Said[]; }
 interface Walk {
   mode: string; unit: string; asked_unit: string; units: Unit[]; next: string | null; end: boolean; fallback: boolean;
   beat?: number; beat_open?: boolean; beats_before?: number; concluded?: boolean;
@@ -298,21 +306,32 @@ export function WorkflowVoicePicker({ manuscript }: { manuscript: string }) {
   );
 }
 
-function ListenBar({ before, reason, after, manuscript }: { before: string; reason: string; after: string; manuscript: string }) {
+// The listen controls follow the unit's kind. A text unit (a paragraph, a
+// section, a filter unit, a wrap-up item) offers before, reason and after
+// in their combinations, showing only those it has text for; a beat's plan
+// is not essay prose and has no before, so it offers one quiet Listen that
+// reads the plan (owner, 2026-11-27: "I get these weird controls in the
+// beat one ... like reason and before and after ... it doesn't make sense
+// when we're discussing a beat").
+const TEXT_PARTS: [string, string[]][] = [
+  ["Reason + after", ["reason", "after"]],
+  ["Before + reason + after", ["before", "reason", "after"]],
+  ["Before", ["before"]], ["Reason", ["reason"]], ["After", ["after"]],
+];
+const PLAN_PARTS: [string, string[]][] = [["Listen", ["after"]]];
+
+function ListenBar({ before, reason, after, manuscript, plan = false }: { before: string; reason: string; after: string; manuscript: string; plan?: boolean }) {
   const [busy, setBusy] = useState("");
   const [url, setUrl] = useState("");
   const [error, setError] = useState("");
   const player = useRef<HTMLAudioElement>(null);
   useEffect(() => { if (url) void player.current?.play().catch(() => {}); return () => { if (url) URL.revokeObjectURL(url); }; }, [url]);
   useEffect(() => () => { try { speechSynthesis.cancel(); } catch { /* none */ } }, []);
-  const parts: [string, string[]][] = [
-    ["Reason + after", ["reason", "after"]],
-    ["Before + reason + after", ["before", "reason", "after"]],
-    ["Before", ["before"]], ["Reason", ["reason"]], ["After", ["after"]],
-  ];
   const words: Record<string, [string, string]> = {
-    before: ["Before.", before], reason: ["The reason.", reason], after: ["After.", after],
+    before: ["Before.", before], reason: ["The reason.", reason], after: [plan ? "The plan." : "After.", after],
   };
+  // Only the parts with text to read: a part with nothing in it is not shown.
+  const parts = (plan ? PLAN_PARTS : TEXT_PARTS).filter(([, which]) => which.some(w => words[w][1].trim()));
   const play = async (label: string, which: string[]) => {
     const segs = which.filter(w => words[w][1].trim());
     if (!segs.length) return;
@@ -340,7 +359,7 @@ function ListenBar({ before, reason, after, manuscript }: { before: string; reas
   return (
     <div className="wf-listen">
       {parts.map(([label, which]) => (
-        <button key={label} className="pill" disabled={!!busy || !which.some(w => words[w][1].trim())} onClick={() => void play(label, which)}>
+        <button key={label} className="pill" disabled={!!busy} onClick={() => void play(label, which)}>
           {busy === label ? "Preparing…" : `▶ ${label}`}</button>
       ))}
       <button className="pill" onClick={() => { try { speechSynthesis.cancel(); } catch { /* none */ } player.current?.pause(); setUrl(""); }}>■ Stop</button>
@@ -369,12 +388,74 @@ function CostEstimate({ transport, engine, model, essay, id }: { transport: Tran
     : `No estimate: ${e.why}.`}</div>;
 }
 
+// ------------------------------------------------------------ discussion
+
+// Seconds since a running job began, ticking between polls.
+function useElapsed(job: Job | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  const [seen, setSeen] = useState(() => Date.now());
+  useEffect(() => { setSeen(Date.now()); setNow(Date.now()); }, [job?.id, job?.elapsed]);
+  useEffect(() => {
+    if (job?.state !== "running") return;
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [job?.state, job?.id]);
+  if (!job) return 0;
+  return job.state === "running" ? job.elapsed + Math.max(0, (now - seen) / 1000) : job.elapsed;
+}
+
+// A conversation with the engine, under the letter or under one unit
+// (owner, 2026-11-27: "I expected that when I hit send, my message would
+// remain there and I would get a response from the engine"). The message
+// shows at once, from the running turn on the server (`job.params.text`),
+// with "thinking…" and its time, so it survives a reload; the reply takes
+// its place in the thread when the turn ends. The unsent draft is kept
+// until the server has taken it (see the header).
+function Discussion({ items, job, mine, send, run, dismiss, busy, draftKey, placeholder, children }: {
+  items: Said[]; job: Job | null; mine: (j: Job) => boolean; send: (text: string) => Promise<boolean>;
+  run: (m: string, p: Record<string, unknown>) => Promise<boolean>; dismiss: () => void;
+  busy: boolean; draftKey: string; placeholder: string; children?: ReactNode;
+}) {
+  const [draft, setDraftState] = useState(() => recall(draftKey));
+  const setDraft = (d: string) => { remember(draftKey, d); setDraftState(d); };
+  useEffect(() => { setDraftState(recall(draftKey)); }, [draftKey]);
+  const [sending, setSending] = useState(false);
+  const ours = job && mine(job) ? job : null;
+  const elapsed = useElapsed(ours);
+  const said = String(ours?.params?.text ?? "");
+  return <div className="wf-discuss">
+    {items.map(d => <div key={d.seq} className={`wf-turn${d.earlier ? " muted" : ""}`}>
+      {d.earlier && <span className="muted">(about an earlier letter) </span>}
+      {d.author && <p><b>You:</b> {d.author}</p>}{d.reply && <p className="wf-said"><b>Editor:</b> {d.reply}</p>}</div>)}
+    {ours && <div className="wf-turn wf-pending">
+      <p><b>You:</b> {said}</p>
+      {ours.state === "running"
+        ? <p className="muted wf-thinking"><b>Editor:</b> thinking… {clock(elapsed)}{ours.progress?.requests ? ` · ${ours.progress.requests} read request${ours.progress.requests === 1 ? "" : "s"}` : ""}</p>
+        : <div><p className="bad">No reply: {ours.error}</p>
+          <div className="devedit-actions">
+            <button className="pill on" disabled={busy} onClick={() => void run(ours.method, ours.params)}>Send again</button>
+            <button className="pill" disabled={busy} onClick={dismiss}>Dismiss</button>
+          </div></div>}
+    </div>}
+    {children}
+    <textarea className="devedit-edit wf-discuss-box" rows={rowsFor(draft || "", 2)} value={draft || ""} placeholder={placeholder}
+      aria-label={placeholder} onChange={e => setDraft(e.target.value)} />
+    <div className="devedit-actions">
+      <button className="pill on" disabled={busy || sending || !(draft || "").trim()} onClick={async () => {
+        setSending(true);
+        try { if (await send((draft || "").trim())) setDraft(""); } finally { setSending(false); }
+      }}>{sending ? "Sending…" : "Send"}</button>
+      {busy && !sending && (draft || "").trim() && <span className="muted">A turn is running; send when it ends.</span>}
+    </div>
+  </div>;
+}
+
 // ------------------------------------------------------------- unit form
 
-function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHidden, setShowHidden }: {
+function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHidden, setShowHidden, job, inst }: {
   unit: Unit; newEssay: boolean; blurbs: Blurb[]; tags: string[]; manuscript: string; busy: boolean;
   run: (method: string, params: Record<string, unknown>) => Promise<boolean>;
-  showHidden: boolean; setShowHidden: (v: boolean) => void;
+  showHidden: boolean; setShowHidden: (v: boolean) => void; job: Job | null; inst: string;
 }) {
   const [mode, setMode] = useState<"" | "redo" | "edit">("");
   const [ticked, setTicked] = useState<string[]>([]);
@@ -388,6 +469,12 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
   const noOriginal = !unit.before.trim();
   const bracket = /\[[^\]]*\]/.test(text);
   const visible = blurbs.filter(b => showHidden || !b.hidden);
+  // The discussion since the form the author sees: what "Redo with this
+  // discussion" hands the engine (workflow_page.act, with_discussion).
+  const thread = unit.thread || [];
+  const fresh = thread.filter(d => d.seq > (form?.seq || 0));
+  const canRedo = ["pending", "passed", "open"].includes(unit.state);
+  const [withTalk, setWithTalk] = useState(true);
   const title = unit.kind === "plan" ? `Beat ${unit.beat}: plan` : unit.beat ? `Beat ${unit.beat}: ${unit.kind === "section" ? "section" : `paragraph ${unit.n}`}`
     : unit.label.startsWith("w:") ? `${unit.kind} ${unit.label.split(":")[2]}` : `${unit.kind} ${unit.n ?? unit.label}`;
   return (
@@ -400,7 +487,7 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
         {form.text && <div className="muted wf-said">{form.text}</div>}
         {noOriginal ? <p className="devedit-diff"><ins className="add">{form.proposed}</ins></p>
           : <Diff before={unit.before} after={form.proposed} />}
-        <ListenBar before={unit.before} reason={form.reason} after={form.proposed} manuscript={manuscript} />
+        <ListenBar before={unit.before} reason={form.reason} after={form.proposed} manuscript={manuscript} plan={unit.kind === "plan"} />
       </>}
       {!pending && <>
         {resolved && unit.state !== "passed" && unit.before && unit.text !== unit.before ? <Diff before={unit.before} after={unit.text || ""} />
@@ -426,9 +513,10 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
           <label className="muted"><input type="checkbox" checked={showHidden} onChange={e => setShowHidden(e.target.checked)} /> show hidden</label>
         </div>
         <textarea className="devedit-edit" rows={3} value={free} placeholder="Or say it in your words (the engine may turn it into a new blurb)" onChange={e => setFree(e.target.value)} />
+        {fresh.length > 0 && <label className="muted"><input type="checkbox" checked={withTalk} onChange={e => setWithTalk(e.target.checked)} /> with the discussion below ({fresh.length} exchange{fresh.length === 1 ? "" : "s"})</label>}
         <div className="devedit-actions">
-          <button className="pill on" disabled={busy || (!ticked.length && !free.trim())} onClick={async () => {
-            if (await run("act", { label: unit.label, action: "redo", blurbs: ticked, free })) { setMode(""); setTicked([]); setFree(""); }
+          <button className="pill on" disabled={busy || (!ticked.length && !free.trim() && !(withTalk && fresh.length))} onClick={async () => {
+            if (await run("act", { label: unit.label, action: "redo", blurbs: ticked, free, with_discussion: withTalk && fresh.length > 0 })) { setMode(""); setTicked([]); setFree(""); }
           }}>{busy ? "Asking…" : "Redo"}</button>
           <button className="pill" onClick={() => setMode("")}>Cancel</button>
         </div>
@@ -455,6 +543,21 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
         </>}
         {resolved && unit.state !== "passed" && <button className="pill" disabled={busy} onClick={() => void run("reopen", { label: unit.label })}>Reopen</button>}
       </div>}
+      {/* Talk with the engine about this unit (owner, 2026-11-27: "there is
+          no way to interact with the engine as I did here in the chat"):
+          the proposal stays as it is until Redo with this discussion. */}
+      <Discussion items={thread} job={job} busy={busy} run={run}
+        mine={j => j.method === "discuss" && j.params?.label === unit.label}
+        send={text => run("discuss", { label: unit.label, text })}
+        dismiss={() => job && void run("job_dismiss", { job: job.id })}
+        draftKey={`authorlm.wf.discuss.${manuscript}.${inst}.${unit.label}`}
+        placeholder={unit.kind === "plan" ? "Discuss this plan with the engine…" : "Discuss this with the engine…"}>
+        {!mode && canRedo && fresh.length > 0 && <div className="devedit-actions">
+          <button className="pill" disabled={busy} onClick={() => void run("act", { label: unit.label, action: "redo", blurbs: [], free: "", with_discussion: true })}>
+            Redo with this discussion</button>
+          <span className="muted">The proposal changes only when you redo.</span>
+        </div>}
+      </Discussion>
     </div>
   );
 }
@@ -730,7 +833,6 @@ function LetterStep({ v, run, busy, asking, manuscript }: {
 }) {
   const L = v.letter;
   const [reasons, setReasons] = useState<Record<string, string>>({});
-  const [reply, setReply] = useState("");
   // The letter in force is ruled, edited and discussed from the letter step
   // to the filters (LETTER_STEPS); it is first written at the letter step.
   const here = LETTER_STEPS.includes(v.instance.step);
@@ -777,11 +879,14 @@ function LetterStep({ v, run, busy, asking, manuscript }: {
     </details>}
     {(L.drafted || L.discussion.length > 0) && <div className="card">
       <div className="card-head"><span>Discussion</span></div>
-      {L.discussion.map(d => <div key={d.seq} className={`wf-turn${d.earlier ? " muted" : ""}`}>
-        {d.earlier && <span className="muted">(about an earlier letter) </span>}
-        {d.author && <p><b>You:</b> {d.author}</p>}{d.reply && <p><b>Editor:</b> {d.reply}</p>}</div>)}
-      {here && <><textarea className="devedit-edit" rows={3} value={reply} placeholder="Debate a finding, ask a question…" onChange={e => setReply(e.target.value)} />
-        <button className="pill on" disabled={busy || !reply.trim()} onClick={async () => { if (await run("letter_reply", { text: reply })) setReply(""); }}>{busy ? "…" : "Send"}</button></>}
+      {here ? <Discussion items={L.discussion} job={v.job} busy={busy} run={run}
+        mine={j => j.method === "letter_reply"}
+        send={text => run("letter_reply", { text })}
+        dismiss={() => v.job && void run("job_dismiss", { job: v.job.id })}
+        draftKey={`authorlm.wf.discuss.${manuscript}.${v.instance.id}.letter`}
+        placeholder="Debate a finding, ask a question…" />
+        : L.discussion.map(d => <div key={d.seq} className="wf-turn">
+          {d.author && <p><b>You:</b> {d.author}</p>}{d.reply && <p className="wf-said"><b>Editor:</b> {d.reply}</p>}</div>)}
     </div>}
   </>;
 }
@@ -839,7 +944,7 @@ function WalkStep({ v, run, busy, manuscript, showHidden, setShowHidden }: {
     {inst.step === "filters" && (v.unplaced || []).length > 0 && <div className="card muted">
       Accepted at the wrap-up but not found in the essay, so not placed: {(v.unplaced || []).map(u => `${u.label} (“${u.text}”)`).join("; ")}.</div>}
     {units.map(u => <UnitForm key={u.label} unit={u} newEssay={newEssay} blurbs={v.blurbs} tags={v.supported_tags}
-      manuscript={manuscript} busy={busy} run={run} showHidden={showHidden} setShowHidden={setShowHidden} />)}
+      manuscript={manuscript} busy={busy} run={run} showHidden={showHidden} setShowHidden={setShowHidden} job={v.job} inst={inst.id} />)}
     {(w.end || (w.next && !units.some(u => u.state === "pending")) || (w.mode === "beats" && !w.concluded)) && <div className="card devedit-actions">
       {w.next && !units.some(u => u.state === "pending") &&
         <button className="pill on" disabled={busy} onClick={() => void run("propose", {})}>{busy ? "Asking…" : `Work ${w.next}`}</button>}
@@ -864,7 +969,7 @@ function WrapupStep({ v, run, busy, manuscript, showHidden, setShowHidden }: {
       <button className="pill on" disabled={busy} onClick={() => void run("wrapup", {})}>{busy ? "Asking…" : "Show the wrap-up"}</button></div>}
     {w.text && <div className="card"><pre className="wf-pre">{w.text}</pre></div>}
     {w.items.map(u => <UnitForm key={u.label} unit={u} newEssay={false} blurbs={v.blurbs} tags={v.supported_tags}
-      manuscript={manuscript} busy={busy} run={run} showHidden={showHidden} setShowHidden={setShowHidden} />)}
+      manuscript={manuscript} busy={busy} run={run} showHidden={showHidden} setShowHidden={setShowHidden} job={v.job} inst={v.instance.id} />)}
     {w.principles.length > 0 && <div className="card">
       <div className="card-head"><span>Principles stated during the walk</span></div>
       <p className="muted">Tick one to make it a candidate style rule (a rule only if accepted later).</p>
@@ -934,7 +1039,7 @@ function RestartForm({ v, transport, manuscript, onStarted, busy }: {
 
 const JOB_WORDS: Record<string, string> = {
   recommend: "Recommending", letter: "Writing the letter", letter_reply: "Answering",
-  propose: "Proposing", act: "Redoing", reopen: "Reopening", wrapup: "Writing the wrap-up",
+  propose: "Proposing", act: "Redoing", reopen: "Reopening", wrapup: "Writing the wrap-up", discuss: "Answering",
   summaries: "Bringing summaries up to date", revise_letter: "Revising the letter",
 };
 const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;

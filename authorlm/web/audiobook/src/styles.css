@@ -459,6 +459,11 @@ header .popover select{width:100%;max-width:none;flex:none;background:var(--grou
 .wf-check{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;padding:4px 0}
 .wf-pre{white-space:pre-wrap;font:inherit;font-size:14px}
 .wf-turn{border-top:1px solid var(--line);padding:4px 0}
+/* Talking with the engine under the letter or a unit (Workflows.tsx, Discussion). */
+.wf-discuss{border-top:1px solid var(--line);margin-top:8px;padding-top:4px}
+.wf-discuss .wf-turn p{white-space:pre-wrap;overflow-wrap:anywhere}
+.wf-discuss .wf-pending{border-left:3px solid var(--line);padding-left:8px}
+.wf-discuss .devedit-actions .pill{min-height:44px;padding:8px 18px}
 .wf-settings summary{cursor:pointer;color:var(--muted);font-size:13px;margin:6px 0}
 .wf-settings .devedit-actions{margin:6px 0}
 /* How construction will walk (WalkChoice): beside the On-to button, a full-width drop-down whose long plain labels wrap in the picker. */

@@ -1,6 +1,6 @@
 """Driving a workflow instance's walks from the command line: `authorlm
 workflow walk | propose | job | unit | reopen | beat-done | conclude |
-wrapup | principle`.
+wrapup | principle | discuss`.
 
 The construction walk, the wrap-up and the filter walk are worked one unit
 at a time through a form (original, the engine's reason, proposed text;
@@ -26,6 +26,12 @@ command; the verb returns once the job is on the record, with its id.
 
 Texts are printed whole and unchanged (the owner reads the proposal
 itself, not a clip of it), between `--- … ---` marker lines.
+
+`discuss` talks with the engine about one unit (or, with the label
+`letter`, about the letter), as the page's reply box under the unit does
+(`discuss`, `letter_reply`): the reply is printed verbatim, the unit's
+proposal does not change, and `unit <label> --redo --with-discussion`
+hands the thread to the redo. `walk --label` shows a unit's thread.
 """
 
 from __future__ import annotations
@@ -126,6 +132,10 @@ def _unit_lines(u: dict) -> list[str]:
         lines += _block(f"kept ({u['label']}, {u['state']})", u.get("text", ""))
     if form.get("text") and not form.get("proposed"):
         lines += _block(f"the engine's note ({u['label']})", form["text"])
+    for d in u.get("thread") or []:
+        lines.append(f"discussion #{d['seq']}:")
+        lines += _block(f"the author ({u['label']})", d["author"])
+        lines += _block(f"the engine ({u['label']})", d["reply"])
     return lines
 
 
@@ -359,7 +369,8 @@ def run_turn(t: Target, method: str, params: dict, wait: bool) -> tuple[dict | N
 # ------------------------------------------------------------- the verbs
 
 VERBS = ("walk", "propose", "job", "unit", "reopen", "beat-done", "conclude",
-         "wrapup", "principle")
+         "wrapup", "principle", "discuss")
+LETTER = "letter"
 
 
 def _emit(args, data: dict, lines: list[str]) -> None:
@@ -439,12 +450,18 @@ def _preview(db, manuscript: dict, inst: dict, method: str,
             if state in page.RESOLVED and state != "passed":
                 raise ValueError(f"{label} is {state}; reopen it first")
             if action == "redo":
-                if not params.get("blurbs") and not params.get("free", "").strip():
+                talk = (page._since_form(db, inst, step, label)
+                        if params.get("with_discussion") else [])
+                if params.get("with_discussion") and not talk:
+                    raise ValueError(f"{label} has no discussion since its "
+                                     "last proposal to redo with")
+                if not params.get("blurbs") and not params.get("free", "").strip() \
+                        and not talk:
                     raise ValueError("a redo takes a blurb or a few words of "
                                      "what is wrong (--blurb, --note)")
                 lines.append(f"would ask for a redo of {label}: "
                              + page._redo_message(label, params.get("blurbs") or [],
-                                                  params.get("free", "")))
+                                                  params.get("free", ""), talk))
             else:
                 lines.append(f"would record the author's edit of {label}"
                              + (" and ask the engine to work in its [brackets]"
@@ -473,6 +490,19 @@ def _preview(db, manuscript: dict, inst: dict, method: str,
             raise LookupError(f"no reopen proposed for '{label}'")
         lines.append(f"would leave {label} as accepted: the revised letter "
                      "does not propose reopening it again")
+    elif method == "discuss":
+        step = page._step_for(inst, label)
+        page._check_label_step(inst, step)
+        page._unit(db, manuscript, inst, step, label)
+        lines.append(f"would ask the engine about {label} (its proposal "
+                     "stays as it is):")
+        lines += _block("the author", params.get("text", ""))
+    elif method == "letter_reply":
+        if inst["step"] not in core.LETTER_STEPS:
+            raise ValueError("the letter is discussed from the letter step to "
+                             f"the filters; the instance is at {inst['step']}")
+        lines.append("would ask the engine about the letter:")
+        lines += _block("the author", params.get("text", ""))
     elif method == "job_dismiss":
         lines.append(f"would dismiss the failed job {params.get('job')}")
     else:  # a retry: the failed job's own method
@@ -492,13 +522,18 @@ def _unit_params(args) -> dict:
     label = args.label
     if (args.blurb or args.note) and not args.redo:
         raise ValueError("--blurb and --note go with --redo")
+    if args.with_discussion and not args.redo:
+        raise ValueError("--with-discussion goes with --redo")
     if args.accept:
         return {"label": label, "action": "accept"}
     if args.reject:
         return {"label": label, "action": "reject"}
     if args.redo:
-        return {"label": label, "action": "redo", "blurbs": list(args.blurb or []),
-                "free": args.note or ""}
+        out = {"label": label, "action": "redo", "blurbs": list(args.blurb or []),
+               "free": args.note or ""}
+        if args.with_discussion:
+            out["with_discussion"] = True
+        return out
     text = args.edit if args.edit is not None else _read_text(args.edit_file)
     return {"label": label, "action": "edit", "text": text}
 
@@ -549,7 +584,13 @@ def run_verb(db, manuscript: dict, args) -> None:
             "wrapup": lambda: ("wrapup", {}),
             "principle": lambda: ("principle", {"words": args.words,
                                                 "scope": args.scope or ""}),
+            "discuss": lambda: (("letter_reply", {"text": args.text})
+                                if args.label == LETTER else
+                                ("discuss", {"label": args.label,
+                                             "text": args.text})),
         }[verb]()
+        if verb == "discuss" and not (args.text or "").strip():
+            raise ValueError("--text is the author's message")
     if args.dry_run:
         lines, info = _preview(db, manuscript, inst, method, params)
         if verb == "job" and args.retry:
@@ -559,7 +600,44 @@ def run_verb(db, manuscript: dict, args) -> None:
               [f"{inst['id']}  {inst['file']}  step: {inst['step']}"] + lines)
         return
     job, _out = run_turn(t, method, params, wait=getattr(args, "wait", False))
+    if verb == "discuss":
+        _after_discuss(args, t, job)
+        return
     _after(args, t, job)
+
+
+def _after_discuss(args, t: Target, job: dict | None) -> None:
+    """The engine's reply, verbatim, once the turn has ended; else the job
+    to wait for. A failed turn exits 1 naming Retry."""
+    view = t.view()
+    iid, label = t.iid, args.label
+    if label == LETTER:
+        thread = [{"seq": d["seq"], "author": d["author"], "reply": d["reply"]}
+                  for d in view["letter"]["discussion"]]
+    else:
+        unit = _focus(view, label)
+        thread = (unit or {}).get("thread") or []
+    last = thread[-1] if thread else None
+    data = {"instance": iid, "label": label, "job": job,
+            "reply": last if job and job["state"] == "done" else None,
+            "next": next_hint(view)}
+    if job and job["state"] == "running":
+        lines = [f"{iid}  {label}: started {job['method']} as job {job['id']}; "
+                 f"it runs on after this command (authorlm workflow job {iid} "
+                 f"--wait, then authorlm workflow walk {iid} --label {label})"]
+    elif job and job["state"] == "done" and last:
+        lines = [f"{iid}  {label}: the engine's reply (#{last['seq']}); the "
+                 "proposal is unchanged"]
+        lines += _block("the engine", last["reply"])
+        if label != LETTER:
+            lines.append(f"  redo with it: authorlm workflow unit {iid} {label} "
+                         "--redo --with-discussion")
+    else:
+        lines = _job_lines(job, iid) or [f"{iid}  {label}: no turn ran"]
+    _emit(args, data, lines)
+    if job is not None and job["state"] == "failed":
+        sys.exit(f"error: the {job['method']} turn failed: {job['error']}. "
+                 f"authorlm workflow job {iid} --retry")
 
 
 def _after(args, t: Target, job: dict | None) -> None:
@@ -650,6 +728,9 @@ def add_leaves(leaf, instance) -> None:
                         "(repeat for several)")
     q.add_argument("--note", metavar="TEXT",
                    help="with --redo: the author's own words to the engine")
+    q.add_argument("--with-discussion", action="store_true",
+                   help="with --redo: hand the engine the unit's discussion "
+                        "since its last proposal (`discuss`)")
     wait(q)
     dry(q)
     q = leaf("reopen", "go back to a ruled unit: a landed one is first taken "
@@ -690,6 +771,23 @@ def add_leaves(leaf, instance) -> None:
     instance(q)
     q.add_argument("--words", required=True, help="the author's words")
     q.add_argument("--scope", help="this paragraph | this essay | beyond")
+    dry(q)
+    q = leaf("discuss", "talk with the engine about one unit (a beat's plan, "
+                        "a paragraph or section, a wrap-up item, a filter "
+                        "unit) or, with the label `letter`, about the letter: "
+                        "the author's message goes to the engine and its "
+                        "reply is printed verbatim. The proposal does not "
+                        "change; `unit <label> --redo --with-discussion` "
+                        "hands the thread to the redo. Recorded on the "
+                        "instance, so every later turn sees it." + billed,
+             "authorlm workflow discuss wi-123 b1:plan --text 'why does the "
+             "objection come second?' --wait")
+    instance(q)
+    q.add_argument("label", help="the unit (b1:plan, p3, s2, w:terms:1), or "
+                                 "`letter`")
+    q.add_argument("--text", required=True, help="the author's message, "
+                                                 "in his words")
+    wait(q)
     dry(q)
 
 

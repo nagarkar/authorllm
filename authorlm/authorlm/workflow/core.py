@@ -40,7 +40,11 @@ from ..db import Database, ko_fields, loads, now_iso
 
 KINDS = ("new", "refine", "re-review")
 STEPS = ("start", "letter", "construction", "wrapup", "filters", "lint", "done")
-ACTIONS = ("accept", "reject", "redo", "edit", "reply", "start")
+# `discuss`: the author talks with the engine about a unit (its plan, its
+# text, a wrap-up item, a filter unit) without asking for a new proposal;
+# the engine answers in words and the unit's form does not change until
+# the author presses Redo (workflow_page.discuss_unit).
+ACTIONS = ("accept", "reject", "redo", "edit", "reply", "start", "discuss")
 UNITS = ("paragraph", "section")
 MODES = ("beats", "apply-findings")
 LISTS = ("reference", "voice", "aware")
@@ -396,6 +400,10 @@ def finding_view(row) -> dict:
     body = _body(row)
     author = body.get("author") or {}
     out = {k: body.get(k, "") for k in ("n", "text") + FINDING_FIELDS}
+    if not out["tier"]:
+        # A letter that put the tier at the end of the title ("... (must)")
+        # and gave no Tier line: the title's tier is the finding's.
+        out["tier"] = title_tier(out["title"])
     out.update({k: v for k, v in author.items() if k in FINDING_FIELDS})
     out.update(item=row["item_id"], verdict=row["verdict"],
                reason=row["reason_given"], decided=row["decided"],
@@ -403,6 +411,49 @@ def finding_view(row) -> dict:
                original={k: body.get(k, "") for k in FINDING_FIELDS
                          if k in author})
     return out
+
+
+_TITLE_TIER = re.compile(r"\((must|should|could)\)\W*$", re.I)
+
+
+def title_tier(title: str) -> str:
+    """The tier a title ends with, "(must)" or "(should)" or "(could)", or ""."""
+    m = _TITLE_TIER.search(title or "")
+    return m.group(1).lower() if m else ""
+
+
+VERDICT_DONE = {"accept": "accepted", "reject": "rejected", "defer": "deferred"}
+
+
+def letter_state(db: Database, instance: dict) -> str:
+    """The letter in force as the author now rules it, for every model turn
+    from the letter step to the filters: each finding with its tier, the
+    author's verdict (and reason) or "no verdict yet", its title, and which
+    fields the author edited. Verdicts are not session turns
+    (`rule_finding` records them on the finding), so without this an
+    engine answering a question about the letter could not see them (seen
+    2026-11-27 on wi-7abca47358e0: all ten findings accepted, the reply
+    said six had no decision). "" when there are no findings, or the
+    instance is past the steps a letter steers."""
+    if instance["step"] not in LETTER_STEPS:
+        return ""
+    rows = [finding_view(f) for f in letter_findings(db, instance)]
+    if not rows:
+        return ""
+    lines = ["[The letter in force as the author has ruled it, now. This "
+             "supersedes anything earlier in the session about the verdicts, "
+             "the tiers or the fields; an edited finding reads as in the "
+             "author's latest edit turn for it.]"]
+    for f in rows:
+        verdict = ((VERDICT_DONE.get(f["verdict"], f["verdict"])
+                    + (f" ({f['reason']})" if f["reason"] else ""))
+                   if f["verdict"] else "no verdict yet")
+        lines.append(f"- {f['item']} [{f['tier'] or 'no tier'}] {verdict}: "
+                     f"{f['title']}"
+                     + (" (edited by the author: "
+                        + ", ".join(FINDING_WORDS[k].lower() for k in f["edited"])
+                        + ")" if f["edited"] else ""))
+    return "\n".join(lines)
 
 
 def _check_letter_step(instance: dict) -> None:
@@ -1087,6 +1138,12 @@ def ask(db: Database, manuscript: dict, instance: dict, action: str,
     ctx = context.instance_context(db, manuscript, instance)
     if context_extra:
         ctx.update(context_extra)
+    # Every turn sees the author's verdicts and edits as they now stand, at
+    # the end of its message (not a standing block, so a verdict does not
+    # rebuild the engine's cached session).
+    state = letter_state(db, instance)
+    if state:
+        message = f"{message}\n\n{state}"
     reply = contract.normalize_reply(engine.send(ctx, message))
     return reply, getattr(engine, "session_ref", None)
 

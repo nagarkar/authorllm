@@ -362,8 +362,12 @@ def test_unit_form_actions() -> None:
               u1["state"] == "pending" and u1["before"] == "The first paragraph."
               and u1["form"]["reason"].startswith("tightened")
               and u1["form"]["proposed"] == "A tightened paragraph.", u1)
+        work, _sep, state = FAKE.sent[-1].partition("[The letter in force as the author has ruled it")
         check("the unit's message carries the accepted findings only",
-              "F1" in FAKE.sent[-1] and "F2" not in FAKE.sent[-1])
+              "F1" in work and "F2" not in work)
+        check("and, after it, every finding as the author ruled it (verdict, tier)",
+              "- F1 [must] accepted: The claim drifts" in state
+              and "- F2 [could] deferred: The ending repeats the opening" in state, state)
         check("the unit's message says the letter's Keep list and paragraph "
               "notes itself, not only through the session",
               "Keep (from the letter):\n- the first paragraph's plainness" in FAKE.sent[-1]
@@ -1315,6 +1319,233 @@ def test_walk_choice_controls() -> None:
           and "<option value=\"\">construction mode…</option>" not in wf)
     check("the choice is the server's; nothing in browser storage",
           "remember(" not in choice and "recall(" not in choice)
+
+
+def test_discuss_a_unit() -> None:
+    """The owner, 2026-11-27: "there is no way to interact with the engine
+    as I did here in the chat. We need to build that in." A beat's plan, a
+    paragraph, a wrap-up item and a filter unit can each be discussed: the
+    engine answers in words, the thread is on the record and in the later
+    turns, the proposal changes only on Redo, and "Redo with this
+    discussion" hands the thread to the redo."""
+    with world() as (ws, _root):
+        iid = call(ws, "start", essay="three", kind="new", brief="a new essay")["id"]
+        call(ws, "advance", id=iid)
+        call(ws, "accept_letter", id=iid)
+        call(ws, "advance", id=iid)
+        call(ws, "propose", id=iid)
+        before = call(ws, "instance", id=iid)["walk"]["units"][0]
+        raises(lambda: call(ws, "discuss", id=iid, label="b1:plan", text="  "),
+               "say something")
+        raises(lambda: call(ws, "discuss", id=iid, label="b9:plan", text="hm"),
+               "no unit")
+        v = call(ws, "discuss", id=iid, label="b1:plan",
+                 text="Should the objection come before the example?")
+        u = v["walk"]["units"][0]
+        check("the engine is asked to talk, not to propose",
+              FAKE.sent[-1].startswith("The author is discussing b1:plan")
+              and "Section 1 states the problem." in FAKE.sent[-1]
+              and "Should the objection come before the example?" in FAKE.sent[-1])
+        check("the exchange is under the unit, the author's words and the reply",
+              len(u["thread"]) == 1
+              and u["thread"][0]["author"] == "Should the objection come before the example?"
+              and u["thread"][0]["reply"].startswith("on that: "), u["thread"])
+        check("the proposal is unchanged: same form, still waiting",
+              u["state"] == "pending" and u["form"] == before["form"]
+              and u["turns"] == before["turns"], (u, before))
+        turns = call(ws, "instance", id=iid)["turns"]
+        check("the thread is recorded on the instance as a discuss turn",
+              turns[-1]["action"] == "discuss" and turns[-1]["unit_label"] == "b1:plan"
+              and turns[-1]["proposed"] == "")
+        # A reply that proposes text anyway keeps it in words, never as a form.
+        real = FakeEngine.send
+
+        def proposing(self, ctx, message):
+            out = real(self, ctx, message)
+            if message.startswith("The author is discussing"):
+                out = {**out, "text": "Yes.", "proposed": "Objection, then example."}
+            return out
+        FakeEngine.send = proposing
+        try:
+            v = call(ws, "discuss", id=iid, label="b1:plan", text="Then rewrite it?")
+        finally:
+            FakeEngine.send = real
+        u = v["walk"]["units"][0]
+        check("a proposal in a discussion reply is words, not a new form",
+              u["form"] == before["form"] and u["thread"][-1]["reply"]
+              == "Yes.\n\nWhat I would propose on Redo:\n\nObjection, then example.",
+              u)
+        v = call(ws, "act", id=iid, label="b1:plan", action="redo",
+                 with_discussion=True)
+        check("Redo with this discussion folds the thread into the redo",
+              FAKE.sent[-1].startswith("Redo b1:plan.")
+              and "his word stands" in FAKE.sent[-1]
+              and "The author: Should the objection come before the example?" in FAKE.sent[-1]
+              and "The author: Then rewrite it?" in FAKE.sent[-1], FAKE.sent[-1])
+        check("the later turns see the discussion in the session",
+              any(t["action"] == "discuss" for t in FAKE.contexts[-1]["turns"]))
+        u = v["walk"]["units"][0]
+        check("the redo is a new form; the thread stays",
+              u["state"] == "pending" and u["form"]["proposed"] == "A shorter second."
+              and len(u["thread"]) == 2)
+        raises(lambda: call(ws, "act", id=iid, label="b1:plan", action="redo",
+                            with_discussion=True), "no discussion since")
+        v = call(ws, "act", id=iid, label="b1:plan", action="accept")
+        check("ruling still works after a discussion",
+              v["walk"]["units"][0]["state"] == "accepted")
+
+    with world() as (ws, _root):
+        iid = _to_construction(ws)
+        call(ws, "propose", id=iid)
+        v = call(ws, "discuss", id=iid, label="p1", text="Too tight?")
+        check("a paragraph is discussed the same way",
+              v["walk"]["units"][0]["thread"][0]["author"] == "Too tight?"
+              and v["walk"]["units"][0]["state"] == "pending")
+        call(ws, "act", id=iid, label="p1", action="accept")
+        call(ws, "skip", id=iid, reason="The rest is fine.")
+        v = call(ws, "wrapup", id=iid)
+        v = call(ws, "discuss", id=iid, label="w:placeholders:1", text="Which date?")
+        item = v["wrapup"]["items"][1]
+        check("a wrap-up item is discussed; it stays waiting",
+              item["thread"][0]["author"] == "Which date?" and item["state"] == "pending",
+              item)
+        call(ws, "act", id=iid, label="w:placeholders:1", action="accept")
+        call(ws, "act", id=iid, label="w:removed:1", action="reject")
+        call(ws, "advance", id=iid)
+        call(ws, "filters", id=iid, names=["copyedit"])
+        call(ws, "propose", id=iid)
+        v = call(ws, "discuss", id=iid, label="p1", text="Keep the comma?")
+        u = v["walk"]["units"][0]
+        check("a filter unit is discussed; its thread is its own, not construction's",
+              [d["author"] for d in u["thread"]] == ["Keep the comma?"]
+              and u["state"] == "pending", u)
+
+
+def test_every_turn_sees_the_verdicts() -> None:
+    """The owner's letter question of 2026-11-27 got a reply saying six
+    accepted findings had "no decision from you yet" and that edited
+    findings' tier "reads '-'": verdicts were never in the engine's
+    context, and a letter that put the tier at the end of the title gave
+    the finding no tier. Every turn now ends with the letter as ruled."""
+    letter = ("*Findings*\n\n1. The measure is misdefined. (must)\n"
+              "Where: second paragraph\nWhat is wrong: it says three parts.\n"
+              "Direction: cut it.\n\n2. The close misstates the question. (should)\n"
+              "Where: last paragraph\n\n3. Talks about the book. (could)\n")
+    with world() as (ws, _root):
+        FAKE.letter = letter
+        try:
+            iid = _to_letter(ws)
+            v = call(ws, "letter", id=iid)
+        finally:
+            FAKE.letter = LETTER
+        f = {x["item"]: x for x in v["letter"]["findings"]}
+        check("a title ending (must) gives the finding its tier",
+              [f[k]["tier"] for k in ("F1", "F2", "F3")] == ["must", "should", "could"], f)
+        call(ws, "finding_edit", id=iid, item="F1", fields={"direction": "Say it once."})
+        check("an edit tells the engine the tier, not '-'",
+              "Tier: must" in call(ws, "instance", id=iid)["turns"][-1]["author_text"])
+        for k in ("F1", "F2"):
+            call(ws, "finding", id=iid, item=k, verdict="accept")
+        call(ws, "finding", id=iid, item="F3", verdict="reject", reason="not here")
+        call(ws, "finding_edit", id=iid, item="F2", fields={"tier": "must"})
+        call(ws, "letter_reply", id=iid, text="Have I accepted all of the findings?")
+        sent = FAKE.sent[-1]
+        check("a letter discussion turn sees every verdict, tier and edit",
+              sent.startswith("Have I accepted all of the findings?")
+              and "- F1 [must] accepted: The measure is misdefined. (must) "
+                  "(edited by the author: direction)" in sent
+              and "- F2 [must] accepted: The close misstates the question. (should) "
+                  "(edited by the author: tier)" in sent
+              and "- F3 [could] rejected (not here): Talks about the book." in sent
+              and "no verdict yet" not in sent, sent)
+        call(ws, "advance", id=iid)
+        call(ws, "propose", id=iid)
+        check("a construction turn sees them too",
+              "- F3 [could] rejected (not here)" in FAKE.sent[-1])
+        call(ws, "discuss", id=iid, label="p1", text="Why this?")
+        check("and a unit discussion turn",
+              "- F1 [must] accepted" in FAKE.sent[-1])
+    with world() as (ws, _root):
+        iid = _to_letter(ws)
+        call(ws, "letter", id=iid)
+        call(ws, "finding", id=iid, item="F1", verdict="accept")
+        call(ws, "letter_reply", id=iid, text="Ready?")
+        check("an unruled finding is said to have no verdict yet",
+              "- F2 [could] no verdict yet" in FAKE.sent[-1], FAKE.sent[-1])
+
+
+def test_discussion_in_the_background() -> None:
+    """The page's path (background jobs): the author's message is on the
+    running job at once (the page shows it with "thinking…"), and the reply
+    lands in the thread when the job ends."""
+    from authorlm.workflow import jobs
+    with world() as (ws, _root):
+        iid = _to_construction(ws)
+        call(ws, "propose", id=iid)
+        FAKE.gate = threading.Event()
+        try:
+            v = workflow_page.dispatch("discuss", {"manuscript": "MS", "id": iid,
+                                                   "label": "p1", "text": "Why?"},
+                                       workspace=ws, background=True)
+            check("the job carries the author's message and the label",
+                  v["job"]["method"] == "discuss" and v["job"]["state"] == "running"
+                  and v["job"]["params"] == {"label": "p1", "text": "Why?"}, v["job"])
+        finally:
+            FAKE.gate.set()
+            FAKE.gate = None
+        jobs.wait(v["job"]["id"], 10)
+        v = call(ws, "instance", id=iid)
+        check("the reply lands in the unit's thread",
+              v["job"] is None and v["walk"]["units"][0]["thread"][0]["author"] == "Why?")
+        workflow_page.dispatch("letter_reply", {"manuscript": "MS", "id": iid,
+                                                "text": "Is it ready?"},
+                               workspace=ws, background=True)
+        for thread in list(jobs._LIVE.values()):  # it may already be done
+            thread.join(10)
+        v = call(ws, "instance", id=iid)
+        check("a letter discussion at construction lands in the letter's thread",
+              v["letter"]["discussion"][-1]["author"] == "Is it ready?"
+              and v["letter"]["discussion"][-1]["reply"])
+
+
+def test_discussion_and_listen_controls() -> None:
+    """The page (Workflows.tsx): a beat's plan offers one quiet Listen, not
+    before/reason/after; every unit and the letter have the same discussion
+    box, whose message stays on screen from the running job with
+    "thinking…" and whose unsent draft survives a reload."""
+    src = Path(__file__).resolve().parents[1] / "web" / "audiobook" / "src"
+    wf = (src / "Workflows.tsx").read_text(encoding="utf-8")
+    form = wf[wf.index("function UnitForm"):wf.index("// ---------------------------------------------------------------- steps")]
+    box = wf[wf.index("function Discussion"):wf.index("// ------------------------------------------------------------- unit form")]
+    letter = wf[wf.index("function LetterStep"):wf.index("// The letter in force, above the walk")]
+    check("a plan's listen bar is one Listen; text units keep before/reason/after",
+          'const PLAN_PARTS: [string, string[]][] = [["Listen", ["after"]]];' in wf
+          and 'plan={unit.kind === "plan"}' in form
+          and '["Before + reason + after", ["before", "reason", "after"]]' in wf)
+    check("a part with nothing to read is not shown (no disabled Before)",
+          ".filter(([, which]) => which.some(w => words[w][1].trim()))" in wf
+          and "disabled={!!busy || !which" not in wf)
+    check("every unit form has the discussion box, its thread and its job",
+          "<Discussion items={thread} job={job}" in form
+          and 'j.method === "discuss" && j.params?.label === unit.label' in form
+          and 'run("discuss", { label: unit.label, text })' in form)
+    check("Redo with this discussion, and the redo panel's own tick",
+          ">\n            Redo with this discussion</button>" in form
+          and "with_discussion: true" in form and "with_discussion: withTalk" in form)
+    check("the letter's discussion uses the same box",
+          "<Discussion items={L.discussion} job={v.job}" in letter
+          and 'j.method === "letter_reply"' in letter
+          and "setReply(" not in wf)
+    check("the sent message stays, from the running job, with thinking… and time",
+          'String(ours?.params?.text ?? "")' in box and "thinking… {clock(elapsed)}" in box
+          and "Send again" in box)
+    check("the draft clears only once the server took it; it survives a reload",
+          "if (await send((draft || \"\").trim())) setDraft(\"\")" in box
+          and "`authorlm.wf.discuss.${manuscript}.${inst}.${unit.label}`" in form
+          and "`authorlm.wf.discuss.${manuscript}.${v.instance.id}.letter`" in letter
+          and "authorlm.wf.discuss.\n//   <ms>.<instance>.<label>" in wf)
+    check("discuss is a background model turn on the server's list",
+          "discuss" in workflow_page.METHODS and "discuss" in workflow_page.MODEL_TURNS)
 
 
 def main() -> None:

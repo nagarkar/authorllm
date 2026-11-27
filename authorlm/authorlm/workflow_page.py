@@ -54,6 +54,14 @@ open instance (`brief`), even while a model turn runs: that turn keeps the
 brief it started with, the next one reads the new brief. Usage totals per
 instance, essay and month (Q7).
 
+The author can talk with the engine at any unit, as under the letter
+(`discuss`, `discuss_unit`): the engine answers in words, the exchange is a
+`discuss` turn at the unit's step and label (so every later turn sees it),
+and the unit's form does not change until a redo, which can carry the
+discussion since the form (`act` with `with_discussion`). Every model turn
+from the letter step to the filters ends with the letter's findings as the
+author now rules them (`core.letter_state`).
+
 Model turns (`MODEL_TURNS`, a redo or bracketed edit in `act`) run as
 background jobs when the page asks (`dispatch(background=True)`,
 workflow/jobs.py): the request returns at once, the page polls the
@@ -84,7 +92,7 @@ METHODS = ("overview", "instance", "start", "recommend", "rec", "list",
            "filters", "lint", "skip", "advance", "engine", "unit", "blurbs",
            "blurb_add", "blurb_hide", "usage", "estimate", "land", "leave",
            "summaries", "job_dismiss", "brief", "finding_edit", "keep",
-           "revise_letter", "reopen_decline", "restart")
+           "revise_letter", "reopen_decline", "restart", "discuss")
 
 # The read-only methods: they write nothing (the page polls none of them).
 READ_ONLY = ("overview", "instance", "blurbs", "usage", "estimate")
@@ -187,11 +195,38 @@ def _label(unit: str, n: int) -> str:
 # ----------------------------------------------------------- unit state
 
 def _by_label(turns: list[dict], step: str) -> dict[str, list[dict]]:
+    """Each unit's turns at `step`, in order. The discussion of a unit
+    (`discuss` turns) is not part of its form's history: talking about a
+    proposal never changes it (`threads` holds the discussion)."""
     out: dict[str, list[dict]] = {}
     for t in turns:
-        if t["step"] == step and t["unit_label"]:
+        if t["step"] == step and t["unit_label"] and t["action"] != DISCUSS:
             out.setdefault(t["unit_label"], []).append(t)
     return out
+
+
+DISCUSS = "discuss"
+
+
+def threads(turns: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    """The discussion of each unit, by (step, label): the author's words
+    and the engine's reply, oldest first."""
+    out: dict[tuple[str, str], list[dict]] = {}
+    for t in turns:
+        if t["action"] == DISCUSS and t["unit_label"]:
+            out.setdefault((t["step"], t["unit_label"]), []).append(
+                {"seq": t["seq"], "author": t["author_text"],
+                 "reply": t["reply"], "at": t["created_at"]})
+    return out
+
+
+def _since_form(db: Database, inst: dict, step: str, label: str) -> list[dict]:
+    """The unit's discussion since its latest form (the turns a Redo with
+    this discussion folds in)."""
+    turns = core.turns(db, inst)
+    hist = _by_label(turns, step).get(label, [])
+    last = max((t["seq"] for t in hist if t["engine"]), default=0)
+    return [d for d in threads(turns).get((step, label), []) if d["seq"] > last]
 
 
 def unit_state(history: list[dict], before: str = "") -> dict:
@@ -993,11 +1028,16 @@ def instance_view(db: Database, manuscript: dict, ref: str) -> dict:
     out["restarted_from"] = (
         {"id": inst["carried_from"], "reason": src["reason"]}
         if src and src["detail"].get("successor") == inst["id"] else None)
+    talk = threads(turns)
     if inst["step"] in ("construction", "filters"):
         out["walk"] = _walk(db, manuscript, inst, inst["step"])
         out["walk"]["reopen"] = reopen_proposals(db, inst, out["walk"])
+        for u in out["walk"]["units"]:
+            u["thread"] = talk.get((inst["step"], u["label"]), [])
     if inst["step"] == "wrapup":
         out["wrapup"] = _wrapup(turns)
+        for u in out["wrapup"]["items"]:
+            u["thread"] = talk.get(("wrapup", u["label"]), [])
     if inst["step"] in ("filters", "lint"):
         out["checklist"] = _filter_checklist(db, manuscript, inst)
         out["unplaced"] = _after_wrapup(db, manuscript, inst, turns)["unplaced"]
@@ -1170,13 +1210,42 @@ def _unit_message(db: Database, manuscript: dict, inst: dict, step: str,
             + f"\n\nThe unit as it stands:\n\n{before}")
 
 
-def _redo_message(label: str, blurbs: list[str], free: str) -> str:
+def _redo_message(label: str, blurbs: list[str], free: str,
+                  discussion: list[dict] | None = None) -> str:
     parts = [f"Redo {label}."]
     if blurbs:
         parts.append("What is wrong: " + "; ".join(blurbs) + ".")
     if free.strip():
         parts.append(free.strip())
-    return " ".join(parts)
+    out = " ".join(parts)
+    if discussion:
+        out += ("\n\nRedo it in the light of the author's discussion of this "
+                "unit with you since its last proposal; where he and you "
+                "disagreed, his word stands:\n\n" + _thread_text(discussion))
+    return out
+
+
+def _thread_text(discussion: list[dict]) -> str:
+    return "\n\n".join(f"The author: {d['author']}\nYou: {d['reply']}"
+                        for d in discussion)
+
+
+def _discuss_message(label: str, unit: dict, text: str) -> str:
+    form = unit.get("form") or {}
+    pending = unit.get("state") == "pending"
+    what = ("its plan" if label.endswith(":plan") else "this unit")
+    if pending:
+        now = (f"The proposal waiting for him (your reason: "
+               f"{form.get('reason') or 'none given'}):\n\n{form.get('proposed', '')}")
+    else:
+        now = (f"The unit is {unit.get('state')}; as it stands:\n\n"
+               f"{unit.get('text') or unit.get('before') or '(empty)'}")
+    return (f"The author is discussing {label} with you ({what}). This is a "
+            "conversation, not a new proposal: answer him plainly in `text`, "
+            "as an editor would. If you would change the proposal, say how, "
+            "in words; leave `proposed` empty. The proposal changes only when "
+            "he presses Redo, which carries this discussion to you.\n\n"
+            f"{now}\n\nHis message:\n\n{text}")
 
 
 def _edit_message(label: str, text: str) -> str:
@@ -1293,7 +1362,8 @@ def propose(db: Database, manuscript: dict, inst: dict, label: str | None) -> di
 
 
 def act(db: Database, manuscript: dict, inst: dict, label: str, action: str,
-        text: str = "", blurbs: list[str] | None = None, free: str = "") -> dict:
+        text: str = "", blurbs: list[str] | None = None, free: str = "",
+        with_discussion: bool = False) -> dict:
     """The four actions on a unit (Q8a, Q11). Accept and reject, and an
     edit with no bracket, are recorded without a model call; a redo, and
     an edit with a bracket in it, ask the engine for the next revision.
@@ -1322,13 +1392,21 @@ def act(db: Database, manuscript: dict, inst: dict, label: str, action: str,
     if state in RESOLVED and state != "passed":
         raise ValueError(f"{label} is {state}; reopen it first")
     if action == "redo":
-        if not blurbs and not free.strip():
+        # "Redo with this discussion": the unit's discussion since its last
+        # proposal goes to the engine with the redo, as the author's
+        # direction (his words in the thread).
+        talk = _since_form(db, inst, step, label) if with_discussion else []
+        if with_discussion and not talk:
+            raise ValueError(f"{label} has no discussion since its last "
+                             "proposal to redo with")
+        if not blurbs and not free.strip() and not talk:
             raise ValueError("a redo takes a blurb or a few words of what is "
                              "wrong")
         return _send(db, manuscript, inst, "redo",
-                     _redo_message(label, blurbs, free),
-                     author_text=free.strip(), blurbs=blurbs, unit_label=label,
-                     unit_before=before)
+                     _redo_message(label, blurbs, free, talk),
+                     author_text=free.strip() or (
+                         "(redo with this discussion)" if talk else ""),
+                     blurbs=blurbs, unit_label=label, unit_before=before)
     if action == "edit":
         if not text.strip():
             raise ValueError("an edit carries the author's text")
@@ -1338,6 +1416,37 @@ def act(db: Database, manuscript: dict, inst: dict, label: str, action: str,
         return core.record_turn(db, inst, "edit", author_text=text,
                                 unit_label=label, unit_before=before)
     raise ValueError("action is accept, reject, redo or edit")
+
+
+def discuss_unit(db: Database, manuscript: dict, inst: dict, label: str,
+                 text: str) -> dict:
+    """The author talks with the engine about one unit (a beat's plan, a
+    unit's text, a wrap-up item, a filter unit): a model turn whose reply
+    is words only, recorded as a `discuss` turn at the unit's step and
+    label. The unit's form does not change (`_by_label` leaves discussion
+    out): a proposal the engine would make in its reply is kept in the
+    reply's text, never as a form. Every later turn of the instance sees
+    the thread (it is in the session), and "Redo with this discussion"
+    hands it to the redo."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("say something to discuss the unit")
+    step = _step_for(inst, label)
+    _check_label_step(inst, step)
+    unit, _w = _unit(db, manuscript, inst, step, label)
+    reply, ref = core.ask(db, manuscript, inst, DISCUSS,
+                          _discuss_message(label, unit, text),
+                          author_text=text, engine=_engine(inst),
+                          context_extra=_context_extra(db, manuscript, inst))
+    reply = dict(reply)
+    proposed = (reply.get("proposed") or "").strip()
+    if proposed:
+        reply["text"] = ((reply.get("text") or "").rstrip()
+                         + "\n\nWhat I would propose on Redo:\n\n" + proposed).strip()
+    reply["proposed"] = ""
+    reply["reason"] = ""
+    return core.record_turn(db, inst, DISCUSS, author_text=text,
+                            unit_label=label, reply=reply, session_ref=ref)
 
 
 def reopen(db: Database, manuscript: dict, inst: dict, label: str) -> dict:
@@ -1816,7 +1925,7 @@ def _blurb_list(p: dict) -> list[str]:
 # (workflow/jobs.py); `summaries` (bring the book's summaries up to date
 # ahead of a turn) runs the same way.
 MODEL_TURNS = ("recommend", "letter", "letter_reply", "propose", "reopen", "wrapup",
-               "revise_letter")
+               "revise_letter", "discuss")
 BACKGROUND = MODEL_TURNS + ("summaries",)
 
 
@@ -1961,7 +2070,11 @@ def _apply(db: Database, manuscript: dict, inst: dict, method: str,
     elif method == "act":
         act(db, manuscript, inst, str(p.get("label") or ""),
             str(p.get("action") or ""), text=str(p.get("text") or ""),
-            blurbs=_blurb_list(p), free=str(p.get("free") or ""))
+            blurbs=_blurb_list(p), free=str(p.get("free") or ""),
+            with_discussion=bool(p.get("with_discussion")))
+    elif method == "discuss":
+        discuss_unit(db, manuscript, inst, str(p.get("label") or ""),
+                     str(p.get("text") or ""))
     elif method == "reopen":
         reopen(db, manuscript, inst, str(p.get("label") or ""))
     elif method == "beat_done":

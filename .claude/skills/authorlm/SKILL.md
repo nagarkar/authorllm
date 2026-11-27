@@ -997,6 +997,16 @@ from the walk verbs below.
     the beat is done; the essay is built (then `advance`).
   - `workflow wrapup <i> [--wait]` drafts the wrap-up; `workflow principle
     <i> --words W [--scope S]` ticks a principle it offered.
+  - `workflow discuss <i> <label> --text TEXT [--wait]`: the author talks
+    with the engine about one unit (a beat's plan, a paragraph or section,
+    a wrap-up item, a filter unit), or about the letter with the label
+    `letter`, as the page's reply box under each unit and under the
+    letter does. The reply is printed verbatim; the proposal does not
+    change. `unit <i> <label> --redo --with-discussion [--note TEXT]`
+    hands the unit's discussion since its last proposal to the redo (the
+    page's "Redo with this discussion"). `walk --label` shows the thread.
+    Every turn (discussion, construction, the letter's) carries the
+    author's current verdicts and tiers on the letter's findings.
   - `workflow job <i>` (read-only): the running job or the failed
     attempt with its error; `--retry` sends it again, `--dismiss` hides
     it, `--wait` blocks until it ends. A failed turn exits 1 naming
@@ -1010,8 +1020,12 @@ from the walk verbs below.
   or a clip of it. Ask for his verdict. Record only his words: `--accept`
   or `--reject` on his say-so, a redo's `--note` in his words (blurbs he
   picks), an edit's text as he wrote it (`--edit-file` for anything
-  long); never pick a verdict or write a note for him. Then `propose
-  <i> --wait` for the next unit and show it the same way. One driver at
+  long); never pick a verdict or write a note for him. When he wants to
+  talk a proposal over rather than rule it, send his words as they are:
+  `discuss <i> <label> --text "<his words>" --wait`, and show him the
+  engine's reply verbatim; when he is ready, `unit <i> <label> --redo
+  --with-discussion` (plus `--note` in his words if he adds direction).
+  Then `propose <i> --wait` for the next unit and show it the same way. One driver at
   a time: if the page is open on the same instance, he works there or
   here, not both (a running job holds the instance either way; a stale
   verdict is refused, never written over his text). When the walk ends,
