@@ -1036,8 +1036,14 @@ def restart(db: Database, manuscript: dict, instance: dict, reason: str,
 
 # -------------------------------------------------------------------- turns
 
+_NOT_A_NOTE = re.compile(r"\[\^[^\]\s]+\]:?|\[[^\]]*\]\([^)]*\)")
+
+
 def _bracketed(text: str) -> bool:
-    return "[" in text and "]" in text
+    """A [note] to the engine. Footnote markers ([^RT3], [^RT3]:) and
+    Markdown links ([text](url)) are essay text, not notes."""
+    rest = _NOT_A_NOTE.sub("", text)
+    return "[" in rest and "]" in rest
 
 
 def needs_model(action: str, author_text: str = "") -> bool:
