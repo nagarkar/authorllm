@@ -70,6 +70,7 @@ import re
 from pathlib import Path
 
 from .db import Database, ko_fields, loads, now_iso
+from . import revisions
 from .revisions import MANUSCRIPT_EXTENSIONS, iter_manuscript_paths
 
 RETIRED_DIR = "_retired"
@@ -132,7 +133,7 @@ NAME_JSON_COLUMNS = (
 
 # Recorded history: keeps the name it was recorded under.
 NAME_HISTORY_COLUMNS = (
-    ("manuscript_versions", "files"),
+    ("version_files", "name"),
     ("illustration_prompt_versions", "files"),
     ("editorial_transitions", "location"),
     # A landing run records the file as it was landed, with its text.
@@ -416,10 +417,8 @@ def ensure_documents(db: Database, manuscript: dict) -> list[dict]:
     if not root.is_dir() or not document_ids_enabled(db, manuscript):
         return []
     mid = manuscript["id"]
-    latest = db.one(
-        "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1", (mid,))
-    snapshot = set(loads(latest["files"], {})) if latest else set()
+    latest = revisions.latest_version(db, mid)
+    snapshot = set(revisions.manifest_at(db, latest["id"])) if latest else set()
     on_disk = set(iter_manuscript_paths(root))
     retired_root = root / RETIRED_DIR
     in_retired = {p.name for p in (retired_root.iterdir()

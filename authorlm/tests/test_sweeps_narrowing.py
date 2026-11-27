@@ -9,32 +9,32 @@ proposed edges). Readiness is covered in `test_api`; these helpers are not.
 
 from __future__ import annotations
 
-import json
-import sys
-from pathlib import Path
+import os
+
+os.environ["AUTHORLM_CONFIG"] = "/nonexistent/authorlm-test/config.toml"
+os.environ["AUTHORLM_ENV"] = "/nonexistent/authorlm-test/.env"
+
+import sys  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from authorlm import sweeps
+from authorlm import sweeps  # noqa: E402
+from authorlm.db import Database  # noqa: E402
+from authorlm.revisions import record_version  # noqa: E402
 
 
 MID = "m-1"
 
 
 class FakeDB:
-    """Enough of `db.all` for the two pure narrowing helpers."""
+    """Enough of `db.all` for `_claims_for`."""
 
-    def __init__(self, versions: list[dict] | None = None,
-                 edges: list[dict] | None = None) -> None:
-        self.versions = list(versions or [])
+    def __init__(self, edges: list[dict] | None = None) -> None:
         self.edges = list(edges or [])
 
     def all(self, sql: str, params: tuple = ()) -> list[dict]:
-        if "manuscript_versions" in sql:
-            mid = params[0]
-            rows = [r for r in self.versions if r["manuscript_id"] == mid]
-            rows = sorted(rows, key=lambda r: r["version_no"], reverse=True)
-            return rows[:2]
         if "concept_edges" in sql:
             mid, nid, _nid2 = params
             out = []
@@ -60,38 +60,35 @@ def check(label: str, cond: bool, detail: object = "") -> None:
         raise AssertionError(label)
 
 
-def _ver(no: int, files: dict[str, str], *, mid: str = MID) -> dict:
-    return {
-        "id": f"v{no}",
-        "manuscript_id": mid,
-        "version_no": no,
-        "files": json.dumps(files),
-    }
+def _history(*versions: dict[str, str], mid: str = MID) -> Database:
+    """A throwaway database holding `versions`, oldest first."""
+    folder = tempfile.mkdtemp(prefix="authorlm-sweeps-")
+    db = Database(Path(folder) / "authorlm.db")
+    for files in versions:
+        record_version(db, mid, files, None, source="test")
+    return db
 
 
 def test_changed_files_diff_and_deletes() -> None:
-    db = FakeDB(versions=[
-        _ver(2, {"a.md": "new", "b.md": "same"}),
-        _ver(1, {"a.md": "old", "b.md": "same", "c.md": "gone"}),
-    ])
+    db = _history(
+        {"a.md": "old", "b.md": "same", "c.md": "gone"},
+        {"a.md": "new", "b.md": "same"},
+    )
     got = sweeps._changed_files(db, MID)
     check("edited and deleted paths are reported",
           got == {"a.md", "c.md"}, repr(got))
 
 
 def test_changed_files_needs_two_versions() -> None:
-    db = FakeDB(versions=[_ver(1, {"a.md": "only"})])
+    db = _history({"a.md": "only"})
     check("a single version returns None (no prior baseline)",
           sweeps._changed_files(db, MID) is None)
     check("zero versions also returns None",
-          sweeps._changed_files(FakeDB(), MID) is None)
+          sweeps._changed_files(_history(), MID) is None)
 
 
 def test_changed_files_ignores_other_manuscript() -> None:
-    db = FakeDB(versions=[
-        _ver(2, {"a.md": "new"}, mid="other"),
-        _ver(1, {"a.md": "old"}, mid="other"),
-    ])
+    db = _history({"a.md": "old"}, {"a.md": "new"}, mid="other")
     check("versions for another manuscript do not supply a baseline",
           sweeps._changed_files(db, MID) is None)
 

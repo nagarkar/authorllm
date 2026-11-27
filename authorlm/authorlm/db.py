@@ -50,14 +50,41 @@ CREATE TABLE IF NOT EXISTS manuscripts (
     language TEXT NOT NULL DEFAULT ''
 );
 
+-- One collected version of a manuscript. Its text is not in this row: the
+-- files it holds are its `version_files` rows, and each distinct file text
+-- is kept once in `version_texts` (complete manuscript recoverable, §18.4).
+-- Read and written only through revisions.py. A workspace made before the
+-- version store still has a `files` JSON column here until
+-- `authorlm version-store convert` moves it out (revisions.py).
 CREATE TABLE IF NOT EXISTS manuscript_versions (
     {KNOWLEDGE_OBJECT_COLUMNS},
     manuscript_id TEXT NOT NULL REFERENCES manuscripts(id),
     version_no INTEGER NOT NULL,
-    checksum TEXT NOT NULL,
-    files TEXT NOT NULL,          -- JSON: relpath -> full text (complete manuscript recoverable, §18.4)
+    checksum TEXT NOT NULL,       -- revisions.checksum of the files it holds
     source TEXT NOT NULL,         -- e.g. 'snapshot'
     session_id TEXT
+);
+
+-- The files one version holds: each name it recorded (the relpath the
+-- file had then, never rewritten by a rename) and the hash of its text,
+-- in the order the version recorded them. The primary keys here and on
+-- version_texts are safe in CREATE TABLE IF NOT EXISTS: these tables are
+-- new, so no existing row can collide with them (unlike a unique index
+-- added to an old table, which is never done here).
+CREATE TABLE IF NOT EXISTS version_files (
+    version_id TEXT NOT NULL,     -- manuscript_versions.id
+    manuscript_id TEXT NOT NULL,
+    position INTEGER NOT NULL,    -- order within the version, from 0
+    name TEXT NOT NULL,           -- relpath as recorded then
+    text_hash TEXT NOT NULL,      -- version_texts.hash
+    PRIMARY KEY (version_id, name)
+);
+
+-- Every distinct file text any version holds, once: the sha256 of its
+-- UTF-8 bytes, and those bytes zlib-compressed.
+CREATE TABLE IF NOT EXISTS version_texts (
+    hash TEXT PRIMARY KEY,
+    body BLOB NOT NULL
 );
 
 -- A manuscript file's identity (docs.py). The id is the document; `relpath`
@@ -884,6 +911,10 @@ CREATE INDEX IF NOT EXISTS idx_triage_drafts_lookup
     ON triage_drafts (manuscript_id, triage_type, object_id);
 CREATE INDEX IF NOT EXISTS idx_edit_events_item
     ON edit_events (manuscript_id, source, run, item_id);
+CREATE INDEX IF NOT EXISTS idx_manuscript_versions_number
+    ON manuscript_versions (manuscript_id, version_no);
+CREATE INDEX IF NOT EXISTS idx_version_files_name
+    ON version_files (manuscript_id, name);
 """
 
 

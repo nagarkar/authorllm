@@ -536,7 +536,7 @@ The register of settled choices: every choice the author has made about a book, 
 
 `authorlm/authorlm/revisions.py`
 
-Revision Collector and Revision Analyzer (RFC AuthorLM §17.3–§17.4).
+Revision Collector, version history and Revision Analyzer (RFC AuthorLM §17.3–§17.4).
 
 ## `authorlm.runs_page`
 
@@ -1751,6 +1751,12 @@ _No docstring._
 `authorlm/tests/test_verse_poem_level.py`
 
 `verse.poem_level` and `verse.heading_levels` decide where poems sit in a verse file and what the collect report warns about.
+
+## `tests.test_version_store`
+
+`authorlm/tests/test_version_store.py`
+
+The version store (revisions.py): each distinct file text kept once, a version as the list of its files' names and text hashes, and the conversion of a workspace that still keeps each version's whole text as JSON in `manuscript_versions.files`.
 
 ## `tests.test_web_pages`
 

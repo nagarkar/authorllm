@@ -1,8 +1,16 @@
-"""Revision Collector and Revision Analyzer (RFC AuthorLM §17.3–§17.4).
+"""Revision Collector, version history and Revision Analyzer (RFC AuthorLM
+§17.3–§17.4).
 
 The collector snapshots the manuscript directory into an immutable,
 checksummed version. The analyzer computes editorial transitions between
 successive versions by diffing paragraph sequences per file.
+
+Version history has one door, and it is this module (the "history"
+section below): a caller asks for a version row (`latest_version`,
+`version_by_id`, `version_by_number`, `version_as_of`, `list_versions`)
+and then for text (`files_at`, `file_at`, `manifest_at`, `file_history`,
+`changed_names`). `record_version` is the only writer. Each distinct file
+text is kept once, by hash; no other module reads the tables.
 
 A snapshot records each file under the name it had then, and is never
 rewritten. For a manuscript with document ids on (`docs.py`), a file that
@@ -20,10 +28,11 @@ import hashlib
 import json
 import re
 import sys
+import zlib
 from pathlib import Path
 
 from . import form_grammar
-from .db import Database, ko_fields, loads
+from .db import Database, ko_fields
 
 MANUSCRIPT_EXTENSIONS = {".md", ".markdown", ".txt"}
 
@@ -171,11 +180,288 @@ def checksum(files: dict[str, str]) -> str:
     return digest.hexdigest()
 
 
+# ------------------------------------------------------------ history
+#
+# Version history has one door, and it is this module: no other module
+# reads or writes `manuscript_versions`, `version_files` or
+# `version_texts`. A version is its `manuscript_versions` row (id, number,
+# checksum, source, session, time) plus the files it holds: one
+# `version_files` row per file, naming the text by its hash. Each distinct
+# file text is kept once in `version_texts`, zlib-compressed, however many
+# versions or manuscripts hold it. A collect that changes one file adds
+# one text, not a copy of the book.
+#
+# The text of a version is what `read_manuscript_files` returned when it
+# was recorded (embed lines and pending forms stripped, invalid UTF-8
+# replaced), never the bytes on disk. Version ids, numbers and checksums
+# never change: other tables name versions by id.
+
+
+class VersionStoreNotConverted(RuntimeError):
+    """The workspace still keeps each version's whole text as JSON in
+    `manuscript_versions.files`. Raised by every read and write of
+    history until `authorlm version-store convert` has run, so nothing
+    reads an unconverted workspace as a manuscript with no files.
+    A RuntimeError for the same reason as ManuscriptRootUnreadable: the
+    MCP surface and the CLI already turn one into a clean error."""
+
+
+VERSION_COLUMNS = ("id, version, created_at, created_by, schema_version, "
+                   "metadata, manuscript_id, version_no, checksum, source, "
+                   "session_id")
+
+# Texts are immutable and named by their hash, so a text read once can be
+# served again to any caller, any manuscript, any database: the hash is
+# the whole key. Bounded so a full-history walk does not hold every text.
+_TEXT_CACHE: dict[str, str] = {}
+_TEXT_CACHE_LIMIT = 1024
+
+
+def store_converted(db: Database) -> bool:
+    """Whether the workspace keeps history in the store (True) or still
+    as whole-manuscript JSON per version (False: run `version-store
+    convert`)."""
+    return "files" not in {r[1] for r in db.conn.execute(
+        "PRAGMA table_info(manuscript_versions)")}
+
+
+def _require_store(db: Database) -> None:
+    if getattr(db, "_version_store_ready", False):
+        return
+    if not store_converted(db):
+        raise VersionStoreNotConverted(
+            f"the workspace at {db.path} keeps version history in the old "
+            "form (whole manuscript per version). Run `authorlm "
+            "version-store convert` once to convert it.")
+    # Only the converted state is remembered: conversion is one-way.
+    db._version_store_ready = True
+
+
+def _encode(text: str) -> bytes:
+    # surrogatepass: a version holds whatever str it was given; this
+    # round-trips every one of them exactly.
+    return text.encode("utf-8", "surrogatepass")
+
+
+def _decode(body: bytes) -> str:
+    return zlib.decompress(body).decode("utf-8", "surrogatepass")
+
+
+def text_hash(text: str) -> str:
+    """The key a file text is kept under in `version_texts`."""
+    return hashlib.sha256(_encode(text)).hexdigest()
+
+
+def _remember(digest: str, text: str) -> None:
+    if len(_TEXT_CACHE) >= _TEXT_CACHE_LIMIT:
+        _TEXT_CACHE.pop(next(iter(_TEXT_CACHE)))
+    _TEXT_CACHE[digest] = text
+
+
+def text_of(db: Database, digest: str) -> str:
+    """The file text kept under `digest`. Raises LookupError when the
+    store has no such text (a damaged store, never a normal state)."""
+    cached = _TEXT_CACHE.get(digest)
+    if cached is not None:
+        return cached
+    row = db.one("SELECT body FROM version_texts WHERE hash = ?", (digest,))
+    if row is None:
+        raise LookupError(f"version store has no text {digest}")
+    text = _decode(row["body"])
+    _remember(digest, text)
+    return text
+
+
+def _store_text(db: Database, text: str) -> str:
+    digest = text_hash(text)
+    if not db.one("SELECT 1 AS x FROM version_texts WHERE hash = ?",
+                  (digest,)):
+        db.conn.execute(
+            "INSERT INTO version_texts (hash, body) VALUES (?, ?)",
+            (digest, zlib.compress(_encode(text), 6)))
+    return digest
+
+
+def _row(row) -> dict | None:
+    return dict(row) if row else None
+
+
+def version_by_id(db: Database, version_id: str | None) -> dict | None:
+    """A version's row (no text), or None when there is no such version."""
+    if not version_id:
+        return None
+    _require_store(db)
+    return _row(db.one(
+        f"SELECT {VERSION_COLUMNS} FROM manuscript_versions WHERE id = ?",
+        (version_id,)))
+
+
+def latest_versions(db: Database, manuscript_id: str,
+                    count: int) -> list[dict]:
+    """The `count` most recent versions, newest first."""
+    _require_store(db)
+    return [dict(r) for r in db.all(
+        f"SELECT {VERSION_COLUMNS} FROM manuscript_versions "
+        "WHERE manuscript_id = ? ORDER BY version_no DESC LIMIT ?",
+        (manuscript_id, count))]
+
+
+def latest_version(db: Database, manuscript_id: str) -> dict | None:
+    newest = latest_versions(db, manuscript_id, 1)
+    return newest[0] if newest else None
+
+
+def version_by_number(db: Database, manuscript_id: str,
+                      version_no: int) -> dict | None:
+    _require_store(db)
+    return _row(db.one(
+        f"SELECT {VERSION_COLUMNS} FROM manuscript_versions "
+        "WHERE manuscript_id = ? AND version_no = ?",
+        (manuscript_id, version_no)))
+
+
+def version_as_of(db: Database, manuscript_id: str,
+                  moment: str) -> dict | None:
+    """The version that was current at `moment` (an ISO time, compared as
+    text like every `created_at`): the newest recorded at or before it.
+    None when every version is later."""
+    _require_store(db)
+    return _row(db.one(
+        f"SELECT {VERSION_COLUMNS} FROM manuscript_versions "
+        "WHERE manuscript_id = ? AND created_at <= ? "
+        "ORDER BY version_no DESC LIMIT 1", (manuscript_id, moment)))
+
+
+def list_versions(db: Database, manuscript_id: str) -> list[dict]:
+    """Every version of the manuscript, oldest first."""
+    _require_store(db)
+    return [dict(r) for r in db.all(
+        f"SELECT {VERSION_COLUMNS} FROM manuscript_versions "
+        "WHERE manuscript_id = ? ORDER BY version_no", (manuscript_id,))]
+
+
+def count_versions(db: Database, manuscript_id: str) -> int:
+    return db.one("SELECT COUNT(*) AS n FROM manuscript_versions "
+                  "WHERE manuscript_id = ?", (manuscript_id,))["n"]
+
+
+def last_recorded_at(db: Database, session_id: str) -> str | None:
+    """When the session last recorded a version; None if it never did."""
+    return db.one("SELECT MAX(created_at) AS latest FROM manuscript_versions "
+                  "WHERE session_id = ?", (session_id,))["latest"]
+
+
+def file_counts(db: Database, manuscript_id: str) -> dict[str, int]:
+    """How many files each version of the manuscript holds, by version id."""
+    _require_store(db)
+    return {r["id"]: r["n"] for r in db.all(
+        "SELECT v.id AS id, COUNT(f.name) AS n FROM manuscript_versions v "
+        "LEFT JOIN version_files f ON f.version_id = v.id "
+        "WHERE v.manuscript_id = ? GROUP BY v.id", (manuscript_id,))}
+
+
+def manifest_at(db: Database, version_id: str | None) -> dict[str, str]:
+    """{name: text hash} of every file the version holds, in the order it
+    recorded them. Empty when there is no such version. Two files (or one
+    file at two versions) hold the same text exactly when their hashes are
+    equal, so this answers "what changed" without reading any text."""
+    if not version_id:
+        return {}
+    _require_store(db)
+    return {r["name"]: r["text_hash"] for r in db.all(
+        "SELECT name, text_hash FROM version_files WHERE version_id = ? "
+        "ORDER BY position", (version_id,))}
+
+
+def files_at(db: Database, version_id: str | None) -> dict[str, str]:
+    """{name: text} of every file the version holds, in the order it
+    recorded them. Empty when there is no such version."""
+    return {name: text_of(db, digest)
+            for name, digest in manifest_at(db, version_id).items()}
+
+
+def file_at(db: Database, version_id: str | None, name: str) -> str | None:
+    """One file's text at a version, read alone. None when there is no
+    such version or it holds no file recorded as `name` (for a renamed
+    document, `_version_text` tries each name it carried)."""
+    if not version_id:
+        return None
+    _require_store(db)
+    row = db.one("SELECT text_hash FROM version_files WHERE version_id = ? "
+                 "AND name = ?", (version_id, name))
+    return text_of(db, row["text_hash"]) if row else None
+
+
+def file_history(db: Database, manuscript_id: str,
+                 name: str) -> list[tuple[int, str]]:
+    """[(version_no, text hash)] for every version that holds a file
+    recorded as `name`, newest first. Read a text with `text_of`; equal
+    hashes are equal texts, so a caller reads each distinct one once."""
+    _require_store(db)
+    return [(r["version_no"], r["text_hash"]) for r in db.all(
+        "SELECT v.version_no AS version_no, f.text_hash AS text_hash "
+        "FROM version_files f JOIN manuscript_versions v "
+        "ON v.id = f.version_id WHERE f.manuscript_id = ? AND f.name = ? "
+        "ORDER BY v.version_no DESC", (manuscript_id, name))]
+
+
+def changed_names(db: Database, older_id: str | None,
+                  newer_id: str | None) -> set[str]:
+    """Names whose text differs between two versions, or that only one of
+    them holds. Compares hashes; reads no text."""
+    old, new = manifest_at(db, older_id), manifest_at(db, newer_id)
+    return {n for n in set(old) | set(new) if old.get(n) != new.get(n)}
+
+
+def _insert_files(db: Database, version_id: str, manuscript_id: str,
+                  files: dict[str, str]) -> None:
+    db.conn.executemany(
+        "INSERT INTO version_files (version_id, manuscript_id, position, "
+        "name, text_hash) VALUES (?, ?, ?, ?, ?)",
+        [(version_id, manuscript_id, position, name, _store_text(db, text))
+         for position, (name, text) in enumerate(files.items())])
+
+
+def record_version(db: Database, manuscript_id: str, files: dict[str, str],
+                   session_id: str | None,
+                   source: str = "snapshot") -> dict | None:
+    """Record `files` as the manuscript's next version and return its row
+    (no text), or None when they are what the latest version already
+    holds. One transaction: a crash leaves the whole version or none of
+    it. Only texts the store does not already hold are added."""
+    _require_store(db)
+    digest = checksum(files)
+    with db.transaction():
+        last = latest_version(db, manuscript_id)
+        if last and last["checksum"] == digest:
+            return None
+        row = ko_fields("mv")
+        row.update(
+            manuscript_id=manuscript_id,
+            version_no=(last["version_no"] + 1) if last else 1,
+            checksum=digest,
+            source=source,
+            session_id=session_id,
+        )
+        db.insert("manuscript_versions", row)
+        _insert_files(db, row["id"], manuscript_id, files)
+    return row
+
+
+def prune_texts(db: Database) -> int:
+    """Delete every kept text no version holds any more (after a
+    manuscript's versions are deleted with it). Returns how many."""
+    return db.conn.execute(
+        "DELETE FROM version_texts WHERE hash NOT IN "
+        "(SELECT text_hash FROM version_files)").rowcount
+
+
 def collect_revision(
     db: Database, manuscript: dict, session_id: str | None, source: str = "snapshot"
 ) -> dict | None:
-    """Snapshot the manuscript. Returns the new version row as a dict,
-    or None if nothing changed since the last version.
+    """Snapshot the manuscript. Returns the new version row as a dict
+    (no text: `files_at` reads it), or None if nothing changed since the
+    last version.
 
     Raises ManuscriptRootUnreadable — refuses to record a version — if
     the root is missing or unreadable, regardless of the caller: an
@@ -186,28 +472,101 @@ def collect_revision(
     otherwise bypass the mass-deletion guard entirely."""
     root = Path(manuscript["path"])
     check_manuscript_root(root)
-    files = read_manuscript_files(root)
-    digest = checksum(files)
+    return record_version(db, manuscript["id"], read_manuscript_files(root),
+                          session_id, source)
 
-    last = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (manuscript["id"],),
-    )
-    if last and last["checksum"] == digest:
-        return None
 
-    row = ko_fields("mv")
-    row.update(
-        manuscript_id=manuscript["id"],
-        version_no=(last["version_no"] + 1) if last else 1,
-        checksum=digest,
-        files=json.dumps(files),
-        source=source,
-        session_id=session_id,
-    )
-    db.insert("manuscript_versions", row)
-    return row
+# ------------------------------------------------- converting a workspace
+
+def convert_store(db: Database, progress=None) -> dict:
+    """Move every version's text out of `manuscript_versions.files` into
+    the store, check that every version reads back exactly as its JSON
+    did (same names, same order, same text) and still matches its
+    checksum, then drop the column. One transaction: any difference
+    raises and leaves the workspace as it was. Ids, numbers and checksums
+    are untouched. Returns counts."""
+    if store_converted(db):
+        return {"already": True}
+    ids = [r["id"] for r in db.all(
+        "SELECT id FROM manuscript_versions ORDER BY manuscript_id, "
+        "version_no")]
+    report = {"versions": len(ids), "file_copies": 0, "texts_added": 0,
+              "raw_bytes": 0, "checksum_mismatches": []}
+    with db.transaction():
+        before = db.one("SELECT COUNT(*) AS n FROM version_texts")["n"]
+        for done, vid in enumerate(ids, 1):
+            row = db.one("SELECT manuscript_id, checksum, files FROM "
+                         "manuscript_versions WHERE id = ?", (vid,))
+            files = json.loads(row["files"])
+            if checksum(files) != row["checksum"]:
+                # Recorded as it is; the check below holds the converted
+                # version to the same (mis)match, never a new one.
+                report["checksum_mismatches"].append(vid)
+            db.conn.execute("DELETE FROM version_files WHERE version_id = ?",
+                            (vid,))
+            _insert_files(db, vid, row["manuscript_id"], files)
+            report["file_copies"] += len(files)
+            report["raw_bytes"] += sum(len(_encode(t)) for t in files.values())
+            if progress:
+                progress("copy", done, len(ids))
+        report["texts_added"] = db.one(
+            "SELECT COUNT(*) AS n FROM version_texts")["n"] - before
+        # Read every version back from the database (never the cache) and
+        # compare it with the JSON it came from.
+        for done, vid in enumerate(ids, 1):
+            row = db.one("SELECT checksum, files FROM manuscript_versions "
+                         "WHERE id = ?", (vid,))
+            want = json.loads(row["files"])
+            got = {r["name"]: _decode(r["body"]) for r in db.all(
+                "SELECT f.name AS name, t.body AS body FROM version_files f "
+                "JOIN version_texts t ON t.hash = f.text_hash "
+                "WHERE f.version_id = ? ORDER BY f.position", (vid,))}
+            if list(got.items()) != list(want.items()):
+                raise RuntimeError(
+                    f"version {vid} does not read back as it was stored; "
+                    "nothing was converted")
+            if ((checksum(got) == row["checksum"])
+                    == (vid in report["checksum_mismatches"])):
+                raise RuntimeError(f"version {vid} changed its checksum "
+                                   "match; nothing was converted")
+            if progress:
+                progress("check", done, len(ids))
+        db.conn.execute("ALTER TABLE manuscript_versions DROP COLUMN files")
+    db._version_store_ready = True
+    return report
+
+
+def check_store(db: Database) -> dict:
+    """Read every version of every manuscript back from the store: each
+    text must hash to its key, every file a version names must have its
+    text, and the files together must match the version's checksum. Also
+    counts texts no version holds. Writes nothing."""
+    _require_store(db)
+    report = {"versions": 0, "file_copies": 0, "texts": 0, "bad_texts": [],
+              "missing_texts": [], "checksum_mismatches": [],
+              "unheld_texts": 0}
+    good: set[str] = set()
+    for row in db.all("SELECT hash, body FROM version_texts"):
+        report["texts"] += 1
+        if text_hash(_decode(row["body"])) == row["hash"]:
+            good.add(row["hash"])
+        else:
+            report["bad_texts"].append(row["hash"])
+    held: set[str] = set()
+    for version in db.all("SELECT id, checksum FROM manuscript_versions"):
+        report["versions"] += 1
+        manifest = manifest_at(db, version["id"])
+        report["file_copies"] += len(manifest)
+        held.update(manifest.values())
+        if any(d not in good for d in manifest.values()):
+            report["missing_texts"].append(version["id"])
+            continue
+        if checksum(files_at(db, version["id"])) != version["checksum"]:
+            report["checksum_mismatches"].append(version["id"])
+    report["unheld_texts"] = len(good - held)
+    report["ok"] = not (report["bad_texts"] or report["missing_texts"]
+                        or report["checksum_mismatches"])
+    return report
 
 
 # A removed file and an added file are one renamed document when their
@@ -281,14 +640,10 @@ def massive_deletions(db: Database, manuscript: dict,
     path: a manual `collect` always proceeds. With `renames` (the
     manuscript's `document_ids` setting is on) a renamed file
     (`pair_renames`) lost nothing and is not flagged."""
-    latest = db.one(
-        "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (manuscript["id"],),
-    )
+    latest = latest_version(db, manuscript["id"])
     if not latest:
         return []
-    old_files: dict[str, str] = loads(latest["files"], {})
+    old_files = files_at(db, latest["id"])
     disk = read_manuscript_files(Path(manuscript["path"]))
     renamed = pair_renames(old_files, disk) if renames else {}
     flagged = []
@@ -330,8 +685,8 @@ def detect_transitions(
     followed by the paragraph edits made along with the rename, diffed
     against the text it had under the old name; without it, a removal
     and an addition."""
-    old_files: dict[str, str] = loads(before["files"], {}) if before else {}
-    new_files: dict[str, str] = loads(after["files"], {})
+    old_files = files_at(db, before["id"]) if before else {}
+    new_files = files_at(db, after["id"])
     transitions: list[dict] = []
 
     def record(kind: str, location: str, summary: str, detail: dict) -> None:
@@ -454,16 +809,20 @@ def marker_present(text: str) -> bool:
 
 def _version_text(db: Database, version_id: str | None,
                   file: str) -> str | None:
-    if not version_id:
+    """The text a version holds for the document now called `file`, under
+    whichever name it had when the version was recorded (`docs.names_of`,
+    current name first). None when there is no such version or it holds
+    none of the document's names."""
+    version = version_by_id(db, version_id)
+    if not version:
         return None
-    row = db.one("SELECT manuscript_id, files FROM manuscript_versions "
-                 "WHERE id = ?", (version_id,))
-    if not row:
-        return None
-    from .docs import snapshot_text
+    from .docs import names_of
 
-    return snapshot_text(db, row["manuscript_id"], loads(row["files"], {}),
-                         file)
+    manifest = manifest_at(db, version["id"])
+    for name in names_of(db, version["manuscript_id"], file):
+        if name in manifest:
+            return text_of(db, manifest[name])
+    return None
 
 
 # ------------------------------------------------------------ as of a date
@@ -544,8 +903,9 @@ def file_as_of(db: Database, manuscript: dict, file: str, as_of: str,
     from .summaries import sections_of
 
     cutoff = parse_as_of(as_of)
+    _require_store(db)
     row = db.one(
-        "SELECT version_no, created_at, files FROM manuscript_versions "
+        f"SELECT {VERSION_COLUMNS} FROM manuscript_versions "
         "WHERE manuscript_id = ? AND created_at <= ? "
         "ORDER BY created_at DESC, version_no DESC LIMIT 1",
         (manuscript["id"], cutoff))
@@ -558,7 +918,7 @@ def file_as_of(db: Database, manuscript: dict, file: str, as_of: str,
             f"no snapshot was collected at or before {as_of}"
             + (f"; the first is v{first['version_no']} of {first['created_at']}"
                if first else "; none has been collected yet"))
-    files = loads(row["files"], {})
+    files = files_at(db, row["id"])
     order, unlisted = structure.reading_order(files)
     book = [name for name in order if name not in set(unlisted)]
     requested = (file or "").strip()

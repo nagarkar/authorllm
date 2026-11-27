@@ -9,10 +9,11 @@ plan item into prose is `write start` + `write draft` (§15).
 
 from __future__ import annotations
 
+from . import revisions
 from .analysis import find_precedents
 from .concepts import node_names
 from .terms import concept_pattern
-from .db import Database, loads
+from .db import Database
 from .guidance import PREREQUISITE_FIRST, PREREQUISITE_SECOND
 from .structure import reading_order
 
@@ -24,12 +25,8 @@ def build_plan(db: Database, manuscript: dict) -> dict:
     placement derived from realized graph neighbors and the reading order,
     prerequisite ordering, and any matching active intent."""
     mid = manuscript["id"]
-    latest = db.one(
-        "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (mid,),
-    )
-    files = loads(latest["files"], {}) if latest else {}
+    latest = revisions.latest_version(db, mid)
+    files = revisions.files_at(db, latest["id"]) if latest else {}
     order, toc_unlisted = reading_order(files)
     position = {name: index for index, name in enumerate(order)}
 

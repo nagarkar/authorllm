@@ -35,6 +35,7 @@ from .guidance import INTENT_KINDS, generate_guidance, intent_coverage_notes
 from .llm import LLMClient
 from .normalize import clamp
 from .pronunciations import parse_cast
+from . import revisions as _revisions
 from .revisions import collect_revision, detect_transitions
 
 
@@ -345,6 +346,11 @@ def cmd_unregister(args):
             cursor = db.conn.execute(f"DELETE FROM {table} WHERE {key} = ?", (mid,))
             if cursor.rowcount:
                 deleted[table] = cursor.rowcount
+        # File texts are shared across manuscripts, so they carry no
+        # manuscript_id: drop the ones no remaining version holds.
+        pruned = _revisions.prune_texts(db)
+        if pruned:
+            deleted["version_texts"] = pruned
     total = sum(deleted.values())
     detail = ", ".join(f"{table}: {count}" for table, count in deleted.items())
     print(f"Unregistered '{name}' — removed {total} row(s) ({detail}).")
@@ -522,9 +528,7 @@ def cmd_session(args):
         # realizations) so nothing arrives unacknowledged.
         # Virgin manuscripts (no baseline version) keep the classic flow:
         # first collect runs after the author declares their concepts.
-        has_baseline = db.one(
-            "SELECT id FROM manuscript_versions WHERE manuscript_id = ? "
-            "LIMIT 1", (manuscript["id"],))
+        has_baseline = _revisions.latest_version(db, manuscript["id"])
         if has_baseline:
             try:
                 opening = api.collect(db, manuscript, _load_config(args),
@@ -1478,9 +1482,7 @@ def _critique_write(db: Database, manuscript: dict, args) -> None:
     version = collect_revision(db, manuscript, session_id=None,
                                source="critique-pin")
     if version is None:
-        row = db.one("SELECT id FROM manuscript_versions WHERE manuscript_id "
-                     "= ? ORDER BY version_no DESC LIMIT 1", (mid,))
-        version = dict(row) if row else None
+        version = _revisions.latest_version(db, mid)
     if version:
         passes.pin_version(db, p, file, version["id"])
     config = _load_config(args)
@@ -1640,13 +1642,10 @@ def _critique_rollback(db: Database, manuscript: dict, args) -> None:
     pin = passes.pinned_version(p, file)
     if not pin:
         sys.exit(f"error: no pinned version for {file} — nothing was written.")
-    row = db.one("SELECT files FROM manuscript_versions WHERE id = ?", (pin,))
-    if not row:
+    if not _revisions.version_by_id(db, pin):
         sys.exit("error: pinned version is missing from the record.")
-    from . import docs as _docs
-
     # Under whichever name the essay had when the version was pinned.
-    pinned_text = _docs.snapshot_text(db, mid, loads(row["files"], {}), file)
+    pinned_text = _revisions._version_text(db, pin, file)
     if pinned_text is None:
         sys.exit(f"error: pinned version has no {file}.")
     # Snapshot the current disk state before it's overwritten below — an
@@ -10062,14 +10061,15 @@ def cmd_status(args):
     manuscript = _manuscript(db, args)
     mid = manuscript["id"]
     session = ses.active_session(db, mid)
-    counts = {
+    counts = {"manuscript_versions": _revisions.count_versions(db, mid)}
+    counts.update({
         table: db.one(f"SELECT COUNT(*) AS n FROM {table} WHERE manuscript_id = ?", (mid,))["n"]
         for table in (
-            "manuscript_versions", "editorial_transitions", "editorial_episodes",
+            "editorial_transitions", "editorial_episodes",
             "declared_intents", "concept_nodes", "concept_edges",
             "editorial_beliefs", "guidance_history", "editorial_reviews", "evidence",
         )
-    }
+    })
     print(f"Manuscript: {manuscript['name']} ({manuscript['path']})")
     print(f"Session: {'active — ' + session['id'] if session else 'none'}")
     print(
@@ -10207,10 +10207,7 @@ def cmd_diff(args):
 
     db = _open_db(args)
     manuscript = _manuscript(db, args)
-    versions = db.all(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? ORDER BY version_no",
-        (manuscript["id"],),
-    )
+    versions = _revisions.list_versions(db, manuscript["id"])
     if not versions:
         sys.exit("error: no versions collected yet.")
 
@@ -10234,8 +10231,8 @@ def cmd_diff(args):
         new_v = versions[-1]
         old_v = versions[-2] if len(versions) > 1 else None
 
-    old_files = loads(old_v["files"], {}) if old_v else {}
-    new_files = loads(new_v["files"], {})
+    old_files = _revisions.files_at(db, old_v["id"]) if old_v else {}
+    new_files = _revisions.files_at(db, new_v["id"])
     old_label = f"v{old_v['version_no']}" if old_v else "∅"
     printed = False
     # A file renamed between the two versions is one document: it is
@@ -10507,6 +10504,81 @@ def _print_beats(db, writeup: dict, index: dict) -> None:
         print("  ← a beat drafted by one chat and settled by another")
 
 
+def cmd_version_store(args):
+    """`version-store convert` moves a workspace made before the version
+    store from whole-manuscript JSON per version to one copy of each file
+    text (revisions.py). It first copies the database beside its backups
+    as `pre-version-store-<time>.db`, the way back; converts and checks in
+    one transaction; then, with `--vacuum`, gives the freed space back to
+    the disk. `version-store check` reads every version back and checks
+    it against its checksum. Neither changes a version id, number or
+    checksum."""
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from . import backup
+
+    db = _open_db(args)
+    if args.action == "check":
+        report = _revisions.check_store(db)
+        print(f"{report['versions']} versions, {report['file_copies']} "
+              f"files, {report['texts']} distinct texts "
+              f"({report['unheld_texts']} held by no version).")
+        for key, label in (("bad_texts", "texts whose hash is wrong"),
+                           ("missing_texts", "versions missing a text"),
+                           ("checksum_mismatches",
+                            "versions not matching their checksum")):
+            if report[key]:
+                print(ui.red(f"{len(report[key])} {label}: "
+                             + ", ".join(report[key][:10])))
+        if not report["ok"]:
+            sys.exit(1)
+        print("Every version reads back whole and matches its checksum.")
+        return
+
+    size_before = db.path.stat().st_size
+    if _revisions.store_converted(db):
+        print("Version history is already in the version store.")
+    else:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        folder = backup.backup_dir(db.path)
+        folder.mkdir(parents=True, exist_ok=True)
+        keep = folder / f"pre-version-store-{stamp}.db"
+        db.conn.commit()
+        target = sqlite3.connect(str(keep))
+        try:
+            db.conn.backup(target)
+        finally:
+            target.close()
+        print(f"Copied the database to {keep} (the way back).")
+
+        def progress(stage, done, total):
+            if done == total or done % 200 == 0:
+                print(ui.dim(f"  {stage}: {done}/{total}"), flush=True)
+
+        report = _revisions.convert_store(db, progress=progress)
+        print(f"Converted {report['versions']} versions: "
+              f"{report['file_copies']} file copies "
+              f"({report['raw_bytes'] / 1e6:.1f} MB) now name "
+              f"{report['texts_added']} distinct texts. Every version read "
+              "back identical to its old JSON.")
+        if report["checksum_mismatches"]:
+            print(ui.yellow(
+                f"{len(report['checksum_mismatches'])} version(s) did not "
+                "match their checksum before conversion and still do not "
+                "(kept as recorded): "
+                + ", ".join(report["checksum_mismatches"][:10])))
+    if args.vacuum:
+        db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        db.conn.execute("VACUUM")
+        db.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    print(f"Database: {size_before / 1e6:.1f} MB before, "
+          f"{db.path.stat().st_size / 1e6:.1f} MB now"
+          + ("" if args.vacuum else
+             " (the freed pages are reused; --vacuum gives them back "
+             "to the disk)") + ".")
+
+
 def cmd_dbperf(args):
     """Read the always-on database performance log. Read-only, no
     network, no LLM, no writes — and it does not open the database, so it
@@ -10691,14 +10763,11 @@ def cmd_history(args):
     action = args.action or "list"
 
     if action == "list":
-        for row in db.all(
-            "SELECT * FROM manuscript_versions WHERE manuscript_id = ? ORDER BY version_no",
-            (manuscript["id"],),
-        ):
-            files = loads(row["files"], {})
+        counts = _revisions.file_counts(db, manuscript["id"])
+        for row in _revisions.list_versions(db, manuscript["id"]):
             print(
                 f"v{row['version_no']}  {row['created_at']}  {row['checksum'][:12]}  "
-                f"{len(files)} file(s)  session={row['session_id'] or '-'}"
+                f"{counts.get(row['id'], 0)} file(s)  session={row['session_id'] or '-'}"
             )
         return
 
@@ -10730,7 +10799,7 @@ def cmd_history(args):
             version = api.get_version(db, manuscript, number)
         except LookupError as err:
             sys.exit(f"error: {err}")
-        for name, text in sorted(loads(version["files"], {}).items()):
+        for name, text in sorted(_revisions.files_at(db, version["id"]).items()):
             print(ui.dim(f"--- {name} ---"))
             print(text)
         return
@@ -12269,6 +12338,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top", type=int, default=10,
                    help="how many query shapes per table (default 10)")
     p.set_defaults(func=cmd_dbperf)
+
+    p = sub.add_parser(
+        "version-store",
+        help="version history storage: convert a workspace to one copy of "
+             "each file text, or check every version reads back whole")
+    p.add_argument("action", choices=["convert", "check"])
+    p.add_argument("--vacuum", action="store_true",
+                   help="convert: afterwards, give the freed space back to "
+                        "the disk (rewrites the database file)")
+    p.set_defaults(func=cmd_version_store)
 
     p = sub.add_parser("usage",
                        help="the usage ledger: estimated API spend, chat "

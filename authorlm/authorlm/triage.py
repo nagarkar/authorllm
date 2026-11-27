@@ -416,10 +416,9 @@ def list_rows(db: Database, manuscript: dict, triage_type: str) -> list[dict[str
 
 
 def _latest_manuscript_version(db: Database, manuscript_id: str) -> dict | None:
-    row = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1", (manuscript_id,))
-    return dict(row) if row else None
+    from . import revisions
+
+    return revisions.latest_version(db, manuscript_id)
 
 
 def snapshot(db: Database, manuscript: dict, triage_type: str,

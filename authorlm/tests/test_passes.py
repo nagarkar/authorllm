@@ -3972,15 +3972,16 @@ def _the_doc_road_through_the_cli(root: Path) -> None:
               "marker",
               "Two, as I would rather have it." in final
               and "FOUR AS PROPOSED." in final and "<<" not in final, final)
-        versions = db.all(
-            "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no DESC LIMIT 1", (mid,))
+        from authorlm import revisions as _rv
+
+        latest = _rv.latest_version(db, mid)
         check("FD the resolve was collected — the version history has the "
-              "finished essay", loads(versions[0]["files"], {}).get(
-                  "solo.md", "").find("Two, as I would rather have it.") >= 0)
+              "finished essay", (_rv.file_at(db, latest["id"], "solo.md")
+                                 or "").find(
+                  "Two, as I would rather have it.") >= 0)
         settle_ids = [r["id"] for r in db.all(
             "SELECT id FROM editorial_transitions WHERE manuscript_id = ? "
-            "AND version_after = ?", (mid, versions[0]["id"]))]
+            "AND version_after = ?", (mid, latest["id"]))]
         attached: set[str] = set()
         for r in db.all("SELECT transition_ids FROM editorial_episodes "
                         "WHERE manuscript_id = ?", (mid,)):
@@ -6393,12 +6394,11 @@ def main_test() -> None:
         check("rollback restores the pinned content",
               (rb_ms / "solo.md").read_text()
               == "# Solo\n\nOriginal pinned content.\n")
-        rb_versions = rb_db.all(
-            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no", (rb_mid,))
+        from authorlm import revisions as _rv
+
         recovered = any(
-            loads(v["files"], {}).get("solo.md") == UNCOLLECTED_ROLLBACK
-            for v in rb_versions)
+            _rv.file_at(rb_db, v["id"], "solo.md") == UNCOLLECTED_ROLLBACK
+            for v in _rv.list_versions(rb_db, rb_mid))
         check("critique rollback snapshots the uncollected edit into "
               "history before overwriting it (BUG-2 / A1)", recovered)
 
@@ -6646,12 +6646,11 @@ def main_test() -> None:
               "local-only drift ('local_ahead', not a conflict)",
               "RESOLVED PARAGRAPH TEXT." in resolved3
               and "UNCOLLECTED PARAGRAPH" not in resolved3, resolved3)
-        res_versions = db3.all(
-            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no", (mid3,))
+        from authorlm import revisions as _rv
+
         recovered = any(
-            loads(v["files"], {}).get("solo.md") == UNCOLLECTED_RESOLVE
-            for v in res_versions)
+            _rv.file_at(db3, v["id"], "solo.md") == UNCOLLECTED_RESOLVE
+            for v in _rv.list_versions(db3, mid3))
         check("critique resolve snapshots the uncollected local edit into "
               "history before overwriting the file (BUG-2 / A1)", recovered)
 
@@ -6778,12 +6777,11 @@ def main_test() -> None:
 
         check("pull overwrote the file with the Doc's content",
               (dp_ms / "solo.md").read_text() == "PULLED FROM DOC.\n")
-        dp_versions = dp_db.all(
-            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no", (dp_manuscript["id"],))
+        from authorlm import revisions as _rv
+
         recovered = any(
-            loads(v["files"], {}).get("solo.md") == UNCOLLECTED_PULL
-            for v in dp_versions)
+            _rv.file_at(dp_db, v["id"], "solo.md") == UNCOLLECTED_PULL
+            for v in _rv.list_versions(dp_db, dp_manuscript["id"]))
         check("doc pull snapshots the uncollected local edit into history "
               "before the Doc overwrites it (BUG-1 / A2)", recovered)
 

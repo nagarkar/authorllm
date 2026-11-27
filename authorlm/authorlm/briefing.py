@@ -8,6 +8,7 @@ editorial knowledge happens silently.
 
 from __future__ import annotations
 
+from . import revisions
 from .concepts import unrealized_with_dependents
 from .db import Database, loads
 from .sessions import critic_tallies
@@ -170,15 +171,11 @@ def build_briefing(db: Database, manuscript_id: str, since: str | None = None) -
     # TOC completeness: the reading order is only authoritative when every
     # active file is listed (structure must cover the whole manuscript).
     toc_unlisted: list[str] = []
-    latest = db.one(
-        "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (manuscript_id,),
-    )
+    latest = revisions.latest_version(db, manuscript_id)
     if latest:
         from .structure import TOC_FILENAME, reading_order
 
-        files = loads(latest["files"], {})
+        files = revisions.files_at(db, latest["id"])
         if TOC_FILENAME in files:
             _, toc_unlisted = reading_order(files)
 

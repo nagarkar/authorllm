@@ -149,15 +149,12 @@ def inflight_sources(db: Database, manuscript: dict) -> dict[str, str | None]:
     gone missing reads the same way, and honestly so: there is no
     pre-rewrite text to be had.)"""
     rows = db.all(
-        "SELECT w.file AS file, v.files AS files FROM writeups w "
-        "LEFT JOIN manuscript_versions v ON v.id = w.source_version_id "
-        "WHERE w.manuscript_id = ? AND w.status = 'active'",
-        (manuscript["id"],))
-    from .docs import snapshot_text
+        "SELECT file, source_version_id FROM writeups "
+        "WHERE manuscript_id = ? AND status = 'active'", (manuscript["id"],))
+    from .revisions import _version_text
 
     # Under whichever name the file had when the version was pinned.
-    return {r["file"]: snapshot_text(db, manuscript["id"],
-                                     loads(r["files"], {}), r["file"])
+    return {r["file"]: _version_text(db, r["source_version_id"], r["file"])
             for r in rows}
 
 

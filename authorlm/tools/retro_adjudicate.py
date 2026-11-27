@@ -94,10 +94,10 @@ def load_sandbox_llm(sandbox_config_path: Path) -> LLMClient:
 
 
 def latest_files(db: Database, mid: str) -> dict[str, str]:
-    row = db.one(
-        "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1", (mid,))
-    return json.loads(row["files"]) if row else {}
+    from authorlm import revisions
+
+    latest = revisions.latest_version(db, mid)
+    return revisions.files_at(db, latest["id"]) if latest else {}
 
 
 def essay_files(files: dict[str, str]) -> list[str]:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 
 from . import beliefs as bel
+from . import revisions
 from .db import Database, ko_fields, loads
 from .llm import LLMClient
 
@@ -62,11 +63,8 @@ def _serialize_transitions(db: Database, episode: dict) -> tuple[str, int]:
         if t["kind"] == "file_added":
             # The transition stores only a count; the analyzer needs the
             # prose itself, from the version this transition produced.
-            version = db.one(
-                "SELECT files FROM manuscript_versions WHERE id = ?",
-                (t["version_after"],),
-            )
-            content = (loads(version["files"], {}) if version else {}).get(t["location"], "")
+            content = revisions.file_at(db, t["version_after"],
+                                        t["location"]) or ""
             if content:
                 lines.append(f"NEW TEXT: {content[:NEW_FILE_SNIPPET]}")
             else:

@@ -268,12 +268,16 @@ def primary_location(items: list[tuple[str, str]], node) -> str | None:
     return None
 
 
-def scan_realizations(db: Database, manuscript_id: str, version: dict) -> list[dict]:
-    """Mark declared concepts as realized when they appear in text.
-    Returns newly realized concept rows."""
+def scan_realizations(db: Database, manuscript_id: str, version: dict,
+                      files: dict[str, str] | None = None) -> list[dict]:
+    """Mark declared concepts as realized when they appear in text: the
+    version's files, or `files` when given (collect passes a blinded
+    copy). Returns newly realized concept rows."""
+    from .revisions import files_at
     from .structure import ordered_items
 
-    files: dict[str, str] = loads(version["files"], {})
+    if files is None:
+        files = files_at(db, version["id"])
     # Reading order (TOC-authoritative): the first location in reading order
     # is the concept's primary location — definition precedence. Invariant
     # across nodes, so it's computed once rather than per declared concept.
@@ -301,7 +305,8 @@ def scan_realizations(db: Database, manuscript_id: str, version: dict) -> list[d
 
 
 def rescan_primary_locations(db: Database, manuscript_id: str,
-                             version: dict) -> tuple[list[dict], list[dict]]:
+                             version: dict, files: dict[str, str] | None = None
+                             ) -> tuple[list[dict], list[dict]]:
     """Re-validate realized concepts against the current text.
 
     Returns (repointed, vanished): `repointed` are concepts whose primary
@@ -309,10 +314,13 @@ def rescan_primary_locations(db: Database, manuscript_id: str,
     introduced_in is re-pointed to the first reading-order location that
     does (definition precedence follows the text). `vanished` are realized
     concepts that no longer appear anywhere; the caller surfaces those for
-    an author decision — never silently demoted."""
+    an author decision — never silently demoted. Reads the version's
+    files, or `files` when given."""
+    from .revisions import files_at
     from .structure import ordered_items
 
-    files: dict[str, str] = loads(version["files"], {})
+    if files is None:
+        files = files_at(db, version["id"])
     items = ordered_items(files)
     repointed, vanished = [], []
     for node in db.all(

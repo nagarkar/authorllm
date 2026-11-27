@@ -39,7 +39,7 @@ import authorlm  # noqa: E402
 assert Path(authorlm.__file__).resolve().parent == HERE.parent / "authorlm", (
     f"testing the wrong package: {authorlm.__file__}")
 
-from authorlm import api, book, changes, docs  # noqa: E402
+from authorlm import api, book, changes, docs, revisions  # noqa: E402
 
 from test_book_workflow import NO_USES, Workspace, quiet  # noqa: E402
 
@@ -449,9 +449,8 @@ class LandTests(Book):
         edited = ONE.replace("He never got it.", "He never got it, quite.")
         (self.root / "one.md").write_text(edited, encoding="utf-8")
         result = self.land(run, "one.md", [TYPO])
-        versions = {r["source"]: json.loads(r["files"])["one.md"]
-                    for r in self.db.all(
-                        "SELECT source, files FROM manuscript_versions")}
+        versions = {v["source"]: revisions.file_at(self.db, v["id"], "one.md")
+                    for v in revisions.list_versions(self.db, self.manuscript["id"])}
         self.assertEqual(versions["pre-book-land"], edited)
         self.assertEqual(versions["book-land"], self.text())
         self.assertIn("ran the long way", versions["book-land"])
@@ -770,10 +769,10 @@ class DraftTests(Book):
         self.assertEqual((last["from_status"], last["to_status"]),
                          ("running", "running"))
         self.assertIn("drafted one.md:", last["reason"])
-        latest = self.db.one("SELECT source, files FROM manuscript_versions "
-                             "ORDER BY version_no DESC LIMIT 1")
+        latest = revisions.latest_version(self.db, self.manuscript["id"])
         self.assertEqual(latest["source"], "book-draft")
-        self.assertEqual(json.loads(latest["files"])["one.md"], self.DRAFT)
+        self.assertEqual(revisions.file_at(self.db, latest["id"], "one.md"),
+                         self.DRAFT)
         # A correction in the same run is a change; the drafter may also
         # write its own draft over, whole.
         self.land(self.run, "one.md", [{
@@ -808,8 +807,8 @@ class DraftTests(Book):
         again = self.DRAFT.replace("river", "stream")
         self.assertTrue(self.draft(rerun, "one.md", again)["replaced"])
         self.assertEqual(self.text(), again)
-        kept = [json.loads(r["files"])["one.md"] for r in self.db.all(
-            "SELECT files FROM manuscript_versions")]
+        kept = [revisions.file_at(self.db, v["id"], "one.md")
+                for v in revisions.list_versions(self.db, self.manuscript["id"])]
         self.assertIn(self.DRAFT, kept)
 
     def test_draft_declines_under_forms(self):

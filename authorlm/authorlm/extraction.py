@@ -156,11 +156,9 @@ def changed_files_since_extraction(db: Database, manuscript: dict):
     """(changed relative paths, latest version id, watermark files, latest
     files) since the last extraction. changed is None when there is no
     watermark to diff against (→ process everything)."""
-    latest = db.one(
-        "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-        "ORDER BY version_no DESC LIMIT 1",
-        (manuscript["id"],),
-    )
+    from . import revisions
+
+    latest = revisions.latest_version(db, manuscript["id"])
     if not latest:
         return None, None, None, None
     watermark = json.loads(manuscript["metadata"] or "{}").get("last_extracted_version")
@@ -168,13 +166,10 @@ def changed_files_since_extraction(db: Database, manuscript: dict):
         return None, latest["id"], None, None
     if watermark == latest["id"]:
         return set(), latest["id"], None, None
-    previous = db.one(
-        "SELECT files FROM manuscript_versions WHERE id = ?", (watermark,)
-    )
-    if not previous:
+    if not revisions.version_by_id(db, watermark):
         return None, latest["id"], None, None
-    old_files = json.loads(previous["files"])
-    new_files = json.loads(latest["files"])
+    old_files = revisions.files_at(db, watermark)
+    new_files = revisions.files_at(db, latest["id"])
     changed = {name for name, text in new_files.items() if old_files.get(name) != text}
     return changed, latest["id"], old_files, new_files
 
@@ -1496,10 +1491,11 @@ def revival_due(db: Database, manuscript: dict, node: dict,
     if meta.get("retired_for_good"):
         return None
     since = retired_at(db, mid, node)
-    base = db.one(
-        "SELECT files FROM manuscript_versions WHERE manuscript_id = ? AND "
-        "created_at <= ? ORDER BY version_no DESC LIMIT 1", (mid, since))
-    old = ({_norm_paragraph(p) for text in loads(base["files"], {}).values()
+    from . import revisions
+
+    base = revisions.version_as_of(db, mid, since)
+    old = ({_norm_paragraph(p)
+            for text in revisions.files_at(db, base["id"]).values()
             for p in _paragraphs(text)} if base else set())
     fresh = {name: [p for p in _paragraphs(text)
                     if _norm_paragraph(p) not in old]
@@ -1948,9 +1944,10 @@ def run(db: Database, manuscript: dict, essays: list[tuple[str, list]], *,
         reports.append(run_essay(db, manuscript, payloads,
                                  extract_llm=extract_llm, judge_llm=judge_llm,
                                  knob=knob, run_id=run_id, files=files))
-    latest = db.one("SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-                    "ORDER BY version_no DESC LIMIT 1", (manuscript["id"],))
-    realized = scan_realizations(db, manuscript["id"], dict(latest)) \
+    from . import revisions
+
+    latest = revisions.latest_version(db, manuscript["id"])
+    realized = scan_realizations(db, manuscript["id"], latest) \
         if latest else []
     incomplete = bool(stopped) or any(
         r["answered"] < r["sections"] or not r["judged"] for r in reports)

@@ -1348,15 +1348,14 @@ def check_backup_and_restore() -> None:
         lat_db = api.open_db(str(lat_ws), create=True)
         lat_manuscript = api.register_manuscript(lat_db, "book", str(lat_ms))
         # ~56 MB, matching ~/.authorlm/authorlm.db's real size (RFC OPS-4):
-        # 60 rows of ~1 MB of text in manuscript_versions.files.
-        blob = "x" * (1024 * 1024)
+        # 60 rows of ~1 MB, stored raw in the version store's text table
+        # (size is all this measures).
+        blob = ("x" * (1024 * 1024)).encode()
         with lat_db.transaction():
             for i in range(60):
-                version = _ko_fields("mv")
-                version.update(manuscript_id=lat_manuscript["id"],
-                               version_no=i, checksum=f"c{i}",
-                               files=blob, source="synthetic", session_id=None)
-                lat_db.insert("manuscript_versions", version)
+                lat_db.conn.execute(
+                    "INSERT INTO version_texts (hash, body) VALUES (?, ?)",
+                    (f"synthetic-{i}", blob))
         lat_db.conn.execute("PRAGMA wal_checkpoint(FULL)")
         db_size_mb = lat_db.path.stat().st_size / (1024 * 1024)
         started = _time.monotonic()
@@ -3408,14 +3407,13 @@ def check_placeholder_reader_paths() -> None:
               and all(files.get("01-epictetus.md") == "" for files in seen)
               and "A new essay." in seen[-1].get("02-second.md", ""),
               str([{k: v[:40] for k, v in files.items()} for files in seen]))
-        prior_version = db.one(
-            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no DESC LIMIT 1 OFFSET 1", (manuscript["id"],))
+        from authorlm import revisions as _rv
+        prior_version = _rv.latest_versions(db, manuscript["id"], 2)[1:]
         check("F6 — and the BEFORE version really did carry the "
               "placeholder, so blinding both sides is not a vacuous pass",
-              prior_version is not None and api.is_placeholder(
-                  _json.loads(prior_version["files"]).get(
-                      "01-epictetus.md", "")))
+              bool(prior_version) and api.is_placeholder(
+                  _rv.file_at(db, prior_version[0]["id"],
+                              "01-epictetus.md") or ""))
 
         # --- RK6: two writeups make --writeup a constant companion, so it
         # takes the essay's name as well as an opaque id.
@@ -7155,7 +7153,8 @@ def main_test() -> None:
         check("collect_revision() completes through a mixed-encoding "
               "manuscript instead of raising",
               v1 is not None and v1["version_no"] == 1, str(v1))
-        stored_files = loads(v1["files"], {})
+        from authorlm import revisions as _rv
+        stored_files = _rv.files_at(bad_db, v1["id"])
         check("the unreadable file is still present in the persisted "
               "snapshot, not silently dropped as a phantom deletion",
               "02-bad.md" in stored_files, str(sorted(stored_files)))
@@ -7193,11 +7192,9 @@ def main_test() -> None:
         check("api.collect() completes end-to-end through a manuscript "
               "containing invalid UTF-8, instead of raising",
               "staged" not in report, str(report))
-        v1 = e2e_db.one(
-            "SELECT * FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no DESC LIMIT 1",
-            (e2e_manuscript["id"],))
-        stored_files = loads(v1["files"], {}) if v1 else {}
+        from authorlm import revisions as _rv
+        v1 = _rv.latest_version(e2e_db, e2e_manuscript["id"])
+        stored_files = _rv.files_at(e2e_db, v1["id"]) if v1 else {}
         check("the file with invalid UTF-8 is snapshotted by api.collect(), "
               "not silently dropped as a phantom deletion",
               "02-bad.md" in stored_files, str(sorted(stored_files)))
@@ -7287,7 +7284,7 @@ def main_test() -> None:
 
         v1 = api.get_version(md_db, md_manuscript, 1)
         check("get_version returns the requested snapshot",
-              loads(v1["files"], {})["safety.md"] == big_text)
+              _rv.files_at(md_db, v1["id"])["safety.md"] == big_text)
 
         restored = api.restore_version(md_db, md_manuscript, 1, {})
         check("restore_version writes the old content back to disk",
@@ -7299,8 +7296,8 @@ def main_test() -> None:
               and restored["transitions"])
         latest = api.get_version(md_db, md_manuscript, 6)
         check("the restored snapshot is itself a new, real version",
-              loads(latest["files"], {})["safety.md"] == big_text
-              and "tiny.md" not in loads(latest["files"], {}))
+              _rv.files_at(md_db, latest["id"])["safety.md"] == big_text
+              and "tiny.md" not in _rv.files_at(md_db, latest["id"]))
 
         # --- BUG-2 / A1 regression: restore_version must snapshot the
         # current on-disk state into history BEFORE unlinking/overwriting
@@ -7332,19 +7329,17 @@ def main_test() -> None:
               == "Original collected content.\n"
               and not (rv_ms / "new-uncollected.md").exists())
 
-        rv_versions = rv_db.all(
-            "SELECT files FROM manuscript_versions WHERE manuscript_id = ? "
-            "ORDER BY version_no", (rv_manuscript["id"],))
+        from authorlm import revisions as _rv
+        rv_versions = [_rv.files_at(rv_db, v["id"])
+                       for v in _rv.list_versions(rv_db, rv_manuscript["id"])]
         recovered = any(
-            loads(v["files"], {}).get("only.md")
-            == "EDITED BUT NEVER COLLECTED.\n"
-            and loads(v["files"], {}).get("new-uncollected.md")
+            v.get("only.md") == "EDITED BUT NEVER COLLECTED.\n"
+            and v.get("new-uncollected.md")
             == "A NEW FILE, NEVER COLLECTED.\n"
             for v in rv_versions)
         check("restore_version snapshots the pre-destruction disk state "
               "into history before overwriting/deleting it (BUG-2 / A1)",
-              recovered,
-              [sorted(loads(v["files"], {})) for v in rv_versions])
+              recovered, [sorted(v) for v in rv_versions])
 
         try:
             api.diff_versions(md_db, md_manuscript, older=1, newer=99)

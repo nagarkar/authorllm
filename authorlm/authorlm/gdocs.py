@@ -2744,7 +2744,7 @@ def find_pushed_base(db: Database, manuscript: dict, relpath: str,
                      also: tuple = ()) -> str | None:
     """The text whose hash is `base_hash`: one of `also` (the current
     sides — a side that never moved IS the base), else the newest
-    manuscript_versions snapshot of `relpath` that hashes to it, raw or
+    collected version of `relpath` that hashes to it, raw or
     in the bridge's canonical form (normalized, embed-free)."""
     if not base_hash:
         return None
@@ -2758,24 +2758,25 @@ def find_pushed_base(db: Database, manuscript: dict, relpath: str,
             return text
     # A snapshot holds the file under the name it had then: read each
     # name the document has carried, the current one first.
+    from . import revisions
     from .docs import names_of
 
-    rows = [row for name in names_of(db, manuscript["id"], relpath)
-            for row in db.all(
-        "SELECT json_extract(files, ?) AS text FROM manuscript_versions "
-        "WHERE manuscript_id = ? ORDER BY version_no DESC",
-        ('$."' + name.replace('"', '\\"') + '"', manuscript["id"]))]
+    # Equal hashes are equal texts: each distinct text is read once.
     seen: set[str] = set()
-    for row in rows:
-        raw = row["text"]
-        if not raw or raw in seen:
-            continue
-        seen.add(raw)
-        normalized = normalize_markdown(raw)
-        for text in (strip_embed_lines(normalized), normalized,
-                     strip_embed_lines(raw), raw):
-            if text_hash(text) == base_hash:
-                return text
+    for name in names_of(db, manuscript["id"], relpath):
+        for _number, digest in revisions.file_history(db, manuscript["id"],
+                                                      name):
+            if digest in seen:
+                continue
+            seen.add(digest)
+            raw = revisions.text_of(db, digest)
+            if not raw:
+                continue
+            normalized = normalize_markdown(raw)
+            for text in (strip_embed_lines(normalized), normalized,
+                         strip_embed_lines(raw), raw):
+                if text_hash(text) == base_hash:
+                    return text
     return None
 
 

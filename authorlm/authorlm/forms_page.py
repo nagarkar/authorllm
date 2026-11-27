@@ -500,19 +500,24 @@ def older_version_of(db: Database, manuscript: dict, rel: str, doc: str,
     target = gdocs.text_hash(doc)
     if target == gdocs.text_hash(local):
         return None
-    rows = db.all(
-        "SELECT version_no, json_extract(files, ?) AS text FROM "
-        "manuscript_versions WHERE manuscript_id = ? ORDER BY version_no DESC",
-        ('$."' + rel.replace('"', '\\"') + '"', manuscript["id"]))
-    for row in rows:
-        raw = row["text"]
+    from . import revisions
+
+    # Newest first; equal hashes are equal texts, so each distinct text is
+    # read and tried once, and the newest version holding it answers.
+    tried: set[str] = set()
+    for version_no, digest in revisions.file_history(db, manuscript["id"],
+                                                     rel):
+        if digest in tried:
+            continue
+        tried.add(digest)
+        raw = revisions.text_of(db, digest)
         if not raw:
             continue
         normalized = normalize_markdown(raw)
         for text in (strip_embed_lines(normalized), normalized,
                      strip_embed_lines(raw), raw):
             if gdocs.text_hash(text) == target:
-                return row["version_no"]
+                return version_no
     return None
 
 
