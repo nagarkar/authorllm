@@ -182,6 +182,47 @@ def test_reopen_insert_takes_it_out() -> None:
               (root / "one.md").read_text() == ONE, (root / "one.md").read_text())
 
 
+def test_land_does_not_duplicate_an_insert_already_in_the_file() -> None:
+    """An insert pair's original is the anchor paragraph, still present as
+    a prefix/suffix of `new` once the insert stands in the file. Landing
+    must not splice again (hand-applied text, or a write that outran its
+    landing row)."""
+    tl.reset_road()
+    with world() as (ws, root):
+        iid = to_beats(ws)
+        FAKE.queue.append(plan([], where="start"))
+        call(ws, "propose", id=iid)
+        call(ws, "act", id=iid, label="b1:plan", action="accept")
+        FAKE.queue.append({"proposed": "A new opening."})
+        call(ws, "propose", id=iid)
+        call(ws, "act", id=iid, label="b1:insert", action="accept")
+        want = walk(ws, iid)["text"]
+        (root / "one.md").write_text(want, encoding="utf-8")
+        v = call(ws, "land", id=iid)
+        text = (root / "one.md").read_text()
+        check("a file that already holds the insert is not rewritten",
+              text == want and text.count("A new opening.") == 1, text)
+        unit = next(u for u in v["landed"]["units"] if u["label"] == "b1:insert")
+        check("the insert is recorded as already in the file",
+              unit["status"] in ("already", "landed"), unit)
+    tl.reset_road()
+    with world() as (ws, root):
+        # Insert before an anchor: same hazard from the other side.
+        iid = to_beats(ws)
+        FAKE.queue.append(plan([], where="before", quote="The first"))
+        call(ws, "propose", id=iid)
+        call(ws, "act", id=iid, label="b1:plan", action="accept")
+        FAKE.queue.append({"proposed": "Before the first."})
+        call(ws, "propose", id=iid)
+        call(ws, "act", id=iid, label="b1:insert", action="accept")
+        want = walk(ws, iid)["text"]
+        (root / "one.md").write_text(want, encoding="utf-8")
+        call(ws, "land", id=iid)
+        text = (root / "one.md").read_text()
+        check("an insert before its anchor is not duplicated either",
+              text == want and text.count("Before the first.") == 1, text)
+
+
 def _apply_findings(ws: str) -> str:
     iid = call(ws, "start", essay="one", kind="refine")["id"]
     call(ws, "skip", id=iid, reason="No letter this time.", to="construction")
