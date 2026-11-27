@@ -1764,6 +1764,12 @@ The built web pages against their sources (`authorlm/web_pages.py`): staleness b
 
 The per-essay editing workflow's record (authorlm/workflow/): the step gates, carry-over between instances, engine and unit switches with their reasons, the turns recorded from an engine, blurbs, usage totals, the standing context's stable order, the protected register, no file special-cased, and the CLI.
 
+## `tests.test_workflow_drive`
+
+`authorlm/tests/test_workflow_drive.py`
+
+Driving a workflow's walks from the command line (workflow/drive.py): `authorlm workflow walk | propose | job | unit | reopen | beat-done | conclude | wrapup | principle`.
+
 ## `tests.test_workflow_landing`
 
 `authorlm/tests/test_workflow_landing.py`
