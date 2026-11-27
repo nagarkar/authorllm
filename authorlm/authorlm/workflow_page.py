@@ -1024,13 +1024,27 @@ def _accepted_findings(db: Database, inst: dict) -> str:
 
 
 def _kept(db: Database, inst: dict) -> str:
-    """The Keep list for a construction message, only when the author
-    edited it (otherwise the letter in the session already says it)."""
-    keep = letter_keep(db, inst)
-    if not keep["edited"]:
+    """The letter's Keep list (the author's version once he edited it) and
+    its paragraph notes, for every construction message: said in the
+    message itself, so a turn has them even when the letter is no longer
+    in the engine's session (a rebuilt or switched engine, a long walk).
+    "" when the letter has neither."""
+    turns = core.turns(db, inst)
+    lt = _letter_turn(turns)
+    if lt is None:
         return ""
-    return ("Keep (the author's list, in place of the letter's):\n"
-            + ("\n".join(f"- {k}" for k in keep["keep"]) or "(nothing named)"))
+    keep = letter_keep(db, inst, turns)
+    notes = parse_letter(lt["reply"], [p["name"] for p in passes()])["notes"]
+    parts = []
+    if keep["keep"] or keep["edited"]:
+        head = ("Keep (the author's list, in place of the letter's):"
+                if keep["edited"] else "Keep (from the letter):")
+        parts.append(head + "\n" + ("\n".join(f"- {k}" for k in keep["keep"])
+                                    or "(nothing named)"))
+    if notes:
+        parts.append("Paragraph notes (from the letter; work each at the "
+                     "paragraph it names):\n" + "\n".join(f"- {n}" for n in notes))
+    return "\n\n".join(parts)
 
 
 def _unit_message(db: Database, manuscript: dict, inst: dict, step: str,
@@ -1044,10 +1058,12 @@ def _unit_message(db: Database, manuscript: dict, inst: dict, step: str,
     m = _BEAT.match(label)
     if m and inst["construction_mode"] == "beats":
         b = int(m.group(1))
+        kept = _kept(db, inst)
         if m.group(2) == "plan":
             return (f"Beat {b}: propose its plan — what the section is for, the "
                     "point it makes and how it follows from the one before — "
                     "in `proposed`, with your reason."
+                    + (f"\n\n{kept}" if kept else "")
                     + (f"\n\nThe section as it stands:\n\n{before}" if before else ""))
         hist = _by_label(core.turns(db, inst), "construction")
         plan = unit_state(hist.get(f"b{b}:plan", []))
@@ -1057,6 +1073,7 @@ def _unit_message(db: Database, manuscript: dict, inst: dict, step: str,
         return (f"Beat {b}: write {what}, following the accepted plan:\n\n"
                 f"{plan_text}\n\nReturn it in `proposed`; an empty `proposed` "
                 "means the section is complete."
+                + (f"\n\n{kept}" if kept else "")
                 + (f"\n\nAs it stands now:\n\n{before}" if before else ""))
     findings = _accepted_findings(db, inst)
     kept = _kept(db, inst)

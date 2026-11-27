@@ -364,6 +364,12 @@ def test_unit_form_actions() -> None:
               and u1["form"]["proposed"] == "A tightened paragraph.", u1)
         check("the unit's message carries the accepted findings only",
               "F1" in FAKE.sent[-1] and "F2" not in FAKE.sent[-1])
+        check("the unit's message says the letter's Keep list and paragraph "
+              "notes itself, not only through the session",
+              "Keep (from the letter):\n- the first paragraph's plainness" in FAKE.sent[-1]
+              and 'Paragraph notes (from the letter' in FAKE.sent[-1]
+              and '- "The third": too abstract; give an example.' in FAKE.sent[-1],
+              FAKE.sent[-1])
         v = call(ws, "act", id=iid, label="p1", action="accept")
         check("accept: the proposal becomes the unit's text",
               v["walk"]["units"][0]["state"] == "accepted"
@@ -543,6 +549,39 @@ def test_beats() -> None:
               v["walk"]["units"][1]["state"] == "dropped")
         v = call(ws, "beat_done", id=iid)
         check("beat done: the next beat's plan", v["walk"]["next"] == "b2:plan")
+
+
+def test_beats_carry_keep_and_notes() -> None:
+    """The coordinator's addition of 2026-11-26 to the owner's letter-edit
+    ask: Keep and the paragraph notes reached a construction turn only
+    while the letter was still in the engine's session. Every construction
+    message (beat plan and beat text too) now says them, the Keep list in
+    the author's version once he edited it."""
+    letter = ("No findings.\n\n*Keep*\n- the plain opening\n\n*Paragraph notes*\n"
+              "- \"First\": name the stakes.\n")
+    with world() as (ws, _root):
+        iid = call(ws, "start", essay="three", kind="new", brief="a new essay")["id"]
+        call(ws, "advance", id=iid)
+        saved, FAKE.letter = FAKE.letter, letter
+        try:
+            call(ws, "letter", id=iid)
+        finally:
+            FAKE.letter = saved
+        call(ws, "keep", id=iid, items=["the plain opening", "the short close"])
+        call(ws, "accept_letter", id=iid)
+        call(ws, "advance", id=iid)
+        call(ws, "propose", id=iid)
+        plan_msg = FAKE.sent[-1]
+        check("the beat plan's message carries the author's Keep list and the notes",
+              plan_msg.startswith("Beat 1: propose its plan")
+              and "Keep (the author's list, in place of the letter's):\n"
+                  "- the plain opening\n- the short close" in plan_msg
+              and '- "First": name the stakes.' in plan_msg, plan_msg)
+        call(ws, "act", id=iid, label="b1:plan", action="accept")
+        call(ws, "propose", id=iid)
+        check("the beat text's message carries them too",
+              "- the short close" in FAKE.sent[-1]
+              and '"First": name the stakes.' in FAKE.sent[-1], FAKE.sent[-1])
 
 
 def test_letter_parsing_edges() -> None:
@@ -998,8 +1037,9 @@ def test_letter_edits() -> None:
               "it claims too much." in msg and "narrow the claim to the first case." in msg
               and "[as the author edited it]" in msg
               and "it claims more than it shows." not in msg, msg)
-        check("construction's message carries the author's Keep list",
-              "Keep (the author's list" in msg and "- the closing image" in msg, msg)
+        check("construction's message carries the author's Keep list and the notes",
+              "Keep (the author's list" in msg and "- the closing image" in msg
+              and '"The third": too abstract' in msg, msg)
         turns = FAKE.contexts[-1]["turns"]
         edits = [t for t in turns if t["action"] == "edit" and t["step"] == "letter"]
         check("every later turn's context holds the edits as the author's turns",
