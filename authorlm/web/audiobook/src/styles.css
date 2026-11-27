@@ -461,3 +461,7 @@ header .popover select{width:100%;max-width:none;flex:none;background:var(--grou
 .wf-turn{border-top:1px solid var(--line);padding:4px 0}
 .wf-settings summary{cursor:pointer;color:var(--muted);font-size:13px;margin:6px 0}
 .wf-settings .devedit-actions{margin:6px 0}
+/* How construction will walk (WalkChoice): beside the On-to button, a full-width drop-down whose long plain labels wrap in the picker. */
+.wf-walk{display:grid;gap:6px;margin-top:8px}
+.wf .wf-nav .wf-walk select{font-weight:400;text-overflow:ellipsis}
+.wf-walk .devedit-actions .pill{min-height:44px}

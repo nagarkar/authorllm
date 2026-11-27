@@ -1228,6 +1228,86 @@ def test_phone_navigation_controls() -> None:
           and 'h.startsWith("workflows:")' in app and "item: h.slice(10)" in app)
 
 
+def test_walk_choice_before_construction() -> None:
+    """Owner, 2026-11-26, at the letter step: "I didn't see any option to
+    change from the default to section by section in the UI." The page's
+    walk drop-down sends mode and unit together with the reason "chosen
+    before construction" at the start and letter steps (the server asks
+    for a reason once the instance has turns: core._needs_reason); mid-
+    construction the author's own reason is required."""
+    with world() as (ws, _root):
+        iid = _to_letter(ws)
+        call(ws, "letter", id=iid)  # a model turn: a reason is now required
+        raises(lambda: call(ws, "unit", id=iid, phase="construction",
+                            mode="apply-findings", unit="section"), "reason")
+        v = call(ws, "unit", id=iid, phase="construction", mode="apply-findings",
+                 unit="section", reason="chosen before construction")
+        check("at the letter: apply the findings, section by section, is saved",
+              (v["instance"]["construction_mode"], v["instance"]["unit"])
+              == ("apply-findings", "section")
+              and v["decisions"][-1]["kind"] == "unit-switch"
+              and v["decisions"][-1]["reason"] == "chosen before construction",
+              v["decisions"][-1])
+        v = call(ws, "unit", id=iid, phase="construction", mode="beats",
+                 unit="paragraph", reason="chosen before construction")
+        check("mode and unit change together in one choice",
+              (v["instance"]["construction_mode"], v["instance"]["unit"])
+              == ("beats", "paragraph"))
+        call(ws, "finding", id=iid, item="F1", verdict="accept")
+        call(ws, "finding", id=iid, item="F2", verdict="defer")
+        v = call(ws, "advance", id=iid)
+        check("construction walks as chosen at the letter",
+              v["walk"]["mode"] == "beats", v["walk"]["mode"])
+        raises(lambda: call(ws, "unit", id=iid, phase="construction",
+                            mode="apply-findings", unit="paragraph", reason=""),
+               "reason")
+        new = call(ws, "start", essay="three", kind="new")["id"]
+        raises(lambda: call(ws, "unit", id=new, mode="apply-findings",
+                            unit="paragraph"), "beat by beat")
+
+
+def test_walk_choice_controls() -> None:
+    """The walk drop-down on the page (Workflows.tsx): beside the On-to
+    button at the start, letter and construction steps; four plain labels
+    mapped to construction_mode × unit; only the beats ones for a new
+    essay; saved at once before construction with the automatic reason,
+    and behind a reason box mid-construction; the same plain words in the
+    switch panel and the instance header."""
+    src = Path(__file__).resolve().parents[1] / "web" / "audiobook" / "src"
+    wf = (src / "Workflows.tsx").read_text(encoding="utf-8")
+    walks = wf[wf.index("const WALKS"):wf.index("const MODE_WORDS")]
+    want = [("apply-findings", "paragraph", "Apply the findings, paragraph by paragraph"),
+            ("apply-findings", "section", "Apply the findings, section by section"),
+            ("beats", "section", "Rebuild section by section: plan each section, then write it whole"),
+            ("beats", "paragraph", "Rebuild section by section: plan each section, "
+                                   "then write it paragraph by paragraph")]
+    check("four plain labels, each mapped to its mode and unit",
+          all(f'{{ mode: "{m}", unit: "{u}", label: "{lab}" }}' in walks for m, u, lab in want))
+    choice = wf[wf.index("function WalkChoice"):wf.index("const money")]
+    check("a new essay is offered only the rebuild (beats) walks",
+          '(inst.kind !== "new" || w.mode === "beats")' in choice)
+    check("before construction a choice saves at once with the automatic reason",
+          'const BEFORE_CONSTRUCTION = "chosen before construction";' in wf
+          and "await choose(mode, unit, BEFORE_CONSTRUCTION)" in choice
+          and 'run("unit", { phase: "construction", mode, unit, reason: why })' in choice)
+    check("mid-construction a reason box holds the switch until there is a reason",
+          'const mid = inst.step === "construction";' in choice
+          and "if (mid) { setPending({ mode, unit }); return; }" in choice
+          and "disabled={busy || !reason.trim()}" in choice and ">Cancel</button>" in choice)
+    gate = wf[wf.index('<div className="wf-gate">'):wf.index('className="wf-start"')]
+    check("the control sits beside the On-to button at start, letter and construction",
+          '["start", "letter", "construction"].includes(inst.step)' in gate
+          and "<WalkChoice " in gate and gate.index("On to {STEP_WORDS") < gate.index("<WalkChoice "))
+    check("the instance header uses the plain label",
+          "{walkLabel(inst.construction_mode, inst.unit)}" in wf
+          and "{inst.construction_mode}, by {inst.unit}" not in wf)
+    check("the switch panel shows plain words, not the raw values",
+          "{UNIT_WORDS[u] || u}</option>" in wf and "{MODE_WORDS[u] || u}</option>" in wf
+          and "<option value=\"\">construction mode…</option>" not in wf)
+    check("the choice is the server's; nothing in browser storage",
+          "remember(" not in choice and "recall(" not in choice)
+
+
 def main() -> None:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
