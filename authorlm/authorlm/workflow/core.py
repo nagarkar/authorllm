@@ -50,7 +50,7 @@ MODES = ("beats", "apply-findings")
 LISTS = ("reference", "voice", "aware")
 DECISION_KINDS = ("skip", "engine-switch", "unit-switch", "list-change",
                   "brief-change", "principle", "ruling", "letter-revision",
-                  "abandon", "reopen-declined")
+                  "abandon", "reopen-declined", "filters-base")
 # The steps at which the letter in force may be revised, ruled and edited
 # (owner, 2026-11-26: "if you have an existing workflow and you have a
 # letter and you've done the construction either partly or fully, and you
@@ -740,6 +740,22 @@ def base_text(manuscript: dict, instance: dict) -> str:
 def _manuscript_of(db: Database, instance: dict) -> dict:
     return dict(db.one("SELECT * FROM manuscripts WHERE id = ?",
                        (instance["manuscript_id"],)))
+
+
+def record_filters_base(db: Database, instance: dict, text: str) -> dict:
+    """Record `text` as the filters' base: the file once every ruling of
+    construction and the wrap-up is in it (`landing.take_filters_base`)."""
+    return _record_decision(db, instance, "filters-base",
+                            reason="the file, with construction and the "
+                                   "wrap-up in it", detail={"text": text})
+
+
+def filters_base(decisions: list[dict]) -> str | None:
+    """The filters' base text recorded on the instance, or None."""
+    for d in reversed(decisions):
+        if d["kind"] == "filters-base":
+            return (d.get("detail") or {}).get("text")
+    return None
 
 
 def ensure_base(db: Database, manuscript: dict, instance: dict) -> dict:

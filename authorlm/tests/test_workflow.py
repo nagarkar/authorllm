@@ -763,7 +763,7 @@ def test_cli_end_to_end() -> None:
         kinds = [d["kind"] for d in core.decisions(db, inst)]
         check("every change is in the record",
               kinds == ["list-change", "engine-switch", "skip", "unit-switch",
-                        "skip", "principle"], kinds)
+                        "skip", "filters-base", "principle"], kinds)
 
 
 def test_a_rename_carries_the_workflow() -> None:
