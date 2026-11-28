@@ -310,6 +310,45 @@ def test_google_road_without_a_tab() -> None:
               out["pushed"] is False and "doc push one.md" in out["note"], out)
 
 
+def test_filters_walk_the_file_once_the_wrapup_is_in_it() -> None:
+    """#554: a wrap-up item placed by hand and left is in the text the
+    filters walk; the base is the file, taken once."""
+    reset_road()
+    with world() as (ws, root):
+        iid = _to_construction(ws)
+        for _ in range(3):
+            v = call(ws, "propose", id=iid)
+            u = v["walk"]["units"]
+            pend = [x for x in u if x["state"] == "pending"]
+            if pend:
+                call(ws, "act", id=iid, label=pend[0]["label"], action="accept")
+        call(ws, "advance", id=iid)
+        call(ws, "wrapup", id=iid)
+        call(ws, "act", id=iid, label="w:placeholders:1", action="accept")
+        call(ws, "act", id=iid, label="w:removed:1", action="reject")
+        v = call(ws, "advance", id=iid)
+        check("at the filters, with an item that needs the owner",
+              v["instance"]["step"] == "filters"
+              and [u["label"] for u in v["landing"]["needs_owner"]]
+              == ["w:placeholders:1"], v["landing"])
+        hand = (root / "one.md").read_text().rstrip("\n") + (
+            "\n\nA line the owner placed by hand.\n")
+        (root / "one.md").write_text(hand)
+        v = call(ws, "instance", id=iid)
+        check("no base is taken while a ruling is not in the file",
+              "A line the owner placed by hand." not in v["walk"].get("base", ""),
+              v["walk"].get("base", ""))
+        cli(ws, "workflow", "-m", "MS", "land", iid, "--leave", "w:placeholders:1")
+        v = call(ws, "instance", id=iid)
+        check("once it is left, the filters walk the file as it stands",
+              v["walk"].get("base") == hand, v["walk"].get("base"))
+        (root / "one.md").write_text(hand + "\nLater owner text.\n")
+        cli(ws, "workflow", "-m", "MS", "land", iid)
+        v = call(ws, "instance", id=iid)
+        check("the base is taken once, so the labels keep naming the same text",
+              v["walk"].get("base") == hand, v["walk"].get("base"))
+
+
 def main() -> None:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

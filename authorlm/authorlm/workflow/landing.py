@@ -340,7 +340,43 @@ def land(db: Database, manuscript: dict, inst: dict, *, dry_run: bool = False,
          workspace: str | None = None) -> dict:
     """Land every ruling of the instance not yet landed; `dry_run` says
     what would change and writes nothing. Returns {file, units, written,
-    pushed, note, dry_run}."""
+    pushed, note, dry_run}. Then takes the filters' base when it is due
+    (`take_filters_base`)."""
+    result = _land(db, manuscript, inst, dry_run=dry_run, road=road,
+                   trigger=trigger, actor=actor, workspace=workspace)
+    if not dry_run:
+        take_filters_base(db, manuscript, inst)
+    return result
+
+
+def take_filters_base(db: Database, manuscript: dict, inst: dict) -> str | None:
+    """Record the file as the filters' base text (a `filters-base`
+    decision) once the instance is at the filters, has none yet, no
+    filter ruling exists, and every ruling of construction and the
+    wrap-up is in the file: landed, found there already, or left as the
+    file has it. An item placed by hand and left is then in the text the
+    filters walk, which a rebuild from the record cannot give (#554).
+    Returns the reason it was not taken, or None when it was."""
+    if inst["step"] != "filters":
+        return "the instance is not at the filters"
+    if any(d["kind"] == "filters-base" for d in core.decisions(db, inst)):
+        return "the filters' base is already taken"
+    _text, units = plan(db, manuscript, inst)
+    if any(u["step"] == "filters" for u in units):
+        return "a filter ruling exists, so the base stays as it is"
+    open_ = [u["label"] for u in units
+             if u["step"] in ("construction", "wrapup")
+             and u["status"] not in ("landed", "left", "already")]
+    if open_:
+        return "rulings not yet in the file: " + ", ".join(open_)
+    core.record_filters_base(db, inst,
+                             core.file_text(manuscript, inst["file"]) or "")
+    return None
+
+
+def _land(db: Database, manuscript: dict, inst: dict, *, dry_run: bool = False,
+          road=None, trigger: str = "verb", actor: str = "cli",
+          workspace: str | None = None) -> dict:
     rel = inst["file"]
     result: dict[str, Any] = {"file": rel, "instance": inst["id"],
                               "dry_run": dry_run, "units": [],
@@ -444,6 +480,7 @@ def leave(db: Database, manuscript: dict, inst: dict, label: str,
                     **values})
             else:
                 db.update("workflow_landings", row["id"], values)
+    take_filters_base(db, manuscript, inst)
     return {"left": [u["label"] for u in hits]}
 
 

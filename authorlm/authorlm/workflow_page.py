@@ -510,13 +510,17 @@ def phase_stretches(db: Database, manuscript: dict, inst: dict, step: str,
     order: the walk over the text the stretch before it left, with that
     text as `base`. Construction starts from the instance's base text
     (`core.base_text`), never the live file, so a label always names the
-    same text; the filters start from the text the wrap-up left."""
+    same text; the filters start from the file as it stood once every
+    ruling before them was in it (`core.filters_base`), else from the text
+    the wrap-up left."""
     turns = core.turns(db, inst) if turns is None else turns
     decisions = core.decisions(db, inst) if decisions is None else decisions
     if step == "construction":
         text = core.base_text(manuscript, inst)
     else:
-        text = _after_wrapup(db, manuscript, inst, turns, decisions)["text"]
+        text = core.filters_base(decisions)
+        if text is None:
+            text = _after_wrapup(db, manuscript, inst, turns, decisions)["text"]
     views = []
     for st, ts in _segments(turns, decisions, step, inst):
         view = _walk_over(text, st["unit"], st["mode"], _by_label(ts, step))
