@@ -829,6 +829,8 @@ CREATE TABLE IF NOT EXISTS workflow_landings (
     UNIQUE (instance_id, step, stretch, label, seq)
 );
 
+-- law_id: the style law a principle or ruling was promoted to
+-- (workflow/promote.py), NULL until then.
 CREATE TABLE IF NOT EXISTS workflow_decisions (
     {KNOWLEDGE_OBJECT_COLUMNS},
     instance_id TEXT NOT NULL,
@@ -837,7 +839,8 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
                                   -- principle | ruling
     reason TEXT NOT NULL DEFAULT '',
     words TEXT NOT NULL DEFAULT '',        -- the author's words, verbatim
-    detail TEXT NOT NULL DEFAULT '{{}}'    -- JSON: from, to, list, essay, ...
+    detail TEXT NOT NULL DEFAULT '{{}}',   -- JSON: from, to, list, essay, ...
+    law_id TEXT REFERENCES style_laws(id)
 );
 
 -- A model turn the Workflows page runs in the background (workflow/jobs.py):
@@ -1109,6 +1112,10 @@ class Database:
                 "NOT NULL DEFAULT '{}'")
         if "comment_id" in self._columns("doc_threads"):
             self._migrate_thread_origins()
+        if "law_id" not in self._columns("workflow_decisions"):
+            self.conn.execute(
+                "ALTER TABLE workflow_decisions ADD COLUMN law_id TEXT "
+                "REFERENCES style_laws(id)")
 
     def _tables(self) -> set[str]:
         return {r[0] for r in self.conn.execute(

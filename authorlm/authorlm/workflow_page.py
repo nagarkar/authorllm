@@ -99,7 +99,8 @@ METHODS = ("overview", "instance", "start", "recommend", "rec", "list",
            "filters", "lint", "skip", "advance", "engine", "unit", "blurbs",
            "blurb_add", "blurb_hide", "usage", "estimate", "land", "leave",
            "summaries", "job_dismiss", "brief", "finding_edit", "keep",
-           "revise_letter", "reopen_decline", "restart", "discuss")
+           "revise_letter", "reopen_decline", "restart", "discuss",
+           "promote")
 
 # The read-only methods: they write nothing (the page polls none of them).
 READ_ONLY = ("overview", "instance", "blurbs", "usage", "estimate")
@@ -1248,6 +1249,7 @@ def instance_view(db: Database, manuscript: dict, ref: str) -> dict:
     from .workflow import landing
     out["landing"] = landing.status(db, manuscript, inst)
     out["principles"] = [d for d in out["decisions"] if d["kind"] == "principle"]
+    out["promotions"] = promotions(db, manuscript, inst)
     out["skipped"] = [d for d in out["decisions"] if d["kind"] == "skip"]
     from .workflow import jobs
     out["job"] = jobs.current(db, inst["id"])
@@ -1256,6 +1258,22 @@ def instance_view(db: Database, manuscript: dict, ref: str) -> dict:
     if inst["step"] == "start":
         out["summaries"] = summary_freshness(db, manuscript, inst)
     return out
+
+
+def promotions(db: Database, manuscript: dict, inst: dict) -> dict:
+    """The instance's principles and rulings, each with its law once
+    promoted (workflow/promote.py), and what the Promote form offers: the
+    aspects and the manuscript's guides (the root first, the default)."""
+    from . import styles as st
+    from .workflow import promote
+
+    root = st.root_guide(db, manuscript["id"])
+    guides = [r["name"] for r in db.all(
+        "SELECT name FROM style_guides WHERE manuscript_id = ? "
+        "ORDER BY parent IS NOT NULL, name", (manuscript["id"],))]
+    return {"decisions": promote.promotable(db, inst),
+            "aspects": list(st.PROSE_ASPECTS),
+            "guides": guides, "root": root["name"] if root else None}
 
 
 # ------------------------------------------------------------- summaries
@@ -2281,6 +2299,16 @@ def dispatch(method: str, params: dict[str, Any],
         # it started with and the next turn reads the new one; saving it
         # touches nothing the running turn records (core.set_brief).
         core.set_brief(db, inst, str(p.get("brief") or ""))
+        return instance_view(db, manuscript, inst["id"])
+    if method == "promote":
+        # Allowed while a model turn runs: it writes a style law and the
+        # decision's law_id, nothing a running turn reads or records.
+        # One decision per call; the page offers no bulk promotion.
+        from .workflow import promote
+        promote.promote(db, manuscript, inst, str(p.get("decision") or ""),
+                        statement=p.get("statement"),
+                        aspect=str(p.get("aspect") or "") or None,
+                        guide=str(p.get("guide") or "") or None, actor="web")
         return instance_view(db, manuscript, inst["id"])
     run = jobs.running(db, inst["id"])
     if run:

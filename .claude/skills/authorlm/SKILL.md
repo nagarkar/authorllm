@@ -1009,7 +1009,19 @@ from the walk verbs below.
   - `workflow beat-done <i>` and `workflow conclude <i>`: beat by beat,
     the beat is done; the essay is built (then `advance`).
   - `workflow wrapup <i> [--wait]` drafts the wrap-up; `workflow principle
-    <i> --words W [--scope S]` ticks a principle it offered.
+    <i> --words W [--scope S]` ticks a principle it offered. Ticking only
+    records the decision; it is not law.
+  - `workflow promote <i>` (read-only) lists the instance's principles
+    and rulings with their laws. `workflow promote <i> <decision>
+    --aspect A [--statement TEXT] [--guide G] [--dry-run]` makes one of
+    them a style law (default wording: the decision's words; default
+    guide: the root), notes quoting the decision and the instance; the
+    decision keeps the law's id (`workflow_decisions.law_id`) and is not
+    promoted again. Promotion is the owner's separate decision on a
+    subset he chooses: promote only the decision he names, with the
+    wording he approves (show `--dry-run` first), never several unasked.
+    The Workflows page's "Principles and rulings" card does the same;
+    `authorlm doctor` checks every promoted decision's law exists.
   - `workflow discuss <i> <label> --text TEXT [--wait]`: the author talks
     with the engine about one unit (a beat's plan, a paragraph or section,
     a wrap-up item, a filter unit), or about the letter with the label

@@ -3,6 +3,7 @@ line. Read-only verbs (list, status, show, turns, usage, filters without
 --set, brief without --set/--file or with --dry-run, finding without --set
 or with --dry-run, keep without --file/--item or with --dry-run,
 revise-letter and restart with --dry-run, blurbs without a change, walk,
+promote without a decision or with --dry-run,
 job without a flag, and every --dry-run of the walk verbs) write nothing.
 The verbs that drive the walks are workflow/drive.py."""
 
@@ -12,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import context, core, drive, landing
+from . import context, core, drive, landing, promote
 
 READ_ONLY = ("list", "status", "show", "turns", "usage", "walk")
 
@@ -61,9 +62,10 @@ def _show_lines(db, inst: dict) -> list[str]:
                          f"({len(d['detail'].get('from') or '')} → "
                          f"{len(d['detail'].get('to') or '')} chars)")
             continue
-        lines.append(f"  decision {d['created_at'][:16]} {d['kind']}: "
+        lines.append(f"  decision {d['id']} {d['created_at'][:16]} {d['kind']}: "
                      f"{d['words'] or d['reason'] or '-'} "
-                     f"{json.dumps(d['detail'], ensure_ascii=False)}")
+                     f"{json.dumps(d['detail'], ensure_ascii=False)}"
+                     + (f" → law {d['law_id']}" if d.get("law_id") else ""))
     return lines
 
 
@@ -449,6 +451,32 @@ def cmd_workflow(args):
             inst = core.get_instance(db, manuscript, args.instance)
             d = core.decide(db, inst, args.kind, args.words, args.reason or "")
             _print(args, d, [f"recorded {d['kind']}: {d['words']}"])
+        elif verb == "promote":
+            inst = core.get_instance(db, manuscript, args.instance)
+            if not args.decision:
+                rows = promote.promotable(db, inst)
+                lines = [f"{d['id']}  {d['kind']}: {d['words']}"
+                         + (f"  → law {d['law']['id']}"
+                            f" ({d['law'].get('status', 'missing')})"
+                            if d["law"] else "  (not promoted)")
+                         for d in rows]
+                _print(args, rows, lines or ["no principles or rulings on "
+                                             "this instance"])
+            elif args.dry_run:
+                p = promote.plan(db, manuscript, inst, args.decision,
+                                 args.statement, args.aspect, args.guide)
+                _print(args, p, [
+                    f"would add a {p['aspect']} law to {p['guide']}: "
+                    f"{p['statement']}", f"  notes: {p['notes']}",
+                    f"  and mark {p['decision']['id']} promoted (nothing "
+                    "written)"])
+            else:
+                p = promote.promote(db, manuscript, inst, args.decision,
+                                    args.statement, args.aspect, args.guide)
+                _print(args, p, [
+                    f"added {p['aspect']} law {p['law']['id']} to "
+                    f"{p['guide']}: {p['statement']}",
+                    f"  decision {p['decision']['id']} marked promoted"])
         elif verb == "blurbs":
             mid = manuscript["id"]
             if args.add:
@@ -645,6 +673,27 @@ def add_parser(sub, common) -> None:
     q.add_argument("--kind", required=True, choices=["principle", "ruling"])
     q.add_argument("--words", required=True, help="the author's words")
     q.add_argument("--reason")
+
+    q = leaf("promote", "promote one principle or ruling of an instance to a "
+                        "style law, wording editable (--statement); the "
+                        "decision is marked with the law's id and is not "
+                        "promoted again. Without a decision, list the "
+                        "instance's principles and rulings with their laws "
+                        "(read-only)",
+             "authorlm workflow promote wi-123 wd-456 --aspect rhetoric "
+             "--statement 'No rhetorical questions in the argument.'")
+    instance(q)
+    q.add_argument("decision", nargs="?",
+                   help="the decision's id (wd-…) or a unique prefix")
+    q.add_argument("--statement", metavar="TEXT",
+                   help="the law's words (default: the decision's words)")
+    q.add_argument("--aspect", help="the law's aspect, e.g. rhetoric, "
+                                    "syntax, tone (required to promote)")
+    q.add_argument("--guide", help="the style guide the law joins "
+                                   "(default: the manuscript's root guide)")
+    q.add_argument("--dry-run", action="store_true",
+                   help="show the law that would be written; write nothing "
+                        "(read-only)")
 
     # Driving the walks (construction, the wrap-up, the filters) as the
     # Workflows page does, through its own calls: workflow/drive.py.
