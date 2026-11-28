@@ -91,7 +91,10 @@ interface Letter {
   revise: boolean; open: boolean; revision: number; earlier: EarlierLetter[]; revised_at: string; note: string; unruled: string[];
 }
 interface Rec { list: string; essay: string; change: string; reason: string; label: string; answer: string; }
-interface Decision { id: string; kind: string; reason: string; words: string; detail: Record<string, any>; created_at: string; }
+interface Decision { id: string; kind: string; reason: string; words: string; detail: Record<string, any>; created_at: string; law_id?: string | null; }
+// A principle or ruling with its style law once promoted (workflow/promote.py).
+interface PromoLaw { id: string; aspect?: string; statement?: string; status?: string; guide?: string | null; file?: string | null; missing?: boolean; }
+interface Promotions { decisions: (Decision & { law: PromoLaw | null })[]; aspects: string[]; guides: string[]; root: string | null; }
 interface Blurb { text: string; last_used: string | null; hidden: number; }
 interface View {
   instance: Instance; gate: string | null; next_step: string | null; decisions: Decision[];
@@ -101,7 +104,7 @@ interface View {
   letter: Letter; recommendations: { asked: boolean; items: Rec[]; text: string };
   walk?: Walk; wrapup?: { drafted: boolean; items: Unit[]; principles: { words: string; scope: string }[]; text: string };
   checklist?: { passes: { name: string; stage: string; ticked: boolean; why: string; letter?: { needed: boolean; reason: string } }[]; confirmed: boolean; audiobook: boolean; revised_here?: boolean };
-  principles: Decision[]; skipped: Decision[];
+  principles: Decision[]; skipped: Decision[]; promotions: Promotions;
   unplaced?: { label: string; kind: string; text: string }[]; lint?: LintRun | null;
   turns: { seq: number; step: string; unit_label: string; action: string; reason: string }[];
   landing: Landing; landed?: LandResult | null;
@@ -682,6 +685,61 @@ function UnitForm({ unit, newEssay, blurbs, tags, manuscript, busy, run, showHid
 // to edit the brief and add things there?"). Edit opens a roomy textarea;
 // Save goes to workflow_page `brief` (core.set_brief). Saving is allowed
 // while a model turn runs: that turn keeps the brief it started with.
+// Promote a principle or ruling to a style law, one at a time (never in
+// bulk): the wording is editable, the aspect and guide chosen. The open
+// form's draft (wording, aspect, guide) is a personal, unsent edit, so it
+// lives in browser storage per manuscript and decision and survives a
+// reload; which decision's form is open is part of that draft.
+function PromoteCard({ v, run, asking, manuscript }: {
+  v: View; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; asking: boolean; manuscript: string;
+}) {
+  const pr = v.promotions;
+  const openKey = `authorlm.wf.promoteOpen.${manuscript}.${v.instance.id}`;
+  const draftKey = (id: string) => `authorlm.wf.promoteDraft.${manuscript}.${id}`;
+  const [openId, setOpenState] = useState<string>(() => recall(openKey) || "");
+  const [draft, setDraftState] = useState<{ statement: string; aspect: string; guide: string } | null>(null);
+  useEffect(() => { setOpenState(recall(openKey) || ""); }, [openKey]);
+  useEffect(() => {
+    if (!openId) { setDraftState(null); return; }
+    const d = pr?.decisions.find(x => x.id === openId);
+    if (!d || d.law) { setDraftState(null); return; }
+    let saved: { statement: string; aspect: string; guide: string } | null = null;
+    try { saved = JSON.parse(recall(draftKey(openId)) || "null"); } catch { saved = null; }
+    setDraftState(saved || { statement: d.words, aspect: "", guide: pr.root || "" });
+  }, [openId, pr]);
+  if (!pr || pr.decisions.length === 0) return null;
+  const setOpen = (id: string) => { remember(openKey, id); setOpenState(id); };
+  const setDraft = (d: { statement: string; aspect: string; guide: string }) => { remember(draftKey(openId), JSON.stringify(d)); setDraftState(d); };
+  const close = () => { remember(draftKey(openId), ""); setOpen(""); };
+  return (
+    <div className="card wf-promote">
+      <div className="card-head"><span>Principles and rulings</span></div>
+      <p className="muted">Promote the ones you want as style laws, one at a time; the law's notes quote the decision and this instance.</p>
+      {pr.decisions.map(d => <div key={d.id} className="wf-promote-row">
+        <div><b>{d.kind}</b>: {d.words} <span className="muted">· {new Date(d.created_at).toLocaleDateString([], { dateStyle: "medium" })}{d.reason ? ` · ${d.reason}` : ""}</span></div>
+        {d.law ? <div className="muted">{d.law.missing
+          ? <>Promoted to law {d.law.id}, which no longer exists (authorlm doctor reports it).</>
+          : <>Promoted: <a href={`#${encodeURIComponent(manuscript)}/style:${d.law.guide ? `guide:${encodeURIComponent(d.law.guide)}` : "all"}`}>{d.law.aspect} law {d.law.id}</a>
+            {d.law.guide ? ` in ${d.law.guide}` : ""}{d.law.status !== "active" ? ` (${d.law.status})` : ""}: {d.law.statement}</>}</div>
+          : openId !== d.id ? <div className="devedit-actions"><button className="pill" onClick={() => setOpen(d.id)}>Promote…</button></div>
+          : draft && <>
+            <textarea className="devedit-edit" aria-label="The law's wording" rows={Math.max(3, Math.ceil(draft.statement.length / 70))}
+              value={draft.statement} onChange={e => setDraft({ ...draft, statement: e.target.value })} />
+            <div className="devedit-actions">
+              <select aria-label="Aspect" value={draft.aspect} onChange={e => setDraft({ ...draft, aspect: e.target.value })}>
+                <option value="">aspect…</option>{pr.aspects.map(a => <option key={a} value={a}>{a}</option>)}</select>
+              <select aria-label="Style guide" value={draft.guide} onChange={e => setDraft({ ...draft, guide: e.target.value })}>
+                {pr.guides.map(g => <option key={g} value={g}>{g}{g === pr.root ? " (root)" : ""}</option>)}</select>
+              <button className="pill on" disabled={asking || !draft.aspect || !draft.statement.trim() || !draft.guide} onClick={async () => {
+                if (await run("promote", { decision: d.id, statement: draft.statement, aspect: draft.aspect, guide: draft.guide })) close();
+              }}>{asking ? "Promoting…" : "Promote to law"}</button>
+              <button className="pill" disabled={asking} onClick={close}>Cancel</button>
+            </div></>}
+      </div>)}
+    </div>
+  );
+}
+
 function BriefCard({ v, run, asking, manuscript }: {
   v: View; run: (m: string, p: Record<string, unknown>) => Promise<boolean>; asking: boolean; manuscript: string;
 }) {
@@ -1407,6 +1465,7 @@ export function Workflows({ transport, manuscript, route, onRoute }: {
         </div>
 
         <BriefCard key={inst.id} v={view} run={run} asking={asking} manuscript={manuscript} />
+        <PromoteCard v={view} run={run} asking={asking} manuscript={manuscript} />
         {view.job && <JobCard key={view.job.id} job={view.job} run={run}
           dismiss={() => void run("job_dismiss", { job: view.job!.id })} />}
         <LandingCard v={view} run={run} busy={busy} />

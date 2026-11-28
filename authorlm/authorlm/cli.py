@@ -10044,8 +10044,11 @@ def cmd_doctor(args):
     Needs no workspace, so it runs before `setup` too."""
     from . import web_pages
     from .engines import claude_headless
+    from .workflow import promote
 
     checks = web_pages.doctor_checks() + [claude_headless.doctor_check()]
+    if getattr(args, "workspace", None):
+        checks.append(promote.doctor_check(api.db_path(str(_workspace(args)))))
     ok = all(c["ok"] for c in checks)
     if getattr(args, "as_json", False):
         print(json.dumps({"ok": ok, "checks": checks}, indent=2))
@@ -12323,8 +12326,9 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="check the install: each check with its state, detail and fix; "
              "exit 1 when one fails (now: each web page is built and not "
-             "older than its sources, and the claude-headless engine finds "
-             "`claude`). Example: authorlm doctor --json")
+             "older than its sources, the claude-headless engine finds "
+             "`claude`, and every workflow decision promoted to a style law "
+             "names a law that exists). Example: authorlm doctor --json")
     p.add_argument("--json", action="store_true", dest="as_json",
                    help="print the checks as JSON")
     p.set_defaults(func=cmd_doctor)

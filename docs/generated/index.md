@@ -1800,6 +1800,12 @@ The per-essay workflow's briefs as library files: `authorlm/library/workflow/`.
 
 The Workflows page (`workflow_page.dispatch`, `/api/workflow`): an essay's workflow driven from the app on a fake engine, step by step.
 
+## `tests.test_workflow_promote`
+
+`authorlm/tests/test_workflow_promote.py`
+
+Promoting a workflow decision to a style law (authorlm/workflow/promote.py, nagarkar/authorllm#553): one chosen principle or ruling becomes a law with its wording editable, through the style-law add path; the decision carries the law's id and is not promoted again; the CLI's list and --dry-run write nothing; the Workflows page promotes one decision at a time; doctor finds a promoted decision whose law is gone. Test data only.
+
 ## `tests.test_workflow_revision`
 
 `authorlm/tests/test_workflow_revision.py`
