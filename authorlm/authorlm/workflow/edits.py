@@ -279,11 +279,47 @@ def _insert(text: str, new: str, where: str, quote: str,
     return out, pair, s + len(new)
 
 
+def _cut_pair_unique(text: str, cut_lo: int, cut_hi: int,
+                     bl: list[tuple[int, int]]) -> tuple[int, int, str]:
+    """(left, right, new) for a whole-paragraph cut of blocks cut_lo..cut_hi:
+    enough neighbour paragraphs that `new` occurs once in the post-cut
+    text, so land and reopen both find the same place. A sole-paragraph
+    essay has no neighbour: new is empty and reopen restores only when
+    the file is still empty (`landing.revert`)."""
+    n = len(bl)
+    if cut_lo <= 0 and cut_hi >= n - 1:
+        return bl[cut_lo][0], bl[cut_hi][1], ""
+    # One neighbour first (before preferred), then widen until unique.
+    L = cut_lo - 1 if cut_lo > 0 else cut_lo
+    R = cut_hi + 1 if cut_lo == 0 and cut_hi + 1 < n else cut_hi
+
+    def make(L: int, R: int) -> tuple[int, int, str]:
+        left, right = bl[L][0], bl[R][1]
+        kept = [text[bl[k][0]:bl[k][1]]
+                for k in range(L, R + 1) if k < cut_lo or k > cut_hi]
+        return left, right, "\n\n".join(kept)
+
+    while True:
+        left, right, new = make(L, R)
+        out = text[:left] + new + text[right:]
+        hits = _all(out, new) if new else []
+        if len(hits) <= 1 or (L == 0 and R == n - 1):
+            return left, right, new
+        if L > 0:
+            L -= 1
+        elif R + 1 < n:
+            R += 1
+        else:
+            return left, right, new
+
+
 def _cut(text: str, i: int, j: int) -> tuple[str, dict, int]:
     """Take text[i:j] out. A cut of whole paragraphs takes them out with
-    a neighbour as the pair's context (so the pair is findable and its
-    reverse puts them back in place); a cut inside a paragraph changes
-    that paragraph only."""
+    neighbour context as the pair (so the pair is findable and its reverse
+    puts them back in place); a cut inside a paragraph changes that
+    paragraph only. Neighbour context widens until `new` is unique in the
+    post-cut text, so a repeated neighbour does not make reopen splice
+    beside the wrong copy."""
     s, e = _block_at(text, i, j)
     if (s, e) != (i, j):
         para = text[s:e]
@@ -295,18 +331,20 @@ def _cut(text: str, i: int, j: int) -> tuple[str, dict, int]:
             return out, pair, s + len(rest)
         i, j = s, e
     bl = blocks(text)
-    before = [b for b in bl if b[1] <= i]
-    after = [b for b in bl if b[0] >= j]
-    if before:
-        ps = before[-1][0]
-        out, pair = _pair(text, ps, j, text[ps:before[-1][1]])
-        return out, pair, before[-1][1]
-    if after:
-        pe = after[0][1]
-        out, pair = _pair(text, i, pe, text[after[0][0]:pe])
+    if not bl:
+        out, pair = _pair(text, i, j, "")
         return out, pair, i
-    out, pair = _pair(text, i, j, "")
-    return out, pair, i
+    cut_lo = next((k for k, (a, _b) in enumerate(bl) if a >= i), None)
+    cut_hi = next((k for k in range(len(bl) - 1, -1, -1)
+                   if bl[k][1] <= j), None)
+    if cut_lo is None or cut_hi is None or cut_hi < cut_lo:
+        out, pair = _pair(text, i, j, "")
+        return out, pair, i
+    left, right, new = _cut_pair_unique(text, cut_lo, cut_hi, bl)
+    out, pair = _pair(text, left, right, new)
+    # Cursor where the cut sat: after the kept prefix inside the pair.
+    prefix = text[left:i]
+    return out, pair, left + len(prefix)
 
 
 def apply(text: str, change: dict, *, cursor: int = 0,

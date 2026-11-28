@@ -331,6 +331,53 @@ def test_in_flight_walk_recorded_before_change_kinds() -> None:
               == ONE.replace(P3, "A third, tighter."))
 
 
+def test_cut_reopen_with_repeated_neighbour() -> None:
+    """A whole-paragraph cut keeps enough neighbour context that `new` is
+    unique, so reopen splices the cut back beside the same neighbour — not
+    an earlier copy of the same words."""
+    text = "So.\n\nSo.\n\nGone.\n"
+    out, pairs, _ = edits.apply(text, change("cut", original="Gone."))
+    check("the cut pair widens past a repeated neighbour",
+          pairs == [{"original": "So.\n\nSo.\n\nGone.", "new": "So.\n\nSo."}]
+          and out == "So.\n\nSo.\n", (out, pairs))
+    row = pairs[0]
+    hit = edits.find(out, row["new"])
+    i, j, _how = hit
+    check("reopening the pair restores the essay",
+          out[:i] + row["original"] + out[j:] == text)
+
+    tl.reset_road()
+    with world() as (ws, root):
+        essay = "# One\n\nSo.\n\nSo.\n\nGone.\n"
+        (root / "one.md").write_text(essay)
+        iid = _apply_findings(ws)
+        call(ws, "act", id=iid, label="p3", action="cut")
+        call(ws, "land", id=iid)
+        check("the cut lands without touching the earlier So.",
+              (root / "one.md").read_text() == "# One\n\nSo.\n\nSo.\n")
+        call(ws, "reopen", id=iid, label="p3")
+        check("reopen puts Gone. back after the second So., not the first",
+              (root / "one.md").read_text() == essay,
+              (root / "one.md").read_text())
+
+
+def test_sole_paragraph_cut_reopen_restores() -> None:
+    """Cutting the only paragraph lands new=\"\"; reopen restores while the
+    file is still empty (session and file stay in sync)."""
+    tl.reset_road()
+    with world() as (ws, root):
+        (root / "one.md").write_text("Only paragraph.\n")
+        iid = _apply_findings(ws)
+        call(ws, "act", id=iid, label="p1", action="cut")
+        call(ws, "land", id=iid)
+        check("a sole-paragraph cut empties the file",
+              not (root / "one.md").read_text().strip())
+        call(ws, "reopen", id=iid, label="p1")
+        check("reopen restores the sole paragraph",
+              (root / "one.md").read_text() == "Only paragraph.\n",
+              (root / "one.md").read_text())
+
+
 def test_page_lays_out_each_kind() -> None:
     src = (Path(__file__).resolve().parents[1] / "web" / "audiobook" / "src"
            / "Workflows.tsx").read_text(encoding="utf-8")
