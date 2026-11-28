@@ -48,6 +48,8 @@ The rules of this module:
 - **Reversible.** Each landing run keeps the file before and after it
   (`workflow_land_runs`). A reopen of a landed unit takes it back out
   (`revert`): its new text is replaced by its original, matched by text.
+  A cut that emptied the file (sole paragraph, `new` empty) restores only
+  while the file is still empty.
 - **No file is special-cased.** `register = "protected"` does not block a
   landing; the toc's `edits = "owner"` (a general attribute: no automated
   pass writes to such a file) does, with its reason.
@@ -508,7 +510,16 @@ def revert(db: Database, manuscript: dict, inst: dict, step: str, label: str,
     text = pre
     at = now_iso()
     for row in rows:
-        hit = find(text, row["new"]) if row["new"] else None
+        # A sole-paragraph cut lands as new=""; reopen restores only while
+        # the file is still empty (nothing else was written since).
+        if not (row["new"] or "").strip():
+            if text.strip():
+                hit = None
+            else:
+                text = (row["original"] or "").rstrip("\n") + "\n"
+                continue
+        else:
+            hit = find(text, row["new"])
         if hit is None:
             for r in rows:
                 db.update("workflow_landings", r["id"], {
