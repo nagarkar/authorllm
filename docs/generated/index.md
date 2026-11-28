@@ -1236,6 +1236,12 @@ The lens library: a lens promoted from one book is seen, listed and run on anoth
 
 Individual `lint.check_*` helpers encode ratified style laws that `write propose` can refuse as errors.
 
+## `tests.test_lint_map_style_totals`
+
+`authorlm/tests/test_lint_map_style_totals.py`
+
+Unit pins for lint_page's edit-offset map and style_page's live totals and guide tree.
+
 ## `tests.test_lint_page`
 
 `authorlm/tests/test_lint_page.py`
@@ -1782,6 +1788,12 @@ Change kinds in place (`authorlm.workflow.edits`): replace, insert, cut and move
 
 Driving a workflow's walks from the command line (workflow/drive.py): `authorlm workflow walk | propose | job | unit | reopen | beat-done | conclude | wrapup | principle`.
 
+## `tests.test_workflow_form_helpers`
+
+`authorlm/tests/test_workflow_form_helpers.py`
+
+Unit pins for workflow_page's form-history and change-display helpers.
+
 ## `tests.test_workflow_landing`
 
 `authorlm/tests/test_workflow_landing.py`
@@ -1799,6 +1811,12 @@ The per-essay workflow's briefs as library files: `authorlm/library/workflow/`.
 `authorlm/tests/test_workflow_page.py`
 
 The Workflows page (`workflow_page.dispatch`, `/api/workflow`): an essay's workflow driven from the app on a fake engine, step by step.
+
+## `tests.test_workflow_parse_helpers`
+
+`authorlm/tests/test_workflow_parse_helpers.py`
+
+Unit pins for workflow_page's letter-parse helpers.
 
 ## `tests.test_workflow_promote`
 
